@@ -1,0 +1,32 @@
+[package]
+name = "astar-inspect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "astar_inspect"
+path = "src/lib.rs"
+
+[[bin]]
+name = "astar-inspect"
+path = "src/main.rs"
+
+[dependencies]
+astar-iax = { path = "../astar-iax" }
+astar-console = { path = "../astar-console", features = ["serde"] }
+astar-audio = { path = "../astar-audio" }
+astar-asl3 = { path = "../astar-asl3" }
+# serial-usb adds the raw-USB/IOKit PTT backend (iax-d937) so the harness can
+# flip between the tty/dext and IOKit transports at runtime.
+astar-ptt = { path = "../astar-ptt", features = ["serial-usb"] }
+astar-station = { path = "../astar-station" }
+serialport = "4"
+tiny_http = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing.workspace = true
+
+[lints]
+workspace = true

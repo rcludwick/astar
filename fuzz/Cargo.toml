@@ -1,0 +1,45 @@
+[package]
+name = "astar-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.astar-iax-core]
+path = "../crates/astar-iax-core"
+
+[dependencies.astar-iax]
+path = "../crates/astar-iax"
+
+# Prevent this crate from being treated as a workspace member; the workspace
+# Cargo.toml also excludes `fuzz/`.
+[workspace]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "parse_no_panic"
+path = "fuzz_targets/parse_no_panic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_encode_parse"
+path = "fuzz_targets/parse_encode_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "listener_demux"
+path = "fuzz_targets/listener_demux.rs"
+test = false
+doc = false
+bench = false

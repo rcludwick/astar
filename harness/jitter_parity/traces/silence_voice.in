@@ -1,0 +1,27 @@
+# Voice frames, then a silence (CNG) marker, then voice resumes.
+# Validates entering/leaving silent mode and the late-voice-in-silence path.
+config 0 1000 0 40
+put 20  20  20 voice 00
+put 40  40  20 voice 01
+put 60  60  20 voice 02
+put 80  80  20 voice 03
+put 100 100 20 voice 04
+get 40  20
+get 60  20
+get 80  20
+get 100 20
+get 120 20
+# CNG / silence frame at sender ts 120
+put 140 120 20 silence ff
+get 140 20
+get 160 20
+get 180 20
+get 200 20
+# voice resumes
+put 220 220 20 voice 05
+put 240 240 20 voice 06
+put 260 260 20 voice 07
+get 220 20
+get 240 20
+get 260 20
+get 280 20

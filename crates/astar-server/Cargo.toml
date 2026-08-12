@@ -1,0 +1,43 @@
+[package]
+name = "astar-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "astar-server: the always-on AllStarLink node daemon (IAX2 inbound + local handset bridge)."
+
+[dependencies]
+# SAFETY (iax-2f6b): default features only — deliberately NOT `dstar`.
+# This crate exposes remote PTT (`POST /key`, http.rs; a TUI keystroke),
+# which lands on `Station::set_ptt` and keys whatever network is live.
+# Enabling `astar-station/dstar` anywhere in a workspace build that
+# includes this crate would make that a remote D-Star transmit trigger.
+#
+# iax-4c8e: that unification now DOES happen — `astar-sys` enables
+# `astar-station/dstar` for the C-ABI, and Cargo unifies features across
+# a build — so this line is no longer what keeps D-Star unkeyable here. The
+# real guard is in the `NodeCommand::Key` handler (controller.rs): it refuses
+# whenever the snapshot reports `dstar_active`, whatever features are on.
+# Keep this line anyway — nothing here needs D-Star, so nothing here asks.
+astar-station = { path = "../astar-station" }
+astar-iax = { path = "../astar-iax", features = ["serde"] }
+astar-wireguard = { path = "../astar-wireguard" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tiny_http = "0.12"
+tracing.workspace = true
+ctrlc = { version = "3", features = ["termination"] }
+astar-audio = { path = "../astar-audio", features = ["test-backend"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "astar-server"
+path = "src/main.rs"

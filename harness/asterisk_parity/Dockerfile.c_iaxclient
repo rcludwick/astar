@@ -1,0 +1,70 @@
+# Patched-C iaxclient harness for iax-7022 ground-truth captures.
+#
+# Build context is `harness/asterisk_parity/` (compose service sets it).
+# Inputs:
+#   - c_iaxclient/vendored/libiax2/   pristine astar snapshot (snapshot.sh)
+#   - c_iaxclient/patches/*.patch     applied in lexical order
+#   - c_iaxclient/harness.c           our scripted driver
+#
+# Output:
+#   /usr/local/bin/iax-harness        the scripted driver linked against libiax2
+#   /usr/local/lib/libiax.so          shared lib (for runtime; statically would be fine too)
+
+FROM debian:bookworm-slim AS build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential \
+      autoconf \
+      automake \
+      libtool \
+      pkg-config \
+      ca-certificates \
+      git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src/libiax2
+
+# Layer 1: pristine source. Cache-friendly: changes only when snapshot.sh re-runs.
+COPY c_iaxclient/vendored/libiax2/ /src/libiax2/
+
+# Layer 2: patch series. Applied with -p5 to strip
+# `a/vendor/iaxclient/lib/libiax2/` (5 components including the leading `a/`)
+# and `--directory` prepends /src/libiax2 so paths resolve to /src/libiax2/src/...
+COPY c_iaxclient/patches/ /src/patches/
+RUN set -eux; \
+    cd /src/libiax2; \
+    for p in /src/patches/[0-9]*.patch; do \
+      echo "applying $p"; \
+      git apply -p5 < "$p"; \
+    done
+
+# Layer 3: bootstrap + configure + build.
+# bootstrap.sh wraps autoreconf; if it's absent we fall back to autoreconf -fi.
+RUN set -eux; \
+    if [ -x ./bootstrap.sh ]; then ./bootstrap.sh; \
+    else autoreconf -fi; fi; \
+    ./configure --prefix=/usr/local; \
+    make -j"$(nproc)"; \
+    make install; \
+    ldconfig
+
+# Layer 4: build the harness program.
+COPY c_iaxclient/harness.c /src/harness.c
+RUN gcc -O2 -Wall -Wextra \
+      -I/usr/local/include \
+      -I/usr/local/include/iax \
+      /src/harness.c \
+      -L/usr/local/lib -liax \
+      -o /usr/local/bin/iax-harness
+
+# Slim runtime: just libc + libiax + the harness.
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /usr/local/lib/libiax* /usr/local/lib/
+COPY --from=build /usr/local/bin/iax-harness /usr/local/bin/iax-harness
+RUN ldconfig
+
+# Default to printing usage if no scenario is given.
+ENTRYPOINT ["/usr/local/bin/iax-harness"]

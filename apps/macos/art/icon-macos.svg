@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="14" flood-color="#000000" flood-opacity="0.22"/>
+    </filter>
+    <clipPath id="squircle">
+      <rect x="100" y="100" width="824" height="824" rx="185" ry="185"/>
+    </clipPath>
+    <!-- full-spectrum rainbow, axis tilted 22.5 deg above horizontal, fitted to the
+         asterisk's visible extent (12% inset) so red and violet land on the mark -->
+    <linearGradient id="rainbow" gradientUnits="userSpaceOnUse"
+                    x1="188.6" y1="645.9" x2="835.4" y2="378.1">
+      <stop offset="0.00" stop-color="#FF2D2D"/>
+      <stop offset="0.17" stop-color="#FF8A00"/>
+      <stop offset="0.34" stop-color="#FFD500"/>
+      <stop offset="0.51" stop-color="#2ECC40"/>
+      <stop offset="0.68" stop-color="#1E90FF"/>
+      <stop offset="0.84" stop-color="#4B3BFF"/>
+      <stop offset="1.00" stop-color="#9B30FF"/>
+    </linearGradient>
+    <!-- mask: white reveals the asterisk (single gradient wash across the whole
+         mark — see art/icon.svg). Coordinates match the unscaled mark. -->
+    <mask id="asteriskMask" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <rect x="0" y="0" width="1024" height="1024" fill="#000000"/>
+      <!-- the asterisk brand mark (astar-cdab, replaces the star+A): six rounded
+           spokes — three capsules rotated 0/60/120 deg about centre, one point
+           up — radius 400, bar width 150 -->
+      <g fill="#ffffff">
+        <rect x="437" y="112" width="150" height="800" rx="75"/>
+        <rect x="437" y="112" width="150" height="800" rx="75" transform="rotate(60 512 512)"/>
+        <rect x="437" y="112" width="150" height="800" rx="75" transform="rotate(120 512 512)"/>
+      </g>
+    </mask>
+  </defs>
+
+  <!-- macOS rounded squircle body with margin for the system drop shadow -->
+  <g clip-path="url(#squircle)">
+    <!-- dark slate background -->
+    <rect x="100" y="100" width="824" height="824" fill="#1E293B"/>
+    <!-- rainbow asterisk scaled to fill the squircle with margin -->
+    <g transform="translate(512,512) scale(0.92) translate(-512,-512)">
+      <rect x="0" y="0" width="1024" height="1024" fill="url(#rainbow)" mask="url(#asteriskMask)" filter="url(#soft)"/>
+    </g>
+  </g>
+</svg>

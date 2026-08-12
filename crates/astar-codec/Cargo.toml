@@ -1,0 +1,40 @@
+[package]
+name = "astar-codec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Audio codecs for IAX2. G.711 always-on; GSM/Speex/iLBC behind feature flags."
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+codec2 = { workspace = true, optional = true }
+libloading = { workspace = true, optional = true }
+# Vendored MIT/Apache-2.0 ThumbDV driver — see vendor/ambe-thumbdv/VENDORED.md.
+ambe-thumbdv = { path = "../../vendor/ambe-thumbdv", optional = true }
+
+[features]
+default = ["g711"]
+g711 = []
+gsm = []
+speex = []
+ilbc = []
+# LICENSING: `codec2` is LGPL-2.1-only AND MIT. It must stay behind this
+# feature and this feature must NEVER be part of any default feature set —
+# that's what keeps a plain `cargo build -p astar-codec` (and anything
+# depending on this crate with defaults) free of LGPL code. Verify with
+# `cargo tree -p astar-codec` (must NOT show codec2/libloading) vs
+# `cargo tree -p astar-codec --features codec2-static,codec2-runtime`.
+codec2-static = ["dep:codec2"]
+codec2-runtime = ["dep:libloading"]
+# AMBE vocoder backend (iax-a9d4): the ThumbDV dongle. OFF by default, like
+# codec2-*: a plain `cargo build` must never pull the vocoder driver. D-Star
+# is hardware-only — there is no software AMBE backend. Verify with
+# `cargo tree -p astar-codec` (no ambe-thumbdv) vs `--features ambe-hw`.
+ambe-hw = ["dep:ambe-thumbdv"]

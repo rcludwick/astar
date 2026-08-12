@@ -1,0 +1,73 @@
+[package]
+name = "astar-station"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Thread-safe IAX2 station facade: console session + audio + PTT + ASL3 WT-connect behind a poll/snapshot API."
+
+[lints]
+workspace = true
+
+[dependencies]
+# `serde` on astar-iax so the secret-free LinkRoster serializes to JSON for
+# the link C-ABI (iax-1075).
+astar-iax = { path = "../astar-iax", version = "0.1.0-beta", features = ["serde"] }
+astar-iax-core = { path = "../astar-iax-core", version = "0.1.0-beta" }
+# `default-features = false`: astar-console's own default pulls in its
+# `m17` feature. This crate mirrors that default via its OWN `m17` feature
+# below (`m17 = ["astar-console/m17"]`) so `--no-default-features` on
+# THIS crate actually disables M17 end-to-end, instead of astar-console
+# silently building with it anyway.
+astar-console = { path = "../astar-console", version = "0.1.0-beta", default-features = false }
+# In-band DTMF tone generator (iax-68eb) for `Station::send_dtmf`.
+astar-codec = { path = "../astar-codec", version = "0.1.0-beta" }
+# `serde` so the secret-free MicProfile serializes to JSON for the
+# characterize / set-mic-profile FFI (iax-5fb6 / iax-2095).
+astar-audio = { path = "../astar-audio", version = "0.1.0-beta", features = ["serde"] }
+astar-asl3 = { path = "../astar-asl3", version = "0.1.0-beta" }
+
+[dev-dependencies]
+astar-audio = { path = "../astar-audio", version = "0.1.0-beta", features = ["test-backend", "serde"] }
+astar-iax-core = { path = "../astar-iax-core", version = "0.1.0-beta" }
+# Forces the LGPL `codec2-static` backend on for every TEST/bench build of
+# this crate (mirrors astar-console's own dev-dependency override — see
+# that crate's Cargo.toml for the full licensing note) so the M17 station
+# tests always have a working Codec 2 instance without depending on a system
+# libcodec2 being installed. Never part of any default feature set.
+astar-codec = { path = "../astar-codec", version = "0.1.0-beta", features = ["codec2-static"] }
+# M17 wire-frame parsing (StreamPacket/decode_callsign) for the m17_station
+# test's PTT-frame assertion.
+astar-m17 = { path = "../astar-m17", version = "0.1.0-beta" }
+# D-Star DSVT/RfHeader framing (iax-a9d4 Task 6) for the dstar_station test's
+# canned-stream fixtures. Zero dependencies of its own (pure decode/encode +
+# a loopback reflector), so — unlike the AMBE codec deps — this is always
+# cheap to compile in as a dev-dependency, regardless of `--features dstar`.
+astar-dstar = { path = "../astar-dstar", version = "0.1.0-beta" }
+tiny_http = "0.12"
+
+[features]
+default = ["m17"]
+# M17 digital-voice client (iax-f2b8 Task 4): re-exposes astar-console's
+# `m17` feature, wired through `Station::m17_connect`/`m17_disconnect`/
+# `m17_available`. Byte-identical defaults with this feature off: the methods
+# still exist (so downstream code doesn't need its own `#[cfg]`) but return
+# `StationError::M17("m17 support not compiled")` / are no-ops / return
+# `false`.
+m17 = ["astar-console/m17"]
+# D-Star (DExtra) full-transceive digital-voice client (iax-a9d4 Task 6
+# built RX; iax-2f6b added TX): re-exposes astar-console's `dstar`
+# feature, wired through
+# `Station::dstar_connect`/`dstar_disconnect`/`dstar_available`. Unlike
+# `m17`, this is NOT in `default` — the AMBE vocoder deps are pinned `git`
+# dependencies (see `astar_codec::ambe`'s module doc), so opting in is
+# explicit. D-Star is hardware-only (iax-b3e7 M0): `dstar` pulls
+# `astar-console/dstar`, which in turn depends on `astar-codec/
+# ambe-hw` (the `ThumbDV` USB dongle) — no software-codec fallback, no
+# preference knob. `dstar_connect` opens the dongle unconditionally.
+# Byte-identical defaults with this feature off, same contract as `m17`
+# above (methods exist, return `StationError::Dstar("dstar support not
+# compiled")` / are no-ops / return `false`).
+dstar = ["astar-console/dstar"]

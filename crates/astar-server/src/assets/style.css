@@ -1,0 +1,109 @@
+:root {
+  --green: #30d158; --amber: #ffd60a; --red: #ff453a; --blue: #0a84ff;
+  --text: rgba(255, 255, 255, 0.92);
+  --text-dim: rgba(255, 255, 255, 0.45);
+  --card: rgba(22, 22, 26, 0.55);
+  --edge: rgba(255, 255, 255, 0.14);
+  --edge-glow: rgba(255, 255, 255, 0.22);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { color-scheme: dark; }
+body {
+  background: #000; color: var(--text); min-height: 100vh;
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased; overflow-x: hidden;
+}
+/* Ambient gradient glows behind the content layer. */
+.ambient {
+  position: fixed; border-radius: 50%; filter: blur(90px);
+  pointer-events: none; z-index: 0; opacity: 0.5;
+  animation: drift 24s ease-in-out infinite alternate;
+}
+.ambient-a { width: 60vw; height: 60vw; top: -25vw; left: -15vw;
+  background: radial-gradient(circle, #1e3a8a 0%, transparent 70%); }
+.ambient-b { width: 50vw; height: 50vw; bottom: -20vw; right: -12vw;
+  background: radial-gradient(circle, #6d28d9 0%, transparent 70%);
+  animation-delay: -8s; }
+.ambient-c { width: 34vw; height: 34vw; top: 40vh; left: 55vw;
+  background: radial-gradient(circle, #9a3412 0%, transparent 70%);
+  opacity: 0.3; animation-delay: -16s; }
+@keyframes drift {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to { transform: translate3d(4vw, 3vh, 0) scale(1.12); }
+}
+main {
+  position: relative; z-index: 1; max-width: 880px;
+  margin: 0 auto; padding: 40px 20px 80px;
+  display: flex; flex-direction: column; gap: 20px;
+}
+/* Frosted-glass card with a 1px luminous border (brighter top edge). */
+.card {
+  background: var(--card);
+  -webkit-backdrop-filter: blur(24px) saturate(150%);
+  backdrop-filter: blur(24px) saturate(150%);
+  border: 1px solid var(--edge); border-radius: 18px; padding: 20px 22px;
+  box-shadow: inset 0 1px 0 var(--edge-glow), 0 20px 50px rgba(0, 0, 0, 0.5);
+}
+.header { display: flex; justify-content: space-between; align-items: center;
+  flex-wrap: wrap; gap: 12px; }
+h1 { font: 600 28px/1.2 -apple-system, BlinkMacSystemFont, "SF Pro Display",
+  "Helvetica Neue", sans-serif; letter-spacing: -0.02em; }
+.subtitle { color: var(--text-dim); font-size: 13px; }
+h2 { font-size: 13px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--text-dim); }
+.card-head { display: flex; justify-content: space-between; align-items: baseline;
+  margin-bottom: 12px; }
+.count { font: 300 22px/1 -apple-system, "SF Pro Display", sans-serif;
+  color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.badges { display: flex; gap: 8px; flex-wrap: wrap; }
+.badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 500; padding: 5px 11px; border-radius: 999px;
+  border: 1px solid var(--edge); background: rgba(255, 255, 255, 0.04);
+  color: var(--text-dim);
+}
+.badge .dot { width: 7px; height: 7px; border-radius: 50%;
+  background: currentColor; display: inline-block; }
+.badge.on { color: var(--green); border-color: rgba(48, 209, 88, 0.35);
+  box-shadow: inset 0 1px 0 rgba(48, 209, 88, 0.25); }
+.badge.err { color: var(--red); border-color: rgba(255, 69, 58, 0.35); }
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text-dim); padding: 6px 10px;
+  border-bottom: 1px solid var(--edge); }
+td { padding: 10px; border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  font-variant-numeric: tabular-nums; }
+tr:last-child td { border-bottom: none; }
+.mono, td.node, td.addr, td.up {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; }
+td.node { font-size: 15px; font-weight: 600; }
+.state { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+.state .dot { width: 7px; height: 7px; border-radius: 50%;
+  background: currentColor; }
+.state.up { color: var(--green); }
+.state.connecting { color: var(--amber); }
+.pill { font-size: 11px; font-weight: 600; padding: 3px 9px;
+  border-radius: 999px; border: 1px solid var(--edge); color: var(--text-dim); }
+.pill.tx { color: var(--blue); border-color: rgba(10, 132, 255, 0.4);
+  background: rgba(10, 132, 255, 0.12); }
+.pill.rx { color: var(--green); border-color: rgba(48, 209, 88, 0.4);
+  background: rgba(48, 209, 88, 0.12); animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(48, 209, 88, 0.35); }
+  50% { box-shadow: 0 0 10px 2px rgba(48, 209, 88, 0.25); }
+}
+.empty { color: var(--text-dim); font-size: 13px; padding: 8px 10px;
+  display: none; }
+#log { list-style: none; max-height: 320px; overflow-y: auto; }
+#log li { display: flex; gap: 12px; padding: 7px 10px; font-size: 13px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+#log li:last-child { border-bottom: none; }
+#log .t { color: var(--text-dim); flex-shrink: 0; }
+#log .connected { color: var(--green); }
+#log .disconnected { color: var(--red); }
+#log .keyed { color: var(--blue); }
+#log .dtmf { color: var(--amber); }
+/* Stale overlay while the SSE stream is down. */
+body.stale main > section { opacity: 0.45; transition: opacity 0.3s; }

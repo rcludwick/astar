@@ -1,0 +1,99 @@
+# ============================================================================
+# DORMANT — this workflow does not run on push, by design.
+#
+# GitHub Actions is deliberately switched off across Rob's repos for billing,
+# and the everyday gate for astar lives in ../../.gitlab-ci.yml. This file
+# exists for exactly one job that GitLab cannot do: publishing the Zensical
+# documentation to *GitHub* Pages, which is only reachable through the official
+# actions/deploy-pages flow.
+#
+# Trigger: `workflow_dispatch` ONLY. It runs when a human presses the button
+# (Actions → docs (Pages) → Run workflow) and at no other time. To make it
+# automatic later, add:
+#
+#     push:
+#       branches: [main]
+#       paths: ["docs/site/**", ".github/workflows/docs-pages.yml"]
+#
+# and nothing else needs to change.
+#
+# BEFORE THE FIRST RUN, one manual setting: repository Settings → Pages →
+# Build and deployment → Source = "GitHub Actions". Without it deploy-pages
+# fails with a 404 on the Pages API. `site_url` in zensical.toml already
+# carries the /astar/ project sub-path Pages serves from; if the repository is
+# ever renamed, that value has to move with it or instant navigation and the
+# 404 page will resolve against the wrong origin.
+#
+# RUNNER CHOICE, AND THE SECURITY TRADE BEHIND IT
+# -----------------------------------------------
+# This runs on GitHub-hosted `ubuntu-latest`, not on the self-hosted IONOS
+# fleet, and that is deliberate:
+#
+#   * GitHub Pages on a *private* repo requires a paid plan, so publishing at
+#     all implies this repo is public. Actions minutes on public repos are
+#     free, so ubuntu-latest costs nothing here.
+#   * A self-hosted runner must NEVER be attached to a public repo — any pull
+#     request author would get arbitrary code execution on the build box and,
+#     for the macOS runners, on Rob's personal Mac. The gh-runners README says
+#     this in bold and it is right.
+#
+# So: when this repo goes public, detach the IONOS and Mac runners from it
+# first. That decision is Rob's and has not been made here.
+#
+# The build is a thin wrapper around ci/build-docs.sh — the same script the
+# GitLab `docs-site` job runs, so the published site and the CI-verified site
+# are built by identical code.
+# ============================================================================
+
+name: docs (Pages)
+
+on:
+  workflow_dispatch:
+
+# Least privilege: read the tree, write a Pages deployment, mint the OIDC token
+# deploy-pages needs. No contents: write, no packages, no PR access.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; never cancel a publish midway.
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - uses: actions/configure-pages@v5
+
+      # Reads zensical.toml at the repo root; output lands in site_dir
+      # (docs/.site). Builds with --strict, so a broken link fails the publish
+      # rather than shipping a half-built site.
+      - name: Build the Zensical site
+        run: ./ci/build-docs.sh
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/.site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

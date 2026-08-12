@@ -1,0 +1,42 @@
+[package]
+name = "astar-gui"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "astar — native Iced GUI client (Windows/Linux) over the astar station core."
+
+[[bin]]
+name = "astar-gui"
+path = "src/main.rs"
+
+[dependencies]
+# Current stable Iced (verified via crates.io: 0.14.0). `tokio` enables the
+# default async executor that drives subscriptions and screenshot Tasks.
+iced = { version = "0.14", features = ["tokio"] }
+# PNG encoding for the `--shot` screenshot path (RGBA → PNG on disk).
+image = { version = "0.25", default-features = false, features = ["png"] }
+# Links the Rust core: the thread-safe multi-network station facade.
+astar-station = { path = "../../crates/astar-station", version = "0.1.0-beta" }
+# Settings persistence (astar-de0a): TOML on disk under the platform config dir.
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+directories = "6"
+
+# Tray backends (astar-22cf). Windows/macOS use `tray-icon` (native Shell/
+# NSStatusItem, no extra system deps). Linux deliberately does NOT — tray-icon
+# there drags in the GTK3 + libappindicator C stack; `ksni` speaks the
+# StatusNotifierItem D-Bus protocol in pure Rust, runs on its own thread, and
+# fails cleanly (→ window fallback) when no StatusNotifier host exists (GNOME
+# without the AppIndicator extension, headless CI).
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+tray-icon = "0.24"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3", features = ["blocking"] }
+
+[dev-dependencies]
+# Isolated config dirs for TomlStore tests.
+tempfile = "3"

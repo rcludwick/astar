@@ -1,0 +1,36 @@
+# Variable network delay: every 5th frame arrives 30 ms late.
+# Exercises history accumulation and target growth.
+config 0 1000 0 40
+put 20  0   20 voice 00
+put 40  20  20 voice 01
+put 60  40  20 voice 02
+put 80  60  20 voice 03
+put 130 80  20 voice 04
+put 120 100 20 voice 05
+put 140 120 20 voice 06
+put 160 140 20 voice 07
+put 180 160 20 voice 08
+put 230 180 20 voice 09
+put 220 200 20 voice 0a
+put 240 220 20 voice 0b
+put 260 240 20 voice 0c
+put 280 260 20 voice 0d
+put 330 280 20 voice 0e
+get 0   20
+get 20  20
+get 40  20
+get 60  20
+get 80  20
+get 100 20
+get 120 20
+get 140 20
+get 160 20
+get 180 20
+get 200 20
+get 220 20
+get 240 20
+get 260 20
+get 280 20
+get 300 20
+get 320 20
+get 340 20

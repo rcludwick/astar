@@ -1,0 +1,14 @@
+config ok
+put sched
+put ok
+put ok
+put ok
+put ok
+next at=40
+get noframe
+get noframe
+get ok ts=0 ms=20 ftype=voice payload=00
+get ok ts=20 ms=20 ftype=voice payload=01
+get ok ts=40 ms=20 ftype=voice payload=02
+get ok ts=60 ms=20 ftype=voice payload=03
+get ok ts=80 ms=20 ftype=voice payload=04

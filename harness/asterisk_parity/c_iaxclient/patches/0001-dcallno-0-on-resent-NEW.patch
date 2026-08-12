@@ -1,0 +1,76 @@
+Subject: [PATCH 0001] iax2: dcallno=0 on resent NEW after CALLTOKEN
+
+Live ASL3 trace 2026-05-29 showed the CALLTOKEN-bearing reply comes from a
+throwaway stub session on the hub, so addressing the resent NEW with its
+peercallno makes the hub ACK-and-drop without advancing to AUTHREQ. Reset
+peercallno before iax_call so the wire dcallno is zero — the hub then keys
+a fresh session off our scallno + the validated token and proceeds.
+
+Also add stderr traces around the resend send_command and rx full-frame
+dispatch to support iax-7022 ground-truth captures.
+
+Source: astar working tree on top of HEAD 10d45f4 (2026-06-05).
+Apply: git apply -p5  (strip a/vendor/iaxclient/lib/libiax2/ prefix).
+Refs: astar-39b5 (CALLTOKEN patch), iax-7022 (pcap fixtures).
+---
+diff --git a/vendor/iaxclient/lib/libiax2/src/iax.c b/vendor/iaxclient/lib/libiax2/src/iax.c
+index 1903400..038170a 100644
+--- a/vendor/iaxclient/lib/libiax2/src/iax.c
++++ b/vendor/iaxclient/lib/libiax2/src/iax.c
+@@ -2279,7 +2279,16 @@ int iax_call(struct iax_session *session, const char *cidnum, const char *cidnam
+ 		iax_ie_append_raw(&ied, IAX_IE_CALLTOKEN, NULL, 0);
+ 	}
+ 
++	if (session->calltoken_resend) {
++		fprintf(stderr,
++			"astar-iax2: resend NEW pre-send: ied.pos=%d callno=%d peercallno=%d calltoken_len=%d peer=%s:%d\n",
++			ied.pos, session->callno, session->peercallno, session->calltoken_len,
++			inet_ntoa(session->peeraddr.sin_addr), ntohs(session->peeraddr.sin_port));
++	}
+ 	res = send_command(session, AST_FRAME_IAX, IAX_COMMAND_NEW, 0, ied.buf, ied.pos, -1);
++	if (session->calltoken_resend) {
++		fprintf(stderr, "astar-iax2: resend NEW send_command returned %d\n", res);
++	}
+ 	if (res < 0)
+ 		return res;
+ 	if (wait) {
+@@ -2837,7 +2846,16 @@ static struct iax_event *iax_header_to_event(struct iax_session *session, struct
+ 				memcpy(session->calltoken, e->ies.calltoken, e->ies.calltokendatalen);
+ 				session->calltoken_len = e->ies.calltokendatalen;
+ 				session->calltoken_resend = 1;
+-				fprintf(stderr, "astar-iax2: CALLTOKEN received (%d bytes); resending NEW\n", e->ies.calltokendatalen);
++				/* The CALLTOKEN-bearing reply was from a throwaway stub session
++				 * on the server side; pointing the resent NEW back at it via
++				 * dcallno=peercallno causes the hub to ACK-and-drop without
++				 * advancing to AUTHREQ. Reset peercallno so the wire dcallno
++				 * goes out as 0 — the hub then starts a fresh real session
++				 * keyed off our scallno + validated token. (Confirmed via
++				 * live trace 2026-05-29: with peercallno=1, server replied
++				 * with bare ACK and stalled.) */
++				session->peercallno = 0;
++				fprintf(stderr, "astar-iax2: CALLTOKEN received (%d bytes); resending NEW with dcallno=0\n", e->ies.calltokendatalen);
+ 				iax_call(session,
+ 					session->ct_cidnum[0]  ? session->ct_cidnum  : NULL,
+ 					session->ct_cidname[0] ? session->ct_cidname : NULL,
+@@ -3238,6 +3256,21 @@ static struct iax_event *iax_net_read(void)
+ #endif
+ 		return NULL;
+ 	}
++	{
++		/* astar-39b5 stall trace: dump every full-frame arrival so we can see
++		 * whether the server is replying at all to the resent NEW. Voice/mini
++		 * frames are skipped to keep the log readable. */
++		struct ast_iax2_full_hdr *_fh = (struct ast_iax2_full_hdr *)buf;
++		if (res >= (int)sizeof(struct ast_iax2_full_hdr) &&
++		    (ntohs(_fh->scallno) & IAX_FLAG_FULL)) {
++			fprintf(stderr,
++				"astar-iax2: rx full len=%d from=%s:%d scallno=0x%04x dcallno=0x%04x type=%d csub=%d\n",
++				res, inet_ntoa(sin.sin_addr), ntohs(sin.sin_port),
++				ntohs(_fh->scallno) & ~IAX_FLAG_FULL,
++				ntohs(_fh->dcallno) & 0x7fff,
++				_fh->type, _fh->csub);
++		}
++	}
+ 	event = iax_net_process(buf, res, &sin);
+ 	if ( event == NULL )
+ 	{

@@ -1,0 +1,512 @@
+/* astar documentation theme — Apple-inspired, dark only.
+ *
+ * Zensical/Material expose only a fixed 21-colour palette through
+ * [project.theme.palette]. `primary = "custom"` / `accent = "custom"` is the
+ * documented escape hatch: the theme emits no colour rules and this file owns
+ * the variables. Almost everything below is a variable assignment rather than
+ * selector surgery against theme internals, so upstream restyles do not break
+ * it.
+ *
+ * ── RAINBOW POLICY (deliberate, do not "improve") ──────────────────────────
+ * The seven-stop brand rainbow appears in exactly TWO places on this site:
+ *
+ *   1. the asterisk logo            — images/logo.svg, self-contained
+ *   2. the hairline under the header — the single `.md-header::after` rule
+ *
+ * Nowhere else. Links, buttons, headings, nav, code, admonitions, tables and
+ * cards all use ordinary flat Apple system colours. A gradient anywhere else
+ * is a defect, not a flourish. The --astar-spectrum-* tokens exist ONLY to
+ * feed rule 2 and are referenced by no other declaration in this file.
+ */
+
+/* ---------------------------------------------------------------- type --- */
+/* theme.font = false in zensical.toml suppresses the Google Fonts request;
+ * these two variables then select the native Apple stack, so the site renders
+ * in SF Pro on macOS/iOS and falls back to the platform UI face elsewhere. */
+:root {
+  --md-text-font:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+    "Helvetica Neue", system-ui, sans-serif;
+  --md-code-font:
+    ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* --------------------------------------------------------------- color --- */
+:root {
+  /* Neutrals — macOS dark mode, not Material's blue-grey. */
+  --astar-ink: #0b0b0f;
+  --astar-surface: #16161c;
+  --astar-surface-2: #1e1e26;
+  --astar-hairline: #2c2c35;
+  --astar-hairline-strong: #3a3a45;
+
+  /* Apple system colours (dark-mode variants) — the ordinary accent set.
+   * These, not the spectrum below, colour every interactive element. */
+  --astar-blue: #0a84ff;
+  --astar-green: #30d158;
+  --astar-orange: #ff9f0a;
+  --astar-red: #ff453a;
+  --astar-purple: #bf5af2;
+  --astar-teal: #64d2ff;
+  --astar-gray: #8e8e93;
+
+  /* Brand spectrum — the exact stops and offsets of the `rainbow` gradient in
+   * images/logo.svg, so the header hairline and the mark are the same rainbow.
+   * USED ONLY by `.md-header::after`. See the rainbow policy above. */
+  --astar-spectrum-1: #ff1a33;
+  --astar-spectrum-2: #ff8000;
+  --astar-spectrum-3: #ffe000;
+  --astar-spectrum-4: #14e04a;
+  --astar-spectrum-5: #00b4ff;
+  --astar-spectrum-6: #5b4bff;
+  --astar-spectrum-7: #c03bff;
+}
+
+/* `[data-md-color-scheme="slate"]` is the theme's own hook; `:root > *` is what
+ * upstream's custom-colour example targets. Both are given so the palette holds
+ * whether or not a light/dark toggle is ever added. */
+[data-md-color-scheme="slate"],
+:root > * {
+  /* primary = header / nav chrome */
+  --md-primary-fg-color: #101016;
+  --md-primary-fg-color--light: #2a2a36;
+  --md-primary-fg-color--dark: #08080c;
+  --md-primary-bg-color: #f5f5f7;
+  --md-primary-bg-color--light: #a1a1aa;
+
+  /* accent = hover links, active nav, focus rings */
+  --md-accent-fg-color: var(--astar-blue);
+  --md-accent-fg-color--transparent: rgb(10 132 255 / 12%);
+  --md-accent-bg-color: #ffffff;
+  --md-accent-bg-color--light: rgb(255 255 255 / 70%);
+}
+
+[data-md-color-scheme="slate"] {
+  --md-default-bg-color: var(--astar-ink);
+  --md-default-bg-color--light: var(--astar-surface);
+  --md-default-bg-color--lighter: var(--astar-surface-2);
+  --md-default-bg-color--lightest: #2a2a33;
+
+  --md-default-fg-color: #f5f5f7;
+  --md-default-fg-color--light: #c7c7cc;
+  --md-default-fg-color--lighter: var(--astar-gray);
+  /* NOTE: --md-default-fg-color--lightest is consumed as a *background* tint by
+   * the modern theme variant (footer meta bar, table stripes) despite its name,
+   * so it must stay a low-alpha white. An opaque grey here paints a light band
+   * across the bottom of every page. */
+  --md-default-fg-color--lightest: #ffffff12;
+
+  --md-typeset-color: #e8e8ed;
+  --md-typeset-a-color: var(--astar-blue);
+  --md-typeset-mark-color: rgb(255 214 10 / 25%);
+  --md-typeset-kbd-color: var(--astar-surface-2);
+  --md-typeset-kbd-accent-color: #33333d;
+  --md-typeset-kbd-border-color: #0a0a0e;
+  --md-typeset-table-color: var(--astar-hairline);
+
+  /* Code: Xcode-dark-ish, flat, no brand hues. */
+  --md-code-bg-color: var(--astar-surface);
+  --md-code-fg-color: #e8e8ed;
+  --md-code-hl-keyword-color: #ff7ab2;
+  --md-code-hl-string-color: #ff8170;
+  --md-code-hl-number-color: #d9c97c;
+  --md-code-hl-function-color: #78c2b3;
+  --md-code-hl-constant-color: #b281eb;
+  --md-code-hl-variable-color: #e8e8ed;
+  --md-code-hl-comment-color: #7d7d87;
+  --md-code-hl-operator-color: #c7c7cc;
+  --md-code-hl-punctuation-color: #c7c7cc;
+
+  /* Read by the "classic" theme variant only; the "modern" default derives the
+   * footer from the explicit rules further down. */
+  --md-footer-bg-color: #0e0e13;
+  --md-footer-bg-color--dark: #08080c;
+
+  color-scheme: dark;
+}
+
+/* ---------------------------------------------------------- typography --- */
+/* Apple display type: large, tight, slightly negative tracking. */
+.md-typeset {
+  font-size: 0.78rem;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+.md-typeset h1 {
+  font-weight: 700;
+  letter-spacing: -0.022em;
+  color: var(--md-default-fg-color);
+}
+
+.md-typeset h2 {
+  font-weight: 650;
+  letter-spacing: -0.018em;
+  margin-top: 2.2em;
+}
+
+.md-typeset h3 {
+  font-weight: 600;
+  letter-spacing: -0.012em;
+}
+
+.md-typeset h4 {
+  font-weight: 600;
+  letter-spacing: -0.008em;
+}
+
+/* Lead paragraph directly under the page title. */
+.md-typeset h1 + p {
+  font-size: 0.86rem;
+  line-height: 1.55;
+  color: var(--md-default-fg-color--light);
+  letter-spacing: -0.01em;
+}
+
+/* ------------------------------------------------------------- header --- */
+.md-header {
+  background-color: var(--md-primary-fg-color);
+  border-bottom: 1px solid var(--astar-hairline);
+  box-shadow: none;
+}
+
+/* ── RAINBOW, PLACE 2 OF 2 ────────────────────────────────────────────────
+ * The one gradient on the site. Stops and offsets are copied from the
+ * `rainbow` linearGradient in images/logo.svg so the hairline and the mark
+ * read as the same spectrum. Do not reuse these tokens elsewhere. */
+.md-header::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    var(--astar-spectrum-1) 0%,
+    var(--astar-spectrum-2) 17%,
+    var(--astar-spectrum-3) 34%,
+    var(--astar-spectrum-4) 51%,
+    var(--astar-spectrum-5) 68%,
+    var(--astar-spectrum-6) 84%,
+    var(--astar-spectrum-7) 100%
+  );
+}
+
+/* ── RAINBOW, PLACE 1 OF 2 — the mark itself; the SVG carries its own fill. */
+.md-header__button.md-logo :is(img, svg) {
+  height: 1.4rem;
+  width: 1.4rem;
+}
+
+.md-header__title {
+  font-weight: 600;
+  letter-spacing: -0.012em;
+}
+
+/* Search field reads as a macOS field, not a Material one. */
+.md-search__form {
+  border-radius: 0.5rem;
+  background-color: rgb(255 255 255 / 8%);
+}
+
+.md-search__form:hover {
+  background-color: rgb(255 255 255 / 14%);
+}
+
+.md-search__input::placeholder {
+  color: var(--astar-gray);
+}
+
+.md-search__output {
+  border-radius: 0.5rem;
+}
+
+/* ---------------------------------------------------------------- nav --- */
+.md-nav__link:hover,
+.md-nav__link--active {
+  color: var(--astar-blue);
+}
+
+.md-nav__title {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.md-tabs {
+  border-bottom: none;
+}
+
+/* --------------------------------------------------------- admonitions --- */
+/* The theme paints each flavour as a Material-tinted block (a 10%-alpha wash of
+ * #448aff, #ff9100, #ff1744 …). We replace that with one flat Apple card and a
+ * single coloured rule down the left edge, so colour marks severity instead of
+ * flooding the block. Flat fills only — no gradients, and deliberately not the
+ * brand spectrum.
+ *
+ * Specificity note: the theme's flavour rules are `.md-typeset
+ * .admonition.warning` (0,3,0), so the overrides below must match that shape;
+ * astar.css loads after the theme, so an equal-specificity rule wins. */
+.md-typeset .admonition,
+.md-typeset details {
+  border: 1px solid var(--astar-hairline);
+  border-left: 3px solid var(--astar-adm, var(--astar-gray));
+  border-radius: 0.6rem;
+  background-color: var(--astar-surface);
+  box-shadow: none;
+  font-size: 0.68rem;
+}
+
+.md-typeset :is(.admonition-title, summary) {
+  background-color: rgb(255 255 255 / 4%);
+  font-weight: 600;
+  letter-spacing: -0.008em;
+}
+
+/* One Apple system colour per flavour, carried by --astar-adm to the left rule,
+ * the icon and the title chevron. */
+.md-typeset .admonition.note,
+.md-typeset details.note,
+.md-typeset .admonition.info,
+.md-typeset details.info,
+.md-typeset .admonition.abstract,
+.md-typeset details.abstract {
+  --astar-adm: var(--astar-blue);
+}
+
+.md-typeset .admonition.tip,
+.md-typeset details.tip,
+.md-typeset .admonition.success,
+.md-typeset details.success,
+.md-typeset .admonition.example,
+.md-typeset details.example {
+  --astar-adm: var(--astar-green);
+}
+
+.md-typeset .admonition.warning,
+.md-typeset details.warning,
+.md-typeset .admonition.caution,
+.md-typeset details.caution,
+.md-typeset .admonition.question,
+.md-typeset details.question {
+  --astar-adm: var(--astar-orange);
+}
+
+.md-typeset .admonition.danger,
+.md-typeset details.danger,
+.md-typeset .admonition.failure,
+.md-typeset details.failure,
+.md-typeset .admonition.bug,
+.md-typeset details.bug {
+  --astar-adm: var(--astar-red);
+}
+
+.md-typeset .admonition.quote,
+.md-typeset details.quote,
+.md-typeset .admonition.cite,
+.md-typeset details.cite {
+  --astar-adm: var(--astar-gray);
+}
+
+/* Kill the theme's per-flavour background wash at its own specificity. */
+.md-typeset .admonition.note,
+.md-typeset details.note,
+.md-typeset .admonition.info,
+.md-typeset details.info,
+.md-typeset .admonition.abstract,
+.md-typeset details.abstract,
+.md-typeset .admonition.tip,
+.md-typeset details.tip,
+.md-typeset .admonition.success,
+.md-typeset details.success,
+.md-typeset .admonition.example,
+.md-typeset details.example,
+.md-typeset .admonition.warning,
+.md-typeset details.warning,
+.md-typeset .admonition.caution,
+.md-typeset details.caution,
+.md-typeset .admonition.question,
+.md-typeset details.question,
+.md-typeset .admonition.danger,
+.md-typeset details.danger,
+.md-typeset .admonition.failure,
+.md-typeset details.failure,
+.md-typeset .admonition.bug,
+.md-typeset details.bug,
+.md-typeset .admonition.quote,
+.md-typeset details.quote,
+.md-typeset .admonition.cite,
+.md-typeset details.cite {
+  background-color: var(--astar-surface);
+}
+
+/* Icon (::before is a masked glyph) and the details chevron (::after). */
+.md-typeset .admonition > .admonition-title::before,
+.md-typeset details > summary::before {
+  background-color: var(--astar-adm, var(--astar-gray));
+}
+
+.md-typeset .admonition > .admonition-title::after,
+.md-typeset details > summary::after {
+  color: var(--astar-adm, var(--astar-gray));
+}
+
+/* ---------------------------------------------------------------- code --- */
+/* Rounded, hairline-bounded, no drop shadow — Apple, not Material. */
+.md-typeset .highlight,
+.md-typeset pre > code {
+  border-radius: 0.6rem;
+}
+
+.md-typeset .highlight {
+  border: 1px solid var(--astar-hairline);
+  background-color: var(--md-code-bg-color);
+  overflow: hidden;
+}
+
+.md-typeset code {
+  border-radius: 0.3rem;
+  font-size: 0.85em;
+}
+
+/* --------------------------------------------------------------- table --- */
+.md-typeset table:not([class]) {
+  border: 1px solid var(--astar-hairline);
+  border-radius: 0.6rem;
+  overflow: hidden;
+  font-size: 0.7rem;
+}
+
+.md-typeset table:not([class]) th {
+  background: var(--astar-surface-2);
+  font-weight: 600;
+  letter-spacing: -0.006em;
+}
+
+.md-typeset table:not([class]) td {
+  border-top: 1px solid var(--astar-hairline);
+}
+
+/* --------------------------------------------------------------- cards --- */
+/* `<div class="grid cards" markdown>` — flat Apple cards: one surface, one
+ * hairline, generous radius. No gradient, no shadow. */
+.md-typeset .grid.cards > :is(ul, ol) > li,
+.md-typeset .grid > .card {
+  border: 1px solid var(--astar-hairline);
+  border-radius: 0.75rem;
+  background: var(--astar-surface);
+  box-shadow: none;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease;
+}
+
+.md-typeset .grid.cards > :is(ul, ol) > li:hover,
+.md-typeset .grid > .card:hover {
+  border-color: var(--astar-hairline-strong);
+  background: var(--astar-surface-2);
+  box-shadow: none;
+}
+
+/* ------------------------------------------------------------- buttons --- */
+/* `[Text](url){ .md-button }` — an Apple push button: flat fill, 8px radius,
+ * no gradient. `.md-button--primary` is the filled/default variant. */
+.md-typeset .md-button {
+  border: 1px solid var(--astar-hairline-strong);
+  border-radius: 0.5rem;
+  background-color: var(--astar-surface-2);
+  color: var(--md-default-fg-color);
+  padding: 0.35em 1em;
+  font-size: 0.72rem;
+  font-weight: 590;
+  letter-spacing: -0.008em;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
+}
+
+.md-typeset .md-button:hover,
+.md-typeset .md-button:focus-visible {
+  background-color: #2a2a33;
+  border-color: #4a4a56;
+  color: var(--md-default-fg-color);
+}
+
+.md-typeset .md-button--primary {
+  background-color: var(--astar-blue);
+  border-color: var(--astar-blue);
+  color: #ffffff;
+}
+
+.md-typeset .md-button--primary:hover,
+.md-typeset .md-button--primary:focus-visible {
+  background-color: #3d9bff;
+  border-color: #3d9bff;
+  color: #ffffff;
+}
+
+/* ------------------------------------------------------------ mermaid --- */
+/* Diagrams render into a closed shadow root, so only the host is styleable —
+ * the theme colours the diagram itself from --md-mermaid-* variables it derives
+ * from the palette above. This just seats it on the same card surface as code.
+ *
+ * Note: the theme fetches mermaid from a CDN at view time. Offline readers see
+ * an empty block; that is upstream behaviour, not a local misconfiguration. */
+.md-typeset .mermaid {
+  border: 1px solid var(--astar-hairline);
+  border-radius: 0.6rem;
+  background: var(--astar-surface);
+  padding: 0.6rem 0.4rem;
+}
+
+/* ---------------------------------------------------------------- misc --- */
+.md-typeset hr {
+  border-bottom-color: var(--astar-hairline);
+}
+
+.md-typeset blockquote {
+  border-left: 2px solid var(--astar-hairline-strong);
+  color: var(--md-default-fg-color--light);
+}
+
+.md-typeset kbd {
+  border-radius: 0.3rem;
+}
+
+/* -------------------------------------------------------------- footer --- */
+/* The modern theme variant ignores --md-footer-bg-color, so set it directly. */
+.md-footer {
+  background-color: #0e0e13;
+  border-top: 1px solid var(--astar-hairline);
+}
+
+.md-footer-meta {
+  background-color: #08080c;
+}
+
+.md-footer__link {
+  border-radius: 0.5rem;
+}
+
+/* Version chip in the footer. The text comes from the `copyright` key in
+ * zensical.toml, which accepts raw HTML; this only styles it. Bump that string
+ * in lockstep with MARKETING_VERSION in apps/macos/project.yml. */
+.astar-version {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--astar-hairline-strong);
+  background: var(--astar-surface);
+  font-family: var(--md-code-font);
+  font-size: 0.62rem;
+  color: var(--md-default-fg-color--light);
+  white-space: nowrap;
+}
+
+/* -------------------------------------------------- reduced motion / a11y -- */
+@media (prefers-reduced-motion: reduce) {
+  .md-typeset .grid.cards > :is(ul, ol) > li,
+  .md-typeset .grid > .card,
+  .md-typeset .md-button {
+    transition: none;
+  }
+}

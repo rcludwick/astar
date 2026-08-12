@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>astar-inspect</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <main>
+    <h1>astar-inspect</h1>
+
+    <!-- Shared audio controls (both tabs use the same devices + gains) -->
+    <section class="audio">
+      <label>Input <select id="input"></select></label>
+      <label>Output <select id="output"></select></label>
+      <div class="gain-row"><span>Input volume</span><input id="input-gain" type="range" min="0" max="200" value="100" step="1" /><span id="input-gain-val">100%</span></div>
+      <div class="gain-row"><span>Output volume</span><input id="output-gain" type="range" min="0" max="200" value="100" step="1" /><span id="output-gain-val">100%</span></div>
+      <div class="meter"><span>TX</span><div class="bar"><div id="tx-bar" class="fill"></div></div><span id="tx-db">-60 dB</span></div>
+      <div class="meter"><span>RX</span><div class="bar"><div id="rx-bar" class="fill"></div></div><span id="rx-db">-60 dB</span></div>
+      <p class="note">Using an AllScan UCI150 / CM108-class USB interface? Set its rear <strong>PTT&nbsp;DEST</strong> switch to <strong>CTS</strong> (not COS). In the COS position, keying the radio fires the chip's &ldquo;Volume&nbsp;Down&rdquo; HID and the OS turns your output volume down on every PTT. The client doesn't use the COS line, so CTS is safe.</p>
+    </section>
+
+    <nav class="tabs">
+      <button id="tab-network" class="tab active">Web Transceiver</button>
+      <button id="tab-parrot" class="tab">Local Parrot</button>
+      <button id="tab-dtmf" class="tab">DTMF</button>
+      <button id="tab-spectrum" class="tab">Spectrum</button>
+      <button id="tab-serial" class="tab">Serial</button>
+      <button id="tab-node" class="tab">Start Node</button>
+      <button id="tab-register" class="tab">Register</button>
+    </nav>
+
+    <!-- Web Transceiver (WT) tab — the IAX2 call: connect, PTT, timeline. -->
+    <section id="panel-network" class="panel">
+      <div class="form">
+        <p class="wt-id" id="wt-id" hidden></p>
+        <label id="row-calling">Source node <input id="calling" type="text" placeholder="(same as destination)" /></label>
+        <label>Destination node <input id="node" type="text" value="55553" /></label>
+        <label id="row-secret">Secret <input id="secret" type="password" value="allstar" /></label>
+        <label id="row-name">Name <input id="name" type="text" value="astar" /></label>
+        <div class="actions">
+          <button id="connect">Connect</button>
+          <button id="disconnect">Disconnect</button>
+        </div>
+      </div>
+      <label class="check"><input type="checkbox" id="net-denoise" /> Noise reduction (mic)</label>
+      <label class="check"><input type="checkbox" id="net-compress" /> Voice compression (mic)</label>
+      <section class="ptt">
+        <button id="ptt-btn">PTT (hold / Space)</button>
+      </section>
+      <p id="status">Idle</p>
+      <section class="timeline">
+        <h2>Timeline</h2>
+        <ol id="timeline-list"></ol>
+      </section>
+      <details class="wire">
+        <summary>Wire (raw frames)</summary>
+        <label><input type="checkbox" id="wire-voice" /> show voice frames</label>
+        <ol id="wire-list"></ol>
+      </details>
+    </section>
+
+    <!-- Local Parrot tab -->
+    <section id="panel-parrot" class="panel" hidden>
+      <p class="note">Local loopback test — no network. Pick the input/output above (e.g. KT USB Audio in, monitor speaker out), Start, then hold the handset PTT (or the button / Space) and speak; release to hear it played back.</p>
+      <div class="actions">
+        <button id="parrot-toggle">Start Parrot</button>
+      </div>
+      <label class="check"><input type="checkbox" id="parrot-denoise" /> Noise reduction (60&nbsp;Hz hum filter + gate)</label>
+      <label class="check"><input type="checkbox" id="parrot-compress" /> Voice compression (4:1 @ &minus;24&nbsp;dBFS, +6&nbsp;dB makeup)</label>
+      <div class="actions">
+        <button id="parrot-calibrate" title="Records ~10s of silence and tunes the noise filter to this mic">Calibrate mic (stay quiet ~10s)</button>
+      </div>
+      <p id="calib-result" class="note" hidden></p>
+      <section class="ptt">
+        <button id="parrot-rec">Record (hold / Space)</button>
+        <span id="ptt-light" class="light idle"></span>
+      </section>
+      <p id="parrot-status">Stopped</p>
+    </section>
+
+    <!-- DTMF tab -->
+    <section id="panel-dtmf" class="panel" hidden>
+      <p class="note">In-band DTMF. Press a key to synthesize the dual-tone, hear it on the output (sidetone), and decode it back (local loopback). Enable <strong>Decode mic</strong> to also detect DTMF a handset generates into the capture device. Out-of-band IAX2 DTMF and live-call decode are separate work.</p>
+      <div id="dtmf-pad" class="dtmf-pad">
+        <button data-digit="1">1</button><button data-digit="2">2</button><button data-digit="3">3</button><button data-digit="A">A</button>
+        <button data-digit="4">4</button><button data-digit="5">5</button><button data-digit="6">6</button><button data-digit="B">B</button>
+        <button data-digit="7">7</button><button data-digit="8">8</button><button data-digit="9">9</button><button data-digit="C">C</button>
+        <button data-digit="*">*</button><button data-digit="0">0</button><button data-digit="#">#</button><button data-digit="D">D</button>
+      </div>
+      <div class="actions">
+        <button id="dtmf-mic-toggle">Decode mic: off</button>
+      </div>
+      <section class="detected">
+        <h2>Detected digits</h2>
+        <ol id="dtmf-list"></ol>
+      </section>
+    </section>
+
+    <!-- Spectrum / mic characterize tab (iax-2377 / iax-e73e / iax-5fb6) -->
+    <section id="panel-spectrum" class="panel" hidden>
+      <p class="note">Live spectrum — log&nbsp;frequency (≈100&nbsp;Hz…3.9&nbsp;kHz), dBFS amplitude, peak-held. <strong>Mic</strong> uses <em>monitor mode</em> (opens the input device <em>without</em> a call, to see the noise floor/whine before dialing). <strong>RX</strong>/<strong>TX</strong> show the active call's received / outgoing audio (no device claim — they read the call streams). Use headphones if also running the parrot.</p>
+      <div class="actions">
+        <span class="note">Source:</span>
+        <label class="check"><input type="radio" name="spectrum-source" value="mic" checked /> Mic (monitor)</label>
+        <label class="check"><input type="radio" name="spectrum-source" value="rx" /> RX (received)</label>
+        <label class="check"><input type="radio" name="spectrum-source" value="tx" /> TX (outgoing)</label>
+      </div>
+      <div class="actions">
+        <button id="spectrum-toggle">Start monitor</button>
+      </div>
+      <canvas id="spectrum-canvas" class="spectrum" width="512" height="180"></canvas>
+      <p id="spectrum-status" class="note">Monitor stopped.</p>
+      <div class="actions">
+        <button id="spectrum-characterize" title="Detect narrowband noise tones in the live monitor">Characterize mic</button>
+        <label class="check"><input type="checkbox" id="spectrum-comb" /> Harmonic comb (catch rolled-off harmonics)</label>
+      </div>
+      <p id="spectrum-result" class="note" hidden></p>
+    </section>
+
+    <!-- Serial monitor tab (iax-b38e) -->
+    <section id="panel-serial" class="panel" hidden>
+      <p class="note">Read-only monitor of incoming serial <strong>data bytes</strong> (RX), shown as timestamped hex + ASCII. No transmit in v1. Uses a dedicated monitor port set via <strong>HARNESS_MONITOR_SERIAL</strong> (baud via <strong>HARNESS_MONITOR_BAUD</strong>, default&nbsp;9600); autodetect picks a WCH <code>cu.wchusbserial*</code> port that is <em>not</em> the PTT port, so the two don't fight over the RX bytes.</p>
+      <p id="serial-port" class="serial-port">Port: (none)</p>
+      <div class="actions">
+        <button id="serial-clear">Clear</button>
+      </div>
+      <ol id="serial-list"></ol>
+    </section>
+
+    <!-- Start Node tab (node-as-handset, iax-64b6) -->
+    <section id="panel-node" class="panel" hidden>
+      <p class="note">Run as an inbound IAX2 node (node-as-handset): bind a listener, accept a direct dial-in, and bridge it to your mic/speaker. To be reachable by node number (register with an upstream registrar), use the <strong>Register</strong> tab.</p>
+      <div class="form">
+        <label>Bind port <input id="node-port" type="text" placeholder="4569" /></label>
+        <label>Answer <select id="node-answer">
+          <option value="auto">Auto-answer</option>
+          <option value="manual">Manual (Answer/Reject)</option>
+        </select></label>
+      </div>
+      <div class="actions">
+        <button id="node-start">Start Node</button>
+        <button id="node-stop">Stop Node</button>
+      </div>
+      <p id="node-status" class="note">Stopped.</p>
+      <div id="node-incoming" hidden>
+        <p>Incoming call from <strong id="node-incoming-from"></strong></p>
+        <div class="actions">
+          <button id="node-answer-btn">Answer</button>
+          <button id="node-reject-btn">Reject</button>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="node-parrot-start">Start Parrot</button>
+        <button id="node-parrot-stop">Stop Parrot</button>
+        <button id="node-ptt" class="ptt">PTT (hold)</button>
+      </div>
+      <p class="note">Start the node, then Start Parrot. Hold PTT, talk, release — a few seconds later you'll hear yourself. (Use headphones — the node uses your real mic + speaker.)</p>
+    </section>
+
+    <!-- Register tab (register-as-node, iax-64b6 P7) -->
+    <section id="panel-register" class="panel" hidden>
+      <p class="note">Register this station <strong>as</strong> an IAX2 node so callers can reach it by node number. The REGREQ is sent to the registrar; once acked, a caller dialing your node number rings here and bridges to your mic/speaker (node-as-handset). Inbound auth is permissive (auth&nbsp;off) for the dial-in — fine for a dev test. The password is sent to this local harness only and is never stored, echoed, or logged.</p>
+      <div class="form">
+        <label>Registrar host:port <input id="reg-registrar" type="text" placeholder="register.example.org:4569" /></label>
+        <label>Node number <input id="reg-username" type="text" placeholder="77777" /></label>
+        <label id="row-reg-secret">Password <input id="reg-password" type="password" placeholder="(node password)" /></label>
+        <label>Refresh (s) <input id="reg-refresh" type="text" placeholder="60" /></label>
+        <label>Bind port <input id="reg-port" type="text" placeholder="4569" /></label>
+        <label>Answer <select id="reg-answer">
+          <option value="auto">Auto-answer</option>
+          <option value="manual">Manual (Answer/Reject)</option>
+        </select></label>
+      </div>
+      <div class="actions">
+        <button id="reg-register">Register</button>
+        <button id="reg-deregister">Deregister</button>
+      </div>
+      <p id="reg-status" class="note">Not registered.</p>
+      <p id="reg-msg" class="note"></p>
+      <div id="reg-incoming" hidden>
+        <p>Incoming call from <strong id="reg-incoming-from"></strong></p>
+        <div class="actions">
+          <button id="reg-answer-btn">Answer</button>
+          <button id="reg-reject-btn">Reject</button>
+        </div>
+      </div>
+      <section class="ptt">
+        <button id="reg-ptt" class="ptt">PTT (hold)</button>
+      </section>
+      <p class="note">When a caller is bridged, hold PTT to talk back. Use headphones (real mic + speaker).</p>
+    </section>
+
+    <footer>
+      <button id="shutdown" class="danger">Shutdown server</button>
+    </footer>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

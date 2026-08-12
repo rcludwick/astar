@@ -1,0 +1,4 @@
+# Zensical build output (site_dir in ../zensical.toml) and its content-hash
+# cache. Both are regenerable; `just docs-build` rewrites them.
+/.site/
+/.cache/

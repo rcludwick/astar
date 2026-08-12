@@ -1,0 +1,87 @@
+[package]
+name = "astar-console"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+astar-iax = { path = "../astar-iax" }
+astar-audio = { path = "../astar-audio" }
+astar-codec = { path = "../astar-codec" }
+astar-iax-core = { path = "../astar-iax-core" }
+# M17 protocol primitives (iax-f2b8 Task 3): pure, I/O-free, no extra deps of
+# its own. Optional + gated behind the `m17` feature (default ON) below.
+astar-m17 = { path = "../astar-m17", optional = true }
+# D-Star (DExtra) protocol primitives (iax-a9d4 Task 2): pure DSVT framing +
+# link FSM, no extra deps of its own. Optional + gated behind the `dstar`
+# feature (OFF by default — see that feature's doc below) below.
+astar-dstar = { path = "../astar-dstar", optional = true }
+# Underlay socket for applying a deferred `WireGuard` link transport when the
+# engine is first built (iax-5bbd); config/status types come via `astar-iax`.
+astar-wireguard = { path = "../astar-wireguard" }
+# StreamID generation for the M17 TX path (iax-f2b8 Task 3); optional, only
+# pulled in by the `m17` feature.
+rand = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+# `tracing::debug!` on an unparsable DSVT packet (iax-a9d4 final-review fix
+# 4) — always present, not `dstar`-gated, matching `astar-codec`'s own
+# unconditional `tracing` dependency even though its call sites are all
+# feature-gated.
+tracing = { workspace = true }
+
+[dev-dependencies]
+astar-asl3 = { path = "../astar-asl3" }
+astar-audio = { path = "../astar-audio", features = ["test-backend"] }
+# Forces the LGPL `codec2-static` backend on for every TEST/bench build of
+# this crate — regardless of which `--features` flags are passed for the
+# crate's own (non-dev) feature set — so the M17 loopback tests always have
+# a working Codec 2 instance without depending on a system libcodec2 being
+# installed. Dev-dependency features never leak into what a published/shipped
+# build of this crate links: `cargo tree -p astar-console` (the real,
+# non-dev dependency graph) never shows the `codec2` crate, only `libloading`
+# via `codec2-runtime` (see the `m17` feature below) — verified in the Task 3
+# fix report.
+astar-codec = { path = "../astar-codec", features = ["codec2-static"] }
+astar-ptt = { path = "../astar-ptt" }
+serde_json = "1"
+
+[features]
+default = ["m17"]
+serde = ["dep:serde", "astar-iax-core/serde", "astar-iax/serde"]
+# M17 digital-voice client runtime (iax-f2b8 Task 3), default ON. Pulls in
+# `astar-m17` (pure protocol code, no I/O, no extra deps) and enables
+# `astar-codec`'s `codec2-runtime` feature: a `dlopen`/`libloading`-based
+# loader for a SYSTEM libcodec2 at runtime. This keeps a plain `cargo build`
+# (and anything depending on this crate with default features) free of LGPL
+# code — `libloading` itself is MIT/Apache-2.0, and no LGPL-licensed code is
+# linked into the binary. If no system libcodec2 is present at runtime,
+# `M17Session::connect` simply fails to find a codec
+# (`ConsoleError::Device`); voice-capable M17 then needs either a system
+# libcodec2 or the `codec2-static` feature below. Verify with `cargo tree -p
+# astar-console` (no `codec2` crate, `libloading` present) vs `cargo tree
+# -p astar-console --features codec2-static` (both present).
+m17 = ["dep:astar-m17", "dep:rand", "astar-codec/codec2-runtime"]
+# LICENSING: statically links the LGPL-2.1-licensed `codec2` crate. Lets a
+# production build opt into the static backend explicitly (e.g. an install
+# target known to lack a system libcodec2). NOT needed to run this crate's
+# own tests — the `[dev-dependencies]` entry for `astar-codec` above
+# forces `codec2-static` on for every test/bench build unconditionally, so
+# `cargo test -p astar-console` (no extra flags) already runs the M17
+# loopback tests with a working codec. This feature must NEVER be added to
+# `default` (or to any other feature that is).
+codec2-static = ["astar-codec/codec2-static"]
+# D-Star (DExtra) full-transceive digital-voice client runtime (iax-a9d4
+# Task 6 built RX; iax-2f6b added TX). Unlike `m17`, this is NOT part of
+# `default`. D-Star is hardware-only (iax-b3e7 M0): it depends on
+# `astar-codec/ambe-hw` (the `ThumbDV` USB dongle backend) — no
+# software-codec fallback, no preference knob. The vocoder driver it pulls
+# (`ambe-thumbdv`) is vendored in-tree as a path dependency (see
+# `vendor/ambe-thumbdv/VENDORED.md`), so no build ever needs network access
+# to fetch it. Verify with `cargo tree -p astar-console` (no ambe-*) vs
+# `cargo tree -p astar-console --features dstar` (`ambe-thumbdv`
+# present).
+dstar = ["dep:astar-dstar", "astar-codec/ambe-hw"]
+
+[lints]
+workspace = true

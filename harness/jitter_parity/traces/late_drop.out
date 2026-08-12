@@ -1,0 +1,16 @@
+config ok
+put sched
+get ok ts=0 ms=20 ftype=voice payload=00
+put sched
+get interpolate
+put ok
+get ok ts=20 ms=20 ftype=voice payload=01
+put ok
+get ok ts=40 ms=20 ftype=voice payload=02
+put ok
+get ok ts=60 ms=20 ftype=voice payload=03
+put ok
+get ok ts=80 ms=20 ftype=voice payload=04
+put sched
+get interpolate
+get interpolate

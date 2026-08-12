@@ -1,0 +1,35 @@
+[package]
+name = "astar-iax"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "High-level idiomatic Rust API for the IAX2 protocol."
+
+[lints]
+workspace = true
+
+[dependencies]
+astar-iax-core = { path = "../astar-iax-core", version = "0.1.0-beta" }
+astar-audio = { path = "../astar-audio", version = "0.1.0-beta" }
+astar-codec = { path = "../astar-codec", version = "0.1.0-beta" }
+astar-wireguard = { path = "../astar-wireguard", version = "0.1.0-beta" }
+mio.workspace = true
+rand.workspace = true
+serde = { workspace = true, optional = true }
+smallvec.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[features]
+# Derive serde on the secret-free read surface (CallSnapshot / CallId and the
+# routing-config types). Off by default; downstream (iax-ad2e roster, iax-1075
+# FFI) turns it on. iax-42e9. Also turns on astar-iax-core's serde derive so
+# `CallSnapshot.negotiated_format: Option<VoiceFormat>` round-trips (iax-31f7).
+serde = ["dep:serde", "astar-iax-core/serde"]
+
+[dev-dependencies]
+base64.workspace = true
+serde_json.workspace = true

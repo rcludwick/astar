@@ -1,0 +1,14 @@
+[package]
+name = "astar-dstar"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "D-Star digital-voice protocol primitives (DSVT framing, DExtra linking), plus a loopback reflector."
+
+[lints]
+workspace = true
+
+[dependencies]

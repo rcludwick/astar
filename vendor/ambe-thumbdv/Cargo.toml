@@ -1,0 +1,14 @@
+[package]
+name = "ambe-thumbdv"
+description = "DVSI packet codec for the AMBE-3000 (ThumbDV / DV3000) vocoder"
+# NOTE: these four keys are deliberately hard-coded rather than inherited from
+# the workspace. This crate is a vendored MIT/Apache-2.0 island inside an
+# AGPL-3.0 workspace; `license.workspace = true` would silently relicense it.
+# See VENDORED.md.
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rcludwick/ambe"
+
+[dependencies]
+serialport = "4"

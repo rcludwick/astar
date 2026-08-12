@@ -1,0 +1,13 @@
+// Module map exposing the astar-sys C-ABI to Swift as `CAstarStation`.
+//
+// `shim.h` includes the committed, cbindgen-generated
+// crates/astar-sys/include/astar.h by relative path (single source of
+// truth). Clang parses the header here; linking the actual static library and
+// the macOS system frameworks it pulls in is done by `AstarStation`'s
+// linkerSettings in Package.swift (a systemLibrary `link` directive can only
+// name a -l library, not a -framework or a path, so the framework/static-lib
+// link flags live in Package.swift instead).
+module CAstarStation {
+    umbrella header "shim.h"
+    export *
+}

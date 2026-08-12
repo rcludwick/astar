@@ -1,0 +1,36 @@
+[package]
+name = "astar-audio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Audio I/O for astar. cpal-backed."
+
+[lints]
+workspace = true
+
+[features]
+## Exposes a hardware-free `NullBackend` for downstream tests/examples.
+test-backend = []
+## Derive serde on the secret-free `MicProfile` / `NotchSpec` so a front-end can
+## persist a calibrated profile as JSON (iax-2095 / iax-5fb6).
+serde = ["dep:serde"]
+
+[dependencies]
+cpal.workspace = true
+astar-iax-core = { path = "../astar-iax-core", version = "0.1.0-beta" }
+mio = { workspace = true }
+rubato.workspace = true
+rustfft = "6"
+serde = { workspace = true, optional = true }
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# Self-reference so this crate's integration tests (tests/*.rs) compile with the
+# hardware-free `test_support_router::NullBackend` exposed under `test-backend`
+# and serde (for the MicProfile JSON round-trip test).
+astar-audio = { path = ".", features = ["test-backend", "serde"] }
+serde_json.workspace = true

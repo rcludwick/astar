@@ -1,0 +1,34 @@
+config ok
+put sched
+put ok
+put ok
+put ok
+put ok
+put ok
+put ok
+put ok
+put ok
+put ok
+put ok
+put ok
+put ok
+put ok
+put ok
+get noframe
+get noframe
+get ok ts=0 ms=20 ftype=voice payload=00
+get ok ts=20 ms=20 ftype=voice payload=01
+get ok ts=40 ms=20 ftype=voice payload=02
+get ok ts=60 ms=20 ftype=voice payload=03
+get ok ts=80 ms=20 ftype=voice payload=04
+get ok ts=100 ms=20 ftype=voice payload=05
+get ok ts=120 ms=20 ftype=voice payload=06
+get ok ts=140 ms=20 ftype=voice payload=07
+get ok ts=160 ms=20 ftype=voice payload=08
+get ok ts=180 ms=20 ftype=voice payload=09
+get ok ts=200 ms=20 ftype=voice payload=0a
+get ok ts=220 ms=20 ftype=voice payload=0b
+get ok ts=240 ms=20 ftype=voice payload=0c
+get ok ts=260 ms=20 ftype=voice payload=0d
+get ok ts=280 ms=20 ftype=voice payload=0e
+get interpolate

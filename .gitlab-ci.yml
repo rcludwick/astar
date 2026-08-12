@@ -1,0 +1,381 @@
+# ============================================================================
+# astar — CI pipeline
+#
+# READ THIS BEFORE ASSUMING THE PIPELINE IS LIVE
+# ----------------------------------------------
+# This file targets a GitLab CI runner on the IONOS box (192.0.2.20).
+# As of this commit **no such runner is registered, and no GitLab project for
+# astar exists**. What is actually deployed on that box today is a fleet of
+# self-hosted *GitHub Actions* runners (rcludwick/gh-runners, Ansible-managed,
+# rootless podman, one container per runner, labels `self-hosted, linux, x64`
+# plus a discriminating `ionos` label). There is no gitlab-runner binary, no
+# gitlab.com remote on any repo, and no `glab` CLI on the workstation.
+#
+# So the tags below are the GitLab tags a runner MUST BE REGISTERED WITH for
+# this pipeline to schedule — mirrored from the real Actions labels so the two
+# name the same machines. Nothing here is fabricated infrastructure, but
+# nothing here runs until someone does the registration. ci/README.md has the
+# exact steps and the toolchain the image must carry.
+#
+# WHAT RUNS WHERE
+# ---------------
+#   tags: [ionos, linux, x64]  Debian 13, 4 vCPU / 3.8 GB RAM / 4 GB swap.
+#                              Every Rust job, the Iced client, the docs build.
+#   tags: [macos, arm64]       DOES NOT EXIST. See the `macos` stage — those
+#                              jobs are `when: manual` and non-blocking, and
+#                              they say so out loud rather than pretending the
+#                              SwiftUI app is covered.
+#
+# ON-AIR SAFETY (legally and physically load-bearing)
+# ---------------------------------------------------
+# No job in this file transmits, dials a live node, or opens a serial port.
+# `ci/guard-safety-env.sh` runs before every compiling job and hard-fails if
+# IAX_THUMBDV_TESTS / IAX_PORTAL_LIVE / IAX_PARROT_LIVE / IAX_THUMBDV_PORT or
+# the ASL_* portal credentials are set. That gate is not decorative: astar-sys
+# defaults to the `dstar` feature, so the ThumbDV hardware tests are compiled
+# into a plain `cargo test --workspace` and only the env var keeps them asleep.
+# Hardware suites (`just dstar-test-hw`) are Rob's machine only, never CI.
+#
+# NOTE FOR CONTRIBUTORS: `just` is NOT installed on the runner image. Recipes
+# are spelled out as cargo/script invocations here on purpose. Keep this file
+# and the justfile in step by hand; if they drift, the justfile is what humans
+# run and this file is what gates merges.
+# ============================================================================
+
+stages:
+  - guard
+  - lint
+  - test
+  - timing # deliberately its own stage — see `test-timing`
+  - build
+  - docs
+  - macos
+
+variables:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+  # Explicitly neutralise every hardware / live-network opt-in. Job variables
+  # win over anything the runner's config.toml `environment` or the service
+  # user's shell profile might carry in. guard-safety-env.sh then verifies it.
+  IAX_THUMBDV_TESTS: ""
+  IAX_THUMBDV_PORT: ""
+  IAX_PORTAL_LIVE: ""
+  IAX_PARROT_LIVE: ""
+
+  # Shell executor on a persistent box: keep target/ and the cargo registry
+  # warm between pipelines instead of tarballing a multi-GB `cache:` in and out
+  # of the coordinator. `git clean` still wipes every other untracked file.
+  GIT_CLEAN_FLAGS: "-ffdx -e target/"
+  GIT_DEPTH: "20"
+
+# Avoid double pipelines: one for the branch, or one for the MR, never both.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
+# ── shared job shapes ───────────────────────────────────────────────────────
+
+.ionos:
+  tags: [ionos, linux, x64]
+  interruptible: true
+
+.rust:
+  extends: .ionos
+  before_script:
+    - ./ci/guard-safety-env.sh
+    - rustc --version && cargo --version
+  timeout: 45m
+
+# ── stage: guard — repo invariants, cheapest first ──────────────────────────
+
+guards:
+  extends: .ionos
+  stage: guard
+  timeout: 10m
+  script:
+    # Nothing may arm hardware or live-network tests.
+    - ./ci/guard-safety-env.sh
+    # Fully vendored: no git dependencies, ambe-thumbdv present with licences,
+    # the dropped software vocoder not sneaking back in.
+    - ./ci/guard-no-git-deps.sh
+    # No invented install channel. astar has never been released.
+    - ./ci/guard-distribution-claims.sh
+    # Every first-party rs/swift/sh file carries the AGPL-3.0-only SPDX header
+    # that README.md and the docs site promise it does.
+    - ./ci/guard-spdx-headers.sh
+
+# ── stage: lint ─────────────────────────────────────────────────────────────
+
+fmt:
+  extends: .rust
+  stage: lint
+  script:
+    - cargo fmt --all -- --check
+
+clippy:
+  extends: .rust
+  stage: lint
+  script:
+    - cargo clippy --workspace --all-targets --locked -- -D warnings
+
+rfc-audit:
+  extends: .ionos
+  stage: lint
+  timeout: 10m
+  script:
+    # Tracker-free verifier: ticket references are format-checked. Archive
+    # membership is skipped here — docs/issues-archive.jsonl is local-only.
+    - ./scripts/verify-rfc-audit.sh
+
+# ── stage: test ─────────────────────────────────────────────────────────────
+
+# The full sweep, minus one timing-sensitive test that is run on its own below.
+test:
+  extends: .rust
+  stage: test
+  script:
+    - cargo test --workspace --all-targets --locked -- --skip parrot_playback_packets_are_paced
+
+# The M17 parrot pacing assertion measures inter-packet gaps and demands all 24
+# land in 34–48 ms. It is a real regression detector (the pre-fix mean was
+# ~50.9 ms, so there is only ~3 ms of headroom and the band cannot be widened
+# without destroying it), but it is sensitive to CPU contention — which is
+# exactly what `cargo test --workspace`'s default parallelism creates on a
+# 4-vCPU shared box. So: run it alone, single-threaded, and retry a couple of
+# times. A genuine regression fails all three attempts; a scheduler hiccup does
+# not redden the build. The durable fix (assert on the mean plus an outlier
+# budget rather than on every gap) is a backlog item, not a CI workaround.
+#
+# It gets its own STAGE, not just its own job: stages are sequential, so
+# nothing else in this pipeline is compiling or testing while it measures. The
+# resource_group extends that isolation across concurrent pipelines on the same
+# box, which is the case the stage boundary alone does not cover.
+test-timing:
+  extends: .rust
+  stage: timing
+  resource_group: ionos-timing
+  timeout: 15m
+  retry:
+    max: 2
+    when: script_failure
+  script:
+    - cargo test -p astar-m17 --test reflector --locked -- --exact --test-threads=1
+      parrot_playback_packets_are_paced_34_to_48ms_apart_over_many_packets
+
+# `cargo test --workspace` unifies features across the workspace, so the
+# `dstar` / `ambe-hw` code always compiles there. Scoping with `-p` breaks that
+# unification and is therefore a genuinely different build configuration — one
+# that the app and the CLI actually ship. Compile and run it too.
+#
+# Hardware-free: without IAX_THUMBDV_TESTS=1 every dongle-touching test prints
+# "skipping hardware ThumbDV test" and passes. Nothing opens a serial port.
+dstar-scoped:
+  extends: .rust
+  stage: test
+  script:
+    - cargo test -p astar-codec   --features ambe-hw --locked
+    - cargo test -p astar-console --features dstar   --locked
+    - cargo test -p astar-station --features dstar   --locked
+    - cargo test -p astar-cli     --features dstar   --locked
+
+# Regenerates the C headers and fails on drift. Also the secret-free guard:
+# it asserts `secret` / `pass` / `password` / `token` never appear in the
+# out-structs (IaxState / IaxEvent), enforcing the rule that secrets are
+# connect/init in-args only and never surface in a snapshot or event.
+cbindgen:
+  extends: .rust
+  stage: test
+  script:
+    - cargo install cbindgen --version 0.29.4 --locked
+    - ./scripts/check-cbindgen.sh
+    - ./scripts/check-cbindgen-serial.sh
+
+python-binding:
+  extends: .rust
+  stage: test
+  script:
+    - cargo build -p astar-sys --locked
+    - cd bindings/python
+    # Offline ctypes smoke — no network, no device.
+    - python3 astarstation.py
+    - python3 test_smoke.py
+    - python3 examples/parrot.py --dry-run
+    - python3 -m py_compile astarstation.py astarserial.py test_smoke.py
+      test_serial_smoke.py examples/parrot.py
+
+# ── stage: build ────────────────────────────────────────────────────────────
+
+# Compile + link the C parrot example against the staticlib. This proves the
+# FFI surface links from plain C. It BUILDS ONLY — the IAX_PARROT_DRYRUN smoke
+# currently reports a wrong expectation ("expected INVALID_DIGIT, got -3"),
+# which reproduces against the pre-merge sources too, so it is a known bug in
+# examples/parrot.c rather than a regression. Fix the expectation, then add the
+# dry-run invocation here.
+ffi-example:
+  extends: .rust
+  stage: build
+  script:
+    - cargo build --release -p astar-sys --locked
+    - ./crates/astar-sys/examples/build.sh
+
+# The node daemon. Release-built because that is how it ships to the VPS.
+server:
+  extends: .rust
+  stage: build
+  script:
+    - cargo build --release -p astar-server --locked
+  artifacts:
+    name: astar-server-$CI_COMMIT_SHORT_SHA
+    paths:
+      - target/release/astar-server
+    expire_in: 1 week
+
+# The Iced client, natively on Linux, including proof that it actually opens a
+# window: `--shot` renders a scene, screenshots it and exits. ICED_BACKEND=
+# tiny-skia forces the software renderer (no GPU on the runner) and xvfb
+# supplies a virtual X display.
+#
+# xvfb and the X client libraries are an IMAGE prerequisite, not a job step —
+# the runner user is rootless and `apt-get` in a pipeline is the wrong layer.
+# The job fails with an actionable message if they are missing (see ci/README).
+#
+# Memory note: apps/gui is a workspace member, so iced/wgpu is in the tree.
+# On a 3.8 GB box the link step is the tight spot; CARGO_BUILD_JOBS is capped
+# here rather than repo-wide.
+gui-linux:
+  extends: .rust
+  stage: build
+  variables:
+    ICED_BACKEND: tiny-skia
+    CARGO_BUILD_JOBS: "2"
+  script:
+    - command -v xvfb-run >/dev/null || { echo "xvfb-run missing — bake xvfb +
+      libxcursor1 libxrandr2 libxi6 libxkbcommon-x11-0 libxcb-shape0
+      libxcb-xfixes0 libxcb-shm0 fontconfig fonts-dejavu-core into the runner
+      image (gh-runners runner/Containerfile), do not apt-get from CI"; exit 1; }
+    - cargo clippy -p astar-gui --all-targets --locked -- -D warnings
+    - cargo test -p astar-gui --locked
+    - cargo build --release -p astar-gui --locked
+    - xvfb-run -a ./target/release/astar-gui --shot idle shot-linux.png
+  artifacts:
+    name: gui-shot-linux-$CI_COMMIT_SHORT_SHA
+    paths:
+      - shot-linux.png
+    expire_in: 1 week
+    when: always
+
+# ── stage: docs ─────────────────────────────────────────────────────────────
+
+# Builds the Zensical site (zensical.toml at the repo root; docs_dir=docs/site,
+# site_dir=docs/.site) with --strict, so a broken link or a nav entry pointing
+# at a missing page reddens the pipeline on push.
+#
+# PUBLISHING happens on GitHub Pages, not here — see .github/workflows/
+# docs-pages.yml. That workflow is DORMANT (manual dispatch only) because
+# GitHub Actions is deliberately switched off on Rob's repos for billing; it
+# exists so the deploy is one trigger away rather than one afternoon away.
+# Both call ci/build-docs.sh, so the verified site and the published site are
+# built by identical code. If this GitLab project ever becomes real and GitLab
+# Pages is preferred instead, rename this job to `pages` and publish the build
+# output as a `public/` artifact — that is the whole change.
+docs-site:
+  extends: .ionos
+  stage: docs
+  # `needs: []` starts this at pipeline creation instead of waiting out the
+  # earlier stages: the docs are independent of the Rust build, and a failing
+  # test should not hide a broken doc (or vice versa).
+  needs: []
+  timeout: 15m
+  script:
+    - ./ci/build-docs.sh
+  artifacts:
+    name: astar-docs-$CI_COMMIT_SHORT_SHA
+    paths:
+      - docs/.site
+    expire_in: 1 week
+
+# ── stage: macos — NO RUNNER EXISTS. THIS IS NOT COVERAGE. ──────────────────
+#
+# Everything below needs macOS + a full Xcode: swift-format (it ships inside
+# Xcode), `swift test`, xcodegen, xcodebuild, both build-xcframework.sh scripts,
+# and the cargo-xwin Windows cross-build. None of it can run on the Debian
+# fleet — wrong OS, wrong arch, no Swift toolchain.
+#
+# Rob's Mac hosts self-hosted *GitHub Actions* runners today. It hosts no
+# gitlab-runner, so no runner answers the `macos, arm64` tags. These jobs are
+# therefore `when: manual` and `allow_failure: true`: they sit in the pipeline
+# as an explicit, visible hole rather than being silently omitted, and they
+# never report green for work that did not happen. Triggering one before a
+# runner is registered leaves it pending, which is the honest outcome.
+#
+# UNTIL A MAC RUNNER EXISTS, THE SWIFT APP IS GATED BY HAND: run `just ci-full`
+# on the Mac before merging anything under apps/macos/ or bindings/swift*/.
+#
+# The one safety rule that still applies if these are ever switched on: that
+# Mac is the machine with a ThumbDV *and* a UCI150 attached, so
+# guard-safety-env.sh matters more there than anywhere else. It stays in
+# before_script.
+
+.macos:
+  tags: [macos, arm64]
+  stage: macos
+  interruptible: true
+  allow_failure: true
+  rules:
+    - when: manual
+  before_script:
+    - ./ci/guard-safety-env.sh
+    - sw_vers && xcodebuild -version
+
+macos:swift-lint:
+  extends: .macos
+  timeout: 20m
+  script:
+    - swift format lint --strict --recursive
+      apps/macos/Sources
+      apps/macos/Packages/AstarCore/Sources
+      apps/macos/Packages/AstarCore/Tests
+
+# The Swift packages link staticlibs wrapped as xcframeworks, and those are
+# gitignored build products — so a fresh checkout MUST build them before any
+# `swift test`. Both scripts, always: a stale xcframework cache lies.
+macos:swift-tests:
+  extends: .macos
+  timeout: 60m
+  script:
+    - ./bindings/swift/build-xcframework.sh
+    - ./bindings/swift-serial/build-xcframework.sh
+    - cd bindings/swift && swift test && cd ../..
+    - cd bindings/swift-serial && swift test && cd ../..
+    - cd apps/macos/Packages/AstarCore && swift test
+
+# Produces a LOCAL, ad-hoc-signed .dmg. This is a CI artifact for dev sharing,
+# NOT a release: there is no Developer ID signing, no notarization, no download
+# page, no tap, no cask. Gatekeeper will flag it. Building from source remains
+# the only supported way to get astar.
+macos:app-dmg:
+  extends: .macos
+  timeout: 60m
+  script:
+    - ./bindings/swift/build-xcframework.sh
+    - ./bindings/swift-serial/build-xcframework.sh
+    - ./apps/macos/Tools/make-dmg.sh
+  artifacts:
+    name: astar-dmg-$CI_COMMIT_SHORT_SHA
+    paths:
+      - apps/macos/build/astar.dmg
+    expire_in: 1 week
+
+# Windows has no runner of any kind in the estate — not on IONOS, not on GitLab,
+# and nothing in gh-runners plans one. The Windows client is cross-compiled from
+# the Mac with cargo-xwin (`just gui-windows`) as a local pre-flight. This job
+# documents the gap; it needs the same absent Mac runner to run at all.
+macos:gui-windows-cross:
+  extends: .macos
+  timeout: 45m
+  script:
+    - ./apps/gui/check-windows.sh
