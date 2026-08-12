@@ -6,12 +6,19 @@
 
 <p align="center">
   A native ham-radio digital-voice client and node —
-  <strong>AllStarLink (IAX2)</strong>, <strong>M17</strong> and <strong>D-Star</strong>,
+  <strong>AllStarLink (IAX2)</strong> and <strong>M17</strong>,
   in one Rust engine with native front-ends.
 </p>
 
 <p align="center">
   <strong>0.1.0beta</strong> · AGPL-3.0-only · macOS today, Windows and Linux in progress
+</p>
+
+<p align="center">
+  <a href="https://rcludwick.github.io/astar/"><strong>Documentation</strong></a> ·
+  <a href="https://rcludwick.github.io/astar/build/">Build from source</a> ·
+  <a href="https://rcludwick.github.io/astar/macos/hardware/">Hardware</a> ·
+  <a href="https://rcludwick.github.io/astar/server/">astar-server</a>
 </p>
 
 ---
@@ -37,21 +44,20 @@ daemon.
 Be aware that "the engine supports it" and "you can click it in the app" are
 two different things right now. This is the honest state:
 
-| | AllStar (IAX2) | M17 | D-Star |
-|---|---|---|---|
-| **Engine** (`crates/`) | yes | yes | yes (TX + RX) |
-| **macOS app** (`apps/macos`) | yes | yes¹ | **not yet in the UI** |
-| **Iced client** (`apps/gui`) | yes | yes¹ | **not yet in the UI** |
-| **CLI** (`astar-cli`) | yes | yes | yes — `dstar-listen` |
+| | AllStar (IAX2) | M17 |
+|---|---|---|
+| **Engine** (`crates/`) | yes | yes |
+| **macOS app** (`apps/macos`) | yes | yes¹ |
+| **Iced client** (`apps/gui`) | yes | yes¹ |
+| **CLI** (`astar-cli`) | yes | yes |
 
 ¹ M17 is capability-gated: the client shows it only when the running build can
 actually place the call. On macOS that currently means a system `libcodec2` —
 see [M17 and Codec 2](#m17-and-codec-2).
 
-**D-Star reaches the air only through `astar-cli` today.** The engine, the C
-ABI and the Swift binding all carry it, and D-Star is compiled in by default,
-but neither GUI has a D-Star entry in its network picker yet. Wiring it up is
-tracked in the backlog.
+Other networks are in the tree at various stages and are **not** claimed as
+working yet. You will find crates for them; treat their presence as work in
+progress rather than a feature list.
 
 ### Platform state
 
@@ -94,7 +100,7 @@ native UI rather than a shared web shell.
 | `astar-iax` | The high-level IAX2 client stack over `astar-iax-core`. |
 | `astar-codec` | G.711 / GSM / Speex / iLBC, Codec 2, plus the AMBE (ThumbDV) backend. |
 | `astar-audio` | cpal device I/O, network-agnostic. |
-| `astar-station` | The multi-network station facade (IAX2 + M17 + D-Star). |
+| `astar-station` | The multi-network station facade the clients drive. |
 | `astar-console` | Front-end-agnostic operator-console core. |
 | `astar-asl3` / `astar-m17` / `astar-dstar` | Per-network service layers. |
 | `astar-ptt` | Pluggable PTT backends (serial, HID, VOX, UI). |
@@ -216,19 +222,6 @@ On the UCI150, the PTT DEST switch selects CTS.
 All serial I/O runs on a Rust-side worker thread, so a wedged USB transfer
 surfaces as a "serial device error", never a UI hang.
 
-### D-Star needs a ThumbDV — there is no software vocoder
-
-D-Star is **hardware-only**. The vocoder is a DVSI **ThumbDV / DV3000** USB
-dongle, driven by `vendor/ambe-thumbdv`. There is no software AMBE codec in
-this repository, no bundled one, and no fallback — both directions, encode and
-decode, go through the dongle. Without one, D-Star is simply unavailable and
-says so.
-
-`IAX_THUMBDV_PORT` pins *which* dongle to use when several are attached. It
-only ever **narrows** the FTDI VID/PID scan; it can never point the opener at
-an arbitrary serial port. That restriction is deliberate and load-bearing:
-opening a USB radio interface's tty asserts RTS, which keys a transmitter.
-
 ### M17 and Codec 2
 
 M17 needs Codec 2. The engine looks for a system `libcodec2` at runtime
@@ -248,8 +241,12 @@ Connecting to live nodes and keying PTT are deliberate human actions. No
 automated process in this repository may key a transmitter, connect to a live
 reflector or node, or reach anything outside `127.0.0.1`; the
 hardware-touching test suites skip unless `IAX_THUMBDV_TESTS=1` is set
-explicitly. The node daemon's remote-key endpoint refuses to key while a
-D-Star session is active.
+explicitly.
+
+`IAX_THUMBDV_PORT`, which selects among attached vocoder dongles, only ever
+**narrows** the USB VID/PID scan — it can never point the opener at an
+arbitrary serial port. That restriction is load-bearing rather than tidy:
+opening a USB radio interface's tty asserts RTS, and RTS keys a transmitter.
 
 Operating astar on the air requires an appropriate amateur radio licence for
 your jurisdiction, and you are responsible for what your station transmits.

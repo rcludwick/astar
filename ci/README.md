@@ -101,36 +101,59 @@ missing page fails.
 
 The GitLab `docs-site` job **builds** the site on every push. It does not
 publish. Publishing goes to GitHub Pages via
-[`../.github/workflows/docs-pages.yml`](../.github/workflows/docs-pages.yml),
-which is dormant (`workflow_dispatch` only) because Actions are off for
-billing. Both call `ci/build-docs.sh`, so the verified site and the published
-site are built by identical code.
+[`../.github/workflows/docs-pages.yml`](../.github/workflows/docs-pages.yml).
+Both call `ci/build-docs.sh`, so the verified site and the published site are
+built by identical code.
 
-Before the first publish, set repository Settings → Pages → Build and
-deployment → Source = "GitHub Actions". `site_url` already carries the
-`/astar/` project sub-path Pages serves from; a repository rename has to move
-with it.
+That workflow is **`workflow_dispatch` only — it does not fire on push.** After
+changing anything under `docs/site/`, publish by hand:
+
+```console
+$ gh workflow run docs-pages.yml --ref main
+```
+
+It builds with `--strict`, so a broken link fails the publish instead of
+shipping a half-built site. Pages is already configured (Settings → Pages →
+Source = "GitHub Actions"); the site is live at
+<https://rcludwick.github.io/astar/>. `site_url` in `zensical.toml` carries the
+`/astar/` project sub-path Pages serves from — a repository rename has to move
+with it or instant navigation and the 404 page resolve against the wrong
+origin.
+
+### Why there are no other GitHub workflows
+
+Nothing was carried over from the pre-merge `astar` and `iaxclient-rs`
+workflows. They were built around two separate private repos and are now
+actively wrong: the cross-repo checkouts (`CROSS_REPO_TOKEN`), the
+`repository_dispatch` fan-out (`DISPATCH_TOKEN`, `iaxclient-rs-updated`), and
+every crate and path name in them died with the merge. Shipping them as dead
+YAML would have been worse than shipping nothing.
 
 If GitLab Pages is ever preferred instead, rename `docs-site` to `pages` and
 publish the output as a `public/` artifact. That is the whole change.
 
-## The decision nobody has made yet
+## No self-hosted runner may ever touch this repo
 
 **A self-hosted runner must never be attached to a public repo.** Any pull
 request author would get arbitrary code execution on the IONOS build box and,
 for the macOS runners, on Rob's personal Mac. Both `gh-runners` READMEs say so
 in bold.
 
-This repo is AGPL-3.0, which strongly implies it will be published. GitHub
-Pages on a private repo also requires a paid plan, so publishing the docs
-points the same way. The moment the repo goes public:
+This repo went public on 2026-08-11, so that is no longer a hypothetical. The
+fleet stayed with the two private predecessors — the old repos were *renamed*
+(`rcludwick/astar-old`, `rcludwick/astar-lib-old`) rather than deleted, and
+runners follow their repo through a rename, so they never became attached to
+this one. Verify it stays that way:
 
-* detach the IONOS fleet and the Mac runner from it, and
-* move CI to hosted runners (free for public repos on GitHub; GitLab's free
-  shared-runner minutes are limited), or accept no CI.
+```console
+$ gh api repos/rcludwick/astar/actions/runners --jq .total_count   # must be 0
+```
 
-Keeping it private keeps the free self-hosted CI. That is Rob's call and it has
-not been made — nothing in this directory assumes either answer.
+The consequence is that this repo has **no compute for CI**. The docs workflow
+runs on GitHub-hosted `ubuntu-latest`, which is free for public repos and is
+the right answer for anything else that gets automated here. The Rust and
+Swift gates are run by hand — `just ci` and `just ci-full` — until a hosted
+pipeline exists.
 
 ## Never in CI, under any trigger
 
