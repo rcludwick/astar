@@ -18,9 +18,14 @@ bindings/swift-serial/astarserial.xcframework/
 # XcodeGen output — generated from apps/macos/project.yml
 *.xcodeproj
 
-# Xcode / SwiftPM build artifacts
+# Xcode / SwiftPM build artifacts.
+#
+# `build/` is ANCHORED to apps/macos on purpose. An unanchored `build/` matches
+# a directory of that name at any depth, which silently swallowed the
+# docs/site/build/ documentation pages — they built fine locally (the files were
+# on disk) and 404'd in CI (they were never committed).
 DerivedData/
-build/
+/apps/macos/build/
 .build/
 *.xcuserstate
 xcuserdata/
