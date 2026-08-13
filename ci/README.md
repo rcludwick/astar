@@ -136,17 +136,19 @@ merge. `ci.yml` was written fresh rather than salvaged.
 
 ## Running CI
 
+CI runs in the **private** repo — see
+[Two repositories](#two-repositories-and-which-one-ci-belongs-to). From a
+checkout whose `origin` is `astar-private`:
+
 ```console
-$ gh workflow run ci.yml                      # everything
-$ gh workflow run ci.yml -f run_gui=false     # skip the slow Iced job
-$ gh run watch
+$ gh workflow run ci.yml -R rcludwick/astar-private                   # everything
+$ gh workflow run ci.yml -R rcludwick/astar-private -f run_gui=false  # skip the Iced job
+$ gh run watch -R rcludwick/astar-private
 ```
 
 **It never runs by itself.** `ci.yml` has a single trigger,
 `workflow_dispatch`, so a job starts when a human asks for one and at no other
-time — not on push, not on a pull request, not on a schedule. That is a
-deliberate safety property and not a convenience setting; see
-[No self-hosted runner may ever touch this repo](#no-self-hosted-runner-may-ever-touch-this-repo).
+time — not on push, not on a pull request, not on a schedule.
 
 Four jobs, all on `[self-hosted, ionos]`:
 
@@ -175,28 +177,39 @@ recipes out as cargo invocations. Keep them in step with the justfile by hand.
 If GitLab Pages is ever preferred instead, rename `docs-site` to `pages` and
 publish the output as a `public/` artifact. That is the whole change.
 
-## No self-hosted runner may ever touch this repo
+## Two repositories, and which one CI belongs to
+
+astar lives in two places, and the split is what makes self-hosted CI safe:
+
+| | | |
+| --- | --- | --- |
+| `rcludwick/astar-private` | **private** | development happens here; CI runs here; `origin` |
+| `rcludwick/astar` | **public** | release target, merged to from private; `public` |
 
 **A self-hosted runner must never be attached to a public repo.** Any pull
 request author would get arbitrary code execution on the IONOS build box and,
 for the macOS runners, on Rob's personal Mac. Both `gh-runners` READMEs say so
-in bold.
+in bold, and this repository went public on 2026-08-11, so it is not a
+hypothetical.
 
-This repo went public on 2026-08-11, so that is no longer a hypothetical. The
-fleet stayed with the two private predecessors — the old repos were *renamed*
-(`rcludwick/astar-old`, `rcludwick/astar-lib-old`) rather than deleted, and
-runners follow their repo through a rename, so they never became attached to
-this one. Verify it stays that way:
+The private development repo resolves that: there are no outside contributors
+to defend against, only people who already have access, so the runner can live
+there and do real work. The public repo gets no self-hosted runner, ever.
+Verify:
 
 ```console
 $ gh api repos/rcludwick/astar/actions/runners --jq .total_count   # must be 0
 ```
 
-The consequence is that this repo has **no compute for CI**. The docs workflow
-runs on GitHub-hosted `ubuntu-latest`, which is free for public repos and is
-the right answer for anything else that gets automated here. The Rust and
-Swift gates are run by hand — `just ci` and `just ci-full` — until a hosted
-pipeline exists.
+Both workflow files exist in both repositories, because a release merge copies
+everything. Each is guarded on `github.repository` so it only does work where
+it belongs — `ci.yml` in private, `docs-pages.yml` in public — and reports a
+clean skip in the other. Without those guards, `runs-on: [self-hosted, ionos]`
+in the public repo would queue forever against a runner that does not exist,
+which reads as a hung box rather than a misconfiguration.
+
+The macOS and Swift gates are still run by hand on a Mac (`just ci-full`), in
+either repository. No runner anywhere covers them.
 
 ## Never in CI, under any trigger
 

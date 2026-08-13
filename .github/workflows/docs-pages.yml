@@ -64,6 +64,10 @@ concurrency:
 
 jobs:
   build:
+    # PUBLIC repo only. GitHub Pages is enabled there, not on the private
+    # development repo this file also lives in — dispatching it from
+    # astar-private would 404 on the Pages API.
+    if: github.repository == 'rcludwick/astar'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -89,6 +93,7 @@ jobs:
 
   deploy:
     needs: build
+    if: github.repository == 'rcludwick/astar'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:

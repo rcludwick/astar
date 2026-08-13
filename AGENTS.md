@@ -7,6 +7,27 @@ the vendored `vendor/ambe-thumbdv` (MIT/Apache-2.0).
 Design polish is a first-class requirement: astar should be pretty and easy to
 use, not just functional.
 
+## Two remotes — check before you push
+
+| remote | repository | |
+| --- | --- | --- |
+| `origin` | `rcludwick/astar-private` | **private.** Development happens here. Push here. CI runs here. |
+| `public` | `rcludwick/astar` | **public.** The release target — Rob merges to it deliberately. |
+
+Everyday work goes to `origin`. **Publishing is Rob's call, not a step in a
+task**: never `git push public` unless he asks for it in those words. Both
+repos share one history, so a release is a fast-forward.
+
+Consequences worth knowing:
+
+* The self-hosted IONOS runner is attached to the **private** repo only. A
+  self-hosted runner on a public repo would hand any fork's pull request
+  arbitrary code execution on that box. Both workflow files exist in both
+  repos and are guarded on `github.repository`, so each is inert in the wrong
+  one — `ci.yml` works only in private, `docs-pages.yml` only in public.
+* Anything committed to `origin` is still *going* to be public eventually.
+  Secrets, node numbers and personal addresses do not belong in either.
+
 ## Layout
 
 ```

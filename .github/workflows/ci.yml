@@ -1,30 +1,35 @@
 # ============================================================================
 # astar CI — runs on the self-hosted IONOS box (`my-vps`).
 #
-# THE SAFETY PROPERTY, AND WHY IT IS THE TRIGGER LIST
-# ---------------------------------------------------
-# This repository is PUBLIC and this workflow runs on a SELF-HOSTED runner.
-# Those two facts together are normally forbidden — a `pull_request` trigger
-# would let any stranger's fork execute arbitrary code as the `github` user on
-# a box that also hosts runners for other repositories.
+# TWO REPOSITORIES, AND WHY THIS FILE CHECKS WHICH ONE IT IS IN
+# -------------------------------------------------------------
+# astar lives in two places:
 #
-# What makes it safe is that **nothing here runs automatically**. The only
-# trigger is `workflow_dispatch`: it runs when Rob presses the button (Actions
-# → ci → Run workflow) or runs `gh workflow run ci.yml`, and at no other time.
-# Not on push, not on a pull request, not on a schedule. No event originating
-# from outside this repository can start a job on the box.
+#   rcludwick/astar-private   PRIVATE   development happens here; CI runs here
+#   rcludwick/astar           PUBLIC    release target, merged to from private
 #
+# The self-hosted runner is attached to the PRIVATE repository only. That is
+# the whole security design: a self-hosted runner on a public repo would let
+# any stranger's fork execute arbitrary code as the `github` user on a box that
+# also hosts runners for other repositories. On a private repo there are no
+# outside contributors to defend against — only people who already have access.
+#
+#   THE PUBLIC REPOSITORY MUST NEVER HAVE A SELF-HOSTED RUNNER ATTACHED.
 #   DO NOT ADD `pull_request` OR `pull_request_target` TO THIS FILE.
 #
-# Adding a plain `push:` trigger would still be safe — pushing requires write
-# access — but it is deliberately absent: this box is small, a full Rust build
-# is not free, and CI here is an act, not a reflex.
+# This file rides along into the public repository on every release merge, and
+# `runs-on: [self-hosted, ionos]` there would queue forever against a runner
+# that does not exist — which looks like a hung box rather than a
+# misconfiguration. Every job is therefore guarded on `github.repository`, so
+# in the public repo the workflow reports a clean skip instead.
 #
-# If PR checks are wanted later, the answer is a second workflow pinned to
-# `runs-on: ubuntu-latest` (GitHub-hosted minutes are free for public repos),
-# never a self-hosted runner. Belt and braces: Settings → Actions → General →
-# "Fork pull request workflows from outside collaborators" should require
-# approval for *all* outside collaborators.
+# On top of that, the only trigger is `workflow_dispatch`: CI runs when Rob
+# asks for it and at no other time. The box is small and a full Rust build is
+# not free, so CI here is an act, not a reflex.
+#
+# If PR checks are ever wanted on the public repo, the answer is a separate
+# workflow pinned to `runs-on: ubuntu-latest` — GitHub-hosted minutes are free
+# for public repos — and never a self-hosted runner.
 #
 # WHAT THIS DOES NOT COVER
 # ------------------------
@@ -66,6 +71,8 @@ jobs:
   # Cheapest job, and the one that catches what a test cannot. Runs first so a
   # policy violation does not wait behind a full Rust build.
   guards:
+    # Private repo only — see the header. Skips cleanly in public.
+    if: github.repository == 'rcludwick/astar-private'
     runs-on: [self-hosted, ionos]
     timeout-minutes: 10
     steps:
@@ -82,6 +89,8 @@ jobs:
   # The `just ci` equivalent. `just` is deliberately not installed on the box,
   # so the recipes are spelled out; keep the two in step by hand.
   rust:
+    # Private repo only — see the header. Skips cleanly in public.
+    if: github.repository == 'rcludwick/astar-private'
     runs-on: [self-hosted, ionos]
     timeout-minutes: 45
     steps:
@@ -122,6 +131,8 @@ jobs:
   # here instead of failing the manual Pages publish later. Same script the
   # Pages workflow runs.
   docs:
+    # Private repo only — see the header. Skips cleanly in public.
+    if: github.repository == 'rcludwick/astar-private'
     runs-on: [self-hosted, ionos]
     timeout-minutes: 15
     steps:
@@ -135,7 +146,7 @@ jobs:
   # here the box IS Linux, so it builds natively and the headless run is a
   # plain xvfb-run.
   gui-linux:
-    if: inputs.run_gui
+    if: github.repository == 'rcludwick/astar-private' && inputs.run_gui
     runs-on: [self-hosted, ionos]
     timeout-minutes: 60
     env:
