@@ -49,11 +49,17 @@ two different things right now. This is the honest state:
 | **Engine** (`crates/`) | yes | yes |
 | **macOS app** (`apps/macos`) | yes | yes¹ |
 | **Iced client** (`apps/gui`) | yes | yes¹ |
-| **CLI** (`astar-cli`) | yes | yes |
+| **CLI** (`astar-cli`) | yes | **no** — IAX2 only |
 
 ¹ M17 is capability-gated: the client shows it only when the running build can
 actually place the call. On macOS that currently means a system `libcodec2` —
 see [M17 and Codec 2](#m17-and-codec-2).
+
+M17 is **compiled in by default** everywhere it is implemented — the engine,
+the C ABI the macOS app links, the Iced client and the node daemon all get it
+without a feature flag, and a test pins that so it cannot regress silently.
+`astar-cli` is the exception: it sits directly on `astar-iax` and has no M17
+subcommand at all.
 
 Other networks are in the tree at various stages and are **not** claimed as
 working yet. You will find crates for them; treat their presence as work in
