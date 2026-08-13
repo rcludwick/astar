@@ -15,7 +15,7 @@
 [project]
 
 site_name = "astar"
-site_description = "Native ham-radio client for AllStarLink, M17 and D-Star — a macOS menu-bar app, the astar-server node daemon, and the astar-lib engine they share."
+site_description = "Native ham-radio client for AllStarLink and M17 — a macOS menu-bar app, the astar-server node daemon, and the astar-lib engine they share."
 site_author = "Rob Ludwick"
 
 # Must carry the /astar/ sub-path: GitHub Pages serves the project site from

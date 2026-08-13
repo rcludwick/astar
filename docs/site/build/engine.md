@@ -34,7 +34,7 @@ One cargo workspace, `resolver = "2"`, everything sharing a version
 | `astar-console` | The operating runtime beneath the station |
 | `astar-sys` | The main C ABI (`astar.h`) |
 | `astar-server` | The node daemon — see [astar-server](server.md) |
-| `astar-cli` | A terminal client, and the only D-Star path today |
+| `astar-cli` | A terminal IAX2 client — register, dial, parrot |
 | `astar-m17` / `astar-dstar` | The M17 and D-Star protocol implementations |
 | `astar-asl3` | AllStarLink portal and registrar helpers |
 | `astar-wireguard` | The WireGuard link transport |

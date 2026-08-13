@@ -153,14 +153,6 @@ export IAX_CODEC2_PATH=/path/to/libcodec2.dylib
     Keeping Codec 2 out of the link is deliberate: it is LGPL-2.1 and MIT, and
     loading it at runtime is what keeps a plain `cargo build` free of LGPL code.
 
-### A ThumbDV dongle — only for D-Star
-
-D-Star is **hardware-only**. The vocoder is a ThumbDV / DV3000 USB dongle,
-driven by the vendored `ambe-thumbdv` crate. There is no software AMBE codec in
-this repository and no fallback: without a dongle there is no D-Star at all.
-Nothing needs installing to *build* it, and `astar-cli` compiles D-Star only
-behind `--features dstar`.
-
 ### `uv` — only for the documentation site
 
 ```bash

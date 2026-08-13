@@ -156,7 +156,6 @@ happened — the target builds, and that is the whole claim.
 | `xcodegen: command not found` | Missing prerequisite | `brew install xcodegen` |
 | The app builds but shows no menu-bar icon | It launched — there is no Dock icon by design | Look for the rainbow asterisk; check other menu-bar items are not crowding it out |
 | No M17 in the network picker | No system `libcodec2` | [Codec 2](prerequisites.md#codec-2-only-for-m17) |
-| No D-Star anywhere in the UI | Not wired into the GUI yet | Expected — use `astar-cli`, see [Hardware](../macos/hardware.md) |
 
 ## Next steps
 

@@ -22,10 +22,9 @@ What this page will eventually cover:
 * Sending DTMF commands to the far end.
 * Reading the level meters and the spectrum display.
 * Microphone characterization and per-profile gain.
-* M17 sessions (and D-Star, once it reaches the clients — today it is
-  engine + CLI only).
+* M17 sessions.
 
 In the meantime:
 
 * [Build the app](../build/macos-app.md) — from a clean Mac to a running app.
-* [Hardware](hardware.md) — USB radio interfaces and the ThumbDV.
+* [Hardware](hardware.md) — USB radio interfaces and PTT wiring.
