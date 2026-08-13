@@ -1,7 +1,13 @@
 # ci/ — pipeline helpers and runner prerequisites
 
-The pipeline is [`../.gitlab-ci.yml`](../.gitlab-ci.yml). This directory holds
-the scripts it calls, plus the operational facts you need before it can run.
+The working pipeline is [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml),
+which runs on the self-hosted IONOS box and is **`workflow_dispatch`-only** —
+see [Running CI](#running-ci) below. [`../.gitlab-ci.yml`](../.gitlab-ci.yml)
+describes the same gates for a GitLab runner that has never been registered;
+it is a design, not a running system.
+
+This directory holds the scripts both call, plus the operational facts behind
+them.
 
 | script | purpose |
 | --- | --- |
@@ -120,14 +126,51 @@ Source = "GitHub Actions"); the site is live at
 with it or instant navigation and the 404 page resolve against the wrong
 origin.
 
-### Why there are no other GitHub workflows
+### Nothing was carried over from the pre-merge workflows
 
-Nothing was carried over from the pre-merge `astar` and `iaxclient-rs`
-workflows. They were built around two separate private repos and are now
-actively wrong: the cross-repo checkouts (`CROSS_REPO_TOKEN`), the
-`repository_dispatch` fan-out (`DISPATCH_TOKEN`, `iaxclient-rs-updated`), and
-every crate and path name in them died with the merge. Shipping them as dead
-YAML would have been worse than shipping nothing.
+The old `astar` and `iaxclient-rs` workflows were built around two separate
+private repos and are now actively wrong: the cross-repo checkouts
+(`CROSS_REPO_TOKEN`), the `repository_dispatch` fan-out (`DISPATCH_TOKEN`,
+`iaxclient-rs-updated`), and every crate and path name in them died with the
+merge. `ci.yml` was written fresh rather than salvaged.
+
+## Running CI
+
+```console
+$ gh workflow run ci.yml                      # everything
+$ gh workflow run ci.yml -f run_gui=false     # skip the slow Iced job
+$ gh run watch
+```
+
+**It never runs by itself.** `ci.yml` has a single trigger,
+`workflow_dispatch`, so a job starts when a human asks for one and at no other
+time — not on push, not on a pull request, not on a schedule. That is a
+deliberate safety property and not a convenience setting; see
+[No self-hosted runner may ever touch this repo](#no-self-hosted-runner-may-ever-touch-this-repo).
+
+Four jobs, all on `[self-hosted, ionos]`:
+
+| job | what it is | ~budget |
+| --- | --- | --- |
+| `guards` | the four scripts above | 10 min |
+| `rust` | `fmt --check`, `clippy -D warnings`, `cargo test --workspace --all-targets`, C-header drift | 45 min |
+| `docs` | `build-docs.sh`, i.e. the site with `--strict` | 15 min |
+| `gui-linux` | builds and tests `astar-gui`, then renders `--shot idle` under Xvfb and uploads the PNG | 60 min |
+
+`gui-linux` is skippable with `-f run_gui=false`: iced/wgpu is the heaviest
+thing in the tree and the box has 4 cores and 3 GB of RAM. That is also why the
+job pins `CARGO_BUILD_JOBS=2` — unbounded codegen parallelism OOMs the linker
+there.
+
+The runner image carries the toolchain (`rcludwick/gh-runners`,
+`runner/Containerfile`), so jobs install nothing except `cbindgen`, which is
+pinned to the version the drift check expects and cached in the container's
+`CARGO_HOME` after the first run. The X11 runtime libraries and `xvfb` that
+`gui-linux` needs were added to that image for this pipeline; the list mirrors
+`apps/gui/check-linux.sh`, and the two must stay in step.
+
+**`just` is deliberately not installed on the box**, so `ci.yml` spells the
+recipes out as cargo invocations. Keep them in step with the justfile by hand.
 
 If GitLab Pages is ever preferred instead, rename `docs-site` to `pages` and
 publish the output as a `public/` artifact. That is the whole change.

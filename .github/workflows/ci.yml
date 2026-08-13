@@ -1,0 +1,174 @@
+# ============================================================================
+# astar CI — runs on the self-hosted IONOS box (`my-vps`).
+#
+# THE SAFETY PROPERTY, AND WHY IT IS THE TRIGGER LIST
+# ---------------------------------------------------
+# This repository is PUBLIC and this workflow runs on a SELF-HOSTED runner.
+# Those two facts together are normally forbidden — a `pull_request` trigger
+# would let any stranger's fork execute arbitrary code as the `github` user on
+# a box that also hosts runners for other repositories.
+#
+# What makes it safe is that **nothing here runs automatically**. The only
+# trigger is `workflow_dispatch`: it runs when Rob presses the button (Actions
+# → ci → Run workflow) or runs `gh workflow run ci.yml`, and at no other time.
+# Not on push, not on a pull request, not on a schedule. No event originating
+# from outside this repository can start a job on the box.
+#
+#   DO NOT ADD `pull_request` OR `pull_request_target` TO THIS FILE.
+#
+# Adding a plain `push:` trigger would still be safe — pushing requires write
+# access — but it is deliberately absent: this box is small, a full Rust build
+# is not free, and CI here is an act, not a reflex.
+#
+# If PR checks are wanted later, the answer is a second workflow pinned to
+# `runs-on: ubuntu-latest` (GitHub-hosted minutes are free for public repos),
+# never a self-hosted runner. Belt and braces: Settings → Actions → General →
+# "Fork pull request workflows from outside collaborators" should require
+# approval for *all* outside collaborators.
+#
+# WHAT THIS DOES NOT COVER
+# ------------------------
+# The Swift half — the macOS app, both bindings, `swift format` — cannot run
+# here: the box is Debian x86-64 with no Xcode. That gate is `just ci-full` on
+# a Mac, run by hand. See ci/README.md, which is honest about the hole.
+#
+# The runner image is built from `rcludwick/gh-runners` (`runner/Containerfile`)
+# and already carries the toolchain; jobs install nothing except `cbindgen`,
+# which is cached in the container's CARGO_HOME after the first run.
+# ============================================================================
+
+name: ci
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_gui:
+        description: "Include the Iced client job (slow: iced/wgpu on a 3 GB box)"
+        type: boolean
+        default: true
+
+# One run at a time per branch. Dispatching again supersedes a run still
+# queued behind the first — the box has 4 cores and 3 GB of RAM, so
+# overlapping Rust builds are not free.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail a build rather than let a warning through, matching `just ci`.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Cheapest job, and the one that catches what a test cannot. Runs first so a
+  # policy violation does not wait behind a full Rust build.
+  guards:
+    runs-on: [self-hosted, ionos]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Merge invariants
+        run: |
+          ./ci/guard-safety-env.sh
+          ./ci/guard-no-git-deps.sh
+          ./ci/guard-distribution-claims.sh
+          ./ci/guard-spdx-headers.sh
+
+  # The `just ci` equivalent. `just` is deliberately not installed on the box,
+  # so the recipes are spelled out; keep the two in step by hand.
+  rust:
+    runs-on: [self-hosted, ionos]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Toolchain
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --all-targets
+
+      # Pinned: different cbindgen releases format headers differently, and a
+      # mismatch reads as spurious drift in a committed header.
+      - name: cbindgen (cached in CARGO_HOME after the first run)
+        run: |
+          need=0.29.4
+          have=$(cbindgen --version 2>/dev/null | awk '{print $2}') || true
+          if [ "$have" != "$need" ]; then
+            cargo install cbindgen --version "$need" --locked
+          fi
+
+      - name: C header drift
+        run: |
+          ./scripts/check-cbindgen.sh
+          ./scripts/check-cbindgen-serial.sh
+
+  # --strict, so a broken link or a nav entry pointing at a missing page fails
+  # here instead of failing the manual Pages publish later. Same script the
+  # Pages workflow runs.
+  docs:
+    runs-on: [self-hosted, ionos]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build the documentation site
+        run: ./ci/build-docs.sh
+
+  # The Iced client. On the Mac `just gui-linux` reaches Linux through podman;
+  # here the box IS Linux, so it builds natively and the headless run is a
+  # plain xvfb-run.
+  gui-linux:
+    if: inputs.run_gui
+    runs-on: [self-hosted, ionos]
+    timeout-minutes: 60
+    env:
+      # iced/wgpu is the heaviest thing in the tree and this box has 3 GB.
+      # Unbounded codegen parallelism OOMs the linker here.
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build and test astar-gui
+        run: |
+          cargo build -p astar-gui
+          cargo test  -p astar-gui
+
+      # Proves it renders, not merely that it links. Mirrors what
+      # apps/gui/check-linux.sh does inside podman on the Mac: the software
+      # renderer (this box has no GPU), a virtual X server, and a hard timeout
+      # so a hung window manager cannot occupy the runner for an hour.
+      - name: Headless render
+        working-directory: apps/gui
+        env:
+          ICED_BACKEND: tiny-skia
+        run: |
+          mkdir -p .shots
+          timeout 120 xvfb-run -a \
+            ../../target/debug/astar-gui --shot idle .shots/linux-idle.png
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gui-linux-shot
+          path: apps/gui/.shots/linux-idle.png
+          if-no-files-found: warn
