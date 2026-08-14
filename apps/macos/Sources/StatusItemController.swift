@@ -361,14 +361,12 @@
         @objc private func toggleVoxAction() { session.setVoxEnabled(!session.voxEnabled) }
         @objc private func toggleListenOnlyAction() { session.setTxDisabled(!session.txDisabled) }
 
-        /// Flip "Show in Dock" (astar-7c31), then re-apply through the AppDelegate
-        /// so launch and toggle share one path. Reached via `NSApp.delegate` rather
-        /// than a stored reference — the delegate owns this controller, so holding
-        /// it back would be a retain cycle.
+        /// Flip "Show in Dock" (astar-7c31), then re-apply through `DockPolicy` —
+        /// the same path launch uses, so the two cannot drift.
         @objc private func toggleDockAction() {
             let pref = DockPreference()
             pref.save(!pref.load())
-            (NSApp.delegate as? AppDelegate)?.applyDockPresence()
+            DockPolicy.apply()
         }
 
         @objc private func quitAction() { NSApp.terminate(nil) }

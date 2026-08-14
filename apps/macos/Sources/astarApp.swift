@@ -40,6 +40,26 @@ struct AstarApp: App {
 }
 
 #if os(macOS)
+    /// The one place that maps the stored "Show in Dock" preference onto AppKit's
+    /// activation policy (astar-7c31), shared by launch and the menu toggle so the
+    /// two cannot drift.
+    ///
+    /// Static, and deliberately not a method on `AppDelegate`: under
+    /// `@NSApplicationDelegateAdaptor`, `NSApp.delegate` is SwiftUI's own
+    /// `SwiftUI.AppDelegate` wrapper, *not* our `AppDelegate`. Reaching for it with
+    /// `NSApp.delegate as? AppDelegate` silently yields nil, which is how the
+    /// toggle came to save the preference and change nothing until relaunch.
+    ///
+    /// `LSUIElement: YES` stays in the Info.plist on purpose: the app launches as
+    /// an accessory and promotes itself here, so someone with the preference off
+    /// never sees a Dock icon flash.
+    enum DockPolicy {
+        static func apply() {
+            let presence = DockPresence(showInDock: DockPreference().load())
+            NSApp.setActivationPolicy(presence.showsInDock ? .regular : .accessory)
+        }
+    }
+
     /// Owns the long-lived `CallSession` + serial PTT source and stands up the
     /// menu-bar status item once the app finishes launching.
     @MainActor
@@ -73,11 +93,6 @@ struct AstarApp: App {
         ///
         /// One apply path for both launch and the menu toggle, so the two cannot
         /// drift.
-        func applyDockPresence() {
-            let presence = DockPresence(showInDock: DockPreference().load())
-            NSApp.setActivationPolicy(presence.showsInDock ? .regular : .accessory)
-        }
-
         func applicationDidFinishLaunching(_ notification: Notification) {
             setups.attach(session: session, serial: serial)
             statusController = StatusItemController(
@@ -95,7 +110,7 @@ struct AstarApp: App {
             session.setSpectrumDecay(Float(SpectrumDecayPref.current()))
             // Last: the status item is up, so the Dock icon (if enabled) appears
             // together with the menu-bar asterisk rather than ahead of it.
-            applyDockPresence()
+            DockPolicy.apply()
         }
 
         /// Clicking the Dock icon opens the main window (astar-7c31). AppKit only
