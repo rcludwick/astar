@@ -431,13 +431,30 @@ fn parrot_flushes_and_echoes_after_a_silence_gap_with_no_eos_ever_sent() {
 /// (`next_read_timeout`) whenever it's sooner than the normal poll.
 ///
 /// This test sends a 25-packet stream (24 inter-packet gaps, comfortably
-/// over "20 packets") and asserts EVERY gap lands in a 34-48ms band —
-/// widened from 36-46 after 2/85 local runs flaked at the tighter bound
-/// (scheduling jitter is real; the band still catches the pre-fix ~51ms)
-/// around the 40ms target — tight enough to fail against the old ~50ms
-/// behavior, loose enough not to flake under CI scheduling jitter.
+/// over "20 packets") and asserts on the gaps two different ways, because a
+/// single per-gap band cannot do both jobs at once:
+///
+/// * **Every gap in a wide 30-60ms band.** This catches gross misbehaviour —
+///   a blast with no pacing at all, or a stall — without failing on one
+///   unlucky scheduler wake-up. It has to be wide: the pacing runs off
+///   absolute deadlines, so a late packet is followed by a short catch-up gap,
+///   and both tails are legitimate.
+/// * **The median gap in a 36-44ms band.** This is the assertion that actually
+///   pins the fix. The median, not the mean: the bug was *systematic* — a 50ms
+///   poll floor put every gap at ~50.9ms — while scheduler jitter inflates a
+///   handful of gaps and leaves the rest alone. A statistic that ignores
+///   outliers therefore separates the two cleanly, where the mean does not.
+///   Measured: the mean drifts to 42.8ms and past 46ms with all 14 cores of
+///   this box saturated, while the median stays put.
+///
+/// The per-gap band started at 36-46, was widened to 34-48 after local flakes,
+/// and still failed CI at 48.03ms — 27µs over — on a loaded 4-core box. That
+/// is the signature of an assertion measuring the machine rather than the
+/// code: wall-clock arrival gaps of UDP datagrams include scheduler jitter the
+/// reflector does not control. Widening the band again would only move the
+/// next flake, so the sharp assertion moved to the mean, where jitter cancels.
 #[test]
-fn parrot_playback_packets_are_paced_34_to_48ms_apart_over_many_packets() {
+fn parrot_playback_packets_are_paced_about_40ms_apart_over_many_packets() {
     const N: u16 = 25;
 
     let reflector =
@@ -470,11 +487,24 @@ fn parrot_playback_packets_are_paced_34_to_48ms_apart_over_many_packets() {
     for (i, w) in arrival_times.windows(2).enumerate() {
         let delta = w[1].duration_since(w[0]);
         assert!(
-            delta >= Duration::from_millis(34) && delta <= Duration::from_millis(48),
-            "gap #{i} between playback packets must land in the 34-48ms band \
+            delta >= Duration::from_millis(30) && delta <= Duration::from_millis(60),
+            "gap #{i} between playback packets must land in the 30-60ms band \
              (target ~40ms), got {delta:?}"
         );
     }
+
+    let mut sorted: Vec<Duration> = arrival_times
+        .windows(2)
+        .map(|w| w[1].duration_since(w[0]))
+        .collect();
+    sorted.sort_unstable();
+    let median = sorted[sorted.len() / 2];
+    assert!(
+        median >= Duration::from_millis(36) && median <= Duration::from_millis(44),
+        "median gap over {} playback packets must land in the 36-44ms band \
+         (target ~40ms; the pre-fix bug sat at ~50.9ms on every gap), got {median:?}",
+        sorted.len()
+    );
 
     handle.shutdown();
 }

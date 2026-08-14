@@ -109,8 +109,21 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # The M17 parrot pacing test is skipped here and run alone below. It
+      # measures wall-clock arrival gaps of UDP datagrams, so running it
+      # alongside the rest of the suite on a 4-core box measures the scheduler
+      # rather than the pacer — which is exactly how it failed at 48.03ms
+      # against a 48ms ceiling, 27µs over (iax-f7a3). The GitLab pipeline
+      # already isolates it in a `test-timing` stage with its own
+      # resource_group; this is the same idea with the tools this file has.
       - name: Test
-        run: cargo test --workspace --all-targets
+        run: cargo test --workspace --all-targets -- --skip parrot_playback_packets_are_paced
+
+      - name: Timing test (alone, single-threaded)
+        run: |
+          cargo test -p astar-m17 --test reflector -- \
+            --exact --test-threads=1 \
+            parrot_playback_packets_are_paced_about_40ms_apart_over_many_packets
 
       # Pinned: different cbindgen releases format headers differently, and a
       # mismatch reads as spurious drift in a committed header.
