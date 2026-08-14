@@ -42,7 +42,7 @@ site_dir = "docs/.site"
 
 # The version chip. `copyright` accepts raw HTML; astar.css styles the span.
 # Bump this in lockstep with MARKETING_VERSION in apps/macos/project.yml.
-copyright = "Copyright &copy; 2026 Rob Ludwick — AGPL-3.0-only &nbsp;<span class=\"astar-version\">v0.1.0beta</span>"
+copyright = "Copyright &copy; 2026 Rob Ludwick — AGPL-3.0-only &nbsp;<span class=\"astar-version\">v0.1.1beta</span>"
 
 extra_css = ["stylesheets/astar.css"]
 
