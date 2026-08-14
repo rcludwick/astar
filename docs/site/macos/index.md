@@ -13,6 +13,11 @@ Prefer it out of the way? Right-click the asterisk and turn off **Show in Dock**
 It takes effect immediately, sticks across launches, and the app then starts with
 no Dock icon at all.
 
+<figure markdown="span">
+  ![The astar window on macOS: connected to a node, with live TX and RX meters, the levels and spectrum view, and the DTMF dialpad open](../images/macos-app.png){ width="348" }
+  <figcaption>Connected, receiving, with the spectrum and dialpad open.</figcaption>
+</figure>
+
 !!! info "Requirements"
 
     macOS **13 (Ventura) or later** — the app is built on `MenuBarExtra`, which
