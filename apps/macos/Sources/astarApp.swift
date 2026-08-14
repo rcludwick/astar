@@ -97,5 +97,18 @@ struct AstarApp: App {
             // together with the menu-bar asterisk rather than ahead of it.
             applyDockPresence()
         }
+
+        /// Clicking the Dock icon opens the main window (astar-7c31). AppKit only
+        /// calls this when the app is already running; the return value tells AppKit
+        /// whether it should do its own default reopen handling, and `false` keeps
+        /// it out of the way since we have handled it.
+        func applicationShouldHandleReopen(
+            _ sender: NSApplication, hasVisibleWindows: Bool
+        ) -> Bool {
+            if DockPresence.shouldShowWindowOnReopen(hasVisibleWindows: hasVisibleWindows) {
+                statusController?.showWindow()
+            }
+            return false
+        }
     }
 #endif
