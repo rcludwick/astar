@@ -65,6 +65,19 @@ struct AstarApp: App {
         // its Combine subscriptions are what does the actual work.
         private var announcer: AccessibilityAnnouncer?
 
+        /// Promote the app out of `LSUIElement` accessory mode when "Show in Dock"
+        /// is on (astar-7c31). The Info.plist keeps `LSUIElement: YES` on purpose:
+        /// the app always *launches* as an accessory and promotes itself here, so
+        /// someone with the preference off never sees a Dock icon flash. Removing
+        /// LSUIElement and demoting instead would produce exactly that flash.
+        ///
+        /// One apply path for both launch and the menu toggle, so the two cannot
+        /// drift.
+        func applyDockPresence() {
+            let presence = DockPresence(showInDock: DockPreference().load())
+            NSApp.setActivationPolicy(presence.showsInDock ? .regular : .accessory)
+        }
+
         func applicationDidFinishLaunching(_ notification: Notification) {
             setups.attach(session: session, serial: serial)
             statusController = StatusItemController(
@@ -80,6 +93,9 @@ struct AstarApp: App {
             // (astar-68a6) so the engine + the inactive fade use it before the first
             // spectrum renders. Re-asserted later whenever a new analyzer appears.
             session.setSpectrumDecay(Float(SpectrumDecayPref.current()))
+            // Last: the status item is up, so the Dock icon (if enabled) appears
+            // together with the menu-bar asterisk rather than ahead of it.
+            applyDockPresence()
         }
     }
 #endif
