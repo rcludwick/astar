@@ -7,12 +7,14 @@ import SwiftUI
 
 /// astar — a native AllStarLink client.
 ///
-/// On macOS, astar is a **menu-bar app**: it lives in the status bar (no Dock
-/// icon — see `LSUIElement` in project.yml). An AppKit `StatusItemController`
-/// (via `AppDelegate`) owns the status item; a left click shows/hides the main
-/// window (movable / hideable / closable) while a right click shows a quick
-/// status + audio/VOX + disconnect menu. The asterisk stays a live TX/RX/
-/// connected indicator. On iOS it is a standard windowed app.
+/// On macOS, astar is a **menu-bar app**: it lives in the status bar, and by
+/// default in the Dock as well (astar-7c31 — `LSUIElement` in project.yml keeps
+/// it launching as an accessory, and `DockPolicy.apply()` promotes it). An
+/// AppKit `StatusItemController` (via `AppDelegate`) owns the status item; a
+/// left click shows/hides the main window (movable / hideable / closable) while
+/// a right click shows a quick status + audio/VOX + disconnect menu and the
+/// `Show in Dock` toggle. The asterisk stays a live TX/RX/connected indicator.
+/// On iOS it is a standard windowed app.
 ///
 /// The app owns a single `CallSession` (au-e00f) — the observable view-model
 /// over the AstarStation poll loop — and shares it with the UI. The menu-bar

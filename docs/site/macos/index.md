@@ -4,10 +4,14 @@ icon: lucide/monitor
 
 # The macOS app
 
-astar on macOS is a **menu-bar app**. It has no Dock icon and no main window —
-after launch, look for the **rainbow asterisk** in the menu bar — the product
-mark, a six-spoke asterisk, not a five-pointed star. Left-click opens the dial
-popover; everything the client does happens there or in Settings.
+astar on macOS is a **menu-bar app** that also, by default, shows up in the Dock
+and in Cmd-Tab. After launch, look for the **rainbow asterisk** in the menu bar —
+the product mark, a six-spoke asterisk, not a five-pointed star. Left-click opens
+the dial popover; everything the client does happens there or in Settings.
+
+Prefer it out of the way? Right-click the asterisk and turn off **Show in Dock**.
+It takes effect immediately, sticks across launches, and the app then starts with
+no Dock icon at all.
 
 !!! info "Requirements"
 

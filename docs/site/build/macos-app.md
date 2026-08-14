@@ -25,8 +25,9 @@ just run           # (2)!
     `AstarSerial` (PTT). This is the step to not skip.
 2.  `xcodegen generate` → `xcodebuild` → launch.
 
-Then look for the **rainbow asterisk** in the menu bar. astar has no Dock icon
-and no main window; left-click the asterisk to open the dial popover. The
+Then look for the **rainbow asterisk** in the menu bar, and an astar icon in the
+Dock — left-click either one. (`Show in Dock` in the asterisk's right-click menu
+turns the Dock icon off.) The
 running version is in the popover footer, so you can always tell what you are
 actually running.
 
@@ -154,7 +155,7 @@ happened — the target builds, and that is the whole claim.
 | Build stops saying an xcframework is missing | Fresh checkout, or you deleted `target/` | `just xcframework` |
 | Undefined symbols that clearly exist in the Rust source | One xcframework is stale | `just xcframework` — both, again |
 | `xcodegen: command not found` | Missing prerequisite | `brew install xcodegen` |
-| The app builds but shows no menu-bar icon | It launched — there is no Dock icon by design | Look for the rainbow asterisk; check other menu-bar items are not crowding it out |
+| The app builds but shows no menu-bar icon | It launched, but the asterisk is crowded out | Look for the rainbow asterisk; check other menu-bar items are not pushing it off. If the Dock icon is off too, `defaults delete com.aj7hr.astar ui.showInDock` restores it |
 | No M17 in the network picker | No system `libcodec2` | [Codec 2](prerequisites.md#codec-2-only-for-m17) |
 
 ## Next steps

@@ -26,8 +26,8 @@ working. Treat any crate you find for one as work in progress, not a feature.
 
 -   __[The macOS app](macos/index.md)__
 
-    A SwiftUI **menu-bar** client: no Dock icon, no main window, a **rainbow
-    asterisk** in the menu bar that opens a dial popover. macOS 13 or later.
+    A SwiftUI **menu-bar** client: a **rainbow asterisk** in the menu bar that
+    opens a dial popover, plus a Dock icon you can turn off. macOS 13 or later.
     [Build it from source](build/macos-app.md).
 
 -   __[astar-server](server/index.md)__

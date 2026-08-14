@@ -67,8 +67,9 @@ progress rather than a feature list.
 
 ### Platform state
 
-* **macOS** — the primary front-end. A menu-bar app (`MenuBarExtra`), no Dock
-  icon, no main window. This is the one that gets the design attention.
+* **macOS** — the primary front-end. A menu-bar app with a real main window and,
+  by default, a Dock icon you can switch off. This is the one that gets the
+  design attention.
 * **Linux** — the Iced client builds, tests and runs headless in CI-style
   container runs (`just gui-linux`), and its rendering is verified from
   screenshots. It has not had a sit-down-and-use-it pass on real hardware.
@@ -166,8 +167,10 @@ xcframeworks are large and fully regenerable, so they are gitignored; `just
 app` and `just run` hard-fail with instructions when they are missing, rather
 than silently linking some host-only fallback.
 
-After launch, look for the **rainbow asterisk** in the menu bar — astar has no
-Dock icon and no main window. Left-click opens the dial popover. The running
+After launch, look for the **rainbow asterisk** in the menu bar — and, unless you
+turn it off, an astar icon in the Dock. Left-click the asterisk opens the dial
+popover; `Show in Dock` in the right-click menu drops back to menu-bar-only. The
+running
 version (`0.1.0beta`) is shown in the popover footer, so you can always tell
 what you are actually running.
 
