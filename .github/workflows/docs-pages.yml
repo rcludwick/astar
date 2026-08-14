@@ -1,21 +1,31 @@
 # ============================================================================
-# DORMANT — this workflow does not run on push, by design.
+# Publishes the Zensical documentation to GitHub Pages. This is the ONLY thing
+# that runs in the public repository.
 #
-# GitHub Actions is deliberately switched off across Rob's repos for billing,
-# and the everyday gate for astar lives in ../../.gitlab-ci.yml. This file
-# exists for exactly one job that GitLab cannot do: publishing the Zensical
-# documentation to *GitHub* Pages, which is only reachable through the official
-# actions/deploy-pages flow.
+# WHERE IT RUNS, AND WHERE IT MUST NOT
+# ------------------------------------
+# astar develops in the PRIVATE `rcludwick/astar-private` and releases to the
+# PUBLIC `rcludwick/astar`. Both workflow files exist in both repositories,
+# because a release merge copies everything, so both jobs below are guarded on
+# `github.repository`:
 #
-# Trigger: `workflow_dispatch` ONLY. It runs when a human presses the button
-# (Actions → docs (Pages) → Run workflow) and at no other time. To make it
-# automatic later, add:
+#   this file    does work ONLY in rcludwick/astar          (Pages lives there)
+#   ci.yml       does work ONLY in rcludwick/astar-private  (the runner lives there)
 #
-#     push:
-#       branches: [main]
-#       paths: ["docs/site/**", ".github/workflows/docs-pages.yml"]
+# In the private repo this workflow still *starts* on a push to main and then
+# skips both jobs immediately. That is intentional and cheap — a skipped job
+# occupies no runner — and it beats the alternative, which is a Pages deploy
+# attempt against a repository that has no Pages site and a 404 from the API.
 #
-# and nothing else needs to change.
+# TRIGGERS
+# --------
+# `push` to main, path-filtered, plus a manual button. Publishing follows a
+# merge to the public repo rather than waiting for someone to remember; the
+# path filter keeps an engine-only release from rebuilding a site that did not
+# change. Nothing else triggers it — no pull_request, no schedule.
+#
+# It runs on GitHub-hosted `ubuntu-latest`, never a self-hosted runner. That is
+# not negotiable in a public repo: see ../../ci/README.md.
 #
 # BEFORE THE FIRST RUN, one manual setting: repository Settings → Pages →
 # Build and deployment → Source = "GitHub Actions". Without it deploy-pages
@@ -37,8 +47,10 @@
 #     for the macOS runners, on Rob's personal Mac. The gh-runners README says
 #     this in bold and it is right.
 #
-# So: when this repo goes public, detach the IONOS and Mac runners from it
-# first. That decision is Rob's and has not been made here.
+# That was settled on 2026-08-13: no self-hosted runner is attached to this
+# repository, and the development runner lives on the private one instead.
+# Confirm with `gh api repos/rcludwick/astar/actions/runners --jq .total_count`,
+# which must stay 0.
 #
 # The build is a thin wrapper around ci/build-docs.sh — the same script the
 # GitLab `docs-site` job runs, so the published site and the CI-verified site
@@ -48,6 +60,13 @@
 name: docs (Pages)
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/site/**"
+      - "zensical.toml"
+      - "ci/build-docs.sh"
+      - ".github/workflows/docs-pages.yml"
   workflow_dispatch:
 
 # Least privilege: read the tree, write a Pages deployment, mint the OIDC token
