@@ -12,7 +12,19 @@ inline. All 129 issues (107 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (33)
+## Open items (34)
+
+### astar-9d21 — Docs still say the macOS app is built on `MenuBarExtra`
+*P3 low · chore · labels: docs, cx:1*
+
+The app moved off `MenuBarExtra` to a hand-rolled `NSStatusItem` +
+`StatusItemController` (the only surviving mention in code is a historical
+comment at `StatusItemController.swift:73`), but three docs still present
+`MenuBarExtra` as the current architecture — and, worse, as the *reason* for the
+macOS 13 floor: `docs/site/macos/index.md:18`,
+`docs/site/build/prerequisites.md:49`, `README.md:149`. Establish what actually
+sets the floor now (SwiftUI/Ventura API use, not `MenuBarExtra`) and reword all
+three. Spotted while correcting the Dock-icon claims for astar-7c31.
 
 ### astar-e2b9 — D-Star network light-up (blocked on iax-a9d4)
 *P2 medium · feature · labels: network, dstar, cx:2*
