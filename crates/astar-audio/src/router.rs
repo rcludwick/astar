@@ -137,6 +137,28 @@ struct OutSlot {
 /// Owns the audio backend + the open streams. Phase 2: N mic lanes / N output
 /// buses. A mic opens at most once (mics are 1:1, never shared); an output
 /// opens at most once and is summed across the calls routed to it.
+/// Meters an observer lane's mic INPUT peak, then hands the samples to the
+/// caller's sink unchanged. Used only by [`AudioRouter::open_input_with`],
+/// whose lanes have no `MicLane` to do the metering the call path gets for
+/// free — without it `mic_input_dbfs` on such a lane reads a permanent -60,
+/// which is how the VOX calibration meter came to be dead outside a call.
+///
+/// Deliberately transparent: it never alters the samples, so the mic monitor
+/// stays a pure observer. Unlike the call path it applies no input gain — the
+/// observer lane has none to apply — so the level is the raw device peak.
+struct MeteredInput {
+    inner: Box<dyn InputSink>,
+    peak: Arc<AtomicU32>,
+}
+
+impl InputSink for MeteredInput {
+    fn write(&mut self, samples: &[f32], meter: f32) {
+        self.peak
+            .store(crate::peak(samples).min(1.0).to_bits(), Ordering::Relaxed);
+        self.inner.write(samples, meter);
+    }
+}
+
 pub struct AudioRouter {
     backend: Box<dyn AudioBackend>,
     mics: HashMap<MicId, MicSlot>,
@@ -638,6 +660,17 @@ impl AudioRouter {
     ) -> Result<(), AudioError> {
         let in_dev = self.resolve(mic.as_str(), Direction::Input)?;
         let overruns = Arc::new(AtomicU64::new(0));
+        // Meter this lane's mic INPUT peak (iax-5c30) on the way past. The call
+        // path does it inside `MicLane`; this path has no MicLane, so without
+        // the wrapper the `mic_input_peak` cell registered below would never be
+        // written and `mic_input_dbfs` would report a permanent -60. That is
+        // exactly how the VOX calibration meter came to read nothing unless a
+        // call happened to be up.
+        let mic_input_peak = Arc::new(AtomicU32::new(0));
+        let sink: Box<dyn InputSink> = Box::new(MeteredInput {
+            inner: sink,
+            peak: Arc::clone(&mic_input_peak),
+        });
         let handle = self
             .backend
             .open_input(&in_dev, config, sink, Arc::clone(&overruns))?;
@@ -656,7 +689,7 @@ impl AudioRouter {
                 profile_gen: Arc::new(AtomicU32::new(0)),
                 tx_peak: Arc::new(AtomicU32::new(0)),
                 tx_spectrum: Arc::new(Mutex::new(SpectrumAnalyzer::new(config.sample_rate))),
-                mic_input_peak: Arc::new(AtomicU32::new(0)),
+                mic_input_peak,
                 preroll_ms: Arc::new(AtomicU32::new(0)),
                 overruns,
                 inject: Arc::new(Mutex::new(None)),
@@ -669,6 +702,7 @@ impl AudioRouter {
     pub fn mic_count(&self) -> usize {
         self.mics.len()
     }
+
     #[must_use]
     pub fn output_count(&self) -> usize {
         self.outputs.len()
@@ -798,6 +832,11 @@ impl AudioRouter {
         }
     }
     /// Current mic INPUT level on an open lane in dBFS (post-gain, pre-NR peak),
+    ///
+    /// NOTE for the observer lanes opened by [`AudioRouter::open_input_with`]:
+    /// those apply no input gain (there is no `MicLane` to apply it), so their
+    /// level is the raw device peak. On a call lane the same reading is
+    /// post-gain. See [`MeteredInput`].
     /// metered CONTINUOUSLY even while unkeyed so VOX can key from silence
     /// (iax-5c30). Unlike `mic_tx_dbfs`, this does not floor when the PTT gate
     /// is closed.

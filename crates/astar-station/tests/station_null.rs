@@ -250,6 +250,45 @@ fn monitor_start_resolves_a_named_input_device() {
     s.monitor_stop();
 }
 
+#[test]
+fn monitor_input_level_is_exposed_only_while_monitoring() {
+    // The VOX calibration meter's level comes from the monitor lane, which is
+    // a Station-level thing the console session knows nothing about. Before
+    // this existed the snapshot floored `input_level_db` at -60 whenever there
+    // was no active call, so the meter only ever moved mid-call.
+    let s = test_station(StationConfig::default());
+    assert!(
+        s.monitor_input_dbfs().is_none(),
+        "no monitor lane, no level"
+    );
+    s.monitor_start(None).expect("monitor");
+    assert!(
+        s.monitor_input_dbfs().is_some(),
+        "a running monitor exposes its mic input level"
+    );
+    s.monitor_stop();
+    assert!(
+        s.monitor_input_dbfs().is_none(),
+        "the level goes away with the lane"
+    );
+}
+
+#[test]
+fn snapshot_reports_the_monitor_input_level_with_no_call() {
+    // Regression (VOX test meter): with the monitor open and no call, the
+    // snapshot must carry the monitor lane's level rather than the unconditional
+    // -60 floor the no-active-call branch used to write.
+    let s = test_station(StationConfig::default());
+    s.monitor_start(None).expect("monitor");
+    let lane = s.monitor_input_dbfs().expect("monitoring");
+    assert!(
+        (s.snapshot().input_level_db - lane).abs() < 1e-6,
+        "snapshot must mirror the monitor lane ({lane}), got {}",
+        s.snapshot().input_level_db
+    );
+    s.monitor_stop();
+}
+
 // --- iax-e73e: live voice-band mic spectrum tap ---
 
 #[test]

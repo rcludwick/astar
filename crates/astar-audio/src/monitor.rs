@@ -105,6 +105,16 @@ impl MicMonitor {
         self.router.mic_count()
     }
 
+    /// Current mic INPUT level (dBFS) on the monitored lane — metered
+    /// continuously (iax-5c30), which is the whole point here: the monitor
+    /// exists to observe a mic with no call up and nothing keyed. This is what
+    /// the VOX calibration meter reads while the operator picks a threshold.
+    /// `None` only if the lane is somehow not open.
+    #[must_use]
+    pub fn input_dbfs(&self) -> Option<f32> {
+        self.router.mic_input_dbfs(&self.mic)
+    }
+
     /// Copy the current log-binned, peak-held spectrum (dBFS) into `out` (up to
     /// `out.len()` bins) and return the number of bins written (iax-e73e). The
     /// front-end polls this ~20 Hz to draw the live mic spectrum.
@@ -159,6 +169,21 @@ mod tests {
             .expect("monitor opens the input device");
         assert_eq!(mon.mic_count(), 1, "monitor opens exactly one mic");
         assert_eq!(mon.mic().as_str(), "in:test");
+    }
+
+    #[test]
+    fn monitor_meters_the_mic_input_level_with_no_call() {
+        // The VOX calibration meter reads this level while nothing is
+        // connected: pressing Test opens the monitor lane, and that lane is
+        // then the only open mic. Its input level is metered continuously
+        // (iax-5c30) — nothing is keyed and nothing ever will be here.
+        let (backend, controls) = NullBackend::with_controls();
+        let mon = MicMonitor::start(Box::new(backend), "in:test", StreamConfig::default()).unwrap();
+        controls.push_mic(&[0.5_f32; 160]);
+        let db = mon
+            .input_dbfs()
+            .expect("the monitored lane is open, so it has a level");
+        assert!(db > -60.0, "a driven mic must read above the floor: {db}");
     }
 
     #[test]
