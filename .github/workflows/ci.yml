@@ -147,6 +147,32 @@ jobs:
       - name: Build the documentation site
         run: ./ci/build-docs.sh
 
+  # RustSec advisory check over the committed Cargo.lock. Complements Dependabot
+  # rather than duplicating it: Dependabot watches the dependency graph and opens
+  # PRs on its own schedule, while this fails a run, so an advisory cannot ride
+  # along unnoticed in a release build.
+  #
+  # `continue-on-error`, deliberately. A new advisory against a transitive crate
+  # appears without anyone touching this repository, and a red CI that nobody
+  # caused teaches people to ignore red CI. The result is visible in the run
+  # summary and in `just audit` locally; promote it to a hard gate if that turns
+  # out to be too quiet.
+  audit:
+    # Private repo only — see the header. Skips cleanly in public.
+    if: github.repository == 'rcludwick/astar-private'
+    runs-on: [self-hosted, ionos]
+    timeout-minutes: 15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: cargo-audit (cached in CARGO_HOME after the first run)
+        run: |
+          command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked
+      - name: Advisory scan
+        run: cargo audit --deny warnings
+
   # The Iced client. On the Mac `just gui-linux` reaches Linux through podman;
   # here the box IS Linux, so it builds natively and the headless run is a
   # plain xvfb-run.
