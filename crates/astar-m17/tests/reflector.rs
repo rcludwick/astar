@@ -217,7 +217,14 @@ fn client_that_never_pongs_is_reaped_while_a_ponging_client_stays() {
     let (n, _) = responder.recv_from(&mut buf).unwrap();
     assert_eq!(&buf[..n], b"ACKN");
 
-    assert_eq!(handle.client_count(), 2, "both clients start out linked");
+    // Poll rather than assert outright: an ACKN proves the reflector replied,
+    // not that its run-loop finished inserting the client into the table. Those
+    // are separate steps on that thread, and on a loaded box the read here can
+    // win the race.
+    assert!(
+        wait_until(|| handle.client_count() == 2, 1_000),
+        "both clients start out linked"
+    );
 
     // Keep `responder` alive by answering every PING with a PONG, for well
     // past the 400ms client_timeout; `silent` never answers.
@@ -236,9 +243,8 @@ fn client_that_never_pongs_is_reaped_while_a_ponging_client_stays() {
         }
     }
 
-    assert_eq!(
-        handle.client_count(),
-        1,
+    assert!(
+        wait_until(|| handle.client_count() == 1, 1_000),
         "the silent client must have been reaped while the ponging one stays"
     );
 
@@ -264,7 +270,10 @@ fn disc_gets_a_bare_ack_and_the_client_is_reaped_immediately() {
     let mut buf = [0u8; 64];
     let (n, _) = c1.recv_from(&mut buf).unwrap();
     assert_eq!(&buf[..n], b"ACKN");
-    assert_eq!(handle.client_count(), 1);
+    assert!(
+        wait_until(|| handle.client_count() == 1, 1_000),
+        "the client must be linked before the DISC below"
+    );
 
     let disc = ControlPacket::Disc { callsign: Some(cs) }.to_bytes();
     c1.send_to(&disc, addr).unwrap();
