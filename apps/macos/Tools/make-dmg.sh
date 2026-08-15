@@ -143,6 +143,60 @@ else
   echo "   (set ASTAR_SIGN_IDENTITY, or see the M2 notes at the top of this script)"
 fi
 
+# ---------------------------------------------------------------------------
+# 3b. Notarize + staple THE APP, before it is sealed into the DMG (astar-43eb).
+#
+#     Why the app and not just the DMG: stapling attaches the ticket to the
+#     thing you staple, and nothing else. A ticket on the DMG covers the DMG;
+#     the moment a user drags astar.app to /Applications the copy they run has
+#     no ticket of its own, and Gatekeeper falls back to asking Apple over the
+#     network. That works — until the machine is offline or Apple is
+#     unreachable, and then a first launch is refused. Stapling the app here is
+#     what makes the install work with the network unplugged.
+#
+#     The app is read-only once it is inside the DMG, so this has to happen
+#     before packaging. That is why notarization runs twice: once for the app,
+#     once for the finished DMG. Apple's "Customizing the notarization
+#     workflow" describes this same order.
+#
+#     Credentials live in the keychain, never in this repo or its environment:
+#       xcrun notarytool store-credentials "astar-notary" \
+#         --key <AuthKey_XXX.p8> --key-id <KEY_ID> --issuer <ISSUER_ID>
+#
+#     The probe is a `notarytool history` round trip rather than a keychain
+#     poke: `store-credentials` leaves no item `security find-generic-password`
+#     can find by service or account, so guessing at its storage silently
+#     skipped notarization on a correctly configured machine. `history`
+#     succeeds only if the profile exists AND Apple accepts the credentials,
+#     which also means an offline machine correctly declines to try.
+# ---------------------------------------------------------------------------
+NOTARY_PROFILE="${ASTAR_NOTARY_PROFILE:-astar-notary}"
+NOTARIZED=0
+APP_STAPLED=0
+
+can_notarize() {
+  [ "$SIGNED" = 1 ] && [ "${ASTAR_SKIP_NOTARIZE:-0}" != 1 ] &&
+    xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1
+}
+
+if can_notarize; then
+  echo ">> notarizing the app (profile: $NOTARY_PROFILE) — Apple's scan usually takes a few minutes…"
+  APP_ZIP="$(mktemp -d)/astar.zip"
+  # ditto, not `zip`: it is the only archiver that preserves the bundle's
+  # symlinks and extended attributes, and notarytool rejects a mangled bundle.
+  ditto -c -k --keepParent "$APP" "$APP_ZIP"
+  if xcrun notarytool submit "$APP_ZIP" --keychain-profile "$NOTARY_PROFILE" --wait; then
+    xcrun stapler staple "$APP"
+    APP_STAPLED=1
+  else
+    echo "!! app notarization failed — continuing; the DMG pass below will report the damage." >&2
+    echo "   'xcrun notarytool log <submission-id> --keychain-profile $NOTARY_PROFILE' explains why." >&2
+  fi
+  rm -rf "$(dirname "$APP_ZIP")"
+elif [ "$SIGNED" = 1 ]; then
+  echo ">> skipping notarization (no '$NOTARY_PROFILE' keychain profile, or ASTAR_SKIP_NOTARIZE=1)"
+fi
+
 # 4. Package the DMG. Prefer dmgbuild for a styled window (astar.app on the left,
 #    /Applications on the right, an arrow background, large icons) — it writes the
 #    layout's .DS_Store directly, so it works headlessly in CI. Fall back to a
@@ -165,6 +219,25 @@ else
   hdiutil create -volname "$VOL_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG_PATH" >/dev/null
 fi
 
+# 4b. Sign the DMG itself (astar-43eb). The disk image is a separate object from
+#     the app inside it: signing the app leaves the container unsigned, and
+#     Gatekeeper assesses the container first when someone opens a download.
+#     An unsigned DMG fails that assessment —
+#       spctl -a -t open --context context:primary-signature astar.dmg
+#       -> rejected (source=no usable signature)
+#     — even when the app inside is perfectly signed and notarized, which is
+#     exactly the state this script used to ship. Notarizing an unsigned DMG
+#     still returns "Accepted", because the notary service scans the *contents*;
+#     that success is not evidence the container is distributable.
+#
+#     No --options runtime and no entitlements here: a DMG is a container, not
+#     executable code. The hardened runtime applies to the app, and was applied
+#     above.
+if [ "$SIGNED" = 1 ]; then
+  echo ">> signing $DMG_PATH"
+  codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG_PATH"
+fi
+
 # ---------------------------------------------------------------------------
 # 5. Notarize + staple (astar-43eb). Apple scans the DMG and issues a ticket;
 #    stapling attaches it so Gatekeeper clears the app OFFLINE, on a machine
@@ -172,22 +245,10 @@ fi
 #    notarytool keychain profile exists — an ad-hoc DMG cannot be notarized,
 #    and a missing profile is a setup gap, not a build error.
 #
-#    Credentials live in the keychain, never in this repo or its environment:
-#      xcrun notarytool store-credentials "astar-notary" \
-#        --key <AuthKey_XXX.p8> --key-id <KEY_ID> --issuer <ISSUER_ID>
+#    The keychain profile and the `can_notarize` probe are set up at step 3b.
 # ---------------------------------------------------------------------------
-NOTARY_PROFILE="${ASTAR_NOTARY_PROFILE:-astar-notary}"
-NOTARIZED=0
-
-# Probe with notarytool rather than poking at the keychain: `store-credentials`
-# does not leave an item `security find-generic-password` can find by service or
-# account, so guessing at its storage silently skipped notarization on a machine
-# that was correctly configured. `history` is a cheap authenticated round trip —
-# it succeeds only if the profile exists AND Apple accepts the credentials, which
-# also means an offline machine correctly declines to try.
-if [ "$SIGNED" = 1 ] && [ "${ASTAR_SKIP_NOTARIZE:-0}" != 1 ] &&
-   xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
-  echo ">> notarizing (profile: $NOTARY_PROFILE) — Apple's scan usually takes a few minutes…"
+if can_notarize; then
+  echo ">> notarizing the DMG (profile: $NOTARY_PROFILE) — Apple's scan usually takes a few minutes…"
   if xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait; then
     xcrun stapler staple "$DMG_PATH"
     NOTARIZED=1
@@ -195,16 +256,45 @@ if [ "$SIGNED" = 1 ] && [ "${ASTAR_SKIP_NOTARIZE:-0}" != 1 ] &&
     echo "!! notarization failed — the DMG is signed but NOT notarized." >&2
     echo "   'xcrun notarytool log <submission-id> --keychain-profile $NOTARY_PROFILE' explains why." >&2
   fi
-elif [ "$SIGNED" = 1 ]; then
-  echo ">> skipping notarization (no '$NOTARY_PROFILE' keychain profile, or ASTAR_SKIP_NOTARIZE=1)"
 fi
 
 echo ""
 echo ">> DONE — $DMG_PATH"
 ls -lh "$DMG_PATH"
 if [ "$NOTARIZED" = 1 ]; then
-  echo ">> signed + notarized + stapled. Gatekeeper verdict:"
-  spctl -a -vvv -t open --context context:primary-signature "$DMG_PATH" 2>&1 | sed 's/^/   /'
+  # Assert, do not merely narrate. This block used to print "signed + notarized
+  # + stapled" directly above spctl's own "rejected" line, because it reported
+  # what the script had *attempted* rather than what Gatekeeper actually said.
+  # Every claim below is now the exit status of the command that proves it.
+  echo ">> verifying the artifact the way a downloader's Mac will:"
+  ok=1
+
+  # The container, as assessed when someone opens the download.
+  if spctl -a -vvv -t open --context context:primary-signature "$DMG_PATH" 2>&1 |
+       sed 's/^/   dmg:  /'; then :; else ok=0; fi
+
+  # The ticket that makes an OFFLINE first launch work. `stapler validate`
+  # reads the ticket off the disk image; it never asks Apple, which is the
+  # whole point of checking it.
+  if xcrun stapler validate "$DMG_PATH" >/dev/null 2>&1; then
+    echo "   dmg:  stapled ticket present (works offline)"
+  else
+    echo "   dmg:  NO stapled ticket" >&2; ok=0
+  fi
+
+  if [ "$APP_STAPLED" = 1 ]; then
+    echo "   app:  stapled before packaging (survives the drag to /Applications)"
+  else
+    echo "   app:  NOT stapled — a copied-out app needs Apple reachable on first launch" >&2
+    ok=0
+  fi
+
+  if [ "$ok" = 1 ]; then
+    echo ">> OK — signed, notarized and stapled. Safe to distribute."
+  else
+    echo "!! NOT distributable: a check above failed. Do not ship this DMG." >&2
+    exit 3
+  fi
 elif [ "$SIGNED" = 1 ]; then
   echo ">> signed with Developer ID, NOT notarized — other Macs will still refuse it"
   echo "   ('spctl' reports: Unnotarized Developer ID). Set up the notary profile above."
