@@ -123,12 +123,31 @@ under `apps/macos/`.
 just dmg          # → apps/macos/build/astar.dmg
 ```
 
-!!! danger "This is not a release"
+!!! info "What you get depends on your keychain"
 
-    The image is **unsigned and un-notarized**. Gatekeeper will refuse it on
-    any Mac that did not build it. It exists so you can move the app to another
-    machine you own — it is not a distribution channel, and astar publishes no
-    binaries anywhere.
+    `just dmg` reports which of three outcomes it produced:
+
+    * **ad-hoc** — no Developer ID identity on the machine. Fine for moving the
+      app to another Mac you own; Gatekeeper refuses it anywhere else, and the
+      recipient has to right-click ▸ Open (or
+      `xattr -dr com.apple.quarantine /Applications/astar.app`).
+    * **signed** — a *Developer ID Application* identity was found in the
+      keychain, so the app gets the hardened runtime, a secure timestamp and the
+      microphone entitlement. Gatekeeper still refuses it elsewhere, reporting
+      *Unnotarized Developer ID* — a signature alone stopped being enough after
+      macOS 10.15.
+    * **signed + notarized** — as above, plus an Apple-issued ticket stapled to
+      the image so it verifies offline. This is what the
+      [published release](https://github.com/rcludwick/astar/releases/latest) is.
+
+    Nothing is hard-coded to one developer: the identity is discovered from the
+    keychain (`ASTAR_SIGN_IDENTITY` overrides), and notary credentials come from
+    a keychain profile (`ASTAR_NOTARY_PROFILE`, default `astar-notary`). A clone
+    with neither still builds — it just lands on ad-hoc. Set the profile up once
+    with `xcrun notarytool store-credentials`.
+
+    Builds are **arm64 only**: `libastar_serial_sys.a` carries just the host
+    slice, so an x86_64 or universal build fails to link.
 
 ## Installing your build
 

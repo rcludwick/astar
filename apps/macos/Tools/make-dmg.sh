@@ -21,29 +21,31 @@
 #   Tools/make-dmg.sh
 #
 # ---------------------------------------------------------------------------
-# M2 (FOLLOW-UP — real public distribution; NOT implemented here):
+# SIGNING (astar-43eb). What comes out depends on what this machine has, and
+# the script tells you which of the three you got:
 #
-# This M1 DMG is AD-HOC signed (CODE_SIGN_IDENTITY="-"). Gatekeeper on any OTHER
-# Mac will flag it as "damaged" / "unidentified developer"; recipients must
-# right-click > Open, or run `xattr -dr com.apple.quarantine /Applications/astar.app`.
-# That is fine for dev/local sharing but NOT for public download.
+#   ad-hoc            no Developer ID identity in the keychain. Fine for local
+#                     use; another Mac reports "damaged"/"unidentified
+#                     developer" and the recipient must right-click > Open (or
+#                     xattr -dr com.apple.quarantine /Applications/astar.app).
+#   signed            a Developer ID Application identity was found, so the app
+#                     carries the hardened runtime, a secure timestamp, and the
+#                     mic entitlement. Gatekeeper still refuses it elsewhere —
+#                     "Unnotarized Developer ID" — because a signature alone was
+#                     never enough after macOS 10.15.
+#   signed+notarized  as above plus an Apple-issued ticket, stapled to the DMG
+#                     so it verifies OFFLINE. This is the only output fit for
+#                     public download.
 #
-# For public distribution we need (BLOCKED on a paid Apple Developer ID — there
-# is no signing identity yet):
-#   1. A "Developer ID Application" certificate (paid Apple Developer account).
-#   2. Codesign astar.app with that identity, the hardened runtime
-#      (--options runtime), and the microphone entitlement
-#      com.apple.security.device.audio-input (the IAX engine captures the mic):
-#        codesign --force --deep --options runtime \
-#          --entitlements astar.entitlements \
-#          --sign "Developer ID Application: <NAME> (<TEAMID>)" astar.app
-#   3. Build the DMG (as below), then notarize it via notarytool:
-#        xcrun notarytool submit build/astar.dmg \
-#          --apple-id "<APPLE_ID>" --team-id "<TEAMID>" \
-#          --password "<APP_SPECIFIC_PASSWORD>" --wait
-#      (or --keychain-profile / an App Store Connect API key).
-#   4. Staple the ticket so it verifies offline:
-#        xcrun stapler staple build/astar.dmg
+# Nothing here is hard-coded to one developer: the identity is discovered from
+# the keychain (override: ASTAR_SIGN_IDENTITY) and the notary credentials live
+# in a keychain profile (override: ASTAR_NOTARY_PROFILE, default astar-notary).
+# A clone with neither still builds — it just lands on "ad-hoc".
+#
+# One-time notary setup, using an App Store Connect API key:
+#   xcrun notarytool store-credentials "astar-notary" \
+#     --key <AuthKey_XXXXXXXXXX.p8> --key-id <KEY_ID> --issuer <ISSUER_ID>
+#
 # The WCH CH34x serial driver (UCI150) is a separate user install per onboarding —
 # it is NOT bundled in the app.
 # ---------------------------------------------------------------------------
@@ -101,6 +103,46 @@ echo ">> build ok"
 APP="$DD/Build/Products/$CONFIG/$APP_NAME"
 [ -d "$APP" ] || { echo "!! app not found at $APP" >&2; exit 1; }
 
+# ---------------------------------------------------------------------------
+# 3b. Developer ID signing (astar-43eb).
+#
+# xcodebuild above signs ad-hoc so a build from source works for anyone. If a
+# "Developer ID Application" identity is on this machine we re-sign properly on
+# top of that: hardened runtime (notarization refuses anything without it), a
+# secure timestamp (without one the signature stops validating when the cert
+# eventually expires), and the mic entitlement.
+#
+# The identity is DISCOVERED, never hard-coded — a contributor with their own
+# Developer ID gets their own, and someone with none still gets a working
+# ad-hoc DMG instead of a build failure. Override with ASTAR_SIGN_IDENTITY.
+# ---------------------------------------------------------------------------
+SIGN_IDENTITY="${ASTAR_SIGN_IDENTITY:-$(
+  security find-identity -v -p codesigning 2>/dev/null |
+    sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1
+)}"
+ENTITLEMENTS="astar.entitlements"
+SIGNED=0
+
+if [ -n "$SIGN_IDENTITY" ]; then
+  [ -f "$ENTITLEMENTS" ] || { echo "!! missing $ENTITLEMENTS" >&2; exit 1; }
+  echo ">> signing as: $SIGN_IDENTITY"
+  # Inside-out: nested Mach-O first, then the bundle. (`--deep` is the lazy
+  # equivalent and Apple advises against it — it cannot apply per-binary
+  # entitlements and silently re-signs things you did not mean to.)
+  while IFS= read -r -d '' nested; do
+    codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$nested"
+  done < <(find "$APP/Contents" -type f \( -name '*.dylib' -o -name '*.so' \) -print0)
+
+  codesign --force --options runtime --timestamp \
+    --entitlements "$ENTITLEMENTS" --sign "$SIGN_IDENTITY" "$APP"
+
+  codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | sed 's/^/   /'
+  SIGNED=1
+else
+  echo ">> no Developer ID Application identity found — leaving the ad-hoc signature"
+  echo "   (set ASTAR_SIGN_IDENTITY, or see the M2 notes at the top of this script)"
+fi
+
 # 4. Package the DMG. Prefer dmgbuild for a styled window (astar.app on the left,
 #    /Applications on the right, an arrow background, large icons) — it writes the
 #    layout's .DS_Store directly, so it works headlessly in CI. Fall back to a
@@ -123,8 +165,50 @@ else
   hdiutil create -volname "$VOL_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG_PATH" >/dev/null
 fi
 
+# ---------------------------------------------------------------------------
+# 5. Notarize + staple (astar-43eb). Apple scans the DMG and issues a ticket;
+#    stapling attaches it so Gatekeeper clears the app OFFLINE, on a machine
+#    that has never seen it. Skipped unless the app was really signed AND a
+#    notarytool keychain profile exists — an ad-hoc DMG cannot be notarized,
+#    and a missing profile is a setup gap, not a build error.
+#
+#    Credentials live in the keychain, never in this repo or its environment:
+#      xcrun notarytool store-credentials "astar-notary" \
+#        --key <AuthKey_XXX.p8> --key-id <KEY_ID> --issuer <ISSUER_ID>
+# ---------------------------------------------------------------------------
+NOTARY_PROFILE="${ASTAR_NOTARY_PROFILE:-astar-notary}"
+NOTARIZED=0
+
+# Probe with notarytool rather than poking at the keychain: `store-credentials`
+# does not leave an item `security find-generic-password` can find by service or
+# account, so guessing at its storage silently skipped notarization on a machine
+# that was correctly configured. `history` is a cheap authenticated round trip —
+# it succeeds only if the profile exists AND Apple accepts the credentials, which
+# also means an offline machine correctly declines to try.
+if [ "$SIGNED" = 1 ] && [ "${ASTAR_SKIP_NOTARIZE:-0}" != 1 ] &&
+   xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1; then
+  echo ">> notarizing (profile: $NOTARY_PROFILE) — Apple's scan usually takes a few minutes…"
+  if xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait; then
+    xcrun stapler staple "$DMG_PATH"
+    NOTARIZED=1
+  else
+    echo "!! notarization failed — the DMG is signed but NOT notarized." >&2
+    echo "   'xcrun notarytool log <submission-id> --keychain-profile $NOTARY_PROFILE' explains why." >&2
+  fi
+elif [ "$SIGNED" = 1 ]; then
+  echo ">> skipping notarization (no '$NOTARY_PROFILE' keychain profile, or ASTAR_SKIP_NOTARIZE=1)"
+fi
+
 echo ""
 echo ">> DONE — $DMG_PATH"
 ls -lh "$DMG_PATH"
-echo ">> NOTE: ad-hoc signed (M1). On another Mac, recipients must right-click > Open"
-echo "         (or: xattr -dr com.apple.quarantine /Applications/astar.app). See M2 notes in this script."
+if [ "$NOTARIZED" = 1 ]; then
+  echo ">> signed + notarized + stapled. Gatekeeper verdict:"
+  spctl -a -vvv -t open --context context:primary-signature "$DMG_PATH" 2>&1 | sed 's/^/   /'
+elif [ "$SIGNED" = 1 ]; then
+  echo ">> signed with Developer ID, NOT notarized — other Macs will still refuse it"
+  echo "   ('spctl' reports: Unnotarized Developer ID). Set up the notary profile above."
+else
+  echo ">> NOTE: ad-hoc signed (M1). On another Mac, recipients must right-click > Open"
+  echo "         (or: xattr -dr com.apple.quarantine /Applications/astar.app). See M2 notes in this script."
+fi

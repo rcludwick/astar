@@ -28,13 +28,22 @@ meters — with support for generic USB radio interfaces (serial PTT + USB audio
 the AllScan UCI150 is the reference device). It also runs as an always-on node
 daemon.
 
-> ### Nothing here has been released yet
+> ### First release — `0.1.1beta`
 >
-> There is no Homebrew tap, no cask, no App Store listing, no notarized
-> download, and no published binary of any kind. **The only way to run astar
-> today is to build it from this repository.** See [Building](#building).
+> A signed and notarized **`astar.dmg`** is on the
+> [releases page](https://github.com/rcludwick/astar/releases/latest). It opens
+> on any Mac without the Gatekeeper warning — no right-click-Open dance, no
+> `xattr` incantation.
 >
-> This is a `0.1.1beta` of a project that has never shipped. Expect rough
+> **Apple Silicon only, macOS 13 (Ventura) or later.** The image carries a
+> single `arm64` slice; an Intel Mac has to [build from source](#building).
+> There is still no Homebrew tap, no cask, and no App Store listing.
+>
+> **M17 needs `brew install codec2`.** The app does not bundle `libcodec2` yet,
+> so M17 stays unavailable until a system copy is present. AllStarLink works out
+> of the box.
+>
+> This is a beta of a project that has only just started shipping. Expect rough
 > edges, expect things to move.
 
 ---
@@ -180,10 +189,13 @@ what you are actually running.
 just dmg            # → apps/macos/build/astar.dmg
 ```
 
-This is a **local, unsigned, un-notarized** disk image for your own machine.
-It is not a release, and it is not something to hand to anyone else: macOS
-Gatekeeper will refuse it on any other Mac. astar publishes no binaries
-anywhere.
+What this produces depends on your keychain, and the script says which you got:
+**ad-hoc** with no Developer ID identity present (fine for your own machines,
+refused everywhere else), **signed** if one is found, or **signed + notarized +
+stapled** if a `notarytool` keychain profile is also configured — the last being
+what the [published release](https://github.com/rcludwick/astar/releases/latest)
+is built with. Nothing is hard-coded to one developer; see
+[the build guide](https://rcludwick.github.io/astar/build/macos-app/).
 
 ### The Windows / Linux client
 

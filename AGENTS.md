@@ -100,10 +100,18 @@ relicense someone else's MIT/Apache code as AGPL. See its `VENDORED.md`.
 
 ## Distribution reality
 
-Nothing has ever been released. There is **no** Homebrew tap or cask for astar,
-no App Store listing, no download URL, no published binary. The only honest
-install path is building from source; `just dmg` makes a local, unsigned image.
-Do not write install instructions that imply otherwise.
+`0.1.1beta` is published: a Developer ID-signed, notarized, stapled `astar.dmg`
+on the public repo's releases page. It is **arm64 only** (a single slice, macOS
+13+) — there is no Intel and no universal build, so an Intel Mac still builds
+from source. There is still **no** Homebrew tap or cask and no App Store
+listing. Do not write install instructions that imply otherwise.
+
+`just dmg` reproduces that image. It discovers a "Developer ID Application"
+identity in the keychain and notarizes through the `astar-notary` keychain
+profile (`ASTAR_SIGN_IDENTITY` / `ASTAR_NOTARY_PROFILE` override both;
+`ASTAR_SKIP_NOTARIZE=1` skips the wait). With neither configured it falls back
+to an ad-hoc image and says so, so a fresh clone still builds. No signing
+identity, team id, or notary credential is stored in this repository.
 
 The only cask astar ever mentions is WCH's CH34x USB serial driver, and it is
 now **optional** — see Hardware notes.

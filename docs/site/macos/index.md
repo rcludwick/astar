@@ -18,6 +18,8 @@ no Dock icon at all.
   <figcaption>Connected, receiving, with the spectrum and dialpad open.</figcaption>
 </figure>
 
+[Download astar.dmg](https://github.com/rcludwick/astar/releases/latest){ .md-button .md-button--primary }
+
 !!! info "Requirements"
 
     macOS **13 (Ventura) or later** — the app is built on `MenuBarExtra`, which
