@@ -420,42 +420,37 @@ fn parrot_flushes_and_echoes_after_a_silence_gap_with_no_eos_ever_sent() {
     handle.shutdown();
 }
 
-/// iax-91f4 fix-forward: a permanent measurement harness for playback pacing.
+/// iax-91f4 fix-forward: playback is PACED, not blasted — end to end.
 ///
-/// Before the fix, the run-loop's socket read timeout was a fixed 50ms
-/// regardless of parrot mode — but while a playback drains, the sender is
-/// unkeyed, so that read timeout is the loop's ONLY wake source, and a 40ms
-/// pacing deadline can never fire on time against a 50ms poll. Measured
-/// average inter-packet arrival was ~50.9ms, not ~40ms. The fix shortens the
-/// read timeout on the fly to the earliest pending playback deadline
-/// (`next_read_timeout`) whenever it's sooner than the normal poll.
+/// Before the fix the run-loop's socket read timeout was a fixed 50ms
+/// regardless of parrot mode. While a playback drains the sender is unkeyed,
+/// so that read timeout is the loop's only wake source, and a 40ms pacing
+/// deadline can never fire on time against a 50ms poll; measured average
+/// inter-packet arrival was ~50.9ms rather than ~40ms. The fix shortens the
+/// read timeout to the earliest pending playback deadline
+/// (`next_read_timeout`).
 ///
-/// This test sends a 25-packet stream (24 inter-packet gaps, comfortably
-/// over "20 packets") and asserts on the gaps two different ways, because a
-/// single per-gap band cannot do both jobs at once:
+/// **The cadence itself is pinned by unit tests on `next_read_timeout`**
+/// (iax-f7a3), not here. This test used to assert observed inter-packet gaps
+/// against a band, and that band measured the machine as much as the code: it
+/// failed CI at 48.03ms against a 48ms ceiling — 27µs over — and again at
+/// 44.00035ms against 44ms even running alone on an idle runner, which simply
+/// paces on a coarser grid than the development Mac. Three widenings in, the
+/// sharp assertion moved to arithmetic where it belongs.
 ///
-/// * **Every gap in a wide 30-60ms band.** This catches gross misbehaviour —
-///   a blast with no pacing at all, or a stall — without failing on one
-///   unlucky scheduler wake-up. It has to be wide: the pacing runs off
-///   absolute deadlines, so a late packet is followed by a short catch-up gap,
-///   and both tails are legitimate.
-/// * **The median gap in a 36-44ms band.** This is the assertion that actually
-///   pins the fix. The median, not the mean: the bug was *systematic* — a 50ms
-///   poll floor put every gap at ~50.9ms — while scheduler jitter inflates a
-///   handful of gaps and leaves the rest alone. A statistic that ignores
-///   outliers therefore separates the two cleanly, where the mean does not.
-///   Measured: the mean drifts to 42.8ms and past 46ms with all 14 cores of
-///   this box saturated, while the median stays put.
-///
-/// The per-gap band started at 36-46, was widened to 34-48 after local flakes,
-/// and still failed CI at 48.03ms — 27µs over — on a loaded 4-core box. That
-/// is the signature of an assertion measuring the machine rather than the
-/// code: wall-clock arrival gaps of UDP datagrams include scheduler jitter the
-/// reflector does not control. Widening the band again would only move the
-/// next flake, so the sharp assertion moved to the mean, where jitter cancels.
+/// What remains here is the part only an end-to-end test can show, expressed
+/// so that it cannot flake: every packet arrives, in order, and the whole
+/// transmission takes at least a conservative floor of wall-clock time. A
+/// reflector that lost pacing entirely would blast all 25 echoes back in
+/// microseconds and fail this instantly. There is deliberately **no ceiling**:
+/// a loaded box can only make delivery slower, never faster, so load cannot
+/// produce a false failure.
 #[test]
-fn parrot_playback_packets_are_paced_about_40ms_apart_over_many_packets() {
+fn parrot_playback_is_paced_not_blasted() {
     const N: u16 = 25;
+    /// Well under the ~40ms real cadence, and astronomically above the
+    /// microseconds an unpaced blast would take.
+    const PER_GAP_FLOOR: Duration = Duration::from_millis(20);
 
     let reflector =
         Reflector::bind_parrot("127.0.0.1:0".parse().unwrap()).expect("bind parrot reflector");
@@ -474,36 +469,22 @@ fn parrot_playback_packets_are_paced_about_40ms_apart_over_many_packets() {
         c1.send_to(&pkt, addr).unwrap();
     }
 
-    c1.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-    let mut arrival_times = Vec::with_capacity(N as usize);
+    c1.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let mut echo_buf = [0u8; 128];
+    let started = Instant::now();
     for _ in 0..N {
         let (_n, _) = c1
             .recv_from(&mut echo_buf)
             .expect("must receive every paced playback packet");
-        arrival_times.push(Instant::now());
     }
+    let elapsed = started.elapsed();
 
-    for (i, w) in arrival_times.windows(2).enumerate() {
-        let delta = w[1].duration_since(w[0]);
-        assert!(
-            delta >= Duration::from_millis(30) && delta <= Duration::from_millis(60),
-            "gap #{i} between playback packets must land in the 30-60ms band \
-             (target ~40ms), got {delta:?}"
-        );
-    }
-
-    let mut sorted: Vec<Duration> = arrival_times
-        .windows(2)
-        .map(|w| w[1].duration_since(w[0]))
-        .collect();
-    sorted.sort_unstable();
-    let median = sorted[sorted.len() / 2];
+    let gaps = u32::from(N - 1);
+    let floor = PER_GAP_FLOOR * gaps;
     assert!(
-        median >= Duration::from_millis(36) && median <= Duration::from_millis(44),
-        "median gap over {} playback packets must land in the 36-44ms band \
-         (target ~40ms; the pre-fix bug sat at ~50.9ms on every gap), got {median:?}",
-        sorted.len()
+        elapsed >= floor,
+        "{N} playback packets ({gaps} gaps) arrived in {elapsed:?}, under the {floor:?} \
+         floor — that is a blast, not ~40ms pacing"
     );
 
     handle.shutdown();

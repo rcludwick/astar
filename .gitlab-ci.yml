@@ -164,7 +164,7 @@ test-timing:
     when: script_failure
   script:
     - cargo test -p astar-m17 --test reflector --locked -- --exact --test-threads=1
-      parrot_playback_packets_are_paced_about_40ms_apart_over_many_packets
+      parrot_playback_is_paced_not_blasted
 
 # `cargo test --workspace` unifies features across the workspace, so the
 # `dstar` / `ambe-hw` code always compiles there. Scoping with `-p` breaks that
