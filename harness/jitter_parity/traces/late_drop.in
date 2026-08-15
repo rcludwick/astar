@@ -1,0 +1,19 @@
+# Build a steady stream then inject a very late frame; the buffer should
+# return it as drop (late voice) rather than ok.
+config 0 1000 0 20
+put 20  0   20 voice 00
+get 40  20
+put 40  20  20 voice 01
+get 60  20
+put 60  40  20 voice 02
+get 80  20
+put 80  60  20 voice 03
+get 100 20
+put 100 80  20 voice 04
+get 120 20
+put 120 100 20 voice 05
+get 140 20
+# now a late arrival: ts is well in the past
+put 200 20 20 voice ff
+get 200 20
+get 220 20

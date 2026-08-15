@@ -1,0 +1,7 @@
+{
+  "images" : [
+    { "idiom" : "universal", "scale" : "1x", "filename" : "brand_asterisk_34.png" },
+    { "idiom" : "universal", "scale" : "2x", "filename" : "brand_asterisk_34@2x.png" }
+  ],
+  "info" : { "author" : "xcode", "version" : 1 }
+}

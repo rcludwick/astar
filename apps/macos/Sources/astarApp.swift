@@ -1,0 +1,85 @@
+// astar — Copyright (c) 2026 Rob Ludwick.
+// SPDX-License-Identifier: AGPL-3.0-only
+// Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
+
+import AstarCore
+import SwiftUI
+
+/// astar — a native AllStarLink client.
+///
+/// On macOS, astar is a **menu-bar app**: it lives in the status bar (no Dock
+/// icon — see `LSUIElement` in project.yml). An AppKit `StatusItemController`
+/// (via `AppDelegate`) owns the status item; a left click shows/hides the main
+/// window (movable / hideable / closable) while a right click shows a quick
+/// status + audio/VOX + disconnect menu. The asterisk stays a live TX/RX/
+/// connected indicator. On iOS it is a standard windowed app.
+///
+/// The app owns a single `CallSession` (au-e00f) — the observable view-model
+/// over the AstarStation poll loop — and shares it with the UI. The menu-bar
+/// status item uses the `MenuBarRainbow` asset (astar-cdab), tinted per state.
+@main
+struct AstarApp: App {
+    #if os(macOS)
+        @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    #else
+        @StateObject private var session = CallSession.live()
+    #endif
+
+    var body: some Scene {
+        #if os(macOS)
+            // Menu-bar-only: no SwiftUI window/scene. The AppDelegate's
+            // StatusItemController owns the status item + popover. An empty Settings
+            // scene satisfies the `App` scene requirement without showing a window.
+            Settings { EmptyView() }
+        #else
+            WindowGroup {
+                ContentView().environmentObject(session)
+            }
+        #endif
+    }
+}
+
+#if os(macOS)
+    /// Owns the long-lived `CallSession` + serial PTT source and stands up the
+    /// menu-bar status item once the app finishes launching.
+    @MainActor
+    final class AppDelegate: NSObject, NSApplicationDelegate {
+        let session = CallSession.live()
+        // The macOS-only serial PTT source (UCI150). Owns the IOKit-linked
+        // SerialClient and installs CallSession's serial-free pttSourceTick hook, so
+        // AstarCore stays multiplatform. Re-opens on launch if previously enabled.
+        let serial = SerialController()
+        // Named hardware Setups ("UCI150 desk" ↔ "Jabra mobile"): one-click rig
+        // switching that drives `serial` + the session's device selection together.
+        let setups = SetupController()
+        // Reactive audio-device list backed by a CoreAudio hotplug listener, so the
+        // pickers never enumerate on view-appear (which froze the Quick-settings
+        // reveal) and stay live when a mic/interface is plugged in or removed.
+        lazy var deviceMonitor = AudioDeviceMonitor(session: session)
+        lazy var micAnalyzer = MicAnalyzerController(session: session)
+        private var statusController: StatusItemController?
+        // Posts VoiceOver announcements for call-session events (astar-b167,
+        // accessibility-audit F6) — a sibling of `statusController`, not owned
+        // by the popover, so it lives whether or not the window is open (same
+        // reasoning as `session.start()` below). Retained via this property;
+        // its Combine subscriptions are what does the actual work.
+        private var announcer: AccessibilityAnnouncer?
+
+        func applicationDidFinishLaunching(_ notification: Notification) {
+            setups.attach(session: session, serial: serial)
+            statusController = StatusItemController(
+                session: session, serial: serial, setups: setups, micAnalyzer: micAnalyzer,
+                deviceMonitor: deviceMonitor)
+            announcer = AccessibilityAnnouncer(session: session)
+            // Baseline poll for the whole app lifetime, so the menu-bar tint, serial
+            // PTT, and right-click status stay live even when the popover is closed.
+            // The popover pauses this only while Settings is open (to avoid the device
+            // pickers re-rendering at 20 Hz) — see MenuPopover.
+            session.start()
+            // Apply the persisted app-global "Spectrum decay" preference at launch
+            // (astar-68a6) so the engine + the inactive fade use it before the first
+            // spectrum renders. Re-asserted later whenever a new analyzer appears.
+            session.setSpectrumDecay(Float(SpectrumDecayPref.current()))
+        }
+    }
+#endif

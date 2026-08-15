@@ -1,0 +1,111 @@
+# astar-server configuration.
+#
+# SECRET-FREE FILE: no passwords or tokens go here. The registration secret is
+# supplied at runtime — see the [secrets] section at the bottom. Run with:
+#   astar-server serve --config node.toml
+#
+# Fill in the blank ("") / placeholder values below. Strings must be quoted.
+
+# ─── codec_policy — codec negotiation (iax-31f7) ─────────────────────────────
+# ulaw_only (default) | allow_slin | prefer_slin
+# prefer_slin negotiates 16-bit linear audio (~128 kbps) with peers that
+# allow it (ASL3: `allow = slin`), falling back to ulaw.
+#codec_policy = "prefer_slin"
+
+# ─── [listener] — REQUIRED: this node's inbound IAX2 socket ──────────────────
+# NOTE: this bind is internet-reachable once UDP 4569 is forwarded, on a daemon
+# that can bridge a local radio and key a transmitter. It ships CLOSED:
+# auth = "required" plus a node allowlist. `auth = "off"` with no allowlist
+# admits every caller on the internet — a deliberate opt-in for a lab network or
+# a loopback bind, not a starting point.
+[listener]
+bind      = "0.0.0.0:4569"     # bind addr  (UDP 4569 must be port-forwarded from the internet for inbound calls to land)
+answer    = "auto"     # "auto"  (answer inbound automatically)  or  "manual"
+max_calls = 2      # max simultaneous inbound calls
+auth      = "required"     # "required" | "optional" | "off"  (auth for INBOUND callers)
+                           #   "required": each caller is MD5-challenged against
+                           #   ALLSTAR_PEER_<NODE> (see [secrets] below); unknown
+                           #   usernames are rejected.
+
+# Inbound node allowlist. A caller whose node id is not on this list is rejected
+# at call setup, before answer. OMITTING IT (or leaving it empty) ADMITS EVERY
+# CALLER, subject only to `auth` and `max_calls`.
+allowed_nodes = ["00000"]      # replace with the node id(s) allowed to call you
+
+# ─── [bridge] — audio topology (iax-647d) ────────────────────────────────────
+# Daemon default (section absent) = "bridge". Switch live with:
+#   curl -X POST http://127.0.0.1:8730/bridge -d '{"mode":"handset"}'
+[bridge]
+mode                = "bridge"   # "handset" (1:1 local radio) | "bridge" (pure conference, local radio off) | "conference"
+mix_minus           = true       # each member hears everyone but itself (false = full mix, hear self)
+include_local_radio = false      # add local mic as a source + local speaker as a sink (NOTE: not yet wired in Manager — see iax follow-on)
+
+# ─── [register] — register THIS node with AllStar's registrar ────────────────
+# Omit this whole section if you don't want to register. The node's PASSWORD is
+# NOT here — it comes from ALLSTAR_SECRET (see [secrets]).
+[register]
+peer    = "52.20.63.146:4569"       # register.allstarlink.org:4569
+                   #   take the host from your existing rpt.conf `register => <node>:<pw>@<HOST>` line
+                   #   (must be an IP:port today; resolve the host to IP if needed)
+node_id = "12345"       # your AllStarLink node number (this is ALSO the register username)
+
+# ─── [control] — REQUIRED: local HTTP + SSE control channel ──────────────────
+[control]
+bind = "127.0.0.1:8730"   # keep on loopback; this is where you POST commands/secrets
+
+# ─── [secrets] — REQUIRED: where the runtime secret comes from ───────────────
+# This declares the SOURCE only. The password itself is never written in any file.
+[secrets]
+source = "env"     # "env"     → daemon reads env vars  ALLSTAR_NODE  and  ALLSTAR_SECRET  at startup
+                   # "control" → POST it after startup:  curl -X POST http://127.0.0.1:8730/secrets \
+                   #                                        -d '{"username":"<node>","secret":"<password>"}'
+#
+# For source = "env", before launching:
+#   export ALLSTAR_NODE=<your node number>     # must match [register].node_id
+#   export ALLSTAR_SECRET=<your node password>
+
+
+# ─── OPTIONAL SECTIONS (uncomment + fill if/when you want them) ───────────────
+
+# [audio] — capture/playback device selection; omit entirely for system defaults.
+# [audio]
+# input  = "USB"     # substring match on the input device name
+# output = "USB"     # substring match on the output device name
+
+# [announce] — voice/CW announcements (not needed for registration bring-up).
+# [announce]
+# enabled                  = true
+# sounds_dir               = "/etc/iaxnode/sounds"
+# mixunder_default_gain_db = -12.0
+# id_interval_secs         = 600        # periodic station ID every N seconds (omit/0 = off)
+# id_mode                  = "cw"       # "cw" (Morse) or "tts"
+# cw_wpm                   = 20
+# cw_tone_hz               = 800.0
+# cw_keys_when_idle        = true       # key up to send a CW ID when the link is idle
+#
+# [announce.tts]
+# enabled    = true
+# binary     = "piper"
+# voice      = "/etc/iaxnode/voices/en_US.onnx"
+# timeout_ms = 4000
+#
+# Per-event announcements. <name> ∈ incoming_call | hangup | registered | register_failed | answered
+# [announce.events.incoming_call]
+# enabled     = true
+# destination = "to_air"     # "to_air" or "to_monitor"
+
+# ─── ACTIVE announcement config (iax-c4ea on-join greeting via piper/cori) ────
+[announce]
+enabled       = true
+id_mode       = "off"     # no periodic station ID — just the join greeting
+join_template = "Connected to node {server-node-number}"   # {server-node-number} → "7 7 7 7 7"
+
+[announce.tts]
+enabled    = true
+binary     = "/Users/rob/.local/bin/piper"
+voice      = "/Users/rob/.local/share/piper/voices/en_GB-cori-medium.onnx"
+timeout_ms = 5000
+gain_db    = -10.5    # cori renders hot; attenuate the join greeting (negative = quieter)
+
+[announce.events]
+answered = { enabled = true, destination = "to_air" }   # the join greeting

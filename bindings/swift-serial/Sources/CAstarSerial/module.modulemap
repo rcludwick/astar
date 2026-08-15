@@ -1,0 +1,4 @@
+module CAstarSerial {
+    umbrella header "shim.h"
+    export *
+}

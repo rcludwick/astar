@@ -1,0 +1,28 @@
+[package]
+name = "astar-conformance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Asterisk-in-Docker conformance harness and pcap fixtures."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+astar-iax-core = { path = "../astar-iax-core" }
+pcap-parser.workspace = true
+smallvec.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[[example]]
+name = "gen_synthetic_pcap"
+path = "examples/gen_synthetic_pcap.rs"
+
+[[example]]
+name = "harness"
+path = "examples/harness.rs"

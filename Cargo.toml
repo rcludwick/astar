@@ -1,0 +1,75 @@
+[workspace]
+resolver = "2"
+members = [
+    "vendor/ambe-thumbdv",
+    "crates/astar-iax-core",
+    "crates/astar-codec",
+    "crates/astar-audio",
+    "crates/astar-iax",
+    "crates/astar-sys",
+    "crates/astar-conformance",
+    "crates/astar-console",
+    "crates/astar-asl3",
+    "crates/astar-ptt",
+    "crates/astar-station",
+    "crates/astar-inspect",
+    "crates/astar-serial-sys",
+    "crates/astar-cli",
+    "crates/astar-server",
+    "crates/astar-wireguard",
+    "crates/astar-m17",
+    "crates/astar-dstar",
+    "apps/gui",
+]
+exclude = [
+    # cargo-fuzz scaffold; built with nightly + libFuzzer, not part of the
+    # stable workspace build.
+    "fuzz",
+]
+
+[workspace.package]
+version = "0.1.0-beta"
+edition = "2024"
+# Real floor, verified against the committed Cargo.lock: apps/gui's graph pulls
+# font-types 1.89 (and iced/wgpu/image 1.88, zbus 1.87). The engine crates alone
+# — astar-station, astar-server, astar-cli, astar-sys, astar-console — need only
+# 1.86 (icu_normalizer, via url/ureq). Declared workspace-wide at the higher of
+# the two so `cargo build --workspace` on a minimum toolchain cannot fail.
+rust-version = "1.89"
+license = "AGPL-3.0-only"
+repository = "https://github.com/rcludwick/astar"
+authors = ["Rob Ludwick <rcludw@gmail.com>"]
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[workspace.dependencies]
+bitflags = "2"
+bytes = "1"
+codec2 = "0.3"
+cpal = "0.15"
+libloading = "0.8"
+md-5 = "0.10"
+mio = { version = "1", features = ["net", "os-poll"] }
+pcap-parser = "0.17"
+rand = "0.8"
+rubato = "0.16"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smallvec = "1"
+thiserror = "2"
+tracing = "0.1"
+zeroize = { version = "1", features = ["derive"] }
+boringtun = "0.6"
+base64 = "0.22"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

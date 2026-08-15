@@ -1,0 +1,18 @@
+[package]
+name = "astar-asl3"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "AllStarLink (ASL3) service layer: web-transceiver token minting and node directory resolution"
+
+[dependencies]
+ureq = "2"
+
+[dev-dependencies]
+tiny_http = "0.12"
+
+[lints]
+workspace = true

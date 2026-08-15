@@ -1,0 +1,18 @@
+[package]
+name = "astar-m17"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "M17 digital-voice protocol primitives (callsign addressing, CRC-16/M17, IP framing, a client session FSM) plus an mrefd-compatible loopback/parrot reflector (UDP I/O)."
+
+[lints]
+workspace = true
+
+[dependencies]
+# StreamID generation for parrot-mode playback (iax-91f4): a fresh random
+# StreamID per echoed transmission. Already a workspace dependency used the
+# same way by astar-console's M17 TX path.
+rand.workspace = true

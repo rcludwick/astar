@@ -1,0 +1,13 @@
+# Reorder: frame 40 arrives after frame 60. Buffer should sort by ts.
+config 0 1000 0 40
+put 20  0  20 voice 00
+put 40  20 20 voice 01
+put 80  60 20 voice 03
+put 70  40 20 voice 02
+put 100 80 20 voice 04
+get 0   20
+get 20  20
+get 40  20
+get 60  20
+get 80  20
+get 100 20

@@ -1,0 +1,30 @@
+[package]
+name = "astar-ptt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Pluggable hardware PTT backends (UCI150 serial, CM108 HID) with shared debounce/keying logic"
+
+[features]
+default = ["serial-tty"]
+# Modem-control PTT over the OS tty (/dev/cu.*, /dev/ttyUSB*, COM*). Needs the
+# CH34x dext on macOS.
+serial-tty = ["dep:serialport"]
+# Raw-USB modem-control PTT over IOKit/nusb (no tty, no dext). Sandbox/MAS- and
+# iOS-eligible; proven by the iax-ceba spike. See uci150_usb.
+serial-usb = ["dep:nusb"]
+
+[dependencies]
+serialport = { version = "4", optional = true }
+# 0.2.5 ships the control_in leak fix we vendored (iax-c683 -> upstream #216).
+nusb = { version = "0.2.5", optional = true }
+
+[[example]]
+name = "uci150_usb_ptt"
+required-features = ["serial-usb"]
+
+[lints]
+workspace = true

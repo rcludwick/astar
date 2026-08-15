@@ -1,0 +1,18 @@
+[package]
+name = "astar-wireguard"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Userspace WireGuard link transport for the astar engine (boringtun, no TUN)."
+
+[lints]
+workspace = true
+
+[dependencies]
+boringtun = { workspace = true }
+base64 = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

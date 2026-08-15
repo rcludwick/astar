@@ -1,0 +1,104 @@
+# XcodeGen project spec for astar — the source of truth for the Xcode project.
+# Regenerate the (gitignored) astar.xcodeproj with:  xcodegen generate
+#
+# One multiplatform app target (macOS + iOS) sharing all SwiftUI sources.
+# Requires full Xcode to build/run (Command Line Tools alone are not enough).
+name: astar
+options:
+  bundleIdPrefix: com.aj7hr
+  createIntermediateGroups: true
+  deploymentTarget:
+    macOS: "13.0"   # MenuBarExtra requires macOS 13+
+    iOS: "16.0"
+  groupSortPosition: top
+
+# Local SwiftPM packages, all in this repo — nothing is vendored across repos
+# any more. AstarStation/AstarSerial are the engine's own Swift bindings under
+# bindings/; build their xcframeworks with `just xcframework` before building
+# the app (Tools/build.sh checks and tells you).
+packages:
+  AstarStation:
+    path: ../../bindings/swift
+  # Serial PTT (UCI150) binding — macOS-only (links IOKit for USB serial
+  # enumeration). Scoped to the macOS target's dependency below; the iOS target
+  # never links it.
+  AstarSerial:
+    path: ../../bindings/swift-serial
+  AstarCore:
+    path: Packages/AstarCore
+
+settings:
+  base:
+    # The one declaration of the user-facing version. XcodeGen copies it into
+    # the generated Info.plist as CFBundleShortVersionString, which the popover
+    # footer reads at runtime (MenuPopover.appVersion) — so there is no second
+    # copy to drift. The Rust workspace spells the same release "0.1.0-beta"
+    # in the root Cargo.toml because Cargo requires SemVer's hyphenated
+    # pre-release form; Apple's MARKETING_VERSION is a free-form string and
+    # takes the human spelling. Bump both together.
+    # (App Store submission would demand a purely numeric n.n.n here; nothing
+    # is submitted or notarised today — build-from-source only.)
+    MARKETING_VERSION: "0.1.0beta"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    GENERATE_INFOPLIST_FILE: "YES"
+    ENABLE_PREVIEWS: "YES"
+    # astar.xcframework ships an arm64-only iOS-simulator slice
+    # (Apple-Silicon dev), so exclude x86_64 for simulator builds.
+    "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
+    # No signing team yet — set DEVELOPMENT_TEAM when wiring real builds.
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  astar:
+    type: application
+    platform: [macOS, iOS]
+    dependencies:
+      - package: AstarStation
+      - package: AstarCore
+      # AstarSerial is macOS-only (IOKit). For this multiplatform target XcodeGen
+      # generates per-platform targets (astar_macOS / astar_iOS); `platforms:
+      # [macOS]` conditionally links this dependency into ONLY the macOS target
+      # so the iOS build never references the IOKit-linked, macOS-only serial
+      # xcframework (which has no iOS slice).
+      - package: AstarSerial
+        platforms: [macOS]
+    sources:
+      - path: Sources
+      - path: Resources
+    settings:
+      # XcodeGen does not filter settings by platform for a multiplatform
+      # target, so these live in base. Each is a no-op on the platform it does
+      # not apply to (iOS ignores LSUIElement; macOS ignores TARGETED_DEVICE_FAMILY
+      # and UILaunchScreen).
+      base:
+        PRODUCT_NAME: astar
+        PRODUCT_BUNDLE_IDENTIFIER: com.aj7hr.astar
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        INFOPLIST_KEY_CFBundleDisplayName: astar
+        # macOS menu-bar app: no Dock icon, no default window (UI is the MenuBarExtra).
+        INFOPLIST_KEY_LSUIElement: "YES"
+        INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
+        TARGETED_DEVICE_FAMILY: "1,2"   # iPhone + iPad (iOS)
+        # Audio app: the IAX engine captures the mic on a call.
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "astar uses the microphone to transmit on AllStar nodes."
+
+# Shared schemes (tracked in git) so `xcodebuild -scheme` and Xcode both find them.
+schemes:
+  astar (macOS):
+    build:
+      targets:
+        astar_macOS: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+  astar (iOS):
+    build:
+      targets:
+        astar_iOS: all
+    run:
+      config: Debug
+    archive:
+      config: Release

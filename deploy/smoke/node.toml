@@ -1,0 +1,38 @@
+# Local smoke-test config (iax-4703). NOT deployed. No [register] section on
+# purpose; control binds 0.0.0.0 so podman -p can reach it from the Mac.
+
+[listener]
+bind      = "0.0.0.0:4569"
+answer    = "auto"
+max_calls = 2
+auth      = "off"
+
+[bridge]
+mode                = "bridge"
+mix_minus           = true
+include_local_radio = false
+
+[control]
+bind = "0.0.0.0:8730"
+
+[secrets]
+source = "config"
+secret = "dummy"
+
+[announce]
+enabled       = true
+id_mode       = "off"
+join_template = "Connected to node {server-node-number}"
+
+[announce.tts]
+enabled    = true
+binary     = "/usr/local/bin/piper"
+voice      = "/usr/share/piper/voices/en_GB-cori-medium.onnx"
+timeout_ms = 5000
+gain_db    = -10.5
+
+[announce.events]
+answered = { enabled = true, destination = "to_air" }
+
+[audio]
+backend = "none"

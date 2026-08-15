@@ -1,0 +1,59 @@
+[package]
+name = "astar-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Command-line IAX2 client: register / dial / parrot with keyboard (stdin) PTT."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "astar-cli"
+path = "src/main.rs"
+
+[dependencies]
+astar-iax = { path = "../astar-iax", version = "0.1.0-beta" }
+astar-audio = { path = "../astar-audio", version = "0.1.0-beta" }
+astar-iax-core = { path = "../astar-iax-core", version = "0.1.0-beta" }
+astar-asl3 = { path = "../astar-asl3", version = "0.1.0-beta" }
+# D-Star `dstar-listen` subcommand (iax-a9d4 Task 7). All four crates are
+# optional and only pulled in by the `dstar` feature below — a plain `cargo
+# build`/`cargo test` (no explicit `--features dstar`) never touches the AMBE
+# vocoder's pinned `git` dependencies. `astar-station` is the driver
+# (`Station::dstar_connect`/`dstar_disconnect`/`dstar_state`); the other
+# three are named directly because `dstar_listen.rs` matches on their public
+# types (`DstarSnapshotState`, `LinkState`, `AmbeBackend`) — Rust only lets a
+# crate name types from its OWN `Cargo.toml` dependencies, not transitive
+# ones, even when (as here) `astar-station` already depends on all three
+# itself.
+astar-station = { path = "../astar-station", version = "0.1.0-beta", optional = true, default-features = false }
+astar-console = { path = "../astar-console", version = "0.1.0-beta", optional = true, default-features = false }
+astar-dstar = { path = "../astar-dstar", version = "0.1.0-beta", optional = true }
+astar-codec = { path = "../astar-codec", version = "0.1.0-beta", optional = true }
+# SIGINT/SIGTERM handling for `dstar-listen`'s clean-unlink-on-Ctrl-C
+# requirement (the `dial`/`parrot` commands instead read a `q`/EOF quit
+# command off stdin, which doesn't fit a mostly-silent RX-only listener).
+# Mirrors `astar-server`'s own use of this crate/feature.
+ctrlc = { version = "3", features = ["termination"], optional = true }
+
+[features]
+# D-Star (DExtra) receive-only listen mode (iax-a9d4 Task 7), OFF by
+# default — see the dependency comments above for why. D-Star is
+# hardware-only (iax-b3e7 M0): this pulls `astar-codec/ambe-hw` (the
+# `ThumbDV` USB dongle backend) — no software-codec fallback, no preference
+# knob. Verify with `cargo tree -p astar-cli` (no ambe-*) vs
+# `cargo tree -p astar-cli --features dstar` (`ambe-thumbdv` present).
+dstar = [
+    "dep:astar-station",
+    "astar-station/dstar",
+    "dep:astar-console",
+    "astar-console/dstar",
+    "dep:astar-dstar",
+    "dep:astar-codec",
+    "astar-codec/ambe-hw",
+    "dep:ctrlc",
+]

@@ -1,0 +1,29 @@
+[package]
+name = "astar-iax-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "IAX2 protocol framing and state machine — no I/O."
+
+[lints]
+workspace = true
+
+[dependencies]
+bitflags.workspace = true
+bytes.workspace = true
+md-5.workspace = true
+serde = { version = "1", features = ["derive"], optional = true }
+smallvec.workspace = true
+subtle = "2"
+thiserror.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+proptest = "1"
+
+[features]
+serde = ["dep:serde"]

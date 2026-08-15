@@ -1,0 +1,58 @@
+services:
+  asterisk:
+    image: andrius/asterisk:20
+    container_name: astar-test-asterisk
+    ports:
+      - "4569:4569/udp"
+    volumes:
+      - ./asterisk:/etc/asterisk:ro
+    command: ["asterisk", "-fvvvvvvv"]
+
+  tshark:
+    image: nicolaka/netshoot
+    network_mode: "service:asterisk"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./captures:/captures
+    profiles: [capture]
+    command:
+      - tshark
+      - "-i"
+      - any
+      - "-f"
+      - "udp port 4569"
+      - "-w"
+      - "/captures/active.pcap"
+
+  c_iaxclient:
+    build:
+      context: .
+      dockerfile: Dockerfile.c_iaxclient
+    container_name: astar-test-c-iaxclient
+    depends_on:
+      - asterisk
+    # Stay up so the orchestrator can `podman exec` per-scenario runs and
+    # the c-side tshark sidecar can join this netns. The container does
+    # nothing on its own; harness binary is invoked from outside.
+    entrypoint: ["sleep", "infinity"]
+    profiles: [c_client]
+
+  tshark_c:
+    image: nicolaka/netshoot
+    network_mode: "service:c_iaxclient"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - ./captures:/captures
+    profiles: [c_client]
+    command:
+      - tshark
+      - "-i"
+      - any
+      - "-f"
+      - "udp port 4569"
+      - "-w"
+      - "/captures/c-active.pcap"

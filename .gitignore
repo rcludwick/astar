@@ -1,0 +1,70 @@
+.worktrees/
+.DS_Store
+
+# ── Rust ─────────────────────────────────────────────────────────────────────
+target/
+
+# cargo-fuzz artifacts
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/
+
+# ── Swift / Xcode ────────────────────────────────────────────────────────────
+# Generated xcframeworks (large, regenerable): `just xcframework` builds both.
+bindings/swift/astar.xcframework/
+bindings/swift-serial/astarserial.xcframework/
+
+# XcodeGen output — generated from apps/macos/project.yml
+*.xcodeproj
+
+# Xcode / SwiftPM build artifacts
+DerivedData/
+build/
+.build/
+*.xcuserstate
+xcuserdata/
+.swiftpm/
+
+# ── app / gui scratch ────────────────────────────────────────────────────────
+# Iced client demo screenshots (regenerate with apps/gui/shots.sh)
+apps/gui/.shots/
+
+# ── docs ─────────────────────────────────────────────────────────────────────
+# Zensical's root-level build cache. Zensical drops a self-ignoring `.gitignore`
+# inside it, but that file is generated — relying on it alone means a tree built
+# by a version that stops writing it leaks the whole cache into `git status`.
+# Ignore it here too. (Site output + its cache under docs/ live in docs/.gitignore.)
+/.cache/
+
+# ── harness / tooling scratch ────────────────────────────────────────────────
+harness/asterisk_parity/captures/*.pcap
+harness/asterisk_parity/captures/*.pcapng
+deploy/out/
+deploy/sysroot-amd64/
+
+# Local harness secrets (HARNESS_PW etc.)
+.env
+
+# Local node daemon runtime config (machine-specific; secret-free but not a
+# deliverable)
+/node.toml
+
+rust_out
+.playwright-mcp/
+__pycache__/
+*.pyc
+
+# Superpowers SDD scratch (ledger, task briefs/reports) — not the deliverable
+.superpowers/
+
+# Tracker archive from the au/beads migration (local-only)
+docs/issues-archive.jsonl
+
+# Superpowers plans, specs, research and reviews — the working notes behind the
+# code. Kept on disk because the backlogs still cite them by path, but
+# local-only: they are process artefacts rather than a deliverable, and most of
+# them predate the merge, so they describe the old two-repo layout and its dead
+# crate names.
+docs/superpowers/
+docs/app/superpowers/

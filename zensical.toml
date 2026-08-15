@@ -1,0 +1,163 @@
+# ============================================================================
+# Zensical configuration for the astar documentation site.
+#
+# Zensical is the static site generator from the Material for MkDocs team.
+# This is TOML, not MkDocs' mkdocs.yml.
+#
+#   just docs         →  zensical serve   (http://localhost:8000, live reload)
+#   just docs-build   →  zensical build --clean --strict   (→ docs/.site)
+#
+# No install step is needed: the recipes run it through `uvx`. To pin it into a
+# virtualenv instead:  python3 -m venv .venv && . .venv/bin/activate
+#                      && pip install zensical
+# ============================================================================
+
+[project]
+
+site_name = "astar"
+site_description = "Native ham-radio client for AllStarLink, M17 and D-Star — a macOS menu-bar app, the astar-server node daemon, and the astar-lib engine they share."
+site_author = "Rob Ludwick"
+
+# Must carry the /astar/ sub-path: GitHub Pages serves the project site from
+# there, and instant navigation plus the 404 page resolve against it.
+site_url = "https://rcludwick.github.io/astar/"
+
+repo_url = "https://github.com/rcludwick/astar"
+repo_name = "rcludwick/astar"
+
+# Zensical's default edit_uri assumes a `master` branch; this repository's
+# default branch is `main`. Set explicitly so any "edit this page" link points
+# somewhere real.
+edit_uri = "edit/main/docs/site/"
+
+# The published site's Markdown lives in docs/site/. The rest of docs/ is
+# internal engineering material — backlog, design notes, plans, reviews — and
+# is deliberately NOT part of the site. Zensical has no exclude_docs key, so a
+# dedicated docs_dir is the only way to keep those pages unpublished.
+docs_dir = "docs/site"
+
+# Build output. Kept under docs/ (and ignored by docs/.gitignore) so a local
+# build can never leave an untracked directory at the repo root.
+site_dir = "docs/.site"
+
+# The version chip. `copyright` accepts raw HTML; astar.css styles the span.
+# Bump this in lockstep with MARKETING_VERSION in apps/macos/project.yml.
+copyright = "Copyright &copy; 2026 Rob Ludwick — AGPL-3.0-only &nbsp;<span class=\"astar-version\">v0.1.0beta</span>"
+
+extra_css = ["stylesheets/astar.css"]
+
+# Explicit navigation. Without it Zensical derives the nav from the directory
+# layout. Every path here must exist or `--strict` fails.
+nav = [
+  { "Home" = "index.md" },
+  { "Build from source" = [
+    "build/index.md",
+    "build/prerequisites.md",
+    "build/macos-app.md",
+    "build/engine.md",
+    "build/clients.md",
+    "build/server.md",
+    "build/verifying.md",
+  ] },
+  { "macOS app" = [
+    "macos/index.md",
+    "macos/hardware.md",
+    "macos/usage.md",
+  ] },
+  { "astar-server" = [
+    "server/index.md",
+    "server/configuration.md",
+    "server/control-api.md",
+  ] },
+  { "Protocol notes" = [
+    "reference/index.md",
+    "reference/app-rpt-text-commands.md",
+    "reference/web-transceiver-call-flow.md",
+  ] },
+  { "About" = [
+    "about/safety.md",
+    "about/license.md",
+  ] },
+]
+
+# ----------------------------------------------------------------------------
+# Theme
+# ----------------------------------------------------------------------------
+
+[project.theme]
+language = "en"
+
+# No Google Fonts request. astar.css then selects the native Apple system
+# stack (SF Pro / SF Mono) instead of Roboto.
+font = false
+
+logo = "images/logo.svg"
+favicon = "images/favicon.svg"
+
+features = [
+  "content.code.annotate",
+  "content.code.copy",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.instant.prefetch",
+  "navigation.sections",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "toc.follow",
+]
+# Note: `search.suggest` is NOT in this list — Zensical 0.0.53's theme bundle
+# does not implement it, and an unsupported feature is silently ignored rather
+# than reported, so listing it would only be misleading.
+
+# Dark only — no light/dark toggle, matching the app. `custom` tells the theme
+# to emit no colour rules at all and hands both brand colours to
+# docs/site/stylesheets/astar.css.
+[project.theme.palette]
+scheme = "slate"
+primary = "custom"
+accent = "custom"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/rcludwick/astar"
+name = "astar on GitHub"
+
+# ----------------------------------------------------------------------------
+# Markdown extensions
+# ----------------------------------------------------------------------------
+
+[project.markdown_extensions]
+abbr = {}
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+tables = {}
+toc = { permalink = true }
+
+"pymdownx.betterem" = {}
+"pymdownx.caret" = {}
+"pymdownx.details" = {}
+"pymdownx.inlinehilite" = {}
+"pymdownx.keys" = {}
+"pymdownx.magiclink" = {}
+"pymdownx.mark" = {}
+"pymdownx.smartsymbols" = {}
+"pymdownx.snippets" = {}
+"pymdownx.tilde" = {}
+
+"pymdownx.highlight" = { anchor_linenums = true, line_spans = "__span", pygments_lang_class = true }
+"pymdownx.tabbed" = { alternate_style = true, combine_header_slug = true }
+"pymdownx.tasklist" = { custom_checkbox = true }
+
+[project.markdown_extensions."pymdownx.emoji"]
+emoji_generator = "zensical.extensions.emoji.to_svg"
+emoji_index = "zensical.extensions.emoji.twemoji"
+
+[project.markdown_extensions."pymdownx.superfences"]
+custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
