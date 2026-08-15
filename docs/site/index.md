@@ -18,7 +18,19 @@ target. M17 is in the apps but capability-gated on a system `libcodec2`. See
 Other networks are in the tree at various stages and are **not** claimed as
 working. Treat any crate you find for one as work in progress, not a feature.
 
-[Build it from source](build/index.md){ .md-button .md-button--primary }
+[Download for macOS](https://github.com/rcludwick/astar/releases/latest){ .md-button .md-button--primary }
+[Build it from source](build/index.md){ .md-button }
+
+!!! info "About the download"
+
+    `astar.dmg` is signed with a Developer ID and notarized by Apple, so it opens
+    without a Gatekeeper warning. It is **Apple Silicon only** — a single `arm64`
+    slice — and needs **macOS 13 (Ventura) or later**. On an Intel Mac, build from
+    source. There is no Homebrew tap, no cask, and no App Store listing.
+
+    **M17 needs `brew install codec2`.** The app does not bundle `libcodec2` yet
+    (astar-8c4d), so M17 stays greyed out until a system copy is present.
+    AllStarLink needs nothing extra.
 
 ## Three surfaces, one engine
 
