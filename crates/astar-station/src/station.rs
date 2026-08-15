@@ -1206,6 +1206,21 @@ impl Station {
         // the FFI/header/Swift-binding layers (a bundled-dylib deployment via
         // `set_codec_dirs` must show available) otherwise silently breaks.
         snap.m17_available = self.m17_available();
+        // The mic monitor is a Station-level lane the console session knows
+        // nothing about, so with no active call `session.snapshot()` writes the
+        // -60 silence floor into every level field. That is right for TX and RX
+        // — there is no call to have levels — but wrong for the continuous mic
+        // INPUT level, which exists precisely to be metered with no call up: it
+        // is what the VOX calibration meter watches while you set a threshold.
+        // Without this the meter only ever moved mid-call.
+        //
+        // Guarded on there being no active call: a call's own routed mic wins,
+        // and nothing stops a call starting while the monitor is still open
+        // (`monitor_start` declines during a call, but not the reverse).
+        let call_active = self.session.lock().unwrap().is_active();
+        if let Some(db) = self.monitor_input_dbfs().filter(|_| !call_active) {
+            snap.input_level_db = db;
+        }
         snap
     }
 
@@ -1701,6 +1716,19 @@ impl Station {
     #[must_use]
     pub fn is_monitoring(&self) -> bool {
         self.monitor.lock().unwrap().is_some()
+    }
+
+    /// The monitor lane's continuous mic input level (dBFS), or `None` when not
+    /// monitoring. Companion to [`Station::mic_spectrum`]: same lane, scalar
+    /// level instead of bins. Drives the VOX calibration meter, which runs with
+    /// no call up.
+    #[must_use]
+    pub fn monitor_input_dbfs(&self) -> Option<f32> {
+        self.monitor
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(astar_audio::MicMonitor::input_dbfs)
     }
 
     /// Copy the live voice-band mic spectrum (iax-e73e) into `out` and return the

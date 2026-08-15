@@ -1,7 +1,13 @@
 # ci/ — pipeline helpers and runner prerequisites
 
-The pipeline is [`../.gitlab-ci.yml`](../.gitlab-ci.yml). This directory holds
-the scripts it calls, plus the operational facts you need before it can run.
+The working pipeline is [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml),
+which runs on the self-hosted IONOS box and is **`workflow_dispatch`-only** —
+see [Running CI](#running-ci) below. [`../.gitlab-ci.yml`](../.gitlab-ci.yml)
+describes the same gates for a GitLab runner that has never been registered;
+it is a design, not a running system.
+
+This directory holds the scripts both call, plus the operational facts behind
+them.
 
 | script | purpose |
 | --- | --- |
@@ -101,36 +107,109 @@ missing page fails.
 
 The GitLab `docs-site` job **builds** the site on every push. It does not
 publish. Publishing goes to GitHub Pages via
-[`../.github/workflows/docs-pages.yml`](../.github/workflows/docs-pages.yml),
-which is dormant (`workflow_dispatch` only) because Actions are off for
-billing. Both call `ci/build-docs.sh`, so the verified site and the published
-site are built by identical code.
+[`../.github/workflows/docs-pages.yml`](../.github/workflows/docs-pages.yml).
+Both call `ci/build-docs.sh`, so the verified site and the published site are
+built by identical code.
 
-Before the first publish, set repository Settings → Pages → Build and
-deployment → Source = "GitHub Actions". `site_url` already carries the
-`/astar/` project sub-path Pages serves from; a repository rename has to move
-with it.
+That workflow is **`workflow_dispatch` only — it does not fire on push.** After
+changing anything under `docs/site/`, publish by hand:
+
+```console
+$ gh workflow run docs-pages.yml --ref main
+```
+
+It builds with `--strict`, so a broken link fails the publish instead of
+shipping a half-built site. Pages is already configured (Settings → Pages →
+Source = "GitHub Actions"); the site is live at
+<https://rcludwick.github.io/astar/>. `site_url` in `zensical.toml` carries the
+`/astar/` project sub-path Pages serves from — a repository rename has to move
+with it or instant navigation and the 404 page resolve against the wrong
+origin.
+
+### Nothing was carried over from the pre-merge workflows
+
+The old `astar` and `iaxclient-rs` workflows were built around two separate
+private repos and are now actively wrong: the cross-repo checkouts
+(`CROSS_REPO_TOKEN`), the `repository_dispatch` fan-out (`DISPATCH_TOKEN`,
+`iaxclient-rs-updated`), and every crate and path name in them died with the
+merge. `ci.yml` was written fresh rather than salvaged.
+
+## Running CI
+
+CI runs in the **private** repo — see
+[Two repositories](#two-repositories-and-which-one-ci-belongs-to). From a
+checkout whose `origin` is `astar-private`:
+
+```console
+$ gh workflow run ci.yml -R rcludwick/astar-private                   # everything
+$ gh workflow run ci.yml -R rcludwick/astar-private -f run_gui=false  # skip the Iced job
+$ gh run watch -R rcludwick/astar-private
+```
+
+**It never runs by itself.** `ci.yml` has a single trigger,
+`workflow_dispatch`, so a job starts when a human asks for one and at no other
+time — not on push, not on a pull request, not on a schedule.
+
+Four jobs, all on `[self-hosted, ionos]`:
+
+| job | what it is | ~budget |
+| --- | --- | --- |
+| `guards` | the four scripts above | 10 min |
+| `rust` | `fmt --check`, `clippy -D warnings`, `cargo test --workspace --all-targets`, C-header drift | 45 min |
+| `docs` | `build-docs.sh`, i.e. the site with `--strict` | 15 min |
+| `gui-linux` | builds and tests `astar-gui`, then renders `--shot idle` under Xvfb and uploads the PNG | 60 min |
+
+`gui-linux` is skippable with `-f run_gui=false`: iced/wgpu is the heaviest
+thing in the tree and the box has 4 cores and 3 GB of RAM. That is also why the
+job pins `CARGO_BUILD_JOBS=2` — unbounded codegen parallelism OOMs the linker
+there.
+
+The runner image carries the toolchain (`rcludwick/gh-runners`,
+`runner/Containerfile`), so jobs install nothing except `cbindgen`, which is
+pinned to the version the drift check expects and cached in the container's
+`CARGO_HOME` after the first run. The X11 runtime libraries and `xvfb` that
+`gui-linux` needs were added to that image for this pipeline; the list mirrors
+`apps/gui/check-linux.sh`, and the two must stay in step.
+
+**`just` is deliberately not installed on the box**, so `ci.yml` spells the
+recipes out as cargo invocations. Keep them in step with the justfile by hand.
 
 If GitLab Pages is ever preferred instead, rename `docs-site` to `pages` and
 publish the output as a `public/` artifact. That is the whole change.
 
-## The decision nobody has made yet
+## Two repositories, and which one CI belongs to
+
+astar lives in two places, and the split is what makes self-hosted CI safe:
+
+| | | |
+| --- | --- | --- |
+| `rcludwick/astar-private` | **private** | development happens here; CI runs here; `origin` |
+| `rcludwick/astar` | **public** | release target, merged to from private; `public` |
 
 **A self-hosted runner must never be attached to a public repo.** Any pull
 request author would get arbitrary code execution on the IONOS build box and,
 for the macOS runners, on Rob's personal Mac. Both `gh-runners` READMEs say so
-in bold.
+in bold, and this repository went public on 2026-08-11, so it is not a
+hypothetical.
 
-This repo is AGPL-3.0, which strongly implies it will be published. GitHub
-Pages on a private repo also requires a paid plan, so publishing the docs
-points the same way. The moment the repo goes public:
+The private development repo resolves that: there are no outside contributors
+to defend against, only people who already have access, so the runner can live
+there and do real work. The public repo gets no self-hosted runner, ever.
+Verify:
 
-* detach the IONOS fleet and the Mac runner from it, and
-* move CI to hosted runners (free for public repos on GitHub; GitLab's free
-  shared-runner minutes are limited), or accept no CI.
+```console
+$ gh api repos/rcludwick/astar/actions/runners --jq .total_count   # must be 0
+```
 
-Keeping it private keeps the free self-hosted CI. That is Rob's call and it has
-not been made — nothing in this directory assumes either answer.
+Both workflow files exist in both repositories, because a release merge copies
+everything. Each is guarded on `github.repository` so it only does work where
+it belongs — `ci.yml` in private, `docs-pages.yml` in public — and reports a
+clean skip in the other. Without those guards, `runs-on: [self-hosted, ionos]`
+in the public repo would queue forever against a runner that does not exist,
+which reads as a hung box rather than a misconfiguration.
+
+The macOS and Swift gates are still run by hand on a Mac (`just ci-full`), in
+either repository. No runner anywhere covers them.
 
 ## Never in CI, under any trigger
 

@@ -7,12 +7,14 @@ import SwiftUI
 
 /// astar — a native AllStarLink client.
 ///
-/// On macOS, astar is a **menu-bar app**: it lives in the status bar (no Dock
-/// icon — see `LSUIElement` in project.yml). An AppKit `StatusItemController`
-/// (via `AppDelegate`) owns the status item; a left click shows/hides the main
-/// window (movable / hideable / closable) while a right click shows a quick
-/// status + audio/VOX + disconnect menu. The asterisk stays a live TX/RX/
-/// connected indicator. On iOS it is a standard windowed app.
+/// On macOS, astar is a **menu-bar app**: it lives in the status bar, and by
+/// default in the Dock as well (astar-7c31 — `LSUIElement` in project.yml keeps
+/// it launching as an accessory, and `DockPolicy.apply()` promotes it). An
+/// AppKit `StatusItemController` (via `AppDelegate`) owns the status item; a
+/// left click shows/hides the main window (movable / hideable / closable) while
+/// a right click shows a quick status + audio/VOX + disconnect menu and the
+/// `Show in Dock` toggle. The asterisk stays a live TX/RX/connected indicator.
+/// On iOS it is a standard windowed app.
 ///
 /// The app owns a single `CallSession` (au-e00f) — the observable view-model
 /// over the AstarStation poll loop — and shares it with the UI. The menu-bar
@@ -40,6 +42,26 @@ struct AstarApp: App {
 }
 
 #if os(macOS)
+    /// The one place that maps the stored "Show in Dock" preference onto AppKit's
+    /// activation policy (astar-7c31), shared by launch and the menu toggle so the
+    /// two cannot drift.
+    ///
+    /// Static, and deliberately not a method on `AppDelegate`: under
+    /// `@NSApplicationDelegateAdaptor`, `NSApp.delegate` is SwiftUI's own
+    /// `SwiftUI.AppDelegate` wrapper, *not* our `AppDelegate`. Reaching for it with
+    /// `NSApp.delegate as? AppDelegate` silently yields nil, which is how the
+    /// toggle came to save the preference and change nothing until relaunch.
+    ///
+    /// `LSUIElement: YES` stays in the Info.plist on purpose: the app launches as
+    /// an accessory and promotes itself here, so someone with the preference off
+    /// never sees a Dock icon flash.
+    enum DockPolicy {
+        static func apply() {
+            let presence = DockPresence(showInDock: DockPreference().load())
+            NSApp.setActivationPolicy(presence.showsInDock ? .regular : .accessory)
+        }
+    }
+
     /// Owns the long-lived `CallSession` + serial PTT source and stands up the
     /// menu-bar status item once the app finishes launching.
     @MainActor
@@ -65,6 +87,14 @@ struct AstarApp: App {
         // its Combine subscriptions are what does the actual work.
         private var announcer: AccessibilityAnnouncer?
 
+        /// Promote the app out of `LSUIElement` accessory mode when "Show in Dock"
+        /// is on (astar-7c31). The Info.plist keeps `LSUIElement: YES` on purpose:
+        /// the app always *launches* as an accessory and promotes itself here, so
+        /// someone with the preference off never sees a Dock icon flash. Removing
+        /// LSUIElement and demoting instead would produce exactly that flash.
+        ///
+        /// One apply path for both launch and the menu toggle, so the two cannot
+        /// drift.
         func applicationDidFinishLaunching(_ notification: Notification) {
             setups.attach(session: session, serial: serial)
             statusController = StatusItemController(
@@ -80,6 +110,22 @@ struct AstarApp: App {
             // (astar-68a6) so the engine + the inactive fade use it before the first
             // spectrum renders. Re-asserted later whenever a new analyzer appears.
             session.setSpectrumDecay(Float(SpectrumDecayPref.current()))
+            // Last: the status item is up, so the Dock icon (if enabled) appears
+            // together with the menu-bar asterisk rather than ahead of it.
+            DockPolicy.apply()
+        }
+
+        /// Clicking the Dock icon opens the main window (astar-7c31). AppKit only
+        /// calls this when the app is already running; the return value tells AppKit
+        /// whether it should do its own default reopen handling, and `false` keeps
+        /// it out of the way since we have handled it.
+        func applicationShouldHandleReopen(
+            _ sender: NSApplication, hasVisibleWindows: Bool
+        ) -> Bool {
+            if DockPresence.shouldShowWindowOnReopen(hasVisibleWindows: hasVisibleWindows) {
+                statusController?.showWindow()
+            }
+            return false
         }
     }
 #endif

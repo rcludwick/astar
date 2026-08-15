@@ -4,20 +4,33 @@ icon: lucide/radio-tower
 
 # astar
 
-A native ham-radio digital-voice client and node — **AllStarLink (IAX2)**, **M17**
-and **D-Star** — built on one Rust engine with native front-ends.
+A native ham-radio digital-voice client and node — **AllStarLink (IAX2)** and
+**M17** — built on one Rust engine with native front-ends.
 
 astar dials nodes and reflectors as a client: audio, push-to-talk, DTMF, live
 meters, and support for the generic class of USB radio interfaces (serial PTT
 plus USB audio). The same engine also runs headless as an always-on node daemon.
 
-Those three networks are **not equally far along in the clients**. AllStarLink
-is the primary target. M17 is in the apps but capability-gated on a system
-`libcodec2`. D-Star is engine and CLI only — neither GUI has a D-Star entry in
-its network picker yet, and it needs a ThumbDV / DV3000 dongle either way. See
+The two networks are **not equally far along**. AllStarLink is the primary
+target. M17 is in the apps but capability-gated on a system `libcodec2`. See
 [The macOS app](macos/index.md).
 
-[Build it from source](build/index.md){ .md-button .md-button--primary }
+Other networks are in the tree at various stages and are **not** claimed as
+working. Treat any crate you find for one as work in progress, not a feature.
+
+[Download for macOS](https://github.com/rcludwick/astar/releases/latest){ .md-button .md-button--primary }
+[Build it from source](build/index.md){ .md-button }
+
+!!! info "About the download"
+
+    `astar.dmg` is signed with a Developer ID and notarized by Apple, so it opens
+    without a Gatekeeper warning. It is **Apple Silicon only** — a single `arm64`
+    slice — and needs **macOS 13 (Ventura) or later**. On an Intel Mac, build from
+    source. There is no Homebrew tap, no cask, and no App Store listing.
+
+    **M17 needs `brew install codec2`.** The app does not bundle `libcodec2` yet
+    (astar-8c4d), so M17 stays greyed out until a system copy is present.
+    AllStarLink needs nothing extra.
 
 ## Three surfaces, one engine
 
@@ -25,8 +38,8 @@ its network picker yet, and it needs a ThumbDV / DV3000 dongle either way. See
 
 -   __[The macOS app](macos/index.md)__
 
-    A SwiftUI **menu-bar** client: no Dock icon, no main window, a **rainbow
-    asterisk** in the menu bar that opens a dial popover. macOS 13 or later.
+    A SwiftUI **menu-bar** client: a **rainbow asterisk** in the menu bar that
+    opens a dial popover, plus a Dock icon you can turn off. macOS 13 or later.
     [Build it from source](build/macos-app.md).
 
 -   __[astar-server](server/index.md)__

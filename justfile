@@ -201,6 +201,15 @@ docs-build:
 
 # ── CI mirrors ──────────────────────────────────────────────────────────────
 
+# Deliberately NOT part of `just ci`: it needs the network to fetch the
+# advisory database, and the everyday gate should stay runnable offline and
+# answer only for code in this tree. CI runs it as its own job.
+#
+# RustSec advisory scan over Cargo.lock.
+audit:
+    @command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked
+    cargo audit --deny warnings
+
 # The everyday Rust gate: format, lint, test, header-drift.
 ci: fmt-check clippy test cbindgen
     @echo "✓ ci: fmt + clippy + test + cbindgen passed"

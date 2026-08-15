@@ -14,6 +14,29 @@ tracker's final state survives in git history at the migration commit.
 
 ## Open items (88)
 
+### iax-5d90 — Bump boringtun off release-candidate crypto (curve25519-dalek advisory)
+*P3 low · chore · labels: security, wireguard, cx:1*
+
+`cargo audit` flags RUSTSEC-2024-0344 (timing variability in
+`curve25519-dalek`'s `Scalar29::sub`/`Scalar52::sub`) against the shipped
+macOS binary. The path is
+`boringtun 0.6.0 -> x25519-dalek 2.0.0-rc.3 -> curve25519-dalek 4.0.0-rc.3`,
+via `astar-wireguard`, which `astar-console` and `astar-iax` depend on
+unconditionally — so the code ships whether or not a WireGuard transport is
+ever used. Note those are release *candidates* from 2023, which is its own
+reason to move.
+
+`cargo update` cannot fix it: the rc versions are pinned by boringtun 0.6.0's
+own requirements. **boringtun 0.7.1 exists** — bump and re-audit.
+
+Deliberately not blocking the 0.1.1beta release: a timing side-channel needs an
+attacker able to measure precisely against a transport that is beta and
+largely unexercised. Revisit before anything is described as production-ready.
+
+Also outstanding from the same scan, all lower: `ring 0.16.20` unmaintained
+(NOT in the macOS app's graph), the gtk-rs GTK3 stack unmaintained (Linux
+client only), and `lru`/`glib` unsoundness warnings.
+
 ### iax-c7e1 — Finish removing the CH34x dext: ONE HARDWARE STEP LEFT
 *P1 high · task · labels: ptt, hardware, macos, docs, cx:1*
 
@@ -176,21 +199,6 @@ as a warning).
 Verify on air (Rob keys, never an agent): confirm the reflector dashboard
 shows the transmission attributed to AJ7HR on the right module. Record the
 result in `docs/research/research-dstar.md` §8 alongside the RX findings.
-
-### iax-f7a3 — M17 parrot playback pacing test is flaky
-*P3 low · bug · labels: m17, test, cx:1*
-
-`astar-m17`'s `parrot_playback_packets_are_paced_34_to_48ms_apart_over_many_packets`
-asserts every inter-packet gap lands in a 34-48 ms band around the 40 ms
-target. On a loaded machine it fails routinely (observed 48.2 / 49.1 / 53.2
-/ 62.3 / 72.4 ms) — on master as well as on branches, so it is not caused by
-any current work, but it makes `cargo test --workspace` unreliable as a
-merge gate.
-
-Fix: assert the property that actually matters (mean cadence, or a
-percentile bound, or a generous ceiling that still catches a genuinely
-broken pacer) instead of a hard per-gap window that OS scheduling jitter
-alone can breach.
 
 ### iax-3a5c — Loopback reflector should mimic real reflector laxity (zero header CRC)
 *P2 medium · task · labels: dstar, test, cx:1*

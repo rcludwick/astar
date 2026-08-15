@@ -6,12 +6,19 @@
 
 <p align="center">
   A native ham-radio digital-voice client and node —
-  <strong>AllStarLink (IAX2)</strong>, <strong>M17</strong> and <strong>D-Star</strong>,
+  <strong>AllStarLink (IAX2)</strong> and <strong>M17</strong>,
   in one Rust engine with native front-ends.
 </p>
 
 <p align="center">
-  <strong>0.1.0beta</strong> · AGPL-3.0-only · macOS today, Windows and Linux in progress
+  <strong>0.1.1beta</strong> (<a href="CHANGELOG.md">changelog</a>) · AGPL-3.0-only · macOS today, Windows and Linux in progress
+</p>
+
+<p align="center">
+  <a href="https://rcludwick.github.io/astar/"><strong>Documentation</strong></a> ·
+  <a href="https://rcludwick.github.io/astar/build/">Build from source</a> ·
+  <a href="https://rcludwick.github.io/astar/macos/hardware/">Hardware</a> ·
+  <a href="https://rcludwick.github.io/astar/server/">astar-server</a>
 </p>
 
 ---
@@ -21,13 +28,22 @@ meters — with support for generic USB radio interfaces (serial PTT + USB audio
 the AllScan UCI150 is the reference device). It also runs as an always-on node
 daemon.
 
-> ### Nothing here has been released yet
+> ### First release — `0.1.1beta`
 >
-> There is no Homebrew tap, no cask, no App Store listing, no notarized
-> download, and no published binary of any kind. **The only way to run astar
-> today is to build it from this repository.** See [Building](#building).
+> A signed and notarized **`astar.dmg`** is on the
+> [releases page](https://github.com/rcludwick/astar/releases/latest). It opens
+> on any Mac without the Gatekeeper warning — no right-click-Open dance, no
+> `xattr` incantation.
 >
-> This is a `0.1.0beta` of a project that has never shipped. Expect rough
+> **Apple Silicon only, macOS 13 (Ventura) or later.** The image carries a
+> single `arm64` slice; an Intel Mac has to [build from source](#building).
+> There is still no Homebrew tap, no cask, and no App Store listing.
+>
+> **M17 needs `brew install codec2`.** The app does not bundle `libcodec2` yet,
+> so M17 stays unavailable until a system copy is present. AllStarLink works out
+> of the box.
+>
+> This is a beta of a project that has only just started shipping. Expect rough
 > edges, expect things to move.
 
 ---
@@ -37,26 +53,32 @@ daemon.
 Be aware that "the engine supports it" and "you can click it in the app" are
 two different things right now. This is the honest state:
 
-| | AllStar (IAX2) | M17 | D-Star |
-|---|---|---|---|
-| **Engine** (`crates/`) | yes | yes | yes (TX + RX) |
-| **macOS app** (`apps/macos`) | yes | yes¹ | **not yet in the UI** |
-| **Iced client** (`apps/gui`) | yes | yes¹ | **not yet in the UI** |
-| **CLI** (`astar-cli`) | yes | yes | yes — `dstar-listen` |
+| | AllStar (IAX2) | M17 |
+|---|---|---|
+| **Engine** (`crates/`) | yes | yes |
+| **macOS app** (`apps/macos`) | yes | yes¹ |
+| **Iced client** (`apps/gui`) | yes | yes¹ |
+| **CLI** (`astar-cli`) | yes | **no** — IAX2 only |
 
 ¹ M17 is capability-gated: the client shows it only when the running build can
 actually place the call. On macOS that currently means a system `libcodec2` —
 see [M17 and Codec 2](#m17-and-codec-2).
 
-**D-Star reaches the air only through `astar-cli` today.** The engine, the C
-ABI and the Swift binding all carry it, and D-Star is compiled in by default,
-but neither GUI has a D-Star entry in its network picker yet. Wiring it up is
-tracked in the backlog.
+M17 is **compiled in by default** everywhere it is implemented — the engine,
+the C ABI the macOS app links, the Iced client and the node daemon all get it
+without a feature flag, and a test pins that so it cannot regress silently.
+`astar-cli` is the exception: it sits directly on `astar-iax` and has no M17
+subcommand at all.
+
+Other networks are in the tree at various stages and are **not** claimed as
+working yet. You will find crates for them; treat their presence as work in
+progress rather than a feature list.
 
 ### Platform state
 
-* **macOS** — the primary front-end. A menu-bar app (`MenuBarExtra`), no Dock
-  icon, no main window. This is the one that gets the design attention.
+* **macOS** — the primary front-end. A menu-bar app with a real main window and,
+  by default, a Dock icon you can switch off. This is the one that gets the
+  design attention.
 * **Linux** — the Iced client builds, tests and runs headless in CI-style
   container runs (`just gui-linux`), and its rendering is verified from
   screenshots. It has not had a sit-down-and-use-it pass on real hardware.
@@ -94,7 +116,7 @@ native UI rather than a shared web shell.
 | `astar-iax` | The high-level IAX2 client stack over `astar-iax-core`. |
 | `astar-codec` | G.711 / GSM / Speex / iLBC, Codec 2, plus the AMBE (ThumbDV) backend. |
 | `astar-audio` | cpal device I/O, network-agnostic. |
-| `astar-station` | The multi-network station facade (IAX2 + M17 + D-Star). |
+| `astar-station` | The multi-network station facade the clients drive. |
 | `astar-console` | Front-end-agnostic operator-console core. |
 | `astar-asl3` / `astar-m17` / `astar-dstar` | Per-network service layers. |
 | `astar-ptt` | Pluggable PTT backends (serial, HID, VOX, UI). |
@@ -154,9 +176,11 @@ xcframeworks are large and fully regenerable, so they are gitignored; `just
 app` and `just run` hard-fail with instructions when they are missing, rather
 than silently linking some host-only fallback.
 
-After launch, look for the **rainbow asterisk** in the menu bar — astar has no
-Dock icon and no main window. Left-click opens the dial popover. The running
-version (`0.1.0beta`) is shown in the popover footer, so you can always tell
+After launch, look for the **rainbow asterisk** in the menu bar — and, unless you
+turn it off, an astar icon in the Dock. Left-click the asterisk opens the dial
+popover; `Show in Dock` in the right-click menu drops back to menu-bar-only. The
+running
+version (`0.1.1beta`) is shown in the popover footer, so you can always tell
 what you are actually running.
 
 ### A local .dmg
@@ -165,10 +189,13 @@ what you are actually running.
 just dmg            # → apps/macos/build/astar.dmg
 ```
 
-This is a **local, unsigned, un-notarized** disk image for your own machine.
-It is not a release, and it is not something to hand to anyone else: macOS
-Gatekeeper will refuse it on any other Mac. astar publishes no binaries
-anywhere.
+What this produces depends on your keychain, and the script says which you got:
+**ad-hoc** with no Developer ID identity present (fine for your own machines,
+refused everywhere else), **signed** if one is found, or **signed + notarized +
+stapled** if a `notarytool` keychain profile is also configured — the last being
+what the [published release](https://github.com/rcludwick/astar/releases/latest)
+is built with. Nothing is hard-coded to one developer; see
+[the build guide](https://rcludwick.github.io/astar/build/macos-app/).
 
 ### The Windows / Linux client
 
@@ -216,19 +243,6 @@ On the UCI150, the PTT DEST switch selects CTS.
 All serial I/O runs on a Rust-side worker thread, so a wedged USB transfer
 surfaces as a "serial device error", never a UI hang.
 
-### D-Star needs a ThumbDV — there is no software vocoder
-
-D-Star is **hardware-only**. The vocoder is a DVSI **ThumbDV / DV3000** USB
-dongle, driven by `vendor/ambe-thumbdv`. There is no software AMBE codec in
-this repository, no bundled one, and no fallback — both directions, encode and
-decode, go through the dongle. Without one, D-Star is simply unavailable and
-says so.
-
-`IAX_THUMBDV_PORT` pins *which* dongle to use when several are attached. It
-only ever **narrows** the FTDI VID/PID scan; it can never point the opener at
-an arbitrary serial port. That restriction is deliberate and load-bearing:
-opening a USB radio interface's tty asserts RTS, which keys a transmitter.
-
 ### M17 and Codec 2
 
 M17 needs Codec 2. The engine looks for a system `libcodec2` at runtime
@@ -248,8 +262,12 @@ Connecting to live nodes and keying PTT are deliberate human actions. No
 automated process in this repository may key a transmitter, connect to a live
 reflector or node, or reach anything outside `127.0.0.1`; the
 hardware-touching test suites skip unless `IAX_THUMBDV_TESTS=1` is set
-explicitly. The node daemon's remote-key endpoint refuses to key while a
-D-Star session is active.
+explicitly.
+
+`IAX_THUMBDV_PORT`, which selects among attached vocoder dongles, only ever
+**narrows** the USB VID/PID scan — it can never point the opener at an
+arbitrary serial port. That restriction is load-bearing rather than tidy:
+opening a USB radio interface's tty asserts RTS, and RTS keys a transmitter.
 
 Operating astar on the air requires an appropriate amateur radio licence for
 your jurisdiction, and you are responsible for what your station transmits.

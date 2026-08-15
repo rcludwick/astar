@@ -31,7 +31,7 @@ default = ["dstar"]
 dstar = ["astar-station/dstar"]
 
 [dependencies]
-astar-station = { path = "../astar-station", version = "0.1.0-beta" }
+astar-station = { path = "../astar-station", version = "0.1.1-beta" }
 # Serialize the secret-free MicProfile to/from JSON for the characterize /
 # set-mic-profile FFI (iax-5fb6 / iax-2095).
 serde_json.workspace = true
@@ -42,7 +42,7 @@ zeroize.workspace = true
 [dev-dependencies]
 # The FFI tests build the real station; the test-backend feature keeps any
 # device-enumeration path hardware-free.
-astar-audio = { path = "../astar-audio", version = "0.1.0-beta", features = [
+astar-audio = { path = "../astar-audio", version = "0.1.1-beta", features = [
     "test-backend",
 ] }
 

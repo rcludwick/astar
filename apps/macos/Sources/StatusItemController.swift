@@ -124,14 +124,22 @@
             return w
         }
 
-        /// Show (and focus) or hide the window. Since astar is a menu-bar (accessory)
-        /// app, showing must also activate so the window comes to the front.
+        /// Show and focus the window, never hide it. The Dock-icon reopen path
+        /// (astar-7c31) uses this rather than `toggleWindow()`: a second Dock click
+        /// hiding the window is behaviour no Mac app has.
+        func showWindow() {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+        }
+
+        /// Show (and focus) or hide the window. Since astar can be a menu-bar
+        /// (accessory) app, showing must also activate so the window comes to the
+        /// front.
         private func toggleWindow() {
             if window.isVisible {
                 window.orderOut(nil)
             } else {
-                NSApp.activate(ignoringOtherApps: true)
-                window.makeKeyAndOrderFront(nil)
+                showWindow()
             }
         }
 
@@ -280,6 +288,9 @@
                 item(
                     window.isVisible ? "Hide astar Window" : "Show astar Window",
                     #selector(openAction)))
+            menu.addItem(
+                toggleItem(
+                    "Show in Dock", DockPreference().load(), #selector(toggleDockAction)))
             menu.addItem(item("Quit astar", #selector(quitAction), key: "q"))
             return menu
         }
@@ -349,6 +360,14 @@
         @objc private func toggleNoiseReduction() { session.toggleNoiseReduction() }
         @objc private func toggleVoxAction() { session.setVoxEnabled(!session.voxEnabled) }
         @objc private func toggleListenOnlyAction() { session.setTxDisabled(!session.txDisabled) }
+
+        /// Flip "Show in Dock" (astar-7c31), then re-apply through `DockPolicy` —
+        /// the same path launch uses, so the two cannot drift.
+        @objc private func toggleDockAction() {
+            let pref = DockPreference()
+            pref.save(!pref.load())
+            DockPolicy.apply()
+        }
 
         @objc private func quitAction() { NSApp.terminate(nil) }
     }

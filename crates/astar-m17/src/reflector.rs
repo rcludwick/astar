@@ -742,6 +742,95 @@ mod tests {
     use super::*;
     use crate::address::encode_callsign;
 
+    // --- iax-f7a3: the parrot pacing deadline, tested deterministically ---
+    //
+    // These replace a wall-clock assertion on observed inter-packet arrival
+    // gaps. That test measured the machine as much as the code: it failed CI at
+    // 48.03ms against a 48ms ceiling (27µs over), and again at 44.00035ms
+    // against 44ms even running alone on an idle box — the runner simply paces
+    // on a coarser grid than the development Mac. The property that actually
+    // regressed is arithmetic, so it is tested as arithmetic.
+
+    fn addr(n: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], n))
+    }
+
+    fn playback_due_at(next_send: Instant) -> Playback {
+        Playback {
+            dst: [0; 6],
+            src: [0; 6],
+            stream_id: 0,
+            next_frame: 0,
+            payloads: VecDeque::new(),
+            next_send,
+        }
+    }
+
+    #[test]
+    fn no_playbacks_polls_at_the_normal_cadence() {
+        assert_eq!(
+            next_read_timeout(&HashMap::new(), Instant::now()),
+            SOCKET_POLL_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn a_pending_playback_shortens_the_read_timeout_to_its_deadline() {
+        // THE regression guard. The run-loop used a fixed 50ms socket read
+        // timeout, so a 40ms pacing deadline could not be met and playback
+        // drifted to a measured ~50.9ms per packet. With a deadline 40ms out,
+        // the timeout must be that 40ms — not the full poll.
+        let now = Instant::now();
+        let mut playbacks = HashMap::new();
+        playbacks.insert(addr(1), playback_due_at(now + PARROT_PACE_INTERVAL));
+        let timeout = next_read_timeout(&playbacks, now);
+        assert_eq!(timeout, PARROT_PACE_INTERVAL);
+        assert!(
+            timeout < SOCKET_POLL_TIMEOUT,
+            "a pending playback must not wait out the full poll cadence: {timeout:?}"
+        );
+    }
+
+    #[test]
+    fn the_earliest_deadline_across_playbacks_wins() {
+        // Several clients parroting at once: the loop must wake for whichever
+        // is due first, or the others starve that one.
+        let now = Instant::now();
+        let mut playbacks = HashMap::new();
+        playbacks.insert(addr(1), playback_due_at(now + Duration::from_millis(30)));
+        playbacks.insert(addr(2), playback_due_at(now + Duration::from_millis(10)));
+        playbacks.insert(addr(3), playback_due_at(now + Duration::from_millis(45)));
+        assert_eq!(
+            next_read_timeout(&playbacks, now),
+            Duration::from_millis(10)
+        );
+    }
+
+    #[test]
+    fn an_overdue_playback_floors_at_the_minimum_and_never_zero() {
+        // A zero-duration set_read_timeout is rejected by the OS, and would
+        // busy-spin the loop besides.
+        let now = Instant::now();
+        let mut playbacks = HashMap::new();
+        let overdue = now
+            .checked_sub(Duration::from_millis(500))
+            .expect("test clock has headroom");
+        playbacks.insert(addr(1), playback_due_at(overdue));
+        let timeout = next_read_timeout(&playbacks, now);
+        assert_eq!(timeout, MIN_PARROT_READ_TIMEOUT);
+        assert!(!timeout.is_zero(), "never zero");
+    }
+
+    #[test]
+    fn a_distant_deadline_is_capped_at_the_normal_cadence() {
+        // PING ticking and client reaping ride this same poll, so the timeout
+        // must never stretch past it however far off the playback is.
+        let now = Instant::now();
+        let mut playbacks = HashMap::new();
+        playbacks.insert(addr(1), playback_due_at(now + Duration::from_secs(5)));
+        assert_eq!(next_read_timeout(&playbacks, now), SOCKET_POLL_TIMEOUT);
+    }
+
     #[test]
     fn reflector_callsign_encodes_and_pings_use_it() {
         // Guards the module doc's hard-coded-callsign claim: REFLECTOR_CALLSIGN

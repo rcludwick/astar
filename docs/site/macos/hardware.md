@@ -86,45 +86,17 @@ install the driver above.
     transfer surfaces as a *serial device error* and the device is disabled —
     it can never freeze the interface.
 
-## D-Star: the ThumbDV vocoder
+## Vocoder dongles
 
-!!! warning "D-Star is not in the macOS app yet"
+The tree contains support for a USB vocoder dongle, used by work that has not
+reached the clients. Nothing in the macOS app uses it today, and you do not need
+one to run astar.
 
-    The engine, the C ABI and the Swift binding all carry D-Star, but neither
-    GUI has a D-Star entry in its network picker. Today D-Star reaches the air
-    only through `astar-cli`, and the feature is not on by default:
-
-    ```bash
-    cargo run -p astar-cli --features dstar -- dstar-listen <reflector-host> <module>
-    ```
-
-    Buying a dongle buys you the CLI path, not an entry in the popover. Wiring
-    D-Star into the clients is tracked in the backlog.
-
-D-Star support is **hardware-only**. The vocoder is a ThumbDV / DV3000 USB
-dongle, driven by the vendored `ambe-thumbdv` crate. There is no software AMBE
-codec in this repository and there is no fallback: without a dongle attached,
-there is no D-Star at all.
-
-Only one process may hold the dongle at a time.
-
-### Pinning a specific dongle
-
-When several dongles are attached, `IAX_THUMBDV_PORT` selects which one to use:
-
-```bash
-IAX_THUMBDV_PORT=/dev/cu.usbserial-XXXX
-```
-
-!!! danger "The pin only ever narrows the scan — by design"
-
-    `IAX_THUMBDV_PORT` filters the results of the FTDI `0x0403:0x6015` scan. It
-    **cannot** point the opener at an arbitrary serial port, and that limit is
-    load-bearing, not an implementation detail: opening a USB radio interface's
-    tty asserts RTS, which **keys a transmitter**.
-
-    A port that the scan did not match yields no candidates at all. Do not
-    "fix" this by letting the variable replace the scan.
+If you do have one attached, the rule that governs it is a safety rule rather
+than a convenience: `IAX_THUMBDV_PORT` only ever **narrows** the USB VID/PID
+scan and can never point the opener at an arbitrary serial port. Opening a USB
+radio interface's tty asserts RTS, which keys a transmitter. See
+[On-air safety](../about/safety.md).
 
 ## Audio devices
 

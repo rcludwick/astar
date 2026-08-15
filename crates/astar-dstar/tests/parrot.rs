@@ -114,7 +114,15 @@ fn connect_is_acked_and_invalid_module_is_nacked() {
     let reply = recv_packet(&c1);
     assert_eq!(reply.len(), 14, "ACK/NAK is 14 bytes");
     assert!(reply.ends_with(b"ACK\0"), "valid module must be ACKed");
-    assert_eq!(handle.client_count(), 1);
+    // Poll rather than assert outright: receiving the ACK proves the reflector
+    // *replied*, not that its run-loop finished inserting the client into the
+    // table. The two are separate steps on that thread, and on a loaded box the
+    // read here can win the race — which is exactly how this test failed CI
+    // with left: 0, right: 1.
+    assert!(
+        wait_until(|| handle.client_count() == 1, 1_000),
+        "the ACKed client must be linked"
+    );
 
     let (c2, _) = raw_client();
     c2.send_to(&connect_bytes("N0CALL2", b'5'), addr).unwrap();
@@ -124,9 +132,8 @@ fn connect_is_acked_and_invalid_module_is_nacked() {
         reply2.ends_with(b"NAK\0"),
         "a non A-Z module must be NACKed"
     );
-    assert_eq!(
-        handle.client_count(),
-        1,
+    assert!(
+        wait_until(|| handle.client_count() == 1, 1_000),
         "the NACKed client must not be linked"
     );
 
@@ -271,7 +278,10 @@ fn unlink_replies_disconnected_and_reaps_the_client() {
     c1.send_to(&connect_bytes("N0CALL", b'A'), addr).unwrap();
     let ack = recv_packet(&c1);
     assert!(ack.ends_with(b"ACK\0"));
-    assert_eq!(handle.client_count(), 1);
+    assert!(
+        wait_until(|| handle.client_count() == 1, 1_000),
+        "the ACKed client must be linked before the unlink below"
+    );
 
     c1.send_to(&unlink_bytes("N0CALL"), addr).unwrap();
     let reply = recv_packet(&c1);

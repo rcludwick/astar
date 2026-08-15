@@ -1,0 +1,72 @@
+# ============================================================================
+# CodeQL static analysis. Runs ONLY in the public repository.
+#
+# WHY PUBLIC ONLY, AND WHY THAT IS NOT A CHOICE
+# ---------------------------------------------
+# GitHub code scanning on a *private* repository requires GitHub Advanced
+# Security, which a personal account cannot buy. `rcludwick/astar-private`
+# answers the code-scanning API with 403 "Code scanning is not enabled" and no
+# setting changes that. So this file is guarded on `github.repository` exactly
+# like ci.yml and docs-pages.yml — it rides along into the private repo on every
+# push and skips cleanly there rather than failing every run.
+#
+# The private repo is not left unwatched: it runs the `audit` job in ci.yml
+# (RustSec advisories over Cargo.lock) and has Dependabot alerts enabled.
+#
+# RUNNER
+# ------
+# `ubuntu-latest`, never self-hosted. Actions minutes are free on public repos,
+# and a self-hosted runner on a public repo would hand any fork's pull request
+# arbitrary code execution on the IONOS box. See ci.yml's header — that rule is
+# absolute and this file does not bend it.
+#
+# SCOPE
+# -----
+# Rust only. The Swift app is not analysed here: CodeQL's Swift support needs a
+# macOS runner and a full Xcode build, which is the `just ci-full` gate on a Mac.
+# ============================================================================
+
+name: codeql
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Weekly. New queries ship on CodeQL's own cadence, so a periodic run finds
+    # things a push-triggered run cannot — the code need not change for the
+    # analysis of it to improve.
+    - cron: "27 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    # Public repo only — see the header. Skips cleanly in private.
+    if: github.repository == 'rcludwick/astar'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: rust
+
+      - name: Build
+        # The engine only. apps/gui pulls iced/wgpu and a pile of system
+        # libraries that are not worth installing on a hosted runner just to
+        # analyse them; the protocol, codec, audio and PTT code is what matters.
+        run: cargo build --locked -p astar-station -p astar-iax -p astar-m17 -p astar-dstar
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
