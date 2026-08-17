@@ -20,6 +20,9 @@
         private let setups: SetupController
         private let micAnalyzer: MicAnalyzerController
         private let deviceMonitor: AudioDeviceMonitor
+        /// Which pane the window shows. Shared with the main menu so ⌘, and the
+        /// popover's own footer button drive the same settings pane (astar-1f7d).
+        private let navigation: AppNavigation
         private let statusItem: NSStatusItem
         private var cancellables = Set<AnyCancellable>()
         /// The main window — created on first use; the asterisk toggles its visibility.
@@ -28,13 +31,15 @@
 
         init(
             session: CallSession, serial: SerialController, setups: SetupController,
-            micAnalyzer: MicAnalyzerController, deviceMonitor: AudioDeviceMonitor
+            micAnalyzer: MicAnalyzerController, deviceMonitor: AudioDeviceMonitor,
+            navigation: AppNavigation
         ) {
             self.session = session
             self.serial = serial
             self.setups = setups
             self.micAnalyzer = micAnalyzer
             self.deviceMonitor = deviceMonitor
+            self.navigation = navigation
             self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
             super.init()
 
@@ -100,6 +105,7 @@
                     .environmentObject(setups)
                     .environmentObject(micAnalyzer)
                     .environmentObject(deviceMonitor)
+                    .environmentObject(navigation)
             )
             let w = NSWindow(contentViewController: hosting)
             w.styleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -130,6 +136,15 @@
         func showWindow() {
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
+        }
+
+        /// Show the window already switched to Settings — what the main menu's
+        /// `Settings…` item (⌘,) does (astar-1f7d). Deliberately routes to the same
+        /// pane as the popover's footer button rather than opening a second window:
+        /// astar has one settings surface.
+        func showSettings() {
+            navigation.showsSettings = true
+            showWindow()
         }
 
         /// Show (and focus) or hide the window. Since astar can be a menu-bar
