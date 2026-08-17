@@ -30,45 +30,51 @@
 
         let registry = HardwareProfileRegistry()
 
-        /// The built-in "None" setup: system-default input/output, no serial. Always
-        /// present and first in the list; can't be edited or deleted.
-        static let noneID = "__none__"
-        static let noneSetup = Setup(
-            id: noneID, name: "None (system default)",
-            hardwareProfileID: HardwareProfileRegistry.headsetID,
-            inputDevice: nil, outputDevice: nil)
+        /// The built-in **System Default** config (astar-1f7d): system input/output,
+        /// no serial. Always present and first in the list; can't be deleted. Its
+        /// identity and the launch-default rule live in `AstarCore` where they are
+        /// unit-testable — see `SystemDefaultSetup`.
+        static let systemDefaultID = SystemDefaultSetup.id
 
         private weak var session: CallSession?
         private weak var serial: SerialController?
         private let store: SetupStore
         private let audioStore: AudioSettingsStore = UserDefaultsAudioSettingsStore()
 
-        /// User setups the management UI may edit/delete (excludes the built-in None).
-        var managedSetups: [Setup] { setups.filter { $0.id != Self.noneID } }
+        /// User setups the management UI may edit/delete/reorder — everything except
+        /// the built-in System Default, which has its own fixed row.
+        var managedSetups: [Setup] { setups.filter { $0.id != Self.systemDefaultID } }
 
         /// The currently-applied setup, if any.
         var selectedSetup: Setup? { setups.first { $0.id == selectedID } }
 
         init(store: SetupStore = UserDefaultsSetupStore()) {
             self.store = store
-            self.setups = [Self.noneSetup] + store.all()
+            self.setups = [SystemDefaultSetup.setup] + store.all()
             self.selectedID = store.loadSelectedID()
             self.defaultID = store.loadDefaultID()
         }
 
-        /// Wire to the live session + serial controller. Seeds a first Setup from the
-        /// current hardware/devices if the user has none, so the switchers are never
-        /// empty. Call once at launch.
+        /// Wire to the live session + serial controller, then apply the launch
+        /// config. Call once at launch.
+        ///
+        /// astar-1f7d: this used to seed a config seeded from `serial
+        /// .selectedProfileID ?? uci150ID` — so a fresh install on a machine that
+        /// had never seen a UCI150 got a config named after that hardware, on a
+        /// serial profile. Now a fresh install lands on System Default, and an
+        /// existing user who never set a ★ is left alone (see
+        /// `SystemDefaultSetup.launchApplyID` for why that `nil` matters).
         func attach(session: CallSession, serial: SerialController) {
             self.session = session
             self.serial = serial
-            // None is always present; seed a current-rig setup once so the user has a
-            // named hardware setup alongside None.
-            if store.all().isEmpty { seedFromCurrentState() }
-            // Apply the launch default, if one is set and still exists.
-            if let d = defaultID, setups.contains(where: { $0.id == d }) {
-                apply(id: d)
-            }
+            guard
+                let applyID = SystemDefaultSetup.launchApplyID(
+                    storedDefault: defaultID, savedConfigIDs: store.all().map(\.id))
+            else { return }
+            // A fresh install has no ★ yet — record where the launch config came
+            // from so the star shows against System Default rather than nothing.
+            if defaultID == nil { setDefault(applyID) }
+            apply(id: applyID)
         }
 
         // MARK: - Apply
@@ -174,7 +180,7 @@
         /// Delete a Setup. Clears the selection if it was the selected one. The
         /// built-in None can't be deleted.
         func delete(id: String) {
-            guard id != Self.noneID else { return }
+            guard id != Self.systemDefaultID else { return }
             store.remove(id: id)
             if selectedID == id {
                 selectedID = nil
@@ -189,7 +195,7 @@
         /// the whole rig. Reads the live persisted `AudioSettings`. No-op for None /
         /// no selection.
         func saveCurrentToSelected() {
-            guard let id = selectedID, id != Self.noneID,
+            guard let id = selectedID, id != Self.systemDefaultID,
                 var s = store.all().first(where: { $0.id == id })
             else { return }
             let a = audioStore.load()
@@ -214,7 +220,7 @@
         /// (after the audio store is restored), which would otherwise clobber a
         /// device change that was only written to the audio store. No-op for None.
         func setActiveDevices(input: String?, output: String?) {
-            guard let id = selectedID, id != Self.noneID,
+            guard let id = selectedID, id != Self.systemDefaultID,
                 var s = store.all().first(where: { $0.id == id })
             else { return }
             s.inputDevice = input
@@ -245,30 +251,6 @@
 
         // MARK: - Internals
 
-        private func refresh() { setups = [Self.noneSetup] + store.all() }
-
-        private func seedFromCurrentState() {
-            let hardwareID = serial?.selectedProfileID ?? HardwareProfileRegistry.uci150ID
-            let name = registry.resolve(id: hardwareID).name
-            let seed = Setup(
-                id: UUID().uuidString,
-                name: name,
-                hardwareProfileID: hardwareID,
-                inputDevice: currentInput(),
-                outputDevice: currentOutput()
-            )
-            store.save(seed)
-            store.saveSelectedID(seed.id)
-            setups = [Self.noneSetup] + store.all()
-            selectedID = seed.id
-        }
-
-        private func currentInput() -> String? {
-            UserDefaultsAudioSettingsStore().load().input
-        }
-
-        private func currentOutput() -> String? {
-            UserDefaultsAudioSettingsStore().load().output
-        }
+        private func refresh() { setups = [SystemDefaultSetup.setup] + store.all() }
     }
 #endif
