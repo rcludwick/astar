@@ -58,9 +58,29 @@ struct CredentialsView: View {
                 text: $accountPassword
             )
             .textFieldStyle(.roundedBorder)
-            Text("Your allstarlink.org account password — not the node’s IAX secret.")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+            // Red outline when the password is missing or the portal rejected it
+            // (astar-4e8a). Drawn as an overlay rather than a background so the
+            // native rounded-border field keeps its focus ring.
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(Color.red, lineWidth: passwordStatus.isInvalid ? 1.5 : 0)
+            )
+            .animation(.easeInOut(duration: 0.15), value: passwordStatus)
+            .accessibilityValue(passwordStatus.message ?? "")
+            // The reason replaces the standing hint while something is wrong —
+            // two captions stacked under one field is noise, and the red one is
+            // the one that matters.
+            if let problem = passwordStatus.message {
+                Label(problem, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .transition(.opacity)
+            } else {
+                Text("Your allstarlink.org account password — not the node’s IAX secret.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
 
             HStack(spacing: 10) {
                 if saved {
@@ -134,6 +154,16 @@ struct CredentialsView: View {
                 "This deletes your saved callsign, node, and password from the Keychain. You can re-enter them anytime."
             )
         }
+    }
+
+    /// How to draw the password field (astar-4e8a). `saved` is what keeps a
+    /// working account from being flagged: astar never pre-fills the password, so
+    /// a blank box there means "unchanged", not "missing".
+    private var passwordStatus: CredentialFieldStatus {
+        CredentialsValidation.password(
+            text: accountPassword,
+            hasSavedCredentials: saved,
+            portalRejected: testResult == .failure)
     }
 
     private var canSave: Bool {
