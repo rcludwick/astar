@@ -18,7 +18,7 @@ workspace = true
 # serial-usb pulls in the raw-USB (nusb) CH343 backend alongside the default tty
 # backend; the C-ABI exposes both via IaxSerialConfig.transport. The raw-USB path
 # is the sandbox/MAS-eligible one (proven on hardware, iax-ceba/iax-f56c).
-astar-ptt = { path = "../astar-ptt", version = "0.1.2-beta", features = ["serial-usb"] }
+astar-ptt = { path = "../astar-ptt", version = "0.1.3-beta", features = ["serial-usb"] }
 
 [dev-dependencies]
 # Used directly by the ch34x_usb_spike example (raw-USB CH34x over IOKit).
