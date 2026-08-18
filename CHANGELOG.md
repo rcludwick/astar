@@ -8,6 +8,45 @@ else is still built from source. Versions are `MAJOR.MINOR.PATCHbeta` and will
 stay on `beta` until the client has had a real sit-down-and-use-it pass on all
 three platforms.
 
+## 0.1.3beta — 2026-08-17
+
+Everything here is about the first ten minutes with astar. `0.1.2beta` fixed
+Settings being unreachable; this fixes Settings being *findable but silent* —
+you could open it and still not learn that an AllStarLink account is the thing
+standing between you and a call.
+
+### Added
+
+- **Settings opens by default when no AllStarLink account is configured.**
+  Without one the dial field is disabled, so the call UI is a form that cannot
+  be typed into. astar now lands on Settings instead, from every route into the
+  window — the menu-bar asterisk, the Dock icon, and `Cmd-,`. It stops the
+  moment an account is saved.
+
+- **A first launch with no account raises the window on Settings** — once.
+  astar is a menu-bar app, so a new user otherwise sees an asterisk and nothing
+  else. It happens a single time: M17 needs no portal login, so running astar
+  without an AllStarLink account is perfectly legitimate and is not nagged at.
+
+- **The account password is outlined in red** when it is empty with nothing
+  saved, or when the portal rejected the last token test, with the reason
+  underneath.
+
+  An empty box on an account that *is* saved stays unmarked. astar never
+  pre-fills the password — it lives in the Keychain and the field reads
+  "re-enter to change" — so flagging that would tell you your working
+  credentials are broken.
+
+- **Settings now says what a missing account costs you:** AllStarLink is
+  unavailable without one, because dialling a node signs in to your
+  allstarlink.org account and there is no guest access. M17 is unaffected.
+
+### Fixed
+
+- CodeQL had never completed a single run. cpal's Linux backend builds against
+  ALSA and the hosted runner ships no ALSA headers, so the build died before
+  analysis started. Invisible from a Mac, where cpal uses CoreAudio.
+
 ## 0.1.2beta — 2026-08-17
 
 Both fixes here came out of the first outside report against the `0.1.1beta`

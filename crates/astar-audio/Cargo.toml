@@ -20,7 +20,7 @@ serde = ["dep:serde"]
 
 [dependencies]
 cpal.workspace = true
-astar-iax-core = { path = "../astar-iax-core", version = "0.1.2-beta" }
+astar-iax-core = { path = "../astar-iax-core", version = "0.1.3-beta" }
 mio = { workspace = true }
 rubato.workspace = true
 rustfft = "6"

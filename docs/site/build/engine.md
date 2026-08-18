@@ -20,7 +20,7 @@ cargo test  --workspace
 ## The workspace
 
 One cargo workspace, `resolver = "2"`, everything sharing a version
-(`0.1.2-beta`) and a licence (`AGPL-3.0-only`) through `[workspace.package]`.
+(`0.1.3-beta`) and a licence (`AGPL-3.0-only`) through `[workspace.package]`.
 
 | Crate | What it is |
 |---|---|

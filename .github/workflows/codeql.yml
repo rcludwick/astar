@@ -57,6 +57,16 @@ jobs:
         with:
           persist-credentials: false
 
+      # cpal's Linux backend builds against ALSA, so `alsa-sys` needs the dev
+      # headers. ubuntu-latest does not ship them, which failed every run of
+      # this workflow from the day it was added — `pkg-config --libs alsa`
+      # exits 1 and alsa-sys panics in its build script. macOS builds never hit
+      # this (cpal uses CoreAudio there), so it is invisible to `just ci`.
+      - name: System libraries for the cpal ALSA backend
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
