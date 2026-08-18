@@ -121,16 +121,26 @@ app and re-signed on every build — and a Homebrew one on a user's machine is
 both unsigned by us and usually absent. Static removes the load-time failure
 mode and a runtime dependency from the DMG at once.
 
-`astar-codec` already has a `codec2-static` feature (used today by
-`astar-station`'s dev-dependencies) — start by establishing what it actually
-builds and what it would take to make it the shipped default, rather than
-starting from scratch.
+`astar-codec` already has both backends built (`crates/astar-codec/src/codec2.rs`):
+`codec2-runtime` dlopens a system libcodec2, and **`codec2-static` links the
+pure-Rust `codec2` crate** — NOT the C library. So the macOS job is close to
+"turn the existing feature on for the app build and verify M17 lights up on a
+brew-less machine", not "vendor and sign a dylib".
 
-Licensing is fine and should not stall this: libcodec2 is LGPL, and static
-linking LGPL into a *proprietary* binary is the restricted case. astar is
-AGPL-3.0-only with buildable public source, which satisfies LGPL's relink
-requirement. Note the conclusion here so nobody re-opens it — see also the
-LGPL discussion in `docs/BACKLOG.md`.
+Neither feature may enter a default feature set — that rule stays (it is what
+keeps a plain `cargo build` LGPL-free). Enable it for the shipped app build
+specifically.
+
+macOS licensing is fine: the `codec2` crate is `LGPL-2.1-only AND MIT`, and
+LGPL's relink requirement is satisfied by astar's complete public AGPL source.
+Static linking LGPL into a *proprietary* binary is the restricted case, which
+this is not.
+
+iOS is a DIFFERENT answer and is NOT unblocked by this — see `iax-e5d9` in
+`docs/BACKLOG.md`. That SPDX expression is `AND`, not `OR`: both licenses apply
+cumulatively, so there is no MIT-only path out, and LGPL is effectively
+incompatible with App Store distribution. iOS M17 needs the clean-room codec,
+not a different linkage strategy.
 
 Original item follows.
 
