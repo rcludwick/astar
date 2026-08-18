@@ -64,6 +64,22 @@ features that are deliberately **never** part of any default feature set (see
 | `codec2-static` | the `codec2` Rust crate (a reimplementation), linked into the binary | `LGPL-2.1-only AND MIT` |
 | `codec2-runtime` | the system `libcodec2` C library, `dlopen`ed at runtime, never linked | LGPL-2.1 |
 
+### You are free to change Codec 2 and rebuild astar
+
+Stated plainly, because it is the point of everything in this section and not
+merely a licence obligation being discharged:
+
+**Nothing here restricts anyone from modifying Codec 2, or astar, and building
+their own astar from the result.** You may patch the codec, swap in a different
+implementation, fix a bug in it, tune it, or replace it wholesale, and rebuild
+astar against your version. You do not need permission, you do not need to ask,
+and you do not owe anyone an explanation. The AGPL asks you to pass the same
+freedom on to anyone you distribute your version to; it asks nothing else.
+
+astar links Codec 2 statically for a practical reason — a hardened-runtime macOS
+binary cannot load an unsigned dylib, and most Macs have no libcodec2 at all —
+not to make it harder to replace. Everything needed to swap it out is published.
+
 ### Static linking and your right to relink
 
 Where a released astar binary is built with `codec2-static`, it contains LGPL
