@@ -71,3 +71,11 @@ m17 = ["astar-console/m17"]
 # above (methods exist, return `StationError::Dstar("dstar support not
 # compiled")` / are no-ops / return `false`).
 dstar = ["astar-console/dstar"]
+# Link Codec 2 into the binary instead of relying on a system libcodec2 found
+# at runtime (astar-8c4d). NOT default, and it must never become one — see the
+# licensing note in `astar-codec/Cargo.toml`. The shipped macOS app turns this
+# on explicitly in `bindings/swift/build-xcframework.sh`, because M17 on a Mac
+# with no Homebrew libcodec2 is otherwise dead: `open_codec2` tries the runtime
+# backend first and falls back to this one, so enabling both means a user with
+# the C library still gets it and everyone else gets a working M17 anyway.
+codec2-static = ["astar-console/codec2-static"]
