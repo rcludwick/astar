@@ -100,7 +100,7 @@ relicense someone else's MIT/Apache code as AGPL. See its `VENDORED.md`.
 
 ## Distribution reality
 
-`0.1.1beta` is published: a Developer ID-signed, notarized, stapled `astar.dmg`
+`0.1.2beta` is published: a Developer ID-signed, notarized, stapled `astar.dmg`
 on the public repo's releases page. It is **arm64 only** (a single slice, macOS
 13+) — there is no Intel and no universal build, so an Intel Mac still builds
 from source. There is still **no** Homebrew tap or cask and no App Store

@@ -28,7 +28,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.1.1-beta"
+version = "0.1.2-beta"
 edition = "2024"
 # Real floor, verified against the committed Cargo.lock: apps/gui's graph pulls
 # font-types 1.89 (and iced/wgpu/image 1.88, zbus 1.87). The engine crates alone

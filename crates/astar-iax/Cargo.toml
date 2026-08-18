@@ -12,10 +12,10 @@ description = "High-level idiomatic Rust API for the IAX2 protocol."
 workspace = true
 
 [dependencies]
-astar-iax-core = { path = "../astar-iax-core", version = "0.1.1-beta" }
-astar-audio = { path = "../astar-audio", version = "0.1.1-beta" }
-astar-codec = { path = "../astar-codec", version = "0.1.1-beta" }
-astar-wireguard = { path = "../astar-wireguard", version = "0.1.1-beta" }
+astar-iax-core = { path = "../astar-iax-core", version = "0.1.2-beta" }
+astar-audio = { path = "../astar-audio", version = "0.1.2-beta" }
+astar-codec = { path = "../astar-codec", version = "0.1.2-beta" }
+astar-wireguard = { path = "../astar-wireguard", version = "0.1.2-beta" }
 mio.workspace = true
 rand.workspace = true
 serde = { workspace = true, optional = true }

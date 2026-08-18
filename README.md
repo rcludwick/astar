@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <strong>0.1.1beta</strong> (<a href="CHANGELOG.md">changelog</a>) · AGPL-3.0-only · macOS today, Windows and Linux in progress
+  <strong>0.1.2beta</strong> (<a href="CHANGELOG.md">changelog</a>) · AGPL-3.0-only · macOS today, Windows and Linux in progress
 </p>
 
 <p align="center">
@@ -28,7 +28,7 @@ meters — with support for generic USB radio interfaces (serial PTT + USB audio
 the AllScan UCI150 is the reference device). It also runs as an always-on node
 daemon.
 
-> ### First release — `0.1.1beta`
+> ### Latest release — `0.1.2beta`
 >
 > A signed and notarized **`astar.dmg`** is on the
 > [releases page](https://github.com/rcludwick/astar/releases/latest). It opens
@@ -180,7 +180,7 @@ After launch, look for the **rainbow asterisk** in the menu bar — and, unless 
 turn it off, an astar icon in the Dock. Left-click the asterisk opens the dial
 popover; `Show in Dock` in the right-click menu drops back to menu-bar-only. The
 running
-version (`0.1.1beta`) is shown in the popover footer, so you can always tell
+version (`0.1.2beta`) is shown in the popover footer, so you can always tell
 what you are actually running.
 
 ### A local .dmg
