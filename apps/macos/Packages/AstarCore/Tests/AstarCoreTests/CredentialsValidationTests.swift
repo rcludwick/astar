@@ -87,6 +87,26 @@ final class CredentialsValidationTests: XCTestCase {
         }
     }
 
+    // MARK: - "AllStarLink is unavailable" callout
+
+    func testCalloutShowsOnlyWhileNoAccountIsSaved() {
+        XCTAssertTrue(CredentialsValidation.showsAllStarUnavailable(hasCredentials: false))
+        XCTAssertFalse(CredentialsValidation.showsAllStarUnavailable(hasCredentials: true))
+    }
+
+    /// The headline must name the consequence, not the omission — a user who
+    /// reads "no account configured" still has to work out what it costs them.
+    func testCalloutNamesTheConsequence() {
+        XCTAssertTrue(CredentialsValidation.allStarUnavailable.contains("unavailable"))
+        XCTAssertTrue(CredentialsValidation.allStarUnavailable.contains("AllStarLink"))
+    }
+
+    /// It must also scope the damage. M17 needs a callsign, not a portal login,
+    /// so an M17-only user reading this should not conclude astar is unusable.
+    func testCalloutSaysM17IsUnaffected() {
+        XCTAssertTrue(CredentialsValidation.allStarUnavailableDetail.contains("M17"))
+    }
+
     /// The password is the portal account password, not the node's IAX secret —
     /// the single most common mix-up. The missing-password copy has to say so.
     func testMissingMessageNamesTheRightPassword() {

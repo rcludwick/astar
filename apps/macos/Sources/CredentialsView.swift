@@ -41,6 +41,32 @@ struct CredentialsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("AllStarLink account").font(.subheadline.weight(.semibold))
+
+            // What it costs you to leave this blank (astar-4e8a). The red field
+            // below says the password is missing; this says what that means.
+            if CredentialsValidation.showsAllStarUnavailable(hasCredentials: saved) {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(CredentialsValidation.allStarUnavailable)
+                            .font(.caption.weight(.medium))
+                        Text(CredentialsValidation.allStarUnavailableDetail)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                }
+                .padding(8)
+                .background(
+                    Color.orange.opacity(0.12),
+                    in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                )
+                // One announcement, not three fragments.
+                .accessibilityElement(children: .combine)
+            }
             Text(
                 saved
                     ? "Saved. Toggle “Use my account” when you dial for an authenticated WebTransceiver connection."

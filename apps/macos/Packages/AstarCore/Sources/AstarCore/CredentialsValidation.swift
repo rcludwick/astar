@@ -38,6 +38,24 @@ public enum CredentialsValidation {
     public static let missingPassword =
         "Enter your allstarlink.org account password — not the node's IAX secret."
 
+    /// Headline of the Settings callout shown while no account is saved.
+    /// States the consequence rather than the omission: "no account" is a fact
+    /// about the form, "AllStarLink is unavailable" is what it costs you.
+    public static let allStarUnavailable = "AllStarLink is unavailable until you add an account."
+
+    /// The detail under that headline. Says *why* there is no way around it —
+    /// guest dialling was removed (au-1517), so every call goes on air as the
+    /// user's own node rather than anonymously — and scopes the damage: M17 is a
+    /// separate network that needs a callsign, not a portal login.
+    public static let allStarUnavailableDetail =
+        "Dialling an AllStarLink node signs in to your allstarlink.org account — "
+        + "there is no guest access. M17 does not need one."
+
+    /// Whether Settings should show that callout.
+    public static func showsAllStarUnavailable(hasCredentials: Bool) -> Bool {
+        !hasCredentials
+    }
+
     /// Shown after a token-mint test comes back rejected.
     public static let portalRejected =
         "The AllStarLink portal rejected these credentials. Check the callsign, password, and node."
