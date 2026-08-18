@@ -63,9 +63,25 @@ jobs:
       # exits 1 and alsa-sys panics in its build script. macOS builds never hit
       # this (cpal uses CoreAudio there), so it is invisible to `just ci`.
       - name: System libraries for the cpal ALSA backend
+        # Bounded on purpose. The first version of this step had no timeout, and
+        # when azure.archive.ubuntu.com went unreachable the run sat in apt's
+        # retry backoff (Ign: ... Ign: ...) for 25 minutes against a 60-minute
+        # job budget. A mirror outage should cost a fast, readable failure, not
+        # an hour of a hung runner.
+        timeout-minutes: 8
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev
+          set -x
+          # `|| true`: the runner image ships recent package lists, so the
+          # install below usually succeeds without a refresh. A flaky mirror
+          # should not be the thing that fails CodeQL — let the install be the
+          # step that decides, since it is the one we actually care about.
+          sudo apt-get update -o Acquire::Retries=2 || echo "apt-get update failed; trying the install against the image's existing lists"
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=2 libasound2-dev
+          # Prove the headers landed, so a future failure names itself here
+          # rather than 200 lines into a cargo build script panic.
+          pkg-config --modversion alsa
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
