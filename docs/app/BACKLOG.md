@@ -12,7 +12,51 @@ inline. All 129 issues (107 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (34)
+## Open items (35)
+
+### astar-2b71 — TX level graph stays flat on some built-in microphones
+*P2 medium · bug · labels: audio, ptt, macos, cx:3* — **targeted at 0.1.5beta**
+
+Reported by Rob against 0.1.3beta: on a MacBook Air using the built-in mic, the
+TX meter and TX trace stay at the floor when keyed. The same build with a UCI150
+on a Mac mini is fine, so it is device- or path-specific, not a general break.
+
+Both TX renderers gate on the same flag — `MenuPopover.swift` `VUMetersPane`
+(`db: session.ptt ? meters.txDBHeld : -60`) and `LevelGraphView.swift`
+(`tx: session.ptt ? session.meters.rawTxDB : -60`) — and `session.ptt` is
+assigned only from the engine snapshot (`CallSession.swift`, `if ptt != snap.ptt`).
+So a flat TX has exactly two causes: `ptt` never goes true, or it does and the
+mic lane is delivering silence.
+
+RULED OUT — do not re-derive this. The first theory was that a fresh install
+seeded a UCI150 hardware profile on a machine with no UCI150 (the seeding bug
+fixed in astar-1f7d), enabling serial and force-unkeying every poll. It cannot:
+`SerialController`'s `pttSourceTick` closure guards `let client = self.client
+else { return nil }`, and `nil` means "leave PTT alone this tick".
+
+TWO SURVIVING MECHANISMS, and one observation separates them — when keyed, does
+the TX bar brighten (its tint goes full opacity when `active`, i.e. `ptt` is
+true) while still reading 0%, or does nothing change at all?
+
+* Brightens but zero → the mic lane is producing zeros. The signed DMG has a
+  different code signature than a source build, so macOS treats it as a separate
+  app for microphone permission with its own TCC prompt and its own Privacy
+  entry. Denied or dismissed, CoreAudio returns a stream of zeros rather than an
+  error. `NSMicrophoneUsageDescription` and the audio-input entitlement are both
+  present, so the prompt does appear — it just has to be accepted. Check whether
+  the working Mac mini is running `just run` (authorized long ago) rather than
+  the DMG.
+* Nothing changes → half-duplex. `CallSession.swift` refuses to let VOX key while
+  `receiving`, and on an Air the built-in speakers are physically coupled to the
+  built-in mic — which is exactly what that guard exists to prevent. `receiving`
+  is `snap.remotePTT || rxActivityGate.update(...)`, so ordinary far-end audio
+  through the speakers holds VOX unkeyed indefinitely. Only bites VOX, not the
+  on-screen hold-to-talk.
+
+Pairs with the muted/silent-audio warning Rob asked for (hardware mute, zeroed
+gains, AND denied mic permission are three causes with one symptom — a dead
+meter). That warning would have diagnosed this on its own, so build them
+together.
 
 ### astar-9d21 — Docs still say the macOS app is built on `MenuBarExtra`
 *P3 low · chore · labels: docs, cx:1*
@@ -66,8 +110,29 @@ see one opaque canvas. Options when picked up: track iced's AccessKit
 integration, contribute, or document the limitation and point
 screen-reader users at the Mac app. Details in the audit doc.
 
-### astar-8c4d — Bundle libcodec2 + wire setCodecDirs so M17 works without Homebrew
-*P2 medium · task · labels: m17, cx:2*
+### astar-8c4d — Ship libcodec2 with the app so M17 works without Homebrew
+*P2 medium · task · labels: m17, cx:2* — **targeted at 0.1.4beta**
+
+DIRECTION CHANGED 2026-08-17 (Rob): prefer **static linking** over the bundled
+dylib this item was originally specced around, because of notarization. A
+hardened-runtime binary will not load a dylib that is not signed with the same
+Team ID, so a bundled `libcodec2.dylib` would have to be signed as part of the
+app and re-signed on every build — and a Homebrew one on a user's machine is
+both unsigned by us and usually absent. Static removes the load-time failure
+mode and a runtime dependency from the DMG at once.
+
+`astar-codec` already has a `codec2-static` feature (used today by
+`astar-station`'s dev-dependencies) — start by establishing what it actually
+builds and what it would take to make it the shipped default, rather than
+starting from scratch.
+
+Licensing is fine and should not stall this: libcodec2 is LGPL, and static
+linking LGPL into a *proprietary* binary is the restricted case. astar is
+AGPL-3.0-only with buildable public source, which satisfies LGPL's relink
+requirement. Note the conclusion here so nobody re-opens it — see also the
+LGPL discussion in `docs/BACKLOG.md`.
+
+Original item follows.
 
 From the iax-f2b8 final review: the spec's LGPL distribution story (bundle
 `libcodec2.dylib` in astar.app/Frameworks, dlopen it) has no implementation —
