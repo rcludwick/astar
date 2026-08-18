@@ -627,7 +627,9 @@
 
         /// The applied setup, if it's a real (editable) one — None can't hold state.
         private var selectedEditableSetup: Setup? {
-            guard let s = setups.selectedSetup, s.id != SetupController.noneID else { return nil }
+            guard let s = setups.selectedSetup, s.id != SetupController.systemDefaultID else {
+                return nil
+            }
             return s
         }
 
