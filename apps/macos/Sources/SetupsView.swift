@@ -19,6 +19,14 @@
         /// drag-to-reorder (proper move cursor — no copy "+").
         var body: some View {
             Section("Saved configs") {
+                // The built-in System Default always sits at the top (astar-1f7d).
+                // It is a real, selectable config — not a hidden fallback — so a
+                // fresh install can see what it is running on and get back to a
+                // known-good plain-audio state in one click.
+                SystemDefaultCard()
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 6, bottom: 4, trailing: 6))
+
                 Button {
                     setups.addNew()
                 } label: {
@@ -30,7 +38,7 @@
 
                 if setups.managedSetups.isEmpty {
                     Text(
-                        "No saved configs yet. Add one and expand it to set hardware, devices, and audio."
+                        "No other configs yet. Add one and expand it to set hardware, devices, and audio."
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -57,6 +65,57 @@
                         .listRowSeparator(.hidden)
                 }
             }
+        }
+    }
+
+    /// The built-in **System Default** row (astar-1f7d): apply it, or ★ it as the
+    /// launch default. Deliberately not a `ConfigCard` — it has no stored record to
+    /// write back to, so offering the name field, the hardware/device editors, or
+    /// the delete button would be offering edits that silently go nowhere. What it
+    /// *is* gets said in one caption instead.
+    private struct SystemDefaultCard: View {
+        @EnvironmentObject private var setups: SetupController
+
+        private var isActive: Bool { setups.selectedID == SystemDefaultSetup.id }
+        private var isDefault: Bool { setups.defaultID == SystemDefaultSetup.id }
+
+        var body: some View {
+            HStack(spacing: 8) {
+                Button {
+                    setups.apply(id: SystemDefaultSetup.id)
+                } label: {
+                    Image(systemName: isActive ? "largecircle.fill.circle" : "circle")
+                        .foregroundStyle(isActive ? Color.accentColor : .secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Apply this config")
+                .accessibilityLabel("Apply this config")
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(SystemDefaultSetup.name)
+                        .font(.callout.weight(.medium))
+                    Text("Your Mac's current input and output. No serial PTT.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+
+                Button {
+                    setups.setDefault(isDefault ? nil : SystemDefaultSetup.id)
+                } label: {
+                    Image(systemName: isDefault ? "star.fill" : "star")
+                        .foregroundStyle(isDefault ? .yellow : .secondary)
+                }
+                .buttonStyle(.borderless)
+                .help(isDefault ? "Default config (applied at launch)" : "Set as launch default")
+                .accessibilityLabel(
+                    isDefault ? "Default config (applied at launch)" : "Set as launch default")
+            }
+            .padding(10)
+            .background(
+                Color.secondary.opacity(isActive ? 0.12 : 0.06),
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
         }
     }
 

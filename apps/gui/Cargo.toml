@@ -19,7 +19,7 @@ iced = { version = "0.14", features = ["tokio"] }
 # PNG encoding for the `--shot` screenshot path (RGBA → PNG on disk).
 image = { version = "0.25", default-features = false, features = ["png"] }
 # Links the Rust core: the thread-safe multi-network station facade.
-astar-station = { path = "../../crates/astar-station", version = "0.1.1-beta" }
+astar-station = { path = "../../crates/astar-station", version = "0.1.2-beta" }
 # Settings persistence (astar-de0a): TOML on disk under the platform config dir.
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

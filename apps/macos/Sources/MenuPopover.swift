@@ -15,9 +15,11 @@
     struct MenuPopover: View {
         @EnvironmentObject private var session: CallSession
         @EnvironmentObject private var serial: SerialController
+        /// Which pane to show. Shared (not `@State`) so the main menu's `Settings…`
+        /// item can open this same pane — see `AppNavigation`.
+        @EnvironmentObject private var navigation: AppNavigation
         @State private var node = ""
         @State private var errorText: String?
-        @State private var showDevices = false
         @State private var keyed = false  // PTT currently held
         @State private var keyMonitor: Any?  // spacebar hold-to-talk event monitor
         @State private var showFavoriteEditor = false  // inline "save favorite" popover
@@ -81,22 +83,22 @@
 
         var body: some View {
             Group {
-                if showDevices { devicesPane } else { mainPane }
+                if navigation.showsSettings { devicesPane } else { mainPane }
             }
             // Flexible sizing so the host window is resizable: a usable minimum, a
             // comfortable default, and free to grow. (Settings wants a bit more room,
             // so its ideal is larger — but the user's window size wins.)
             .frame(
-                minWidth: 310, idealWidth: showDevices ? 390 : 330,
+                minWidth: 310, idealWidth: navigation.showsSettings ? 390 : 330,
                 maxWidth: .infinity,
-                minHeight: 450, idealHeight: showDevices ? 670 : 550,
+                minHeight: 450, idealHeight: navigation.showsSettings ? 670 : 550,
                 maxHeight: .infinity
             )
             // Translucent, blurred backing (the host window is non-opaque/clear).
             .background(VisualEffectView().ignoresSafeArea())
             .onAppear {
                 installKeyMonitor()
-                applyPollState(inSettings: showDevices)
+                applyPollState(inSettings: navigation.showsSettings)
             }
             // Popover closed → resume the app's baseline poll (AppDelegate keeps the
             // call live for the menu-bar tint / serial PTT). Don't fully stop it.
@@ -109,13 +111,13 @@
             // keep polling when the serial PTT source is live: the PTT self-test in
             // Settings reads `serial.keyDetected`, which is updated ONLY from the poll
             // loop's `pttSourceTick` — pausing froze the indicator (astar-d00a).
-            .onChange(of: showDevices) { showing in
+            .onChange(of: navigation.showsSettings) { showing in
                 applyPollState(inSettings: showing)
             }
             // Entering/leaving the live serial state while Settings is open flips
             // whether the self-test needs polling, so re-evaluate.
             .onChange(of: serial.isActive) { _ in
-                applyPollState(inSettings: showDevices)
+                applyPollState(inSettings: navigation.showsSettings)
             }
             .onChange(of: session.status) { newStatus in
                 if newStatus != .answered && keyed { setKeyed(false) }  // unkey when the call ends
@@ -209,7 +211,7 @@
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 8) {
                     Button {
-                        showDevices = false
+                        navigation.showsSettings = false
                     } label: {
                         Label("Back", systemImage: "chevron.left")
                             .labelStyle(.iconOnly)
@@ -1148,7 +1150,7 @@
         private var footer: some View {
             HStack(spacing: 12) {
                 Button {
-                    showDevices = true
+                    navigation.showsSettings = true
                 } label: {
                     Image(systemName: "slider.horizontal.3")
                 }

@@ -2,9 +2,54 @@
 
 Notable changes to astar. Newest first.
 
-astar has never had a binary release: every version here is something you build
-from source. Versions are `MAJOR.MINOR.PATCHbeta` and will stay on `beta` until
-the client has had a real sit-down-and-use-it pass on all three platforms.
+Since `0.1.1beta` there is a signed, notarized macOS `astar.dmg` on the
+[releases page](https://github.com/rcludwick/astar/releases/latest); everything
+else is still built from source. Versions are `MAJOR.MINOR.PATCHbeta` and will
+stay on `beta` until the client has had a real sit-down-and-use-it pass on all
+three platforms.
+
+## 0.1.2beta — 2026-08-17
+
+Both fixes here came out of the first outside report against the `0.1.1beta`
+DMG, from a tester who had never built astar from source — so he met the app
+exactly as a new user does, and hit two walls in a row.
+
+### Fixed
+
+- **Settings opened an empty window.** astar spent its life as an `LSUIElement`
+  accessory, which has no application menu. The Dock icon added in `0.1.1beta`
+  promotes the app to a regular one, and that handed it a menu bar whose
+  `Settings…` item was still wired to the placeholder empty scene the app used
+  to satisfy SwiftUI's "an App must have a Scene" requirement. Choosing it
+  opened a window with nothing in it. astar now builds its menu explicitly, and
+  `Cmd-,` opens the real settings pane — the same one the popover's own settings
+  button shows, not a second copy.
+
+- **A fresh install invented a config for hardware you may not own.** With no
+  saved configs, astar seeded one named after the AllScan UCI150 and put it on a
+  serial hardware profile, whether or not that interface had ever been plugged
+  in. Meanwhile the entry that described plain system audio was filtered out of
+  the settings list and never appeared at all.
+
+### Added
+
+- **A built-in `System Default` config**: your Mac's current input and output,
+  no serial PTT. It is always present, can't be deleted, sits at the top of
+  Saved configs, and is what a fresh install starts on and stars as its launch
+  default.
+
+  Existing setups are left alone. If you already have saved configs but never
+  set a launch default, astar still applies nothing at startup — making System
+  Default win there would reset your devices and switch off your serial PTT on
+  every launch.
+
+- **A real menu bar.** `About astar` with links to the documentation and to
+  AJ7HR on QRZ; `Settings…` on `Cmd-,`; a standard Edit menu, so `Cmd-C` /
+  `Cmd-V` / `Cmd-A` work in the account, node, and config fields; Window; and a
+  Help menu linking the documentation site, the issue tracker, and QRZ.
+
+- **`Report an Issue…` in the Help menu**, pointing at the public repository's
+  issue tracker. Nothing in the app used to say where a bug should go.
 
 ## 0.1.1beta — 2026-08-14
 
