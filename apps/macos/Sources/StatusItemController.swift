@@ -134,6 +134,12 @@
         /// (astar-7c31) uses this rather than `toggleWindow()`: a second Dock click
         /// hiding the window is behaviour no Mac app has.
         func showWindow() {
+            // With no AllStarLink account the dial field is disabled, so the call
+            // UI is a form nobody can type into. Land on Settings instead
+            // (astar-4e8a) — it self-corrects the moment an account is saved.
+            if FirstRunPresentation.opensOnSettings(hasCredentials: session.hasCredentials) {
+                navigation.showsSettings = true
+            }
             NSApp.activate(ignoringOtherApps: true)
             window.makeKeyAndOrderFront(nil)
         }

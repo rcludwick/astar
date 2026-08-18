@@ -128,6 +128,25 @@ struct AstarApp: App {
             // Last: the status item is up, so the Dock icon (if enabled) appears
             // together with the menu-bar asterisk rather than ahead of it.
             DockPolicy.apply()
+            showWelcomeIfUnconfigured()
+        }
+
+        /// First launch with no AllStarLink account: raise the window on Settings
+        /// (astar-4e8a). astar is a menu-bar app, so otherwise a new user sees an
+        /// asterisk and nothing else, with no hint that an account is needed
+        /// before the dial field will accept anything.
+        ///
+        /// Once only — M17 needs no portal login, so running astar without
+        /// AllStarLink credentials is legitimate and must not be nagged at.
+        private func showWelcomeIfUnconfigured() {
+            let welcome = WelcomePreference()
+            guard
+                FirstRunPresentation.raisesWindowAtLaunch(
+                    hasCredentials: session.hasCredentials,
+                    hasShownWelcome: welcome.hasShownWelcome)
+            else { return }
+            welcome.markShown()
+            statusController?.showSettings()
         }
 
         /// Clicking the Dock icon opens the main window (astar-7c31). AppKit only
