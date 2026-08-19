@@ -128,10 +128,15 @@ extension CallSession {
         let audio = audioStore.load()
         let credentials = store.load()
         let (station, hasCredentials) = makeStation(credentials: credentials, audio: audio)
+        // m17: whether a Codec 2 backend resolved (astar-8c4d). Worth a launch
+        // line — "M17 doesn't work" is otherwise indistinguishable from "M17 is
+        // there but the codec never loaded", and that was the whole failure mode
+        // before Codec 2 was linked in.
         NSLog(
-            "[astar] live: station=%@ hasCredentials=%@ codecPolicy=%@",
+            "[astar] live: station=%@ hasCredentials=%@ codecPolicy=%@ m17=%@",
             station is NullStation ? "NULL" : "real", hasCredentials ? "yes" : "no",
-            audio.codecPolicyString)
+            audio.codecPolicyString,
+            (try? station.readSnapshot().m17Available) == true ? "available" : "unavailable")
         // `credentials` is also passed through for the M17 callsign prefill
         // (astar-c2e5/iax-f2b8 Task 8) — many hams reuse their portal login as
         // their callsign; see `CallSession.callsignPrefill(from:)`.
