@@ -273,14 +273,19 @@
                     // to it already carries the connection state.
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 1) {
-                    // Title never wraps/hyphenates (astar-cfc1): lineLimit(1) truncates
-                    // rather than breaking mid-word if space ever gets tighter than the
-                    // popover's tested minimum, and layoutPriority protects it from
-                    // being the thing that shrinks when the row is squeezed — the
-                    // Spacer gives first, not the status text.
+                    // Title never wraps and never elides (astar-cfc1, astar-5e2c).
+                    // lineLimit(1) stops it breaking mid-word; fixedSize makes it
+                    // render at its ideal width instead of accepting a narrower
+                    // proposal, which is what put an ellipsis on "Connected" while
+                    // the row still had room. layoutPriority alone did not cover it:
+                    // it orders who gives way, but Text stays willing to compress, so
+                    // a tight proposal still truncated the one string in this row that
+                    // is a fixed, known word rather than user data. Same treatment the
+                    // badges below and the TX toggle at the trailing edge already use.
                     Text(statusTitle)
                         .font(.callout.weight(.medium))
                         .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .layoutPriority(1)
                     // Codec/network badges (astar-eb6c/astar-9b3e/astar-cfc1): broken
                     // onto their own line below the title, not sharing it. At the
@@ -1404,9 +1409,14 @@
 
         var body: some View {
             if let rtt = meters.rttMS {
+                // fixedSize for the same reason as the status title (astar-5e2c):
+                // with the title no longer willing to compress, this short readout
+                // becomes the next thing the row squeezes, and "12 ms" has nothing
+                // worth eliding.
                 Text("\(rtt) ms")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: true, vertical: false)
             }
         }
     }
