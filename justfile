@@ -82,15 +82,17 @@ cbindgen:
     ./scripts/check-cbindgen.sh
     ./scripts/check-cbindgen-serial.sh
 
-# The four merge invariants CI's `guard` stage enforces: no armed hardware /
+# The five merge invariants CI's `guard` stage enforces: no armed hardware /
 # live-network opt-in, no git dependencies (ambe-thumbdv stays vendored, with
-# its licences), no invented install channel, and an AGPL SPDX header on every
-# first-party rs/swift/sh/py file. Each prints one line; run them before a push.
+# its licences), no invented install channel, an AGPL SPDX header on every
+# first-party rs/swift/sh/py file, and no LGPL code in a default build (Codec 2
+# stays opt-in). Each prints one line; run them before a push.
 guards:
     ./ci/guard-safety-env.sh
     ./ci/guard-no-git-deps.sh
     ./ci/guard-distribution-claims.sh
     ./ci/guard-spdx-headers.sh
+    ./ci/guard-codec2-licensing.sh
 
 # RFC audit verifier (tracker-free: ticket refs are format-checked, plus
 # archive membership when docs/issues-archive.jsonl is present locally).

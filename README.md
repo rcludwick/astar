@@ -296,6 +296,13 @@ Because it is the *Affero* GPL: if you modify astar and let other people use it
 over a network — a hosted node, a bridge, a web front-end — those users are
 entitled to the source of your modified version.
 
+One additional permission is granted under AGPL section 7, and it is recorded in
+[`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md): astar may be conveyed through
+Apple's App Store or a comparable platform despite the restrictions such
+platforms impose on recipients. It covers astar's own code only, and changes
+nothing else about the licence. That file also carries the Codec 2 (LGPL)
+notices and the written offer that goes with static linking.
+
 ### Third-party components
 
 These keep their own terms and are **not** covered by the AGPL:
@@ -305,6 +312,7 @@ These keep their own terms and are **not** covered by the AGPL:
 | `vendor/ambe-thumbdv` | ThumbDV / DV3000 AMBE driver (Rob's own, vendored in) | MIT **OR** Apache-2.0 — see its `LICENSE-MIT`, `LICENSE-APACHE`, and `VENDORED.md` |
 | `apps/gui/assets/fonts` | Inter typeface | SIL Open Font License 1.1 |
 | `harness/asterisk_parity/c_iaxclient/vendored/libiax2` | The historical C libiax2, used only as a parity reference by the test harness — never linked into a shipped binary | GPL / LGPL, see its `COPYING` and `COPYING.LIB` |
+| `codec2` crate / system `libcodec2` | Codec 2 — the M17 voice codec. Opt-in features only, never in a default feature set | `LGPL-2.1-only AND MIT` / LGPL-2.1 — notices and relink offer in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) |
 
 Everything else — every `astar-*` crate, both applications, the bindings, the
 scripts and the docs — is AGPL-3.0-only. Every first-party `.rs`, `.swift`,

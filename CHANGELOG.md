@@ -8,6 +8,46 @@ else is still built from source. Versions are `MAJOR.MINOR.PATCHbeta` and will
 stay on `beta` until the client has had a real sit-down-and-use-it pass on all
 three platforms.
 
+## 0.1.4beta — 2026-08-18
+
+M17 now works on a Mac that has never seen Homebrew. That was the whole point
+of this release: `0.1.3beta` offered an M17 network picker that could not
+actually open a codec, because the Codec 2 library it needed was something you
+had to install yourself.
+
+### Added
+
+- **Codec 2 is linked into the shipped app**, so M17 works out of the box.
+  astar still prefers a system `libcodec2` if you have one and only falls back
+  to the linked copy, so nothing changes for anyone who installed it via
+  Homebrew. Verified as a controlled experiment on a Mac with Homebrew's
+  `codec2` uninstalled: the runtime-only build reports M17 unavailable, the
+  shipped build reports it available.
+
+  This is the only LGPL code in astar, it is unmodified, and it is deliberately
+  never part of a default build — see `LICENSE-EXCEPTIONS.md` for the Codec 2
+  notices and the written offer, and `ci/guard-codec2-licensing.sh`, which
+  fails the build if it ever leaks into a default feature set.
+
+- **An App Store distribution exception** under AGPL-3.0 §7, scoped to Rob
+  Ludwick's own copyright and removable exactly as §7 allows. astar stays
+  AGPL-3.0-only; the exception exists so the same source can eventually ship
+  through the App Store, whose terms conflict with the bare AGPL. It grants no
+  rights over Codec 2, which is not Rob's to relicense — and nothing here stops
+  you modifying Codec 2 and rebuilding astar, which the notices say in as many
+  words.
+
+- **A first-run walkthrough** in the docs — install, account, audio levels, the
+  four ways to key up, first contact. Written from the questions an outside
+  tester actually asked over a week rather than from what seemed obvious from
+  the inside.
+
+### Fixed
+
+- The CodeQL workflow could hang for 25 minutes on its own `apt-get` step
+  against an unreachable Ubuntu mirror. The step is now bounded and retried,
+  and reports what happened instead of stalling the run.
+
 ## 0.1.3beta — 2026-08-17
 
 Everything here is about the first ten minutes with astar. `0.1.2beta` fixed

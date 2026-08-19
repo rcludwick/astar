@@ -12,7 +12,7 @@ inline. All 228 issues (164 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (88)
+## Open items (89)
 
 ### iax-5d90 — Bump boringtun off release-candidate crypto (curve25519-dalek advisory)
 *P3 low · chore · labels: security, wireguard, cx:1*
@@ -368,6 +368,52 @@ Found during iax-f2b8 Task 5: `check-cbindgen-serial` is red on master —
 `astar-serial-sys`'s committed header has drifted from its Rust source
 since the iax-239a worker-thread work. Regen, diff-audit (ABI-affecting or
 comment-only?), and add the serial check to the ci recipe if it isn't there.
+
+### iax-9a3c — Verifiable builds: prove a released binary comes from the published source
+*P3 low · task · labels: build, release, licensing, cx:4*
+
+Rob 2026-08-17, deferred deliberately from the 0.1.4beta licensing work. Goal:
+someone holding a released astar binary should be able to rebuild it from the
+tagged source and confirm they got the same thing. Serves LGPL-2.1 s6's relink
+requirement (see `LICENSE-EXCEPTIONS.md`) and is plain good practice for a
+signed binary people install.
+
+Rob also wants the **static Codec 2 library and its source shipped as release
+assets**, alongside astar's source, not just referenced.
+
+ALREADY TRUE — do not redo this:
+
+* `Cargo.lock` is committed and pins `codec2 0.3.1` with checksum
+  `3c3c8ba70382a99c0b5ebadf6ad50e7d98fb6eb9bcc4c0e30d422f6321798d99`. That is
+  already a cryptographic link from the release to the exact upstream source.
+* Every release is tagged, so `git checkout v<version>` yields the exact tree.
+* MEASURED 2026-08-17: the `codec2` rlib built `--release` is **byte-identical
+  across two separate `CARGO_TARGET_DIR`s** on one machine
+  (`9fb6566117d5c5e234daf78d7ce8c9618d4899739e5b4800777b5e8fa1070480`). So the
+  Rust side is already deterministic under the easy conditions.
+
+OPEN QUESTIONS, in the order worth answering:
+
+1. **Different source path.** Untested — this is the case a third-party verifier
+   actually has. Absolute paths leak into artifacts via debug info and panic
+   messages; `--remap-path-prefix` (or `-Z trim-paths` / the stable
+   `trim-paths` profile option) is the mitigation. Test before promising
+   anything.
+2. **The toolchain is not pinned.** `rust-toolchain.toml` says
+   `channel = "stable"`, which floats — two people on different rustc releases
+   will not match. Reproducibility needs an exact version (`1.97.1` today).
+   Weigh against the cost of manually bumping it.
+3. **What can honestly be claimed about the signed artifact.** A notarized
+   Mach-O cannot be byte-compared against a local rebuild: signing rewrites
+   `__LINKEDIT`, and the App Store re-signs on top. The achievable claim is
+   about the *unsigned* binary — publish its SHA-256 and a documented
+   `just verify-build` that rebuilds and compares. Do not advertise
+   "reproducible builds" beyond what is actually true of the delivered file.
+4. Release assets to add: source tarball (`git archive` of the tag), the static
+   Codec 2 artifact, and a `SHA256SUMS` covering every asset including the DMG.
+
+Related: the App Store exception and the LGPL written offer in
+`LICENSE-EXCEPTIONS.md`; `iax-e5d9` for why Codec 2's licence matters on iOS.
 
 ### iax-e5d9 — Clean-room Rust Codec 2 (permissively licensed) — the iOS M17 gate
 *P4 backlog · feature · labels: m17, codec, cx:5*

@@ -10,9 +10,10 @@ icon: lucide/construction
     deliberately deferred rather than guessed at — a walkthrough that does not
     match the app is worse than no walkthrough.
 
-    Until it lands, [The macOS app](index.md) sketches what the popover
-    contains, and the app itself carries inline guidance where setup is
-    fiddly (serial PTT, in particular).
+    Until it lands, [First run](first-run.md) walks a new user from the
+    download to a first contact, [The macOS app](index.md) sketches what the
+    popover contains, and the app itself carries inline guidance where setup
+    is fiddly (serial PTT, in particular).
 
 What this page will eventually cover:
 

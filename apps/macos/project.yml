@@ -38,7 +38,7 @@ settings:
     # takes the human spelling. Bump both together.
     # (App Store submission would demand a purely numeric n.n.n here; nothing
     # is submitted or notarised today — build-from-source only.)
-    MARKETING_VERSION: "0.1.3beta"
+    MARKETING_VERSION: "0.1.4beta"
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "5.0"
     GENERATE_INFOPLIST_FILE: "YES"

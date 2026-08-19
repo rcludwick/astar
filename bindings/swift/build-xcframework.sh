@@ -81,7 +81,22 @@ build_slice() {
   if [ "$target" = "$HOST_TARGET" ]; then
     dep_env=(MACOSX_DEPLOYMENT_TARGET=12.0)
   fi
-  ( cd "$REPO" && env "${dep_env[@]}" cargo build -p astar-sys --target "$target" $cargo_profile_flag )
+  # ASTAR_CODEC2 selects the Codec 2 backend for M17 (astar-8c4d). Default
+  # `static` links it in, so M17 works on a Mac with no Homebrew libcodec2 —
+  # which is every Mac that installed the DMG. `open_codec2` still tries a
+  # system library first and only falls back to the linked one, so a user who
+  # does have the C library keeps it.
+  #
+  # LICENSING: the `codec2` crate is LGPL-2.1-only AND MIT, so this feature is
+  # never a default anywhere in the workspace; turning it on here is a
+  # deliberate act for the shipped app, and it is what the Codec 2 notices and
+  # written offer in LICENSE-EXCEPTIONS.md cover. Set ASTAR_CODEC2=runtime to
+  # build without any LGPL code linked in.
+  local codec_features=()
+  if [ "${ASTAR_CODEC2:-static}" = "static" ]; then
+    codec_features=(--features codec2-static)
+  fi
+  ( cd "$REPO" && env "${dep_env[@]}" cargo build -p astar-sys --target "$target" $cargo_profile_flag "${codec_features[@]}" )
   echo "$REPO/target/$target/$profile_dir/$LIB_NAME"
 }
 
