@@ -1455,6 +1455,35 @@ public final class CallSession: ObservableObject {
         directoryStore.upsert(entry)
     }
 
+    /// Change a saved entry's dial target (node number or address) by id,
+    /// preserving everything else about it — label, favorite flag, lastUsed,
+    /// note, per-node talk-timer override, and the entry's own id (astar-6b83).
+    /// Before this, a node that changed number could only be deleted and
+    /// re-added, which threw away all of that curation.
+    ///
+    /// Validated with `DialTarget.parse`, the SAME validator the dial field
+    /// uses, so anything you can save here is something you could have dialed —
+    /// node numbers, `*`/`#` command dials, and `host`/`host:port` addresses.
+    ///
+    /// Returns false (leaving the entry untouched) when the target is empty or
+    /// malformed, when `id` is unknown, or when another entry already holds that
+    /// node — two rows on one node would make `recordRecent`, which upserts BY
+    /// NODE rather than by id, and `directoryEntry(forNode:)` ambiguous.
+    /// Re-committing an entry's existing node is a successful no-op, not a
+    /// collision with itself.
+    @discardableResult
+    public func directorySetNode(id: String, to target: String) -> Bool {
+        let trimmed = target.trimmingCharacters(in: .whitespaces)
+        guard DialTarget.parse(trimmed) != nil else { return false }
+        let entries = directoryStore.all()
+        guard var entry = entries.first(where: { $0.id == id }) else { return false }
+        guard !entries.contains(where: { $0.id != id && $0.node == trimmed }) else { return false }
+        guard entry.node != trimmed else { return true }
+        entry.node = trimmed
+        directoryStore.upsert(entry)
+        return true
+    }
+
     /// Remove a directory entry by id — the Settings manager's delete.
     public func directoryRemove(id: String) {
         directoryStore.remove(id: id)
