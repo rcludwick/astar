@@ -19,6 +19,7 @@ no Dock icon at all.
 </figure>
 
 [Download astar.dmg](https://github.com/rcludwick/astar/releases/latest){ .md-button .md-button--primary }
+[First run walkthrough](first-run.md){ .md-button }
 
 !!! info "Requirements"
 

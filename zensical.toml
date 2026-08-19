@@ -61,6 +61,7 @@ nav = [
   ] },
   { "macOS app" = [
     "macos/index.md",
+    "macos/first-run.md",
     "macos/hardware.md",
     "macos/usage.md",
   ] },
