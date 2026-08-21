@@ -2,10 +2,10 @@
 icon: lucide/radio-tower
 ---
 
-# astar
-
 <div class="astar-hero" markdown>
 <div class="astar-hero__copy" markdown>
+
+# astar
 
 A native ham-radio digital-voice client and node — **AllStarLink (IAX2)** and
 **M17** — built on one Rust engine with native front-ends.
@@ -15,7 +15,8 @@ meters, and support for the generic class of USB radio interfaces (serial PTT
 plus USB audio). The same engine also runs headless as an always-on node daemon.
 
 The two networks are **not equally far along**. AllStarLink is the primary
-target. M17 is in the apps but capability-gated on a system `libcodec2`. See
+target and takes the most testing. M17 is native, reflectors included, and as
+of `0.1.4beta` the macOS app carries its own Codec 2 — nothing to install. See
 [The macOS app](macos/index.md).
 
 Other networks are in the tree at various stages and are **not** claimed as
@@ -37,9 +38,10 @@ working. Treat any crate you find for one as work in progress, not a feature.
     slice — and needs **macOS 13 (Ventura) or later**. On an Intel Mac, build from
     source. There is no Homebrew tap, no cask, and no App Store listing.
 
-    **M17 needs `brew install codec2`.** The app does not bundle `libcodec2` yet
-    (astar-8c4d), so M17 stays greyed out until a system copy is present.
-    AllStarLink needs nothing extra.
+    **Both networks need nothing extra.** Codec 2 is linked into the app as of
+    `0.1.4beta`, so M17 works on a Mac that has never seen Homebrew; a system
+    `libcodec2` is still preferred when you have one. Building the *engine* on
+    its own is the different case — see [Codec 2](build/prerequisites.md#codec-2-only-for-m17).
 
 ## Three surfaces, one engine
 
