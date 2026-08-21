@@ -175,7 +175,7 @@ happened — the target builds, and that is the whole claim.
 | Undefined symbols that clearly exist in the Rust source | One xcframework is stale | `just xcframework` — both, again |
 | `xcodegen: command not found` | Missing prerequisite | `brew install xcodegen` |
 | The app builds but shows no menu-bar icon | It launched, but the asterisk is crowded out | Look for the rainbow asterisk; check other menu-bar items are not pushing it off. If the Dock icon is off too, `defaults delete com.aj7hr.astar ui.showInDock` restores it |
-| No M17 in the network picker | No system `libcodec2` | [Codec 2](prerequisites.md#codec-2-only-for-m17) |
+| No M17 in the network picker | Built with `ASTAR_CODEC2=runtime`, and no system `libcodec2` to fall back on | Re-run `just xcframework` without it — the default links Codec 2 in — or install one: [Codec 2](prerequisites.md#codec-2-only-for-m17) |
 
 ## Next steps
 

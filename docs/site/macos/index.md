@@ -54,7 +54,7 @@ you are looking at.
 | Network | Notes |
 |---|---|
 | **AllStarLink (IAX2)** | The primary target. Dials nodes; speaks the `app_rpt` link-layer dialect on top of IAX2. |
-| **M17** | Native support, including reflectors. Transmits your callsign, so set it before you key. Capability-gated: the picker shows M17 only when the build can find a system `libcodec2` — see [Codec 2](../build/prerequisites.md#codec-2-only-for-m17). |
+| **M17** | Native support, including reflectors. Transmits your callsign, so set it before you key. The app links Codec 2 in, so there is nothing to install; a system `libcodec2` is used in preference when one is present — see [Codec 2](../build/prerequisites.md#codec-2-only-for-m17). |
 
 ## Audio and PTT hardware
 
