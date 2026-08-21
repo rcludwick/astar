@@ -4,6 +4,9 @@ icon: lucide/radio-tower
 
 # astar
 
+<div class="astar-hero" markdown>
+<div class="astar-hero__copy" markdown>
+
 A native ham-radio digital-voice client and node — **AllStarLink (IAX2)** and
 **M17** — built on one Rust engine with native front-ends.
 
@@ -20,6 +23,12 @@ working. Treat any crate you find for one as work in progress, not a feature.
 
 [Download for macOS](https://github.com/rcludwick/astar/releases/latest){ .md-button .md-button--primary }
 [Build it from source](build/index.md){ .md-button }
+
+</div>
+<div class="astar-hero__shot" markdown>
+![The astar popover on macOS: connected to a node, with live TX and RX meters, the levels and spectrum view, and the DTMF dialpad open](images/macos-app.png)
+</div>
+</div>
 
 !!! info "About the download"
 

@@ -14,7 +14,7 @@ It takes effect immediately, sticks across launches, and the app then starts wit
 no Dock icon at all.
 
 <figure markdown="span">
-  ![The astar window on macOS: connected to a node, with live TX and RX meters, the levels and spectrum view, and the DTMF dialpad open](../images/macos-app.png){ width="348" }
+  ![The astar window on macOS: connected to a node, with live TX and RX meters, the levels and spectrum view, and the DTMF dialpad open](../images/macos-app.png){ width="333" }
   <figcaption>Connected, receiving, with the spectrum and dialpad open.</figcaption>
 </figure>
 

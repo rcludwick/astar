@@ -155,8 +155,11 @@
   letter-spacing: -0.008em;
 }
 
-/* Lead paragraph directly under the page title. */
-.md-typeset h1 + p {
+/* Lead paragraph directly under the page title. On the home page the title is
+ * followed by the hero wrapper rather than the paragraph itself, so the copy
+ * column's first paragraph has to be named too or the lead loses its size. */
+.md-typeset h1 + p,
+.md-typeset h1 + .astar-hero .astar-hero__copy > p:first-child {
   font-size: 0.86rem;
   line-height: 1.55;
   color: var(--md-default-fg-color--light);
@@ -456,6 +459,62 @@
   border-radius: 0.6rem;
   background: var(--astar-surface);
   padding: 0.6rem 0.4rem;
+}
+
+/* --------------------------------------------------------- screenshots --- */
+/* App screenshots are captures of a dark app on a dark page, so their outer
+ * edge would otherwise dissolve into the background. A hairline and the card
+ * radius give the window an edge without adding a shadow. */
+.md-typeset figure img,
+.md-typeset .astar-hero__shot img {
+  border: 1px solid var(--astar-hairline);
+  border-radius: 0.75rem;
+}
+
+/* `<div class="astar-hero">` — the home page opening: prose and buttons on the
+ * left, the product shot on the right. Flex rather than a float so the
+ * admonition and the card grid that follow can never slide underneath a shot
+ * that is taller than the copy beside it. Single column until the theme's
+ * content area is wide enough to seat both. */
+.md-typeset .astar-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  align-items: center;
+}
+
+.md-typeset .astar-hero__shot img {
+  display: block;
+  width: 100%;
+  max-width: 333px; /* the capture's own pixel width — never upscale it */
+  height: auto;
+}
+
+@media screen and (min-width: 60em) {
+  .md-typeset .astar-hero {
+    flex-direction: row;
+    align-items: center;
+    gap: 2.5rem;
+  }
+
+  .md-typeset .astar-hero__copy {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .md-typeset .astar-hero__shot {
+    flex: 0 0 auto;
+  }
+
+  /* The copy column owns the vertical rhythm; drop the leading margin on its
+   * first paragraph so the text and the shot start level. */
+  .md-typeset .astar-hero__copy > :first-child {
+    margin-top: 0;
+  }
+
+  .md-typeset .astar-hero__copy > :last-child {
+    margin-bottom: 0;
+  }
 }
 
 /* ---------------------------------------------------------------- misc --- */
