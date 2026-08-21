@@ -2,7 +2,7 @@
 icon: lucide/apple
 ---
 
-# The macOS app
+# Building the macOS app
 
 The SwiftUI menu-bar client. This is the front-end that gets the design
 attention, and the one with the most prerequisites — a full Xcode, XcodeGen,
