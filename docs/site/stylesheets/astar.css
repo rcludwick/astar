@@ -458,6 +458,83 @@
   padding: 0.6rem 0.4rem;
 }
 
+/* --------------------------------------------------------- screenshots --- */
+/* App screenshots are captures of a dark app on a dark page, so their outer
+ * edge would otherwise dissolve into the background. A hairline and the card
+ * radius give the window an edge without adding a shadow. */
+.md-typeset figure img,
+.md-typeset .astar-hero__shot img {
+  border: 1px solid var(--astar-hairline);
+  border-radius: 0.75rem;
+}
+
+/* `<div class="astar-hero">` — the home page opening: the page title, its
+ * prose and the download buttons on the left, the product shot on the right.
+ * The `# astar` heading lives INSIDE the copy column rather than above the
+ * wrapper, which is what lets the shot's top edge line up with the title
+ * instead of floating somewhere down the page.
+ *
+ * Flex rather than a float, so the admonition and the card grid that follow
+ * can never slide underneath a shot that is taller than the copy beside it.
+ * Single column until the theme's content area is wide enough to seat both. */
+.md-typeset .astar-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  align-items: flex-start;
+}
+
+.md-typeset .astar-hero__shot p {
+  margin: 0;
+}
+
+.md-typeset .astar-hero__shot img {
+  display: block;
+  width: 100%;
+  max-width: 333px; /* the capture's own pixel width — never upscale it */
+  height: auto;
+}
+
+/* The mark beside the wordmark. This is the SAME asterisk as the header logo
+ * and carries its own rainbow, so it is NOT a third use of the spectrum
+ * tokens — see the rainbow policy at the top of this file. Drawn with
+ * ::before so the heading text stays exactly "astar" for the page <title>,
+ * the search index and screen readers. */
+.md-typeset .astar-hero__copy > h1 {
+  margin-top: 0;
+}
+
+.md-typeset .astar-hero__copy > h1::before {
+  content: "";
+  display: inline-block;
+  width: 0.95em;
+  height: 0.95em;
+  margin-right: 0.3em;
+  vertical-align: -0.12em;
+  background: url("../images/logo.svg") center / contain no-repeat;
+}
+
+@media screen and (min-width: 60em) {
+  .md-typeset .astar-hero {
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 2.5rem;
+  }
+
+  .md-typeset .astar-hero__copy {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .md-typeset .astar-hero__shot {
+    flex: 0 0 auto;
+  }
+
+  .md-typeset .astar-hero__copy > :last-child {
+    margin-bottom: 0;
+  }
+}
+
 /* ---------------------------------------------------------------- misc --- */
 .md-typeset hr {
   border-bottom-color: var(--astar-hairline);

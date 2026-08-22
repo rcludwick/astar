@@ -119,12 +119,25 @@ spurious drift.
 
 ### Codec 2 — only for M17
 
-M17 needs Codec 2, and astar does not bundle it. The engine resolves a system
-`libcodec2` **at runtime** — it is `dlopen`ed, never linked. It tries
-`IAX_CODEC2_PATH` first, then any configured search directories, then
-`/opt/homebrew/lib`, `/usr/local/lib` and `/usr/lib`. Each candidate is
-sanity-checked before use, so a wrong or broken library is rejected rather than
-half-loaded.
+M17 needs Codec 2. Where it comes from depends on which of the two things you
+are building, and only one of them needs anything installed.
+
+**The macOS app carries its own** (astar-8c4d). `just xcframework` builds
+`astar-sys` with `--features codec2-static` unless you say otherwise, so both
+the shipped DMG and an app you build yourself have M17 with nothing else on the
+machine. `ASTAR_CODEC2=runtime just xcframework` opts out and leaves no LGPL
+code linked in.
+
+**Everything else resolves a system `libcodec2` at runtime** — a plain
+`cargo build` of the engine, `astar-server` or the Iced client `dlopen`s it,
+never links it. It tries `IAX_CODEC2_PATH` first, then any configured search
+directories, then `/opt/homebrew/lib`, `/usr/local/lib` and `/usr/lib`. Each
+candidate is sanity-checked before use, so a wrong or broken library is
+rejected rather than half-loaded.
+
+The runtime path wins wherever both exist: even in the linked app, a healthy
+system library is preferred and the linked copy is the fallback. Install one
+if you want to control which Codec 2 astar runs.
 
 === "macOS"
 
@@ -144,14 +157,19 @@ If your copy lives somewhere unusual, name the library itself:
 export IAX_CODEC2_PATH=/path/to/libcodec2.dylib
 ```
 
-!!! warning "No libcodec2 looks exactly like no M17 support"
+!!! warning "No Codec 2 at all looks exactly like no M17 support"
 
-    When the engine finds no `libcodec2` it reports M17 as unavailable and the
-    clients simply do not offer M17 in the network picker. There is no error
-    dialog. AllStarLink needs none of this — only M17 does.
+    When a build can find neither a system `libcodec2` nor a linked copy, it
+    reports M17 as unavailable and the clients simply do not offer M17 in the
+    network picker. There is no error dialog. AllStarLink needs none of this —
+    only M17 does.
 
-    Keeping Codec 2 out of the link is deliberate: it is LGPL-2.1 and MIT, and
-    loading it at runtime is what keeps a plain `cargo build` free of LGPL code.
+    Keeping Codec 2 out of every *default* build is deliberate: it is LGPL-2.1
+    and MIT, so `codec2-static` and `codec2-runtime` are both opt-in and a
+    plain `cargo build` stays free of LGPL code. `ci/guard-codec2-licensing.sh`
+    fails the build if that ever stops being true. Linking it into the app is
+    the one deliberate exception, covered by the notices and written offer in
+    `LICENSE-EXCEPTIONS.md`.
 
 ### `uv` — only for the documentation site
 

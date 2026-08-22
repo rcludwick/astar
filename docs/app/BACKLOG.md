@@ -12,7 +12,34 @@ inline. All 129 issues (107 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (35)
+## Open items (36)
+
+### astar-menu — MainMenu.install never wins; SwiftUI's default menu ships instead
+*P3 low · bug · labels: macos, ui, cx:2*
+
+`MainMenu.install` (astar-1f7d) replaces `NSApp.mainMenu` in
+`applicationDidFinishLaunching`, but SwiftUI installs its own menu **after**
+that runs and wins. Verified live through the accessibility API against a
+0.1.5beta build:
+
+* the menu bar reads `Apple, astar, View, Window, Help` — **View** is
+  SwiftUI's, and **Edit**, which `MainMenu` does build, is absent
+* Help contains only `astar Help`, not the `Documentation` / `AJ7HR on QRZ` /
+  `Report an issue` items `MainMenu.helpMenuItem` builds
+
+So none of astar-1f7d's menu reaches a user, and the whole file is dead code
+that reads as live. Its `Settings…` item was the reason the empty
+`Settings { EmptyView() }` scene looked unreachable when it was not — that is
+fixed at the source (`CommandGroup(replacing: .appSettings)`), and the About
+panel now takes its contents from the bundle (`NSHumanReadableCopyright` +
+`Resources/Credits.html`) precisely so it does not depend on which menu wins.
+
+**Design:** decide between the two, do not leave both. Either express the menu
+in SwiftUI `.commands` — which is the thing that actually owns the menu bar —
+and delete `MainMenu.swift`, or find out why the AppKit install loses and make
+it stick. The Help links are the user-visible loss: nothing in the app points
+at the docs or at where to file a bug, which is the gap astar-1f7d was opened
+to close in the first place.
 
 ### astar-2b71 — TX level graph stays flat on some built-in microphones
 *P2 medium · bug · labels: audio, ptt, macos, cx:3* — **targeted at 0.1.5beta**

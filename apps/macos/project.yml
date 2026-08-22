@@ -38,7 +38,7 @@ settings:
     # takes the human spelling. Bump both together.
     # (App Store submission would demand a purely numeric n.n.n here; nothing
     # is submitted or notarised today — build-from-source only.)
-    MARKETING_VERSION: "0.1.4beta"
+    MARKETING_VERSION: "0.1.6beta"
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "5.0"
     GENERATE_INFOPLIST_FILE: "YES"
@@ -77,6 +77,10 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         INFOPLIST_KEY_CFBundleDisplayName: astar
+        # Rendered by AppKit's standard About panel under the version, with no
+        # code involved. Resources/Credits.html supplies the rest of that panel
+        # the same way — both survive whichever main menu ends up installed.
+        INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Rob Ludwick. AGPL-3.0-only."
         # macOS menu-bar app: no Dock icon, no default window (UI is the MenuBarExtra).
         INFOPLIST_KEY_LSUIElement: "YES"
         INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
