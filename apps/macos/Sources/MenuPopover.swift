@@ -1465,27 +1465,36 @@
 
         var body: some View {
             if let rtt = meters.rttMS {
-                // astar-5e2c. Deliberately NOT fixedSize: this appears the moment a
-                // call answers, and pinning it to its ideal width made the whole
-                // window jump wider from a thin popover. It stays compressible —
-                // but it must never WRAP, and it must never truncate.
+                // Whole or not at all (astar-5e2c). No amount of layout priority
+                // can win this row: the codec/network badges beside it are
+                // fixedSize, so the status column cannot compress below their
+                // combined width, while a Text's minimum is zero. Every point of
+                // deficit therefore lands here. Measured on a 310pt window with a
+                // legacy scroller the row has 243pt to spend and wants ~255, and
+                // the readout was handed 5pt of it — rendering "93 ms" as a bare
+                // "9". Priority tweaks only moved which wrong thing was shown:
+                // unbounded it wrapped one character per line into a vertical
+                // strip, lineLimit(1) truncated it to a single digit.
                 //
-                // Both were observed. Unbounded, a narrow window broke "12 ms" one
-                // character per line into a vertical stack. lineLimit(1) alone then
-                // rendered a bare "1", because the status column's layoutPriority(1)
-                // claims its ideal width first and left this nothing — a truncated
-                // latency figure is a wrong number, not a cosmetic defect.
+                // A latency figure clipped to its first digit is a WRONG NUMBER on
+                // screen, which is worse than no number: "9" and "93" and "935" ms
+                // are three very different calls. So ViewThatFits renders it at its
+                // full ideal width or drops it entirely, and the width it would
+                // have taken goes back to the connected-node label. It returns by
+                // itself the moment the window is widened.
                 //
-                // layoutPriority(1) puts it level with that column, so both are
-                // satisfied before the Spacer and the Spacer collapses to what is
-                // genuinely spare. The node label inside the column stays the row's
-                // one pressure valve. Measured intact down to a 250pt row, well
-                // under the window's 310pt contentMinSize.
-                Text("\(rtt) ms")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .layoutPriority(1)
+                // Still not fixedSize at the row level — that made the window jump
+                // wider the moment a call answered. The pin lives inside the first
+                // branch, where it means "this width or nothing" rather than
+                // "grow the window to fit me".
+                ViewThatFits(in: .horizontal) {
+                    Text("\(rtt) ms")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                    Color.clear.frame(width: 0, height: 0)
+                }
             }
         }
     }
