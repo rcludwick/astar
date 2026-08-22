@@ -74,6 +74,7 @@ nav = [
   { "About" = [
     "about/safety.md",
     "about/license.md",
+    "changelog.md",
   ] },
 ]
 
