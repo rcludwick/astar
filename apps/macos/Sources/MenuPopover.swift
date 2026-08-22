@@ -370,13 +370,34 @@
                         // callsign source later. `directoryRevision` re-reads on edits.
                         let _ = directoryRevision
                         HStack(spacing: 6) {
+                            // One line, truncating (astar-5e2c). Without a
+                            // lineLimit this wrapped: a repeater name plus node
+                            // number split across two lines, which grew the card
+                            // vertically and pushed the level graphs down. It is
+                            // also the row's pressure valve — an unbounded
+                            // wrapping Text refuses to compress below its longest
+                            // word, so the width had nowhere to go but the window.
+                            // This is the one string here that is user data and
+                            // can be arbitrarily long, which makes it the right
+                            // thing to elide, unlike the fixed status title.
                             Text(connectedNodeLabel(for: dialedNode))
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
                             talkTimerDot
                         }
                     }
                 }
+                // astar-5e2c: the text column takes its ideal width BEFORE the
+                // Spacer gets any. Without this the column, the RTT readout and
+                // the Spacer all sat at priority 0, so an HStack split the spare
+                // width between them — the Spacer claimed a share it did not need
+                // and the status text was squeezed into eliding "Connected" and
+                // wrapping the node label, while the row visibly still had room.
+                // Priority orders who is satisfied first; the Spacer now collapses
+                // to whatever is genuinely left over.
+                .layoutPriority(1)
                 // Round-trip time right next to the connection status.
                 RTTLabel(meters: session.meters)
                 Spacer()
@@ -1409,14 +1430,12 @@
 
         var body: some View {
             if let rtt = meters.rttMS {
-                // fixedSize for the same reason as the status title (astar-5e2c):
-                // with the title no longer willing to compress, this short readout
-                // becomes the next thing the row squeezes, and "12 ms" has nothing
-                // worth eliding.
+                // Deliberately NOT fixedSize (astar-5e2c): this appears the moment a
+                // call answers, and pinning it to its ideal width made the whole
+                // window jump wider from a thin popover. It stays compressible.
                 Text("\(rtt) ms")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: true, vertical: false)
             }
         }
     }
