@@ -281,23 +281,39 @@
 
         private func applyPending() {
             guard let archive = pending else { return }
+            let wanted = archive.filtered(to: chosenForImport)
             sheet = nil
             pending = nil
             status = nil
             failure = nil
-            do {
+
+            // Dismiss FIRST, apply on the next runloop turn.
+            //
+            // Applying writes to an @EnvironmentObject (SetupController) and to
+            // the parent's @State (directoryRevision), which rebuilds the whole
+            // Settings list. Doing that in the same turn as `sheet = nil` means
+            // the rebuild lands mid-dismissal and re-presents the sheet with its
+            // pre-dismiss value before the nil settles — the close/open/close
+            // bounce. The export sheet never did this because it touches no
+            // observed state on the way out.
+            DispatchQueue.main.async {
                 let summary = ConfigTransfer.apply(
-                    archive.filtered(to: chosenForImport), session: session,
+                    wanted, session: session,
                     setupStore: UserDefaultsSetupStore(),
                     profileStore: UserDefaultsMicProfileStore(),
                     defaults: .standard)
                 // An import writes straight to the stores, behind the live
-                // controllers' backs. Without these two the imported configs do
-                // not appear until relaunch, the ★ renders against a stale
+                // controllers' backs. Without these the imported configs do not
+                // appear until relaunch, the ★ renders against a stale
                 // defaultID, and the next controller write persists that stale
                 // value over what was just imported.
-                setups.reloadFromStore()
-                directoryRevision += 1
+                //
+                // Invalidate only what actually changed: a configs-only import
+                // has no reason to rebuild the favorites UI, and every avoided
+                // rebuild is one less chance to disturb the view that triggered
+                // it.
+                if wanted.rigs != nil { setups.reloadFromStore() }
+                if wanted.directory != nil { directoryRevision += 1 }
                 // Report what changed, not "imported" — a re-imported backup
                 // legitimately changes nothing, and saying "imported" would
                 // leave the user unsure whether it took.
