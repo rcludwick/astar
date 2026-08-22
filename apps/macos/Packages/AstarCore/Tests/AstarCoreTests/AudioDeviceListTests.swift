@@ -107,133 +107,104 @@ final class AudioDeviceListTests: XCTestCase {
         // A UCI150 exposes a mic AND a speaker under one name. That is one
         // device in each list, not two in either — the case AudioDevicePairing
         // relies on. Concatenating the lists would invent a collision here.
-        let warning = AudioDeviceList.collisionWarning(
-            inputs: ["USB Audio Device", "KT USB Audio"],
-            outputs: ["USB Audio Device", "KT USB Audio"])
-        XCTAssertNil(warning)
+        XCTAssertNil(
+            AudioDeviceList.collisionWarning(
+                inputs: ["USB Audio Device", "KT USB Audio"],
+                outputs: ["USB Audio Device", "KT USB Audio"],
+                selectedInput: "USB Audio Device",
+                selectedOutput: "USB Audio Device"))
     }
 
     func testCollisionInInputsAloneIsReported() {
-        let warning = AudioDeviceList.collisionWarning(
-            inputs: ["USB Audio Device", "USB Audio Device"],
-            outputs: ["USB Audio Device"])
-        XCTAssertNotNil(warning)
+        XCTAssertNotNil(
+            AudioDeviceList.collisionWarning(
+                inputs: ["USB Audio Device", "USB Audio Device"],
+                outputs: ["USB Audio Device"],
+                selectedInput: "USB Audio Device",
+                selectedOutput: "USB Audio Device"))
     }
 
     func testCollisionInOutputsAloneIsReported() {
-        let warning = AudioDeviceList.collisionWarning(
-            inputs: ["USB Audio Device"],
-            outputs: ["USB Audio Device", "USB Audio Device"])
-        XCTAssertNotNil(warning)
-    }
-
-    func testANameCollidingInBothDirectionsIsReportedOnce() {
-        // The 7300 + UCI150 case: both gadgets are duplex, so the same name
-        // collides in inputs AND outputs. The user has one problem, not two.
-        let warning = AudioDeviceList.collisionWarning(
-            inputs: ["USB Audio Device", "USB Audio Device"],
-            outputs: ["USB Audio Device", "USB Audio Device"])
-        let text = try! XCTUnwrap(warning)
-        let occurrences = text.components(separatedBy: "USB Audio Device").count - 1
-        XCTAssertEqual(occurrences, 1, "named twice in: \(text)")
-    }
-
-    func testDistinctCollisionsInEachDirectionAreBothReported() {
-        let warning = AudioDeviceList.collisionWarning(
-            inputs: ["Mic X", "Mic X"],
-            outputs: ["Spkr Y", "Spkr Y"])
-        let text = try! XCTUnwrap(warning)
-        XCTAssertTrue(text.contains("Mic X") && text.contains("Spkr Y"), text)
+        XCTAssertNotNil(
+            AudioDeviceList.collisionWarning(
+                inputs: ["USB Audio Device"],
+                outputs: ["USB Audio Device", "USB Audio Device"],
+                selectedInput: "USB Audio Device",
+                selectedOutput: "USB Audio Device"))
     }
 
     func testNoDevicesAtAllIsNoWarning() {
-        XCTAssertNil(AudioDeviceList.collisionWarning(inputs: [], outputs: []))
-    }
-
-    // MARK: - Gated on the current selection (the main page)
-
-    /// The main page warns only when the clash affects the rig you are running
-    /// (astar-9d41). Settings keeps the unconditional form: there you are
-    /// actively choosing devices, so a clash you have not selected yet is still
-    /// the thing you need to know.
-
-    func testNoWarningWhenTheSelectedDeviceIsUnambiguous() {
         XCTAssertNil(
             AudioDeviceList.collisionWarning(
-                inputs: ["Clashy", "Clashy", "KT USB Audio"],
-                outputs: ["Mac mini Speakers"],
-                selectedInput: "KT USB Audio",
-                selectedOutput: "Mac mini Speakers"))
+                inputs: [], outputs: [], selectedInput: nil, selectedOutput: nil))
     }
 
-    func testWarnsWhenTheSelectedInputIsAmbiguous() {
+    // MARK: - Is THIS selection ambiguous (the red picker border)
+
+    func testAnAmbiguousSelectionIsFlagged() {
+        XCTAssertTrue(
+            AudioDeviceList.isAmbiguous(
+                "USB Audio Device", in: ["USB Audio Device", "USB Audio Device"]))
+    }
+
+    func testAUniqueSelectionIsNotFlagged() {
+        XCTAssertFalse(
+            AudioDeviceList.isAmbiguous(
+                "KT USB Audio", in: ["USB Audio Device", "USB Audio Device", "KT USB Audio"]))
+    }
+
+    func testSystemDefaultIsNotFlagged() {
+        XCTAssertFalse(AudioDeviceList.isAmbiguous(nil, in: ["A", "A"]))
+    }
+
+    func testAMissingSelectionIsNotFlagged() {
+        XCTAssertFalse(AudioDeviceList.isAmbiguous("Unplugged", in: ["A", "A"]))
+    }
+
+    func testFlaggingIsPerDirection() {
+        // The list passed in IS the direction. A name unique among inputs is
+        // addressable there even if it clashes among outputs, so the caller
+        // must get false for the input picker.
+        XCTAssertFalse(AudioDeviceList.isAmbiguous("Thing", in: ["Thing"]))
+        XCTAssertTrue(AudioDeviceList.isAmbiguous("Thing", in: ["Thing", "Thing"]))
+    }
+
+    func testACombinedGadgetIsNotFlagged() {
+        // A UCI150 appears once in inputs and once in outputs — one entry per
+        // direction, which is a pair, not a clash.
+        XCTAssertFalse(
+            AudioDeviceList.isAmbiguous(
+                "USB Audio Device", in: ["USB Audio Device", "KT USB Audio"]))
+    }
+
+    // MARK: - The short caption under a picker
+
+    func testNoCaptionForAUniqueSelection() {
+        XCTAssertNil(
+            AudioDeviceList.ambiguityNote(for: "KT USB Audio", in: ["KT USB Audio", "A", "A"]))
+    }
+
+    func testNoCaptionForTheSystemDefault() {
+        XCTAssertNil(AudioDeviceList.ambiguityNote(for: nil, in: ["A", "A"]))
+    }
+
+    func testCaptionNamesTheDevice() {
         let text = try! XCTUnwrap(
-            AudioDeviceList.collisionWarning(
-                inputs: ["USB Audio Device", "USB Audio Device"],
-                outputs: ["Mac mini Speakers"],
-                selectedInput: "USB Audio Device",
-                selectedOutput: "Mac mini Speakers"))
-        XCTAssertTrue(text.contains("USB Audio Device"), text)
+            AudioDeviceList.ambiguityNote(
+                for: "ASTAR DUP TEST", in: ["ASTAR DUP TEST", "ASTAR DUP TEST"]))
+        XCTAssertTrue(text.contains("ASTAR DUP TEST"), text)
     }
 
-    func testWarnsWhenTheSelectedOutputIsAmbiguous() {
-        XCTAssertNotNil(
-            AudioDeviceList.collisionWarning(
-                inputs: ["KT USB Audio"],
-                outputs: ["USB Audio Device", "USB Audio Device"],
-                selectedInput: "KT USB Audio",
-                selectedOutput: "USB Audio Device"))
-    }
-
-    func testSystemDefaultSelectionDoesNotWarn() {
-        // nil is "system default". astar did not choose it and cannot name it,
-        // so there is nothing honest to say.
-        XCTAssertNil(
-            AudioDeviceList.collisionWarning(
-                inputs: ["USB Audio Device", "USB Audio Device"],
-                outputs: ["USB Audio Device", "USB Audio Device"],
-                selectedInput: nil,
-                selectedOutput: nil))
-    }
-
-    func testTheSameAmbiguousNameOnBothEndsIsNamedOnce() {
+    func testCaptionIsShortEnoughToSitUnderAPicker() {
+        // The full explanation lives in the main-page banner; this one sits in a
+        // narrow column under a control and has to stay one short line.
         let text = try! XCTUnwrap(
-            AudioDeviceList.collisionWarning(
-                inputs: ["USB Audio Device", "USB Audio Device"],
-                outputs: ["USB Audio Device", "USB Audio Device"],
-                selectedInput: "USB Audio Device",
-                selectedOutput: "USB Audio Device"))
-        XCTAssertEqual(text.components(separatedBy: "USB Audio Device").count - 1, 1, text)
-    }
-
-    func testTwoDifferentAmbiguousSelectionsAreBothNamed() {
-        let text = try! XCTUnwrap(
-            AudioDeviceList.collisionWarning(
-                inputs: ["Mic X", "Mic X"],
-                outputs: ["Spkr Y", "Spkr Y"],
-                selectedInput: "Mic X",
-                selectedOutput: "Spkr Y"))
-        XCTAssertTrue(text.contains("Mic X") && text.contains("Spkr Y"), text)
-    }
-
-    func testASelectedNameThatOnlyClashesInTheOtherDirectionDoesNotWarn() {
-        // "Thing" is duplicated among OUTPUTS only; it is selected as the INPUT,
-        // where it is unique and perfectly addressable.
-        XCTAssertNil(
-            AudioDeviceList.collisionWarning(
-                inputs: ["Thing"],
-                outputs: ["Thing", "Thing"],
-                selectedInput: "Thing",
-                selectedOutput: nil))
-    }
-
-    func testASelectionForADeviceThatIsGoneDoesNotWarn() {
-        XCTAssertNil(
-            AudioDeviceList.collisionWarning(
-                inputs: ["USB Audio Device", "USB Audio Device"],
-                outputs: [],
-                selectedInput: "Unplugged Thing",
-                selectedOutput: nil))
+            AudioDeviceList.ambiguityNote(
+                for: "USB Audio Device", in: ["USB Audio Device", "USB Audio Device"]))
+        XCTAssertLessThan(text.count, 60, "too long for a caption: \(text)")
+        XCTAssertFalse(
+            text.lowercased().contains("audio midi setup"),
+            "the how-to-fix belongs in the banner, not the caption: \(text)")
     }
 
     // MARK: - A real captured enumeration
@@ -257,14 +228,30 @@ final class AudioDeviceListTests: XCTestCase {
             ["USB Audio Device", "KT USB Audio", "BlackHole 2ch", "ASTAR DUP TEST"])
     }
 
-    func testCapturedEnumerationWarnsOnceAboutTheCollidingPair() {
+    func testCapturedEnumerationWarnsOnceWhenTheClashingDeviceIsSelected() {
         let text = try! XCTUnwrap(
             AudioDeviceList.collisionWarning(
-                inputs: Self.capturedInputs, outputs: Self.capturedOutputs))
+                inputs: Self.capturedInputs, outputs: Self.capturedOutputs,
+                selectedInput: "ASTAR DUP TEST", selectedOutput: "ASTAR DUP TEST"))
         XCTAssertEqual(text.components(separatedBy: "ASTAR DUP TEST").count - 1, 1)
-        // The genuinely-duplex UCI150 appears in both lists and must NOT be
+        // The genuinely-duplex UCI150 appears once in each list and must NOT be
         // reported: one entry per direction is a pair, not a collision.
         XCTAssertFalse(text.contains("USB Audio Device"), text)
+    }
+
+    func testCapturedEnumerationStaysQuietOnTheRealHardware() {
+        // Same machine, but the rig is running the UCI150. The ASTAR DUP TEST
+        // clash is real and still nothing to do with this call.
+        XCTAssertNil(
+            AudioDeviceList.collisionWarning(
+                inputs: Self.capturedInputs, outputs: Self.capturedOutputs,
+                selectedInput: "USB Audio Device", selectedOutput: "USB Audio Device"))
+    }
+
+    func testCapturedEnumerationFlagsOnlyTheClashingPicker() {
+        XCTAssertTrue(AudioDeviceList.isAmbiguous("ASTAR DUP TEST", in: Self.capturedInputs))
+        XCTAssertFalse(AudioDeviceList.isAmbiguous("USB Audio Device", in: Self.capturedInputs))
+        XCTAssertFalse(AudioDeviceList.isAmbiguous("KT USB Audio", in: Self.capturedInputs))
     }
 
     // MARK: - Selection safety

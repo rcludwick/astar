@@ -72,26 +72,6 @@ public enum AudioDeviceList {
             + "Rename one in Audio MIDI Setup to use either."
     }
 
-    /// Collision warning across both device lists, or `nil` when neither has
-    /// one.
-    ///
-    /// Duplicates are counted WITHIN each direction and then unioned — never by
-    /// concatenating the two lists. A combined gadget legitimately appears once
-    /// in each (that is the pairing `AudioDevicePairing` depends on), so a
-    /// concatenated count would report a collision for every headset attached.
-    ///
-    /// A duplex pair like the IC-7300 and the UCI150 collides in inputs *and*
-    /// outputs; that is one problem, so the name is reported once.
-    public static func collisionWarning(inputs: [String], outputs: [String]) -> String? {
-        let clashing = duplicated(in: inputs) + duplicated(in: outputs)
-        var seen = Set<String>()
-        let unique = clashing.filter { seen.insert($0).inserted }
-        guard !unique.isEmpty else { return nil }
-        // Re-use the single-list phrasing by handing it one occurrence pair per
-        // clashing name, so the wording stays in exactly one place.
-        return collisionWarning(for: unique.flatMap { [$0, $0] })
-    }
-
     /// Collision warning limited to the devices actually in use.
     ///
     /// The main page uses this rather than the unconditional form: a clash
@@ -122,6 +102,30 @@ public enum AudioDeviceList {
         }
         guard !affected.isEmpty else { return nil }
         return collisionWarning(for: affected.flatMap { [$0, $0] })
+    }
+
+    /// Whether this selection names a device that more than one gadget answers
+    /// to — the flag behind the red picker border and its exclamation mark.
+    ///
+    /// `names` IS the direction: pass the input list for an input picker. A name
+    /// unique among inputs is addressable there even when it clashes among
+    /// outputs, so the two pickers can legitimately disagree.
+    ///
+    /// `nil` is the system default and is never flagged: astar did not choose it
+    /// and cannot name it.
+    public static func isAmbiguous(_ selection: String?, in names: [String]) -> Bool {
+        guard let selection else { return false }
+        return duplicated(in: names).contains(selection)
+    }
+
+    /// One short line for under a picker whose selection is ambiguous, or `nil`.
+    ///
+    /// Deliberately just the fact, not the fix: it sits in a narrow column under
+    /// a control, and the how-to-fix ("rename one in Audio MIDI Setup") is
+    /// carried by the main-page banner where there is room to read it.
+    public static func ambiguityNote(for selection: String?, in names: [String]) -> String? {
+        guard let selection, isAmbiguous(selection, in: names) else { return nil }
+        return "More than one device is called \u{201C}\(selection)\u{201D}."
     }
 
     /// Whether a stored selection still exists in the current device list.
