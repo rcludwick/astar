@@ -245,18 +245,6 @@
                 devicePicker("Input", devices: inputs, selection: inputBinding)
                 micProfileRow
                 devicePicker("Output", devices: outputs, selection: outputBinding)
-                // astar-9d41 — see QuickConfigView. Repeated here because a
-                // config's devices are edited in this card, away from the
-                // quick-settings panel.
-                if let clash = AudioDeviceList.collisionWarning(
-                    inputs: inputs, outputs: outputs)
-                {
-                    Label(clash, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityLabel("Duplicate device names")
-                }
                 gainSlider("Mic", tint: .red, value: $inputGain) { commitInputGain() }
                 gainSlider("Vol", tint: .green, value: $outputGain) { commitOutputGain() }
 
@@ -511,6 +499,7 @@
         {
             // astar-9d41 — see the note in QuickConfigView.devicePicker.
             let ambiguous = Set(AudioDeviceList.duplicated(in: devices))
+            let flagged = AudioDeviceList.isAmbiguous(selection.wrappedValue, in: devices)
             return HStack(spacing: 8) {
                 label(title)
                 Picker(title, selection: selection) {
@@ -524,6 +513,20 @@
                     }
                 }
                 .labelsHidden()
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .strokeBorder(Color.red, lineWidth: flagged ? 1.5 : 0)
+                )
+                if flagged {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .font(.caption)
+                        .help(
+                            "More than one device reports this name. astar can only use "
+                                + "the first — rename one in Audio MIDI Setup to pick either."
+                        )
+                        .accessibilityLabel("Ambiguous device")
+                }
             }
         }
 
