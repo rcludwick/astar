@@ -1362,6 +1362,16 @@ public final class CallSession: ObservableObject {
     /// Recently-connected nodes, newest first (capped) — for the picker.
     public func directoryRecents() -> [NodeEntry] { directoryStore.recents }
 
+    /// Every directory entry in storage order — favorites AND recents, curated
+    /// or not. For config export (astar-b52e); the picker wants the two
+    /// filtered accessors above, not this.
+    public func directoryAll() -> [NodeEntry] { directoryStore.all() }
+
+    /// Upsert one entry by id. For applying an imported directory, which has
+    /// already been merged by `ConfigMerge.directory` — that is where the
+    /// node-number matching and id rebasing live, deliberately not here.
+    public func directoryUpsert(_ entry: NodeEntry) { directoryStore.upsert(entry) }
+
     /// Resolve a node number to a display name (saved favorite/directory label),
     /// or `nil` when unknown — for showing names wherever a bare number appears.
     /// Backed by a `NameResolver` so a second source (the online AllStarLink-DB

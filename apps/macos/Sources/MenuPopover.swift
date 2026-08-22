@@ -237,6 +237,7 @@
                     FavoritesSettingsView(directoryRevision: $directoryRevision)
                     MicProfilesView()
                     SpectrumSettingsView()
+                    ConfigTransferView()
                 }
                 .listStyle(.inset)
                 .scrollContentBackground(.hidden)  // let the window's blur show through
