@@ -65,11 +65,6 @@ nav = [
     "macos/hardware.md",
     "macos/usage.md",
   ] },
-  { "astar-server" = [
-    "server/index.md",
-    "server/configuration.md",
-    "server/control-api.md",
-  ] },
   { "Protocol notes" = [
     "reference/index.md",
     "reference/app-rpt-text-commands.md",

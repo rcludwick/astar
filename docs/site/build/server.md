@@ -5,9 +5,14 @@ icon: lucide/server-cog
 # Building astar-server
 
 The node daemon is a plain cargo binary. Of the three deliverables it is the
-simplest to build and the only one meant to run unattended — see
-[astar-server](../server/index.md) for what it actually does, and
-[Configuration](../server/configuration.md) for every knob.
+simplest to build and the only one meant to run unattended.
+
+!!! warning "Building it is documented; running one is not, yet"
+
+    This page covers the build and nothing more. The daemon's own
+    documentation — what it does, every configuration knob, the HTTP + SSE
+    control API — is not published while astar-server is still being shaped.
+    Read `crates/astar-server/` if you want to go further in the meantime.
 
 ## Build it
 
@@ -83,5 +88,5 @@ connected member command your links.
 
 ## Next steps
 
-* [astar-server](../server/index.md) — what the daemon does.
-* [Configuration](../server/configuration.md) · [Control API](../server/control-api.md)
+* [The engine](engine.md) — the workspace the daemon is a crate in.
+* [Verifying a build](verifying.md) — the gates.

@@ -53,7 +53,7 @@ working. Treat any crate you find for one as work in progress, not a feature.
     opens a dial popover, plus a Dock icon you can turn off. macOS 13 or later.
     [Build it from source](build/macos-app.md).
 
--   __[astar-server](server/index.md)__
+-   __[astar-server](build/server.md)__
 
     The headless **node daemon** — an inbound IAX2 listener, registration with
     the AllStarLink registrar, a conference bridge, and a loopback HTTP + SSE
