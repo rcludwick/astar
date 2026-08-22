@@ -8,6 +8,31 @@ else is still built from source. Versions are `MAJOR.MINOR.PATCHbeta` and will
 stay on `beta` until the client has had a real sit-down-and-use-it pass on all
 three platforms.
 
+## 0.1.7beta — 2026-08-22
+
+One fix, in the status row at the top of the popover.
+
+### Fixed
+
+- **The round-trip time no longer shows a wrong number when the window is
+  narrow.** Compacting the window horizontally squeezed the `ms` readout until
+  it broke one character per line into a vertical strip, and — after a first
+  attempt at protecting it — until it clipped to a single digit. A latency
+  figure clipped to its first digit is not a cosmetic defect: `9`, `93` and
+  `935` ms describe three very different calls, and nothing on screen showed it
+  was truncated.
+
+  The readout is now drawn at its full width or not at all, and the space it
+  would have taken goes back to the connected-node name, which regains
+  characters at narrow widths. It reappears by itself when the window is
+  widened. On a narrow window with a long favorite name it stays hidden — a
+  supplementary readout that is absent is honest; one that is truncated is not.
+
+  Also fixed on the way: the connected-node name wrapped to a second line
+  instead of eliding, which grew the card and pushed the level graphs down, and
+  `Connected` itself could pick up an ellipsis while the row visibly still had
+  room.
+
 ## 0.1.6beta — 2026-08-22
 
 A small one, entirely about the two things a new user meets first: the app menu
