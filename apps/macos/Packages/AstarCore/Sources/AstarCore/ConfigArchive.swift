@@ -255,6 +255,24 @@ public struct ConfigArchive: Codable, Equatable {
                 ? interfaceSlice(from: sources.defaults) : nil)
     }
 
+    /// A copy carrying only `sections` — the import chooser's filter.
+    ///
+    /// Intersects rather than sets: ticking a section a file does not contain
+    /// cannot conjure an empty one. That matters because an empty section is
+    /// not the same as an absent one downstream — `settings: [:]` would report
+    /// "0 settings applied" where `nil` correctly reports nothing at all.
+    public func filtered(to sections: Set<ConfigSection>) -> ConfigArchive {
+        ConfigArchive(
+            version: version,
+            exportedAt: exportedAt,
+            appVersion: appVersion,
+            rigs: sections.contains(.rigs) ? rigs : nil,
+            directory: sections.contains(.directory) ? directory : nil,
+            settings: sections.contains(.settings) ? settings : nil,
+            callsign: sections.contains(.callsign) ? callsign : nil,
+            interface: sections.contains(.interface) ? interface : nil)
+    }
+
     /// Sections this archive actually carries.
     public var presentSections: Set<ConfigSection> {
         var out = Set<ConfigSection>()

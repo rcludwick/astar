@@ -21,10 +21,23 @@
     struct ConfigTransferView: View {
         @EnvironmentObject private var session: CallSession
 
+        @EnvironmentObject private var setups: SetupController
+        /// Bumped so the favorites UI re-renders — the node directory is not
+        /// `@Published`, so an import into it is otherwise invisible until the
+        /// pane is rebuilt.
+        @Binding var directoryRevision: Int
+
         @State private var showingExport = false
         @State private var chosen: Set<ConfigSection> = [.rigs, .settings]
         @State private var status: String?
         @State private var failure: String?
+
+        /// The decoded file waiting on the import chooser, and the sections
+        /// ticked in it. Held rather than applied straight away so you can take
+        /// just the node directory out of a full backup without its devices.
+        @State private var pending: ConfigArchive?
+        @State private var pendingName = ""
+        @State private var chosenForImport: Set<ConfigSection> = []
 
         var body: some View {
             Section("Backup") {
@@ -58,6 +71,10 @@
                 .listRowSeparator(.hidden)
             }
             .sheet(isPresented: $showingExport) { exportSheet }
+            .sheet(isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }))
+            {
+                importSheet
+            }
         }
 
         // MARK: - Export
@@ -145,17 +162,130 @@
             guard let url = ConfigTransferPanels.runOpenPanel() else { return }
             do {
                 let archive = try ConfigArchive.decode(try Data(contentsOf: url))
+                guard !archive.presentSections.isEmpty else {
+                    failure = "That configuration is empty — there is nothing to import."
+                    return
+                }
+                pendingName = url.lastPathComponent
+                // Default to everything the file has; untick to take a subset.
+                chosenForImport = archive.presentSections
+                pending = archive
+            } catch {
+                failure = error.localizedDescription
+            }
+        }
+
+        private var importSheet: some View {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Import configuration").font(.headline)
+                Text(pendingName)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("Choose what to bring in. Anything you leave off is untouched.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    // Only what this file actually holds — offering a section it
+                    // lacks would be a checkbox that does nothing.
+                    ForEach(
+                        ConfigSection.allCases.filter {
+                            pending?.presentSections.contains($0) == true
+                        }, id: \.self
+                    ) { section in
+                        Toggle(isOn: importBinding(for: section)) {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(sectionLabel(section))
+                                Text(section.detail)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .toggleStyle(.checkbox)
+                    }
+                }
+
+                Label(
+                    "Importing adds and updates. Nothing already on this Mac is deleted.",
+                    systemImage: "arrow.triangle.merge"
+                )
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+                HStack {
+                    Spacer()
+                    Button("Cancel") { pending = nil }
+                        .keyboardShortcut(.cancelAction)
+                    Button("Import", action: applyPending)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(chosenForImport.isEmpty)
+                }
+            }
+            .padding(20)
+            .frame(width: 380)
+        }
+
+        /// Section title plus what the file holds for it, so "Node directory
+        /// (15 nodes)" tells you what you are agreeing to before you agree.
+        private func sectionLabel(_ section: ConfigSection) -> String {
+            guard let pending else { return section.title }
+            switch section {
+            case .rigs:
+                let n = pending.rigs?.setups.count ?? 0
+                let m = pending.rigs?.micProfiles.count ?? 0
+                var bits = ["\(n) config\(n == 1 ? "" : "s")"]
+                if m > 0 { bits.append("\(m) mic profile\(m == 1 ? "" : "s")") }
+                return "\(section.title) (\(bits.joined(separator: ", ")))"
+            case .directory:
+                let n = pending.directory?.count ?? 0
+                return "\(section.title) (\(n) node\(n == 1 ? "" : "s"))"
+            case .settings:
+                return "\(section.title) (\(pending.settings?.count ?? 0) settings)"
+            case .callsign:
+                return "\(section.title) (\(pending.callsign ?? ""))"
+            case .interface:
+                return "\(section.title) (\(pending.interface?.count ?? 0) settings)"
+            }
+        }
+
+        private func importBinding(for section: ConfigSection) -> Binding<Bool> {
+            Binding(
+                get: { chosenForImport.contains(section) },
+                set: { on in
+                    if on {
+                        chosenForImport.insert(section)
+                    } else {
+                        chosenForImport.remove(section)
+                    }
+                })
+        }
+
+        private func applyPending() {
+            guard let archive = pending else { return }
+            pending = nil
+            status = nil
+            failure = nil
+            do {
                 let summary = ConfigTransfer.apply(
-                    archive, session: session,
+                    archive.filtered(to: chosenForImport), session: session,
                     setupStore: UserDefaultsSetupStore(),
                     profileStore: UserDefaultsMicProfileStore(),
                     defaults: .standard)
+                // An import writes straight to the stores, behind the live
+                // controllers' backs. Without these two the imported configs do
+                // not appear until relaunch, the ★ renders against a stale
+                // defaultID, and the next controller write persists that stale
+                // value over what was just imported.
+                setups.reloadFromStore()
+                directoryRevision += 1
                 // Report what changed, not "imported" — a re-imported backup
                 // legitimately changes nothing, and saying "imported" would
                 // leave the user unsure whether it took.
                 status = summary.description
-            } catch {
-                failure = error.localizedDescription
             }
         }
     }

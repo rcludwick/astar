@@ -163,6 +163,47 @@ final class ConfigTransferTests: XCTestCase {
         XCTAssertEqual(Set(b.directoryAll().map(\.node)), ["99999", "516228"])
     }
 
+    func testImportingOnlyTheDirectoryOutOfAFullBackup() throws {
+        // The stated use case: take someone's node list without adopting their
+        // microphone, gains or serial wiring.
+        let a = session(suiteA)
+        populate(suiteA, session: a)
+        let full = ConfigTransfer.archive(
+            sections: Set(ConfigSection.allCases), session: a,
+            setupStore: UserDefaultsSetupStore(suiteA),
+            profileStore: UserDefaultsMicProfileStore(suiteA),
+            defaults: suiteA)
+
+        let b = session(suiteB)
+        let summary = ConfigTransfer.apply(
+            full.filtered(to: [.directory]), session: b,
+            setupStore: UserDefaultsSetupStore(suiteB),
+            profileStore: UserDefaultsMicProfileStore(suiteB),
+            defaults: suiteB)
+
+        XCTAssertEqual(b.directoryAll().map(\.node), ["516228"])
+        XCTAssertEqual(summary.directoryAdded, 1)
+        // Nothing else came along.
+        XCTAssertTrue(UserDefaultsSetupStore(suiteB).all().isEmpty, "configs rode along")
+        XCTAssertTrue(UserDefaultsMicProfileStore(suiteB).all().isEmpty, "mic profiles rode along")
+        XCTAssertNil(suiteB.object(forKey: "audio.input"), "devices rode along")
+        XCTAssertNil(suiteB.object(forKey: "serial.portPath"), "serial rode along")
+        XCTAssertEqual(b.m17Callsign, "", "callsign rode along")
+        XCTAssertEqual(summary.setupsAdded, 0)
+        XCTAssertEqual(summary.settingsApplied, 0)
+    }
+
+    func testTheImportedDefaultConfigIsAdoptedAndReadable() throws {
+        // astar-b52e: the ★ was landing in the store but the live controller
+        // kept a stale defaultID, so the star rendered on System Default. Pin
+        // the store half here; SetupController.reloadFromStore covers the rest.
+        let r = try roundTrip(sections: [.rigs])
+        XCTAssertEqual(
+            UserDefaultsSetupStore(suiteB).loadDefaultID(), "rig-1",
+            "imported ★ did not reach the store")
+        _ = r
+    }
+
     func testTheExportedFileCarriesNoCredentials() throws {
         let a = session(suiteA)
         populate(suiteA, session: a)
