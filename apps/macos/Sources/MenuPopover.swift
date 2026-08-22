@@ -1465,12 +1465,27 @@
 
         var body: some View {
             if let rtt = meters.rttMS {
-                // Deliberately NOT fixedSize (astar-5e2c): this appears the moment a
+                // astar-5e2c. Deliberately NOT fixedSize: this appears the moment a
                 // call answers, and pinning it to its ideal width made the whole
-                // window jump wider from a thin popover. It stays compressible.
+                // window jump wider from a thin popover. It stays compressible —
+                // but it must never WRAP, and it must never truncate.
+                //
+                // Both were observed. Unbounded, a narrow window broke "12 ms" one
+                // character per line into a vertical stack. lineLimit(1) alone then
+                // rendered a bare "1", because the status column's layoutPriority(1)
+                // claims its ideal width first and left this nothing — a truncated
+                // latency figure is a wrong number, not a cosmetic defect.
+                //
+                // layoutPriority(1) puts it level with that column, so both are
+                // satisfied before the Spacer and the Spacer collapses to what is
+                // genuinely spare. The node label inside the column stays the row's
+                // one pressure valve. Measured intact down to a 250pt row, well
+                // under the window's 310pt contentMinSize.
                 Text("\(rtt) ms")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .layoutPriority(1)
             }
         }
     }
