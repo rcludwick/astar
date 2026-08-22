@@ -245,6 +245,25 @@
                 devicePicker("Input", devices: inputs, selection: inputBinding)
                 micProfileRow
                 devicePicker("Output", devices: outputs, selection: outputBinding)
+                // astar-9d41 — the full explanation, once per card, under both
+                // pickers. The per-picker outline and triangle say WHICH
+                // control is affected; this says what it means and how to fix
+                // it, which does not fit beside a control.
+                //
+                // Gated on THIS config's selected devices, the same rule as the
+                // main page: a saved rig can name an ambiguous device while the
+                // config you are editing does not.
+                if let clash = AudioDeviceList.collisionWarning(
+                    inputs: inputs, outputs: outputs,
+                    selectedInput: inputBinding.wrappedValue,
+                    selectedOutput: outputBinding.wrappedValue)
+                {
+                    Label(clash, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityLabel("Duplicate device names")
+                }
                 gainSlider("Mic", tint: .red, value: $inputGain) { commitInputGain() }
                 gainSlider("Vol", tint: .green, value: $outputGain) { commitOutputGain() }
 
