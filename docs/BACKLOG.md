@@ -12,7 +12,66 @@ inline. All 228 issues (164 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (89)
+## Open items (90)
+
+### astar-uid — Audio devices need a stable identity, not their name
+*P2 medium · bug · labels: audio, macos, migration, cx:5*
+
+A device's NAME is its identity today. `DeviceId` is `"in:<name>"` /
+`"out:<name>"` (`crates/astar-audio/src/device.rs`), built in `enumerate`
+and resolved by `find_device`, which returns the FIRST device whose
+`cpal::Device::name()` matches (`crates/astar-audio/src/stream.rs`). The app
+persists the bare name too — `audio.input` / `audio.output` in
+`com.aj7hr.astar`, and `Setup.inputDevice` / `Setup.outputDevice`.
+
+Names are not unique. An ICOM IC-7300 and an AllScan UCI150 both enumerate as
+`USB Audio Device`. Reproduce on any Mac without either:
+
+```
+swiftc -O -o /tmp/dupdev apps/macos/Tools/dup-audio-devices.swift
+/tmp/dupdev create
+cargo run -p astar-audio --example list_devices    # TWO entries, id=in:ASTAR DUP TEST
+/tmp/dupdev destroy
+```
+
+Three consequences, in increasing order of harm:
+
+1. Duplicate `ForEach` ids and duplicate `.tag`s made every row with that name
+   read as selected. **Fixed** in astar-9d41 by offering one row per distinct
+   name plus a warning; that is a stopgap, not this ticket.
+2. The second device is unreachable. No selection can open it.
+3. **A silent swap.** A stored `"USB Audio Device"` binds to whichever device
+   enumerates first. Plug in a second same-named gadget and astar may open it
+   instead, with no visible change — you key one radio over serial PTT and send
+   audio to another. Not a transmit-safety break (PTT is a separate line) but
+   silently wrong.
+
+**Design:** switch identity to `kAudioDevicePropertyDeviceUID`, which is stable
+across replug — e.g. the UCI150 reports
+`AppleUSBAudioEngine:C-Media Electronics Inc.:USB Audio Device:1124000:2,1`.
+
+The obstacle is cpal. In 0.15.3 `Device.audio_device_id` is `pub(crate)` with
+no public accessor and no UID method (`src/host/coreaudio/macos/mod.rs`), so
+astar cannot ask cpal which CoreAudio device it is holding. Options, roughly in
+order of preference:
+
+* Enumerate UIDs via `CoreAudio` alongside cpal and correlate by position
+  within `input_devices()` / `output_devices()`. No fork, but leans on cpal's
+  enumeration order matching `kAudioHardwarePropertyDevices`; needs proving
+  before it is trusted.
+* Upstream a `Device::uid()` (or expose the raw id) to cpal. Cleanest, slowest.
+  Per the repro-first rule, land a reproducer before opening anything upstream.
+* Vendor a patched cpal. Last resort — the nusb episode is the precedent for
+  how much that costs.
+
+Migration is the other half and cannot be skipped: every existing `audio.input`
+/ `audio.output` and every `Setup` holds a bare name. Resolve names to UIDs
+once on first launch after the upgrade, keep the name as a display label and as
+a fallback when the UID is absent, and leave configs whose device is unplugged
+alone rather than clearing them.
+
+Non-macOS hosts have no `CoreAudio` UID; keep the name-based path for them
+behind the same `DeviceId` abstraction.
 
 ### iax-5d90 — Bump boringtun off release-candidate crypto (curve25519-dalek advisory)
 *P3 low · chore · labels: security, wireguard, cx:1*

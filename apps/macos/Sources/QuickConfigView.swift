@@ -345,11 +345,28 @@
             selection: Binding<String?>,
             onChange: @escaping () -> Void
         ) -> some View {
-            HStack(spacing: 8) {
+            // astar-9d41 — names shared by more than one device. Coloured
+            // orange to match the warning under the dial card, so a selected
+            // ambiguous device is visible in the collapsed picker without
+            // opening the menu.
+            let ambiguous = Set(AudioDeviceList.duplicated(in: devices))
+            return HStack(spacing: 8) {
                 label(title)
                 Picker(title, selection: selection) {
                     Text(Self.defaultLabel).tag(String?.none)
-                    ForEach(devices, id: \.self) { Text($0).tag(String?.some($0)) }
+                    // astar-9d41 — one row per DISTINCT name. Two devices can
+                    // report the same one, and the engine addresses devices by
+                    // name, so only the first is reachable; a second row would
+                    // be a choice that silently opens the first device. It also
+                    // duplicates the SwiftUI identity and tag, which is what
+                    // made every matching row read as selected.
+                    ForEach(AudioDeviceList.selectable(from: devices), id: \.self) { name in
+                        Text(name)
+                            .foregroundStyle(
+                                ambiguous.contains(name) ? Color.orange : Color.primary
+                            )
+                            .tag(String?.some(name))
+                    }
                 }
                 .labelsHidden()
                 .onChange(of: selection.wrappedValue) { _ in onChange() }
