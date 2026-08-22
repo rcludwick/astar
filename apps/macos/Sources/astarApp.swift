@@ -30,18 +30,27 @@ struct AstarApp: App {
     var body: some Scene {
         #if os(macOS)
             // Menu-bar-only: no SwiftUI window/scene. The AppDelegate's
-            // StatusItemController owns the status item + window. An empty Settings
-            // scene satisfies the `App` scene requirement without showing a window.
+            // StatusItemController owns the status item + window. An empty
+            // Settings scene satisfies the `App` scene requirement without
+            // showing a window.
             //
-            // It is NOT the app's settings UI and is unreachable (astar-1f7d):
-            // `MainMenu.install` replaces `NSApp.mainMenu` in
-            // `applicationDidFinishLaunching`, so ⌘, and astar → Settings… both go
-            // to `StatusItemController.showSettings()`. When the app was
-            // accessory-only this scene had no menu item at all; once astar-7c31
-            // promoted it to `.regular` it acquired one, and 0.1.1beta shipped a
-            // Settings… item that opened this empty window. Don't wire anything
-            // here — put it in the settings pane the rest of the app uses.
+            // It is NOT the app's settings UI, and the menu item it creates is
+            // REMOVED below. astar-1f7d assumed `MainMenu.install` made that
+            // item unreachable by replacing `NSApp.mainMenu` in
+            // `applicationDidFinishLaunching`; it does not. SwiftUI installs
+            // its own menu after that runs and wins — the live menu bar carries
+            // SwiftUI's View menu, which MainMenu never builds. So the shipped
+            // astar → Settings… opened this empty window, exactly the bug
+            // astar-1f7d set out to fix.
+            //
+            // `CommandGroup(replacing: .appSettings)` with no content deletes
+            // the item at the source rather than trying to out-race SwiftUI for
+            // ownership of the menu bar. Settings stays reachable where it has
+            // always actually been: the gear in the popover footer.
             Settings { EmptyView() }
+                .commands {
+                    CommandGroup(replacing: .appSettings) {}
+                }
         #else
             WindowGroup {
                 ContentView().environmentObject(session)
@@ -172,12 +181,17 @@ struct AstarApp: App {
     // MARK: - Main menu actions (astar-1f7d)
 
     extension AppDelegate: MainMenuActions {
-        /// The standard About panel, with the docs/QRZ links as its credits. A
-        /// custom window would be a second thing to keep in sync with the app's
-        /// real version; this reads `CFBundleShortVersionString` itself.
+        /// The standard About panel. Its contents come from the bundle —
+        /// `NSHumanReadableCopyright` for the copyright line, `Credits.html`
+        /// for the description and links — so this passes no options.
+        ///
+        /// That is deliberate. Supplying `.credits` here would override the
+        /// bundled file, and the panel would then say something different
+        /// depending on which menu opened it — and this menu is currently the
+        /// one users do NOT get.
         func showAbout(_ sender: Any?) {
             NSApp.activate(ignoringOtherApps: true)
-            NSApp.orderFrontStandardAboutPanel(options: [.credits: Self.aboutCredits])
+            NSApp.orderFrontStandardAboutPanel()
         }
 
         /// ⌘, — open the real settings pane, not the empty placeholder scene.
@@ -189,24 +203,5 @@ struct AstarApp: App {
         func openIssues(_ sender: Any?) { NSWorkspace.shared.open(AboutLinks.issues) }
         func openQRZ(_ sender: Any?) { NSWorkspace.shared.open(AboutLinks.qrz) }
 
-        /// Clickable links for the About panel. `.credits` takes an attributed
-        /// string, which is the only way to get real links into the standard panel.
-        private static var aboutCredits: NSAttributedString {
-            let credits = NSMutableAttributedString()
-            let body = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
-            credits.append(
-                NSAttributedString(
-                    string: "A native ham-radio client for AllStarLink, M17 and D-Star.\n\n",
-                    attributes: [.font: body]))
-            credits.append(link("Documentation", AboutLinks.homePage, font: body))
-            credits.append(NSAttributedString(string: "\n", attributes: [.font: body]))
-            credits.append(link("\(AboutLinks.callsign) on QRZ", AboutLinks.qrz, font: body))
-            credits.setAlignment(.center, range: NSRange(location: 0, length: credits.length))
-            return credits
-        }
-
-        private static func link(_ text: String, _ url: URL, font: NSFont) -> NSAttributedString {
-            NSAttributedString(string: text, attributes: [.link: url, .font: font])
-        }
     }
 #endif
