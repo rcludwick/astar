@@ -33,7 +33,7 @@
         /// the import chooser closing, reopening and closing again on Import.
         @State private var sheet: SheetKind?
 
-        private enum SheetKind: String, Identifiable {
+        private enum SheetKind: String, Identifiable, Equatable {
             case export
             case importChooser
             var id: String { rawValue }
@@ -78,13 +78,22 @@
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
-                .listRowSeparator(.hidden)
-            }
-            .sheet(item: $sheet) { kind in
-                switch kind {
-                case .export: exportSheet
-                case .importChooser: importSheet
+                // The sheet hangs off THIS view, not off the Section.
+                //
+                // A `.sheet` on a Section is distributed across the section's
+                // rows — header and content both become presenters — so one
+                // piece of state drove two stacked sheets. Dismissing the top
+                // one revealed the second still underneath, which read as the
+                // chooser closing, reopening and closing again. Traced: one
+                // `sheet -> importChooser`, one builder call, but TWO
+                // `onAppear`s 19ms apart and two `onDisappear`s at the end.
+                .sheet(item: $sheet) { kind in
+                    switch kind {
+                    case .export: exportSheet
+                    case .importChooser: importSheet
+                    }
                 }
+                .listRowSeparator(.hidden)
             }
         }
 

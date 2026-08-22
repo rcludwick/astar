@@ -108,6 +108,12 @@ struct AstarApp: App {
         /// One apply path for both launch and the menu toggle, so the two cannot
         /// drift.
         func applicationDidFinishLaunching(_ notification: Notification) {
+            // Record which config version wrote this preferences domain, before
+            // anything reads it (astar-b52e). A domain that has never been
+            // stamped already reads as version 1, so this is not what makes
+            // migration possible today — it is what makes the NEXT version able
+            // to tell 1 from 2 without guessing from which keys happen to exist.
+            ConfigVersion.stamp()
             setups.attach(session: session, serial: serial)
             statusController = StatusItemController(
                 session: session, serial: serial, setups: setups, micAnalyzer: micAnalyzer,

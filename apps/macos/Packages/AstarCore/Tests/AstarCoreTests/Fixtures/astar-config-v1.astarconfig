@@ -1,0 +1,206 @@
+{
+  "appVersion": "0.1.4beta",
+  "callsign": "N0CALL",
+  "directory": [
+    {
+      "favorite": true,
+      "id": "759A4147-3EFC-4D6E-9E27-C38AA461030A",
+      "label": "Parrot",
+      "lastUsed": "2026-08-14T23:07:49Z",
+      "network": "allstar",
+      "node": "55553"
+    },
+    {
+      "favorite": false,
+      "id": "DD9B2D5A-51BC-4734-8E36-C292822BFC16",
+      "label": "53085",
+      "lastUsed": "2026-06-23T00:52:48Z",
+      "network": "allstar",
+      "node": "53085"
+    },
+    {
+      "favorite": true,
+      "id": "8F5036F4-D0C9-4A3A-B419-65BD67333ADE",
+      "label": "All Nodes Net WC",
+      "lastUsed": "2026-08-18T02:28:45Z",
+      "network": "allstar",
+      "node": "503680"
+    },
+    {
+      "favorite": false,
+      "id": "81CE005B-6162-420F-A343-9D185DF66A86",
+      "label": "503682",
+      "lastUsed": "2026-06-23T01:15:47Z",
+      "network": "allstar",
+      "node": "503682"
+    },
+    {
+      "favorite": false,
+      "id": "2795ADB5-4A0A-4201-AD1E-9E9A424F795D",
+      "label": "2462",
+      "lastUsed": "2026-07-01T04:11:11Z",
+      "network": "allstar",
+      "node": "2462"
+    },
+    {
+      "favorite": false,
+      "id": "510BB3B3-95D9-44C4-81ED-55C6B350AB37",
+      "label": "600790",
+      "lastUsed": "2026-06-25T23:04:05Z",
+      "network": "allstar",
+      "node": "600790"
+    },
+    {
+      "favorite": true,
+      "id": "B86F96BC-99D2-4D9C-97B6-E2987B687D6F",
+      "label": "AR Newswire",
+      "lastUsed": "2026-08-20T18:48:05Z",
+      "network": "allstar",
+      "node": "516228"
+    },
+    {
+      "favorite": false,
+      "id": "BBE6D7A8-9B47-4165-A9E8-6EC54052BB46",
+      "label": "516221",
+      "lastUsed": "2026-07-08T01:54:51Z",
+      "network": "allstar",
+      "node": "516221"
+    },
+    {
+      "favorite": false,
+      "id": "5D101013-2565-4115-9914-F2623F811864",
+      "label": "2002",
+      "lastUsed": "2026-08-14T23:15:55Z",
+      "network": "allstar",
+      "node": "2002"
+    },
+    {
+      "favorite": true,
+      "id": "17CE4A67-C610-4C0D-9224-D26387BC3493",
+      "label": "ARRL Radio news",
+      "lastUsed": "2026-08-14T22:30:04Z",
+      "network": "allstar",
+      "node": "516229"
+    },
+    {
+      "favorite": false,
+      "id": "37970283-DE20-4503-83E4-922E8151C7CB",
+      "label": "172.234.217.28/A",
+      "lastUsed": "2026-08-04T00:09:20Z",
+      "network": "m17",
+      "node": "172.234.217.28/A"
+    },
+    {
+      "favorite": true,
+      "id": "75D91FBA-BF5B-4A9E-A0DB-2A06DD3299A1",
+      "label": "KC-WIDE M17",
+      "lastUsed": "2026-08-20T21:46:09Z",
+      "network": "m17",
+      "node": "172.234.217.28:17000/A"
+    },
+    {
+      "favorite": false,
+      "id": "31F89B49-D0B4-49C6-A94B-EEC95E9F2F0C",
+      "label": "127.0.0.1:13000/A",
+      "lastUsed": "2026-08-05T01:23:54Z",
+      "network": "m17",
+      "node": "127.0.0.1:13000/A"
+    }
+  ],
+  "exportedAt": "2026-08-22T21:25:21Z",
+  "interface": {
+    "ui.dtmfExpanded": true,
+    "ui.hasShownWelcome": true,
+    "ui.network": "m17",
+    "ui.quickSettingsExpanded": true,
+    "ui.showInDock": true,
+    "ui.spectrumDecayDbPerSec": 400,
+    "ui.spectrumExpanded": true
+  },
+  "rigs": {
+    "defaultSetupID": "8AC03836-395C-45C7-B4A0-875AB604B5B9",
+    "micProfiles": [],
+    "selectedSetupID": "8AC03836-395C-45C7-B4A0-875AB604B5B9",
+    "setups": [
+      {
+        "compression": true,
+        "compressionLevel": 0.9,
+        "fullDuplex": true,
+        "hardwareProfileID": "uci150",
+        "id": "8AC03836-395C-45C7-B4A0-875AB604B5B9",
+        "inputDevice": "USB Audio Device",
+        "inputGain": 0.40225938,
+        "name": "UCI150",
+        "noiseReduction": true,
+        "outputDevice": "USB Audio Device",
+        "outputGain": 1,
+        "serial": {
+          "autodetect": true,
+          "debounceMs": 30,
+          "keyActiveHigh": true,
+          "keyLineRaw": 0,
+          "portPath": "/dev/cu.wchusbserial0000000000",
+          "radioActiveHigh": true,
+          "radioLineRaw": 0,
+          "rxFloorDb": -45,
+          "rxHangMs": 250,
+          "rxModeRaw": 0,
+          "transportRaw": 1
+        },
+        "txTrim": 0.59711784,
+        "voxEnabled": false,
+        "voxThreshold": -40
+      },
+      {
+        "compression": true,
+        "compressionLevel": 0.9,
+        "fullDuplex": true,
+        "hardwareProfileID": "headset",
+        "id": "27D54EFD-83E7-495C-A22E-CD1F4AB7D0AB",
+        "inputDevice": "External Microphone",
+        "inputGain": 0.9009321,
+        "name": "Headphone Port",
+        "noiseReduction": true,
+        "outputDevice": "External Headphones",
+        "outputGain": 0.834304,
+        "txTrim": 0.8036511,
+        "voxEnabled": true,
+        "voxThreshold": -24.599545
+      }
+    ]
+  },
+  "settings": {
+    "audio.compression": true,
+    "audio.compressionLevel": 0.8999999761581421,
+    "audio.fullDuplex": true,
+    "audio.input": "USB Audio Device",
+    "audio.inputGain": 0.40225937962532043,
+    "audio.noiseReduction": true,
+    "audio.output": "USB Audio Device",
+    "audio.outputGain": 1,
+    "audio.rxCompression": true,
+    "audio.rxCompressionLevel": 0.8470445275306702,
+    "audio.txDisabled": false,
+    "audio.txTrim": 0.5971178412437439,
+    "audio.voxEnabled": false,
+    "audio.voxHangtimeMS": 1500,
+    "audio.voxThresholdDBFS": -40,
+    "m17.audio.compression": true,
+    "m17.audio.compressionLevel": 0.800000011920929,
+    "m17.audio.inputGain": 0.7040530443191528,
+    "m17.audio.noiseReduction": true,
+    "m17.audio.txTrim": 0.8027057647705078,
+    "serial.debounceMs": 30,
+    "serial.enabled": true,
+    "serial.keyActiveHigh": true,
+    "serial.keyLine": 0,
+    "serial.portPath": "",
+    "serial.radioActiveHigh": true,
+    "serial.radioLine": 0,
+    "serial.rxFloorDb": -45,
+    "serial.rxHangMs": 250,
+    "serial.rxMode": 0,
+    "serial.transport": 1
+  },
+  "version": 1
+}

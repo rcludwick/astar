@@ -124,8 +124,9 @@ public enum SettingValue: Codable, Equatable, Sendable {
 /// keeps an exported file safe to hand to someone regardless of which sections
 /// were ticked (bar `callsign`, which is why it is its own checkbox).
 public struct ConfigArchive: Codable, Equatable {
-    /// Bumped only for a format change an older build could not read.
-    public static let currentVersion = 1
+    /// The config version this build writes. See `ConfigVersion` for the rule
+    /// that governs when it moves — it marks translation, not change.
+    public static let currentVersion = ConfigVersion.current
 
     public var version: Int
     public var exportedAt: Date
