@@ -12,15 +12,21 @@ A native ham-radio digital-voice client and node — **AllStarLink (IAX2)** and
 
 astar dials nodes and reflectors as a client: audio, push-to-talk, DTMF, live
 meters, and support for the generic class of USB radio interfaces (serial PTT
-plus USB audio). The same engine also runs headless as an always-on node daemon.
+plus USB audio).
 
-The two networks are **not equally far along**. AllStarLink is the primary
-target and takes the most testing. M17 is native, reflectors included, and as
-of `0.1.4beta` the macOS app carries its own Codec 2 — nothing to install. See
-[The macOS app](macos/index.md).
+!!! info "Work in Progress"
 
-Other networks are in the tree at various stages and are **not** claimed as
-working. Treat any crate you find for one as work in progress, not a feature.
+    astar is **beta** and moves quickly. **AllStarLink** is the primary target
+    and takes the most testing. **M17** is native, reflectors included, and
+    needs nothing installed — Codec 2 ships inside the app as of `0.1.4beta`.
+    Other networks are in the tree at various stages and are **not** claimed
+    as working.
+
+    The download is signed with a Developer ID and notarized by Apple, so it
+    opens without a Gatekeeper warning. It is **Apple Silicon only** — a
+    single `arm64` slice — and needs **macOS 13 (Ventura) or later**. On an
+    Intel Mac, [build from source](build/index.md). There is no Homebrew tap,
+    no cask, and no App Store listing.
 
 [Download for macOS](https://github.com/rcludwick/astar/releases/latest){ .md-button .md-button--primary }
 [Build it from source](build/index.md){ .md-button }
@@ -30,18 +36,6 @@ working. Treat any crate you find for one as work in progress, not a feature.
 ![The astar popover on macOS: connected to a node, with live TX and RX meters, the levels and spectrum view, and the DTMF dialpad open](images/macos-app.png)
 </div>
 </div>
-
-!!! info "About the download"
-
-    `astar.dmg` is signed with a Developer ID and notarized by Apple, so it opens
-    without a Gatekeeper warning. It is **Apple Silicon only** — a single `arm64`
-    slice — and needs **macOS 13 (Ventura) or later**. On an Intel Mac, build from
-    source. There is no Homebrew tap, no cask, and no App Store listing.
-
-    **Both networks need nothing extra.** Codec 2 is linked into the app as of
-    `0.1.4beta`, so M17 works on a Mac that has never seen Homebrew; a system
-    `libcodec2` is still preferred when you have one. Building the *engine* on
-    its own is the different case — see [Codec 2](build/prerequisites.md#codec-2-only-for-m17).
 
 ## Three surfaces, one engine
 
@@ -55,9 +49,9 @@ working. Treat any crate you find for one as work in progress, not a feature.
 
 -   __[astar-server](build/server.md)__
 
-    The headless **node daemon** — an inbound IAX2 listener, registration with
-    the AllStarLink registrar, a conference bridge, and a loopback HTTP + SSE
-    control channel.
+    The headless **node daemon**, still work in progress — an inbound IAX2
+    listener, registration with the AllStarLink registrar, a conference bridge,
+    and a loopback HTTP + SSE control channel.
 
 -   __astar-lib__
 
