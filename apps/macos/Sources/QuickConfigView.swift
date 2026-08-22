@@ -204,6 +204,19 @@
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                // astar-9d41 — an IC-7300 and a UCI150 both enumerate as "USB
+                // Audio Device". Only the first is reachable, so the picker
+                // lists one entry; without this the second device just silently
+                // isn't there and there is nothing to explain why.
+                if let clash = AudioDeviceList.collisionWarning(
+                    inputs: deviceMonitor.inputs, outputs: deviceMonitor.outputs)
+                {
+                    Label(clash, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityLabel("Duplicate device names")
+                }
             }
             .onAppear(perform: load)
             // A Setup applied elsewhere (right-click menu) swaps the devices — keep the
@@ -349,7 +362,15 @@
                 label(title)
                 Picker(title, selection: selection) {
                     Text(Self.defaultLabel).tag(String?.none)
-                    ForEach(devices, id: \.self) { Text($0).tag(String?.some($0)) }
+                    // astar-9d41 — one row per DISTINCT name. Two devices can
+                    // report the same one, and the engine addresses devices by
+                    // name, so only the first is reachable; a second row would
+                    // be a choice that silently opens the first device. It also
+                    // duplicates the SwiftUI identity and tag, which is what
+                    // made every matching row read as selected.
+                    ForEach(AudioDeviceList.selectable(from: devices), id: \.self) {
+                        Text($0).tag(String?.some($0))
+                    }
                 }
                 .labelsHidden()
                 .onChange(of: selection.wrappedValue) { _ in onChange() }
