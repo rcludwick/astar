@@ -27,7 +27,17 @@
         /// pane is rebuilt.
         @Binding var directoryRevision: Int
 
-        @State private var showingExport = false
+        /// Which sheet is up. ONE piece of state driving ONE `.sheet`: stacking
+        /// two `.sheet` modifiers on a single view makes SwiftUI race the
+        /// dismiss of one against the present of the other, which showed up as
+        /// the import chooser closing, reopening and closing again on Import.
+        @State private var sheet: SheetKind?
+
+        private enum SheetKind: String, Identifiable {
+            case export
+            case importChooser
+            var id: String { rawValue }
+        }
         @State private var chosen: Set<ConfigSection> = [.rigs, .settings]
         @State private var status: String?
         @State private var failure: String?
@@ -43,7 +53,7 @@
             Section("Backup") {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
-                        Button("Export…") { showingExport = true }
+                        Button("Export…") { sheet = .export }
                         Button("Import…", action: runImport)
                         Spacer()
                     }
@@ -70,10 +80,11 @@
                 }
                 .listRowSeparator(.hidden)
             }
-            .sheet(isPresented: $showingExport) { exportSheet }
-            .sheet(isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }))
-            {
-                importSheet
+            .sheet(item: $sheet) { kind in
+                switch kind {
+                case .export: exportSheet
+                case .importChooser: importSheet
+                }
             }
         }
 
@@ -110,7 +121,7 @@
 
                 HStack {
                     Spacer()
-                    Button("Cancel") { showingExport = false }
+                    Button("Cancel") { sheet = nil }
                         .keyboardShortcut(.cancelAction)
                     Button("Export…", action: runExport)
                         .keyboardShortcut(.defaultAction)
@@ -130,7 +141,7 @@
         }
 
         private func runExport() {
-            showingExport = false
+            sheet = nil
             status = nil
             failure = nil
             guard
@@ -170,6 +181,7 @@
                 // Default to everything the file has; untick to take a subset.
                 chosenForImport = archive.presentSections
                 pending = archive
+                sheet = .importChooser
             } catch {
                 failure = error.localizedDescription
             }
@@ -218,8 +230,11 @@
 
                 HStack {
                     Spacer()
-                    Button("Cancel") { pending = nil }
-                        .keyboardShortcut(.cancelAction)
+                    Button("Cancel") {
+                        sheet = nil
+                        pending = nil
+                    }
+                    .keyboardShortcut(.cancelAction)
                     Button("Import", action: applyPending)
                         .keyboardShortcut(.defaultAction)
                         .disabled(chosenForImport.isEmpty)
@@ -266,6 +281,7 @@
 
         private func applyPending() {
             guard let archive = pending else { return }
+            sheet = nil
             pending = nil
             status = nil
             failure = nil
