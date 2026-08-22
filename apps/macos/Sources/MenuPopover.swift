@@ -36,6 +36,9 @@
         /// launches; resolves through `Network.resolve` so a stale/unavailable
         /// raw value falls back to `.allstar`. Gated on `session.m17Available`
         /// (astar-c2e5/iax-f2b8 Task 8) — the picker itself stays Task 9's job.
+        /// Live device lists, for the duplicate-name warning below the dial
+        /// card (astar-9d41). Already in the environment for QuickConfigView.
+        @EnvironmentObject private var deviceMonitor: AudioDeviceMonitor
         @AppStorage("ui.network") private var networkRaw = Network.allstar.rawValue
         private var selectedNetwork: Network {
             Network.resolve(networkRaw, m17: session.m17Available)
@@ -178,6 +181,22 @@
                                 .font(.caption)
                                 .foregroundStyle(.red)
                                 .padding(.horizontal, 6)
+                        }
+
+                        // astar-9d41 — two devices reporting one name. Sits
+                        // directly under the dial card rather than down in
+                        // Quick settings: it explains why a device you just
+                        // plugged in is not in the list, which is a question
+                        // you ask before you go looking for the picker.
+                        if let clash = AudioDeviceList.collisionWarning(
+                            inputs: deviceMonitor.inputs, outputs: deviceMonitor.outputs)
+                        {
+                            Label(clash, systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.horizontal, 6)
+                                .accessibilityLabel("Duplicate device names")
                         }
 
                         if selectedNetwork.showsDialpad {

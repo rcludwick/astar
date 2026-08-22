@@ -509,13 +509,18 @@
         private func devicePicker(_ title: String, devices: [String], selection: Binding<String?>)
             -> some View
         {
-            HStack(spacing: 8) {
+            // astar-9d41 — see the note in QuickConfigView.devicePicker.
+            let ambiguous = Set(AudioDeviceList.duplicated(in: devices))
+            return HStack(spacing: 8) {
                 label(title)
                 Picker(title, selection: selection) {
                     Text(Self.defaultLabel).tag(String?.none)
-                    // astar-9d41 — see the note in QuickConfigView.devicePicker.
-                    ForEach(AudioDeviceList.selectable(from: devices), id: \.self) {
-                        Text($0).tag(String?.some($0))
+                    ForEach(AudioDeviceList.selectable(from: devices), id: \.self) { name in
+                        Text(name)
+                            .foregroundStyle(
+                                ambiguous.contains(name) ? Color.orange : Color.primary
+                            )
+                            .tag(String?.some(name))
                     }
                 }
                 .labelsHidden()

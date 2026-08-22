@@ -204,19 +204,6 @@
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                // astar-9d41 — an IC-7300 and a UCI150 both enumerate as "USB
-                // Audio Device". Only the first is reachable, so the picker
-                // lists one entry; without this the second device just silently
-                // isn't there and there is nothing to explain why.
-                if let clash = AudioDeviceList.collisionWarning(
-                    inputs: deviceMonitor.inputs, outputs: deviceMonitor.outputs)
-                {
-                    Label(clash, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityLabel("Duplicate device names")
-                }
             }
             .onAppear(perform: load)
             // A Setup applied elsewhere (right-click menu) swaps the devices — keep the
@@ -358,7 +345,12 @@
             selection: Binding<String?>,
             onChange: @escaping () -> Void
         ) -> some View {
-            HStack(spacing: 8) {
+            // astar-9d41 — names shared by more than one device. Coloured
+            // orange to match the warning under the dial card, so a selected
+            // ambiguous device is visible in the collapsed picker without
+            // opening the menu.
+            let ambiguous = Set(AudioDeviceList.duplicated(in: devices))
+            return HStack(spacing: 8) {
                 label(title)
                 Picker(title, selection: selection) {
                     Text(Self.defaultLabel).tag(String?.none)
@@ -368,8 +360,12 @@
                     // be a choice that silently opens the first device. It also
                     // duplicates the SwiftUI identity and tag, which is what
                     // made every matching row read as selected.
-                    ForEach(AudioDeviceList.selectable(from: devices), id: \.self) {
-                        Text($0).tag(String?.some($0))
+                    ForEach(AudioDeviceList.selectable(from: devices), id: \.self) { name in
+                        Text(name)
+                            .foregroundStyle(
+                                ambiguous.contains(name) ? Color.orange : Color.primary
+                            )
+                            .tag(String?.some(name))
                     }
                 }
                 .labelsHidden()
