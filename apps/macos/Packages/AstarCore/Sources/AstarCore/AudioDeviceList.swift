@@ -92,6 +92,38 @@ public enum AudioDeviceList {
         return collisionWarning(for: unique.flatMap { [$0, $0] })
     }
 
+    /// Collision warning limited to the devices actually in use.
+    ///
+    /// The main page uses this rather than the unconditional form: a clash
+    /// among devices you have not selected does not affect the rig you are
+    /// running, and a permanent warning about someone else's hardware is noise
+    /// that teaches people to ignore the banner. Settings keeps the
+    /// unconditional form — there you are choosing devices, so a clash you have
+    /// not selected yet is exactly what you need to know.
+    ///
+    /// A `nil` selection is the system default: astar did not choose it and
+    /// cannot name it, so there is nothing honest to warn about.
+    ///
+    /// Direction matters. A name duplicated among outputs but unique among
+    /// inputs is perfectly addressable as an input, so selecting it there does
+    /// not warn.
+    public static func collisionWarning(
+        inputs: [String], outputs: [String],
+        selectedInput: String?, selectedOutput: String?
+    ) -> String? {
+        var affected = [String]()
+        if let selectedInput, duplicated(in: inputs).contains(selectedInput) {
+            affected.append(selectedInput)
+        }
+        if let selectedOutput, duplicated(in: outputs).contains(selectedOutput),
+            !affected.contains(selectedOutput)
+        {
+            affected.append(selectedOutput)
+        }
+        guard !affected.isEmpty else { return nil }
+        return collisionWarning(for: affected.flatMap { [$0, $0] })
+    }
+
     /// Whether a stored selection still exists in the current device list.
     /// `nil` — the system default — is always present.
     public static func isPresent(_ selection: String?, in names: [String]) -> Bool {
