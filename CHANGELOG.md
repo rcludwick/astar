@@ -8,6 +8,31 @@ else is still built from source. Versions are `MAJOR.MINOR.PATCHbeta` and will
 stay on `beta` until the client has had a real sit-down-and-use-it pass on all
 three platforms.
 
+## 0.1.6beta — 2026-08-22
+
+A small one, entirely about the two things a new user meets first: the app menu
+and the About panel.
+
+### Fixed
+
+- **astar → Settings… no longer opens an empty window.** It opened SwiftUI's
+  placeholder settings scene rather than astar's own settings. `0.1.1beta`
+  shipped a fix for this that never took effect: it replaced the main menu at
+  launch, and SwiftUI reinstalls its own menu afterwards and wins. The item is
+  now removed at the source instead. Settings is where it has always actually
+  been — the gear in the popover footer.
+
+### Changed
+
+- **The About panel says who wrote astar and where to find it.** It now carries
+  `Copyright © 2026 Rob Ludwick. AGPL-3.0-only.` and links to the
+  documentation, **the source on GitHub**, and AJ7HR on QRZ. AGPL-3.0-only asks
+  that the source be reachable from the program, not merely published
+  somewhere, and until now nothing in the app pointed at it.
+
+  Both come from the app bundle rather than from code, so the panel reads the
+  same however it was opened.
+
 ## 0.1.5beta — 2026-08-22
 
 Your setup stops being trapped on one Mac. Configs, favorites and settings can
