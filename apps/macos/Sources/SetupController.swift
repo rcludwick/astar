@@ -252,5 +252,21 @@
         // MARK: - Internals
 
         private func refresh() { setups = [SystemDefaultSetup.setup] + store.all() }
+
+        /// Re-read EVERYTHING this controller caches from the store.
+        ///
+        /// `refresh()` deliberately reloads only the list, because every caller
+        /// above it is the one that just changed `selectedID`/`defaultID` and
+        /// already holds the truth. A config **import** is the case that breaks
+        /// that assumption: it writes all three behind this controller's back,
+        /// leaving `defaultID` stale — which is why an imported ★ rendered on
+        /// System Default (the star reads `setups.defaultID == setup.id`) and
+        /// why the next write here would persist the stale value over the
+        /// imported one.
+        func reloadFromStore() {
+            setups = [SystemDefaultSetup.setup] + store.all()
+            selectedID = store.loadSelectedID()
+            defaultID = store.loadDefaultID()
+        }
     }
 #endif

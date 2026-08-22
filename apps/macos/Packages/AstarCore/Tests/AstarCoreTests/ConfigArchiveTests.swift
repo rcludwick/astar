@@ -170,6 +170,44 @@ final class ConfigArchiveTests: XCTestCase {
         XCTAssertNotNil(archive.callsign)
     }
 
+    // MARK: - Filtering an archive on the way IN
+
+    func testFilteringKeepsOnlyTheChosenSections() {
+        let full = ConfigArchive.make(sections: Set(ConfigSection.allCases), from: sampleSources())
+        let only = full.filtered(to: [.directory])
+        XCTAssertNotNil(only.directory)
+        XCTAssertNil(only.rigs)
+        XCTAssertNil(only.settings)
+        XCTAssertNil(only.callsign)
+        XCTAssertNil(only.interface)
+    }
+
+    func testFilteringCannotConjureASectionTheFileLacks() {
+        // Ticking "Node directory" for a file that has none must not produce an
+        // empty directory that then wipes nothing / imports nothing confusingly.
+        let rigsOnly = ConfigArchive.make(sections: [.rigs], from: sampleSources())
+        let asked = rigsOnly.filtered(to: Set(ConfigSection.allCases))
+        XCTAssertNil(asked.directory)
+        XCTAssertNotNil(asked.rigs)
+    }
+
+    func testFilteringToNothingLeavesNothing() {
+        let full = ConfigArchive.make(sections: Set(ConfigSection.allCases), from: sampleSources())
+        XCTAssertTrue(full.filtered(to: []).presentSections.isEmpty)
+    }
+
+    func testFilteringPreservesTheEnvelope() {
+        let full = ConfigArchive.make(sections: Set(ConfigSection.allCases), from: sampleSources())
+        let only = full.filtered(to: [.rigs])
+        XCTAssertEqual(only.version, full.version)
+        XCTAssertEqual(only.exportedAt, full.exportedAt)
+    }
+
+    func testPresentSectionsReportsWhatAFileActuallyHas() {
+        let some = ConfigArchive.make(sections: [.rigs, .callsign], from: sampleSources())
+        XCTAssertEqual(some.presentSections, [.rigs, .callsign])
+    }
+
     // MARK: - The secret-free contract
 
     func testNoArchiveEverCarriesCredentials() throws {
