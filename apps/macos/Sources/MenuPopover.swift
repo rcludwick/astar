@@ -308,14 +308,19 @@
                     // to it already carries the connection state.
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 1) {
-                    // Title never wraps/hyphenates (astar-cfc1): lineLimit(1) truncates
-                    // rather than breaking mid-word if space ever gets tighter than the
-                    // popover's tested minimum, and layoutPriority protects it from
-                    // being the thing that shrinks when the row is squeezed — the
-                    // Spacer gives first, not the status text.
+                    // Title never wraps and never elides (astar-cfc1, astar-5e2c).
+                    // lineLimit(1) stops it breaking mid-word; fixedSize makes it
+                    // render at its ideal width instead of accepting a narrower
+                    // proposal, which is what put an ellipsis on "Connected" while
+                    // the row still had room. layoutPriority alone did not cover it:
+                    // it orders who gives way, but Text stays willing to compress, so
+                    // a tight proposal still truncated the one string in this row that
+                    // is a fixed, known word rather than user data. Same treatment the
+                    // badges below and the TX toggle at the trailing edge already use.
                     Text(statusTitle)
                         .font(.callout.weight(.medium))
                         .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .layoutPriority(1)
                     // Codec/network badges (astar-eb6c/astar-9b3e/astar-cfc1): broken
                     // onto their own line below the title, not sharing it. At the
@@ -400,13 +405,34 @@
                         // callsign source later. `directoryRevision` re-reads on edits.
                         let _ = directoryRevision
                         HStack(spacing: 6) {
+                            // One line, truncating (astar-5e2c). Without a
+                            // lineLimit this wrapped: a repeater name plus node
+                            // number split across two lines, which grew the card
+                            // vertically and pushed the level graphs down. It is
+                            // also the row's pressure valve — an unbounded
+                            // wrapping Text refuses to compress below its longest
+                            // word, so the width had nowhere to go but the window.
+                            // This is the one string here that is user data and
+                            // can be arbitrarily long, which makes it the right
+                            // thing to elide, unlike the fixed status title.
                             Text(connectedNodeLabel(for: dialedNode))
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
                             talkTimerDot
                         }
                     }
                 }
+                // astar-5e2c: the text column takes its ideal width BEFORE the
+                // Spacer gets any. Without this the column, the RTT readout and
+                // the Spacer all sat at priority 0, so an HStack split the spare
+                // width between them — the Spacer claimed a share it did not need
+                // and the status text was squeezed into eliding "Connected" and
+                // wrapping the node label, while the row visibly still had room.
+                // Priority orders who is satisfied first; the Spacer now collapses
+                // to whatever is genuinely left over.
+                .layoutPriority(1)
                 // Round-trip time right next to the connection status.
                 RTTLabel(meters: session.meters)
                 Spacer()
@@ -1439,9 +1465,36 @@
 
         var body: some View {
             if let rtt = meters.rttMS {
-                Text("\(rtt) ms")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                // Whole or not at all (astar-5e2c). No amount of layout priority
+                // can win this row: the codec/network badges beside it are
+                // fixedSize, so the status column cannot compress below their
+                // combined width, while a Text's minimum is zero. Every point of
+                // deficit therefore lands here. Measured on a 310pt window with a
+                // legacy scroller the row has 243pt to spend and wants ~255, and
+                // the readout was handed 5pt of it — rendering "93 ms" as a bare
+                // "9". Priority tweaks only moved which wrong thing was shown:
+                // unbounded it wrapped one character per line into a vertical
+                // strip, lineLimit(1) truncated it to a single digit.
+                //
+                // A latency figure clipped to its first digit is a WRONG NUMBER on
+                // screen, which is worse than no number: "9" and "93" and "935" ms
+                // are three very different calls. So ViewThatFits renders it at its
+                // full ideal width or drops it entirely, and the width it would
+                // have taken goes back to the connected-node label. It returns by
+                // itself the moment the window is widened.
+                //
+                // Still not fixedSize at the row level — that made the window jump
+                // wider the moment a call answered. The pin lives inside the first
+                // branch, where it means "this width or nothing" rather than
+                // "grow the window to fit me".
+                ViewThatFits(in: .horizontal) {
+                    Text("\(rtt) ms")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
+                    Color.clear.frame(width: 0, height: 0)
+                }
             }
         }
     }
