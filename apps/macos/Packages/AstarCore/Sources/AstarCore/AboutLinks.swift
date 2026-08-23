@@ -20,6 +20,10 @@ public enum AboutLinks {
     /// The author's QRZ profile. QRZ serves callsign lookups from `/db/<call>`.
     public static let qrz = URL(string: "https://www.qrz.com/db/\(callsign)")!
 
+    /// The source repository. AGPL-3.0-only means the source has to be
+    /// reachable from the app, not merely published somewhere.
+    public static let repository = URL(string: "https://github.com/rcludwick/astar")!
+
     /// Where to file a bug. Michael's report arrived by email because nothing in
     /// the app said where else to put it.
     public static let issues = URL(string: "https://github.com/rcludwick/astar/issues")!
