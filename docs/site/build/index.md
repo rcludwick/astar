@@ -28,7 +28,7 @@ Build only the one you want.
 
     `cargo build --workspace`
 
--   __[The macOS app](macos-app.md)__
+-   __[Building the macOS app](macos-app.md)__
 
     The SwiftUI menu-bar client. The heaviest set of prerequisites — a full
     Xcode, XcodeGen, and one mandatory extra step (`just xcframework`) that a

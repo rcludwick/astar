@@ -27,7 +27,12 @@ let package = Package(
         ),
         .testTarget(
             name: "AstarCoreTests",
-            dependencies: ["AstarCore"]
+            dependencies: ["AstarCore"],
+            // A real exported config, kept verbatim (bar a scrub of the
+            // operator's callsign, two of their nodes and the USB adapter's
+            // hardware serial) so the v1 format has a fixture no future change
+            // can quietly break. See ConfigFixtureTests.
+            resources: [.copy("Fixtures")]
         ),
     ]
 )

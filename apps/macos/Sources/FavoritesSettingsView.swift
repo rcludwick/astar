@@ -153,6 +153,12 @@
         @Binding var directoryRevision: Int
         @EnvironmentObject private var session: CallSession
         @State private var name: String
+        /// The editable dial target (astar-6b83). Held in @State like `name` so
+        /// the field is live while typing and only written through on commit.
+        @State private var node: String
+        /// Set when a commit was refused, cleared on the next edit — drives the
+        /// red ring and the reason line, matching the credentials form's idiom.
+        @State private var nodeRejected = false
         /// The override mode for the talk timer on this node.
         @State private var timerMode: TimerMode
         /// Custom duration (minutes) when `timerMode == .custom`.
@@ -172,6 +178,7 @@
             self.entry = entry
             _directoryRevision = directoryRevision
             _name = State(initialValue: entry.label)
+            _node = State(initialValue: entry.node)
             // Derive the initial mode from the stored override.
             let mode: TimerMode
             if entry.talkTimerEnabled == false {
@@ -192,10 +199,19 @@
                     TextField("Name", text: $name)
                         .textFieldStyle(.roundedBorder)
                         .onSubmit(commitRename)
-                    Text(entry.node)
+                    TextField("Node", text: $node)
+                        .textFieldStyle(.roundedBorder)
                         .font(.callout.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .frame(minWidth: 56, alignment: .trailing)
+                        .multilineTextAlignment(.trailing)
+                        .frame(width: 120)
+                        .onSubmit(commitNode)
+                        .onChange(of: node) { _ in nodeRejected = false }
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .strokeBorder(Color.red, lineWidth: nodeRejected ? 1.5 : 0)
+                        )
+                        .help("Node number or address — edit to repoint this favorite")
+                        .accessibilityLabel("Node number or address")
                     Button(role: .destructive) {
                         session.directoryRemove(id: entry.id)
                         directoryRevision += 1
@@ -206,6 +222,11 @@
                     .help("Delete this favorite")
                     // astar-a9c3 F4: icon-only.
                     .accessibilityLabel("Delete this favorite")
+                }
+                if nodeRejected, let reason = nodeRejectionReason {
+                    Text(reason)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
                 }
                 talkTimerRow
             }
@@ -258,6 +279,39 @@
                 session.directorySetTalkTimer(id: entry.id, enabled: false, seconds: nil)
             }
             directoryRevision += 1
+        }
+
+        /// Why the current text can't be saved, or nil when it can. Reuses the
+        /// core's own checks so the message always matches the actual refusal.
+        private var nodeRejectionReason: String? {
+            let trimmed = node.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { return "Enter a node number or address." }
+            if DialTarget.parse(trimmed) == nil {
+                return "Not a valid node number or address."
+            }
+            if let other = session.directoryEntry(forNode: trimmed), other.id != entry.id {
+                return "Already saved as \u{201C}\(other.label)\u{201D}."
+            }
+            return nil
+        }
+
+        /// Write the edited dial target through. On refusal the typed text is
+        /// KEPT, not reverted — the red ring plus the reason says what is wrong
+        /// so it can be corrected, rather than silently discarding the edit.
+        private func commitNode() {
+            let trimmed = node.trimmingCharacters(in: .whitespaces)
+            guard trimmed != entry.node else {
+                node = entry.node
+                nodeRejected = false
+                return
+            }
+            if session.directorySetNode(id: entry.id, to: trimmed) {
+                node = trimmed
+                nodeRejected = false
+                directoryRevision += 1
+            } else {
+                nodeRejected = true
+            }
         }
 
         private func commitRename() {

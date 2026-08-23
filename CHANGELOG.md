@@ -8,6 +8,66 @@ else is still built from source. Versions are `MAJOR.MINOR.PATCHbeta` and will
 stay on `beta` until the client has had a real sit-down-and-use-it pass on all
 three platforms.
 
+## 0.1.5beta — 2026-08-22
+
+Your setup stops being trapped on one Mac. Configs, favorites and settings can
+be exported to a file and imported back — in whole or in part — so a second Mac,
+a rebuild, or handing a working rig to another operator is no longer a matter of
+re-entering everything by hand.
+
+### Added
+
+- **Export and import your configuration** (Settings → Backup). Export writes a
+  plain-text `.astarconfig` file; both ends are section-by-section, so one
+  format serves a personal backup and something you share. The sections are
+  saved configs (with their mic profiles), the node directory, audio and serial
+  settings, callsign, and window state.
+
+  **Callsign is its own tick box**, because it is the field that decides whether
+  a file identifies you. Leave it off and an export is a rig anyone can use.
+
+  Import **adds and updates; it never deletes**, and re-importing the same file
+  is a no-op rather than a way to end up with everything twice. Node entries
+  match on node number rather than id, so the same node is never stored twice
+  and your own label and ★ survive an import. This is what makes it possible to
+  take somebody's node list without adopting their microphone and serial wiring.
+
+  **Your AllStarLink account is never exported.** It stays in the Keychain,
+  there is no option to include it, and an import leaves existing credentials
+  untouched. A test encodes a full archive and greps it for the password to
+  keep that true.
+
+- **A config version**, stamped into both an exported file and the preferences
+  domain, so a future release can translate an old config rather than reject it.
+  It marks translation, not change: adding fields or sections leaves it alone,
+  and a version 1 file will keep importing. A real `0.1.4beta` export is kept in
+  the test suite to hold that promise to something.
+
+- **A favorite's node number is editable in place** (Settings → Favorites).
+  Repointing a favorite used to mean deleting it and adding it again, which
+  threw away its label, its ★ and its per-node talk-timer override.
+
+### Fixed
+
+- **Two audio devices with the same name no longer both appear selected.** An
+  ICOM IC-7300 and an AllScan UCI150 both enumerate as "USB Audio Device", and
+  astar identifies devices by name — so of two same-named devices exactly one is
+  reachable, and offering both was offering a choice that does not exist. The
+  picker now lists one entry per distinct name, marks an ambiguous selection with
+  an orange name, a red outline and a warning triangle, and explains what to do
+  about it: renaming a device in Audio MIDI Setup is stored against that device
+  and fixes it for good.
+
+  The underlying repair — identifying devices by their stable CoreAudio UID
+  instead of their name — is tracked as `astar-uid`. Until then, a saved device
+  name still binds to whichever same-named device the system enumerates first.
+
+### Documentation
+
+- **[Saved configs, backup and transfer](https://rcludwick.github.io/astar/macos/configs/)** —
+  what a config contains, where it is stored, what export and import do and do
+  not carry, and the config-version rule.
+
 ## 0.1.4beta — 2026-08-18
 
 M17 now works on a Mac that has never seen Homebrew. That was the whole point

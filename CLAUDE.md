@@ -141,6 +141,30 @@ Surface audio/PTT config layered: sensible defaults and common controls up
 front, advanced device/serial tuning under progressive disclosure. Don't hide
 capability the station offers.
 
+## Config version — bump it for translation, not for change
+
+`ConfigVersion.current` (AstarCore) is **1**. One number, two homes: stamped
+into the preferences domain under `config.version` at launch, and written into
+the envelope of every exported `.astarconfig`. `ConfigArchive.currentVersion`
+is that same constant — a file and the Mac that wrote it must never claim
+different versions.
+
+* **Adding a field or a whole section does NOT bump it.** Both directions
+  already cope: an older reader ignores what it does not recognise, a newer
+  reader treats what is absent as unset. That tolerance is what keeps saved
+  configs portable, and spending a version number on an addition throws it
+  away for nothing.
+* **Bump it only when existing data would be misread unless something rewrites
+  it** — a key renamed, a unit changed, a meaning inverted, a type swapped.
+* **A bump owes a translation** from the previous version, in both places. Old
+  files and old preference domains do not stop existing because a new version
+  shipped; `Tests/AstarCoreTests/Fixtures/astar-config-v1.astarconfig` is a
+  real `0.1.4beta` export kept precisely so a version-1 file must keep
+  importing forever.
+
+An unstamped preferences domain reads as version 1, not 0 — everything written
+before the version existed *is* version 1.
+
 ## Work tracking
 
 Use the Claude Code task tracker for the current session. The durable backlog is

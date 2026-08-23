@@ -36,6 +36,14 @@
         /// launches; resolves through `Network.resolve` so a stale/unavailable
         /// raw value falls back to `.allstar`. Gated on `session.m17Available`
         /// (astar-c2e5/iax-f2b8 Task 8) — the picker itself stays Task 9's job.
+        /// Live device lists, for the duplicate-name warning below the dial
+        /// card (astar-9d41). Already in the environment for QuickConfigView.
+        @EnvironmentObject private var deviceMonitor: AudioDeviceMonitor
+        /// The devices this rig is actually using, so the warning below can be
+        /// limited to a clash that affects them (astar-9d41). Same keys
+        /// `AudioSettings` persists, read-only here.
+        @AppStorage("audio.input") private var selectedInputDevice: String?
+        @AppStorage("audio.output") private var selectedOutputDevice: String?
         @AppStorage("ui.network") private var networkRaw = Network.allstar.rawValue
         private var selectedNetwork: Network {
             Network.resolve(networkRaw, m17: session.m17Available)
@@ -180,6 +188,32 @@
                                 .padding(.horizontal, 6)
                         }
 
+                        // astar-9d41 — two devices reporting one name. Sits
+                        // directly under the dial card rather than down in
+                        // Quick settings: it explains why a device you just
+                        // plugged in is not in the list, which is a question
+                        // you ask before you go looking for the picker.
+                        //
+                        // Gated on the SELECTED devices. A clash among hardware
+                        // this rig is not using does not affect the call you are
+                        // about to make, and a banner that is always on is one
+                        // people learn to stop reading. Settings keeps the
+                        // unconditional warning, where choosing devices is the
+                        // job at hand.
+                        if let clash = AudioDeviceList.collisionWarning(
+                            inputs: deviceMonitor.inputs,
+                            outputs: deviceMonitor.outputs,
+                            selectedInput: selectedInputDevice,
+                            selectedOutput: selectedOutputDevice)
+                        {
+                            Label(clash, systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.horizontal, 6)
+                                .accessibilityLabel("Duplicate device names")
+                        }
+
                         if selectedNetwork.showsDialpad {
                             dialpadSection
                                 .transition(.opacity.combined(with: .move(edge: .top)))
@@ -237,6 +271,7 @@
                     FavoritesSettingsView(directoryRevision: $directoryRevision)
                     MicProfilesView()
                     SpectrumSettingsView()
+                    ConfigTransferView(directoryRevision: $directoryRevision)
                 }
                 .listStyle(.inset)
                 .scrollContentBackground(.hidden)  // let the window's blur show through
