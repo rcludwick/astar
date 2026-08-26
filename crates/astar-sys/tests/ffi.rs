@@ -1401,18 +1401,23 @@ fn connect_dstar_null_guards() {
                 30001,
                 cc(b'A'),
                 call.as_ptr(),
+                ptr::null(),
             )
         },
         IAX_ERR_NULL,
         "NULL station"
     );
     assert_eq!(
-        unsafe { iax_station_connect_dstar(st, ptr::null(), 30001, cc(b'A'), call.as_ptr()) },
+        unsafe {
+            iax_station_connect_dstar(st, ptr::null(), 30001, cc(b'A'), call.as_ptr(), ptr::null())
+        },
         IAX_ERR_NULL,
         "NULL host"
     );
     assert_eq!(
-        unsafe { iax_station_connect_dstar(st, host.as_ptr(), 30001, cc(b'A'), ptr::null()) },
+        unsafe {
+            iax_station_connect_dstar(st, host.as_ptr(), 30001, cc(b'A'), ptr::null(), ptr::null())
+        },
         IAX_ERR_NULL,
         "NULL callsign"
     );
@@ -1437,7 +1442,14 @@ fn connect_dstar_utf8_guard() {
     let call = CString::new("N0CALL").unwrap();
     assert_eq!(
         unsafe {
-            iax_station_connect_dstar(st, bad.as_ptr().cast(), 30001, cc(b'A'), call.as_ptr())
+            iax_station_connect_dstar(
+                st,
+                bad.as_ptr().cast(),
+                30001,
+                cc(b'A'),
+                call.as_ptr(),
+                ptr::null(),
+            )
         },
         IAX_ERR_UTF8,
         "non-UTF-8 host"
@@ -1445,10 +1457,36 @@ fn connect_dstar_utf8_guard() {
     let host = CString::new("127.0.0.1").unwrap();
     assert_eq!(
         unsafe {
-            iax_station_connect_dstar(st, host.as_ptr(), 30001, cc(b'A'), bad.as_ptr().cast())
+            iax_station_connect_dstar(
+                st,
+                host.as_ptr(),
+                30001,
+                cc(b'A'),
+                bad.as_ptr().cast(),
+                ptr::null(),
+            )
         },
         IAX_ERR_UTF8,
         "non-UTF-8 callsign"
+    );
+    // The optional reflector callsign (which fills the transmitted RF
+    // header's RPT1/RPT2) is held to the same strict-UTF-8 rule as the
+    // required strings: a lossy conversion here would transmit a corrupted
+    // destination callsign rather than refusing. Rejected BEFORE any dongle
+    // scan, like every other guard in this file.
+    assert_eq!(
+        unsafe {
+            iax_station_connect_dstar(
+                st,
+                host.as_ptr(),
+                30001,
+                cc(b'A'),
+                call.as_ptr(),
+                bad.as_ptr().cast(),
+            )
+        },
+        IAX_ERR_UTF8,
+        "non-UTF-8 reflector callsign"
     );
     unsafe { iax_station_free(st) };
 }
@@ -1463,7 +1501,16 @@ fn connect_dstar_non_ascii_module_is_dstar_err() {
     // here before the station's own A-Z validation — and, critically, before
     // the dongle scan.
     assert_eq!(
-        unsafe { iax_station_connect_dstar(st, host.as_ptr(), 30001, cc(0xe9), call.as_ptr()) },
+        unsafe {
+            iax_station_connect_dstar(
+                st,
+                host.as_ptr(),
+                30001,
+                cc(0xe9),
+                call.as_ptr(),
+                ptr::null(),
+            )
+        },
         IAX_ERR_DSTAR
     );
     unsafe { iax_station_free(st) };

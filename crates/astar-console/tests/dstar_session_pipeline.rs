@@ -569,11 +569,21 @@ struct Fixture {
 
 impl Fixture {
     fn start(vocoder: impl FnOnce(&Arc<Mutex<VocoderStats>>) -> FakeVocoder) -> Fixture {
+        Fixture::start_named(None, vocoder)
+    }
+
+    /// [`Fixture::start`] with an explicit `DstarConfig::reflector_callsign`
+    /// — the bare-IP case, where the session has no hostname to derive the
+    /// destination reflector's callsign from.
+    fn start_named(
+        reflector_callsign: Option<&str>,
+        vocoder: impl FnOnce(&Arc<Mutex<VocoderStats>>) -> FakeVocoder,
+    ) -> Fixture {
         let reflector =
             Reflector::bind_parrot("127.0.0.1:0".parse().unwrap()).expect("bind reflector");
         let reflector_addr = reflector.local_addr();
         let handle = reflector.run();
-        Fixture::connect(reflector_addr, Some(handle), vocoder)
+        Fixture::connect(reflector_addr, Some(handle), reflector_callsign, vocoder)
     }
 
     /// [`Fixture::start`] against an already-running reflector stand-in — for
@@ -583,12 +593,13 @@ impl Fixture {
         addr: SocketAddr,
         vocoder: impl FnOnce(&Arc<Mutex<VocoderStats>>) -> FakeVocoder,
     ) -> Fixture {
-        Fixture::connect(addr, None, vocoder)
+        Fixture::connect(addr, None, None, vocoder)
     }
 
     fn connect(
         reflector_addr: SocketAddr,
         handle: Option<astar_dstar::ReflectorHandle>,
+        reflector_callsign: Option<&str>,
         vocoder: impl FnOnce(&Arc<Mutex<VocoderStats>>) -> FakeVocoder,
     ) -> Fixture {
         let stats = Arc::new(Mutex::new(VocoderStats::default()));
@@ -603,7 +614,7 @@ impl Fixture {
             callsign: "N0CALL".into(),
             output: None,
             input: None,
-            reflector_callsign: None,
+            reflector_callsign: reflector_callsign.map(str::to_string),
         };
         let session = DstarSession::connect_with_stream(
             cfg,
@@ -878,6 +889,54 @@ fn a_wedged_vocoder_cannot_hang_the_run_loop_or_disconnect() {
 // and much sooner than, the parrot's own ~150 ms delayed echo back to the
 // sender), which is the most direct way to assert on exactly what a keyed
 // session put on the wire.
+
+/// The destination half of the RF header, end to end: what a keyed session
+/// actually puts on the wire must NAME the reflector it is linked to.
+///
+/// Every astar transmission used to go out with `RPT1`/`RPT2` blank —
+/// `Station::dstar_connect` hard-coded `reflector_callsign: None` and the
+/// host-derivation behind it could not name an XLX reflector — which is not
+/// cosmetic: `xlxd`'s `DPlus` path gates on `IsValidModule(rpt2.GetModule())`
+/// and drops such a transmission with no error at the client, and every
+/// receiving radio and dashboard renders both fields.
+///
+/// This fixture connects over 127.0.0.1 (nothing to derive from) as
+/// `XLX836`, so it pins both halves of the fix: the configured callsign
+/// reaches the header at all, and it is addressed by its `DExtra` `XRF` alias
+/// — the form the real XLX458 capture in `astar_dstar::dsvt` carries.
+#[test]
+fn the_tx_header_addresses_the_configured_reflector_and_module() {
+    let mut f = Fixture::start_named(Some("XLX836"), |s| {
+        FakeVocoder::new(Duration::from_millis(2), s)
+    });
+    let listener = f.talker("N7WIRE");
+
+    f.session_mut().set_ptt(true);
+    assert!(
+        wait_until(|| f.session().state().ptt, 1_000),
+        "set_ptt(true) must be applied by the run-loop"
+    );
+
+    let header_bytes = listener.recv_packet();
+    let header_pkt = DsvtPacket::parse(&header_bytes).expect("valid header packet");
+    let DsvtPacket::Header { header, .. } = header_pkt else {
+        panic!("the first packet a freshly keyed session sends must be its header");
+    };
+    assert_eq!(
+        &header.rpt2, b"XRF836 A",
+        "RPT2 must name the destination reflector and the linked module"
+    );
+    assert_eq!(
+        &header.rpt1, b"XRF836 G",
+        "RPT1 must name that reflector's gateway"
+    );
+
+    f.session_mut().set_ptt(false);
+    assert!(
+        wait_until(|| !f.session().state().ptt, 1_000),
+        "set_ptt(false) must be applied by the run-loop"
+    );
+}
 
 /// Happy path: keying PTT emits exactly one header packet before any voice
 /// frame, the operator's OWN callsign is in that header, mic audio flows out
