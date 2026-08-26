@@ -46,7 +46,7 @@ rustc --version          # want 1.89 or newer
 
     | Requirement | Why | Install |
     |---|---|---|
-    | **macOS 13+** | `MenuBarExtra` is the floor. | — |
+    | **macOS 13+** | The declared deployment target; `ViewThatFits` and other macOS 13 SwiftUI APIs are used. | — |
     | **Full Xcode** | `xcodebuild` plus the SwiftUI/AppKit SDKs. The Command Line Tools alone are **not** enough. | App Store, then `sudo xcode-select -s /Applications/Xcode.app` |
     | **XcodeGen** | Generates the (gitignored) `astar.xcodeproj` from `apps/macos/project.yml`. | `brew install xcodegen` |
     | **just** | The command palette. | `brew install just` |
@@ -160,7 +160,7 @@ export IAX_CODEC2_PATH=/path/to/libcodec2.dylib
 !!! warning "No Codec 2 at all looks exactly like no M17 support"
 
     When a build can find neither a system `libcodec2` nor a linked copy, it
-    reports M17 as unavailable and the clients simply do not offer M17 in the
+    reports M17 as unavailable and the clients do not offer M17 in the
     network picker. There is no error dialog. AllStarLink needs none of this —
     only M17 does.
 
@@ -170,6 +170,49 @@ export IAX_CODEC2_PATH=/path/to/libcodec2.dylib
     fails the build if that ever stops being true. Linking it into the app is
     the one deliberate exception, covered by the notices and written offer in
     `LICENSE-EXCEPTIONS.md`.
+
+### A vocoder dongle — only for D-Star
+
+D-Star voice is AMBE+2. There is no software vocoder in astar and there will
+not be one: no freely licensable AMBE implementation exists. The codec runs on
+a **ThumbDV or DV3000** USB dongle, so D-Star is hardware-only in a way M17 is
+not — Codec 2 you can install, AMBE you have to own.
+
+Nothing needs installing on macOS. The dongle is an FTDI part
+(`0x0403:0x6015`) and enumerates as a `/dev/cu.usbserial-*` port on its own.
+
+Which builds include D-Star at all:
+
+| Building | D-Star | Why |
+|---|---|---|
+| **The macOS app** | linked in, no UI | `astar-sys` has `dstar` in its default features, so `just xcframework` picks it up — but the client does not offer D-Star in its network picker yet. |
+| **Engine crates** | off | `astar-codec`'s `ambe-hw` feature is off by default. Enable it per crate, e.g. `cargo test -p astar-codec --features ambe-hw`. |
+| **`astar-server`** | off in its own manifest | It takes default features only — but see the warning below. |
+
+With no dongle attached the engine reports D-Star as unavailable — the same
+shape of outcome as a build with no Codec 2, and equally silent. Detection is
+hotplug rather than latched at launch, so the capability follows the hardware.
+
+!!! danger "`IAX_THUMBDV_PORT` narrows the scan — it can never replace it"
+
+    The dongle is found by scanning for that FTDI VID/PID. `IAX_THUMBDV_PORT`
+    selects *among ports the scan already matched*, for a machine with more
+    than one attached. It cannot point the opener at an arbitrary serial port,
+    and that is a safety property rather than a limitation: opening a USB radio
+    interface's tty asserts RTS, which is the radio-key line. See
+    [On-air safety](../about/safety.md).
+
+    `astar-server` takes default features only, so its own manifest does not
+    enable `dstar` — enabling it would make the daemon's remote `POST /key` a
+    remote D-Star transmit trigger. Note that Cargo unifies features across a
+    workspace build, so `cargo build --workspace` compiles D-Star into the
+    daemon anyway because `astar-sys` asks for it. The daemon refuses to key
+    while a D-Star session is active, which is what actually holds the line;
+    see [The engine](engine.md#feature-flags).
+
+The hardware-touching test suites skip unless `IAX_THUMBDV_TESTS=1` is set
+explicitly. `just dstar-test` runs the hardware-free half and passes with no
+dongle present.
 
 ### `uv` — only for the documentation site
 

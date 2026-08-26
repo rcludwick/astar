@@ -13,7 +13,13 @@ These are finished-ish pages waiting on their subject, not engineering notes.
 
 | Path | Held back because |
 |---|---|
-| `server/` | astar-server is not ready to be presented to users. `docs/site/build/server.md` still documents *building* the daemon; what is held back is what it does, every configuration knob, and the HTTP + SSE control API. |
+| *(nothing at present)* | — |
+
+`server/` was published on 2026-08-25: rather than hold the daemon's docs back
+until it is finished, they now ship with an explicit work-in-progress banner
+listing the known gaps and their backlog items, so that anyone picking one up
+can see the current shape. "Unfinished" and "undocumented" turned out to be
+different problems, and only the first one was real.
 
 ## Publishing one again
 

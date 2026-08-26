@@ -42,7 +42,7 @@ fields:
 
 | Field | What goes in it |
 | --- | --- |
-| **Callsign** | Yours, e.g. `KF8EBV`. |
+| **Callsign** | Yours, e.g. `N0CALL`. |
 | **Node number** | A node number registered to you. |
 | **Account password** | Your **allstarlink.org website password**. |
 
@@ -69,7 +69,8 @@ browser to confirm it, and check the callsign and node number for typos.
 
 ## 3. Set your audio levels
 
-This is the part worth slowing down for. Open **Quick settings** in the popover.
+Levels are where most of the setup time goes. Open **Quick settings** in the
+popover.
 
 ### Pick the devices
 
@@ -111,7 +112,7 @@ Talk normally into the mic and watch the **Audio Level** bar.
 ### Full duplex — headphones only
 
 **Full duplex** lets you hear the channel while you are transmitting, which is
-how you find out that someone is doubling with you. It is genuinely useful.
+how you find out that someone is doubling with you.
 
 On a laptop with the **built-in speaker and built-in mic**, turn it off. The
 speaker feeds straight back into the mic and you get a feedback loop. Full
@@ -146,14 +147,15 @@ net, and it pairs well with VOX while you are still tuning the threshold.
 ## 5. Make a contact
 
 Back in the popover, type a node number into the dial field and press
-**Connect**. `69586` is AJ7HR's personal node and a reasonable first target.
+**Connect**. A local repeater or hub node is the usual first target; the
+AllStarLink [node list](https://www.allstarlink.org/nodelist) is where to find
+one near you.
 
 Nodes you connect to are saved automatically as **recents**, and you can star
 one to make it a **favorite** and give it your own name — "Local 2m", not
 `51234`. Favorites are unlimited; the recents list shows the ten most recent.
 
-When you get there, listen first, then key up and identify. Congratulations —
-that is astar on the air.
+Listen first, then key up and identify.
 
 ## Things worth knowing early
 
@@ -162,11 +164,12 @@ saved configs — are in `~/Library/Preferences/com.aj7hr.astar.plist`. Your
 portal password is not in there; it is in the login Keychain under
 `com.aj7hr.astar`, which is what you want.
 
-There is no settings export/import yet, and no "put my config on a network
-drive and sync it" option. It is on the list. For now, a second Mac means
-entering the account once more and setting levels again — which you would
-mostly want to do anyway, since a different mic on a different machine wants
-different gain.
+Settings can be exported to a file and imported back, in whole or in part, so
+a second Mac does not mean re-entering everything — see
+[Saved configs, backup and transfer](configs.md). Your portal password is never
+in an export; it stays in the Keychain, so the account is the one thing you
+enter again. There is still no "put my config on a network drive and sync it"
+option.
 
 **Mic profiles.** *Analyze…* in Quick settings characterizes a microphone —
 measuring its noise floor and notching out whine and hum — and saves the result
@@ -176,6 +179,13 @@ use regularly.
 **Configs.** A config bundles a device pair, gains, and a mic profile under a
 name. **System Default** is the built-in one you start on. Save your headset
 setup as its own config and switching rigs becomes one menu pick.
+
+**Other networks.** The network picker appears once astar has more than one
+network available. **M17** needs nothing installed and dials reflectors as
+`host[:port]/module`. It transmits your callsign, so set it before you key;
+AllStarLink identifies by node number instead.
+
+D-Star is implemented in the engine but is not in this client yet.
 
 **Bluetooth and AirPods.** They work — they appear in the Mic and Speaker menus
 like any other device. Two caveats. First, the moment macOS starts using a
