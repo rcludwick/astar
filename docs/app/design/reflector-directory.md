@@ -79,9 +79,9 @@ The dial field stays **one smart field**. Today it already distinguishes a node
 number from a host. Directory resolution slots in ahead of the address parser:
 
 ```
-"XLX836"              -> directory hit  -> 45.56.69.219:30001, RPT "XRF836", module A
-"XLX836 A"            -> directory hit, explicit module
-"XLX836/B"            -> directory hit, explicit module
+"XLX836"              -> reflector resolves; module still needed, Connect disabled
+"XLX836 A"            -> complete: 45.56.69.219:30001, RPT "XRF836", module A
+"XLX836/B"            -> complete, same thing with a slash
 "45.56.69.219:30001/A" -> no hit, falls through to the existing address parser
 ```
 
@@ -89,21 +89,33 @@ number from a host. Directory resolution slots in ahead of the address parser:
 gets mistaken for a hostname. Matching is case-insensitive and checks `aliases`,
 so `XRF836` finds the XLX entry it genuinely aliases.
 
-### The module problem, stated honestly
+### The module: no default, because there is nothing to base one on
 
 D-Star needs a module and the XLX registry does not publish which modules are
-active — `modules` is empty for D-Star entries. So the client cannot offer a
+active — `modules` is empty for every D-Star entry. So the client cannot offer a
 populated picker; it can only accept a letter.
 
-Omitting the module defaults to **A**, and the resolved target is echoed under
-the field before you press Connect:
+An earlier draft of this design defaulted the omitted module to **A**, on the
+reasoning that a default you can see is not a silent guess. That was wrong, and
+the reason is worth writing down: on D-Star the module *is* the room. Guessing it
+does not fail visibly — it succeeds, and puts you in a conversation you did not
+mean to join, keyed up under your own callsign. There is no data behind the
+guess, and "usually A" is not knowledge.
+
+So there is no default. Typing a bare `XLX836` resolves the reflector and leaves
+the module unset; **Connect stays disabled until a letter is chosen.** This is
+not an error state — nothing is wrong, the form is simply incomplete, and it
+should read that way: the resolved target line fills in as soon as the module
+does.
 
 ```
-XLX836 · module A · 45.56.69.219:30001
+XLX836 ·  module —  · 45.56.69.219:30001      Connect disabled
+XLX836 ·  module A  · 45.56.69.219:30001      Connect enabled
 ```
 
-That is the compromise: fast for the common case, never a *silent* guess. A
-default you can see is a different thing from a default you can't.
+The last module used per reflector is remembered and pre-selected on return, so
+the cost lands once per reflector rather than once per call. That is a
+recollection, not an assumption — it is a thing you actually did.
 
 ## 4. Browsing and search
 
