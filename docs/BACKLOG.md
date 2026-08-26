@@ -252,8 +252,15 @@ host's first DNS label when `DstarConfig::reflector_callsign` is `None`.
 That shape matches the captured XLX458 header and what xlxd's DPlus
 `IsValidModule(rpt2.GetModule())` gates on, but no transmission has been
 made to a live reflector to confirm it is accepted and attributed
-correctly. Connecting by bare IP transmits with both fields blank (logged
-as a warning).
+correctly.
+
+Since then the derivation itself was fixed and plumbed: an `XLX###`
+reflector is addressed by its DExtra `XRF###` alias (the form the XLX458
+capture carries), the suffix may be alphanumeric (`XLXARG`), and the
+destination callsign now reaches `Station::dstar_connect` and the C-ABI's
+`iax_station_connect_dstar` as an optional argument — so a bare-IP connect
+can name the reflector instead of transmitting blank fields. What remains
+open here is only the on-air confirmation.
 
 Verify on air (Rob keys, never an agent): confirm the reflector dashboard
 shows the transmission attributed to AJ7HR on the right module. Record the

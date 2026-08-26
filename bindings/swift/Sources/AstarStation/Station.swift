@@ -1291,6 +1291,16 @@ public final class Station {
     /// engine's job and map to the same code. Throws
     /// `IAX_ERR_ALREADY_CONNECTED` when another session is live.
     ///
+    /// `reflectorCallsign` names the DESTINATION reflector the way the
+    /// directories list it (`"XLX836"`, `"XRF757"`) and fills the transmitted
+    /// RF header's `RPT1`/`RPT2` — the fields that say where a transmission
+    /// is going. Leave it `nil` to derive it from `host`'s first DNS label
+    /// (`xlx836.…` → `XLX836`, addressed as `XRF836` on the DExtra wire),
+    /// which is right for every reflector reached by its published hostname.
+    /// Pass it when the operator dialled a bare IP address: there is nothing
+    /// to derive from there, and the header would otherwise transmit with
+    /// `RPT1`/`RPT2` blank.
+    ///
     /// NOTE: this blocks for a serial-port scan plus a per-port dongle init
     /// before it ever touches the network — on the order of a second. Call it
     /// off the main thread.
@@ -1298,7 +1308,8 @@ public final class Station {
         host: String,
         port: UInt16 = 30001,
         module: Character,
-        callsign: String
+        callsign: String,
+        reflectorCallsign: String? = nil
     ) throws {
         // A non-ASCII Character can never be a valid module letter, so reject
         // it the same way the C-ABI's own byte guard would.
@@ -1308,9 +1319,12 @@ public final class Station {
         try check(
             host.withCString { hostPtr in
                 callsign.withCString { callsignPtr in
-                    iax_station_connect_dstar(
-                        handle, hostPtr, port, CChar(bitPattern: ascii), callsignPtr
-                    )
+                    withOptionalCString(reflectorCallsign) { reflectorPtr in
+                        iax_station_connect_dstar(
+                            handle, hostPtr, port, CChar(bitPattern: ascii), callsignPtr,
+                            reflectorPtr
+                        )
+                    }
                 }
             }
         )
