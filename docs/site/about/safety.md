@@ -33,8 +33,9 @@ Concretely, in this project:
 * The hardware-touching test suites **skip by default**. They run only when
   `IAX_THUMBDV_TESTS=1` is set explicitly, and that variable exists so that
   a machine with a dongle attached opts in, not so that CI opts everyone in.
-* Remote keying through astar-server's `POST /key` is an operator-supervised
-  action on a loopback-bound control port. It is not an automation hook.
+* Remote keying through astar-server's [`POST /key`](../server/control-api.md#ptt)
+  is an operator-supervised action on a loopback-bound control port. It is not
+  an automation hook.
 
 ## Two guards that must not be removed
 

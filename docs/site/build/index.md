@@ -4,14 +4,15 @@ icon: lucide/hammer
 
 # Building astar
 
-Everything in astar is built from source. Nothing has been released — there is
-no Homebrew tap, no cask, no App Store listing, no notarized download, and no
-published binary of any kind. That is not a gap in these pages; it is the
-current state of the project.
+There is one published binary: a Developer ID-signed, notarized `astar.dmg` for
+the macOS app, on the [releases page](https://github.com/rcludwick/astar/releases/latest).
+It is a single `arm64` slice for macOS 13 or later. Everything else — the
+engine, `astar-server`, the Iced client, and the macOS app on an Intel Mac — is
+built from source.
 
-The good news is that the source build is short and the repository knows how to
-build itself. `just` is the command palette — run it with no arguments to list
-every recipe.
+There is no Homebrew tap, no cask, and no App Store listing.
+
+`just` is the command palette; run it with no arguments to list every recipe.
 
 ## Pick what you are building
 

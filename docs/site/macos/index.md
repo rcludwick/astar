@@ -9,9 +9,8 @@ and in Cmd-Tab. After launch, look for the **rainbow asterisk** in the menu bar 
 the product mark, a six-spoke asterisk, not a five-pointed star. Left-click opens
 the dial popover; everything the client does happens there or in Settings.
 
-Prefer it out of the way? Right-click the asterisk and turn off **Show in Dock**.
-It takes effect immediately, sticks across launches, and the app then starts with
-no Dock icon at all.
+To run it without a Dock icon, right-click the asterisk and turn off **Show in
+Dock**. It takes effect immediately and persists across launches.
 
 <figure markdown="span">
   ![The astar window on macOS: connected to a node, with live TX and RX meters, the levels and spectrum view, and the DTMF dialpad open](../images/macos-app.png){ width="333" }
@@ -23,8 +22,10 @@ no Dock icon at all.
 
 !!! info "Requirements"
 
-    macOS **13 (Ventura) or later** — the app is built on `MenuBarExtra`, which
-    does not exist on earlier releases. Building it also needs a full Xcode; see
+    macOS **13 (Ventura) or later**. The deployment target is set in
+    `apps/macos/project.yml` and in AstarCore's `Package.swift`; the SwiftUI
+    APIs the app uses that need it include `ViewThatFits`, in the status row.
+    Building it also needs a full Xcode; see
     [Build it from source](../build/macos-app.md).
 
 ## What is in the popover
@@ -55,6 +56,7 @@ you are looking at.
 |---|---|
 | **AllStarLink (IAX2)** | The primary target. Dials nodes; speaks the `app_rpt` link-layer dialect on top of IAX2. |
 | **M17** | Native support, including reflectors. Transmits your callsign, so set it before you key. The app links Codec 2 in, so there is nothing to install; a system `libcodec2` is used in preference when one is present — see [Codec 2](../build/prerequisites.md#codec-2-only-for-m17). |
+| **D-Star** *(engine only)* | Implemented in the Rust engine — XLX/XRF reflectors over DExtra, AMBE+2 on a ThumbDV or DV3000 dongle — but **not exposed in this client yet**. See [Vocoder dongles](hardware.md#vocoder-dongles). |
 
 ## Audio and PTT hardware
 
