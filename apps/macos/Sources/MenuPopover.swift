@@ -556,6 +556,19 @@
                         // Same fade/slide as the M17 callsign field above.
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
+                // The one place the directory is visible so far
+                // (astar-refl-ship): what the typed name resolved to, and —
+                // when the module is still blank — what is still missing. Not
+                // styled as an error: nothing is wrong, the form is
+                // unfinished. The picker and search sheet are a separate item.
+                if let resolvedReflectorLine {
+                    Text(resolvedReflectorLine)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Resolved reflector")
+                        .accessibilityValue(resolvedReflectorLine)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
@@ -1255,19 +1268,29 @@
 
         private var trimmedNode: String { node.trimmingCharacters(in: .whitespaces) }
 
-        /// Whether the dial field currently parses for the SELECTED network
-        /// (astar-c2e5 Task 9) — gates the Connect button and, via `connect()`,
-        /// the Enter/onSubmit path too. Each network parses its own grammar:
-        /// AllStar (and the still-unavailable hamlink) via `DialTarget.parse`
-        /// (node number or host[:port]), M17 via `M17Dial.parse`
-        /// (`host[:port]/module`).
+        /// Whether the dial field currently holds a COMPLETE target for the
+        /// selected network — gates the Connect button and, via `connect()`,
+        /// the Enter/onSubmit path too.
+        ///
+        /// The decision itself lives in `CallSession.canDial` (astar-refl-ship)
+        /// so the button and the dial agree by construction: reflector names
+        /// resolve through the directory first and addresses parse second,
+        /// with each network's own grammar underneath (astar-c2e5 Task 9).
+        /// A resolved reflector with no module yet answers `false` — nothing
+        /// is wrong, the form is unfinished, and `resolvedReflectorLine` says
+        /// so below the field.
         private var isDialTargetValid: Bool {
-            switch selectedNetwork {
-            case .allstar, .hamlink:
-                return DialTarget.parse(node) != nil
-            case .m17:
-                return M17Dial.parse(node) != nil
-            }
+            session.canDial(node, network: selectedNetwork)
+        }
+
+        /// The resolved-target line under the dial field (astar-refl-ship):
+        /// `XLX836 · module — · 45.56.69.219:30001`, filling itself in as the
+        /// module arrives. `nil` — and so absent — whenever the text names
+        /// nothing in the directory, which includes every address and every
+        /// launch before the directory has loaded.
+        private var resolvedReflectorLine: String? {
+            guard let network = selectedNetwork.reflectorNetwork else { return nil }
+            return session.resolveReflector(node, network: network).statusLine
         }
 
         private func connect() {
@@ -1292,11 +1315,11 @@
                     dispatchConnect(node: value, network: network, address: value)
                 }
             case .m17:
-                // M17's grammar (`host[:port]/module`) is parsed engine-side
-                // (`CallSession.connect(node:network:)` re-parses via
-                // `M17Dial.parse`) — this is only the same "unreachable via the
+                // M17's target — a directory name or an address — is resolved
+                // engine-side (`CallSession.connect(node:network:)` re-resolves via
+                // `m17Target`) — this is only the same "unreachable via the
                 // disabled button, but refuse it on Enter too" guard as above.
-                guard M17Dial.parse(node) != nil else { return }
+                guard session.canDial(node, network: .m17) else { return }
                 // Pick up whatever's in the callsign prompt (if it's still
                 // showing) before dialing, so a dial started without leaving
                 // that field still uses what was typed (astar-c2e5 Task 9).
