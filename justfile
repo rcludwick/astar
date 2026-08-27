@@ -140,6 +140,13 @@ app-test:
 dmg:
     apps/macos/Tools/make-dmg.sh
 
+# Refresh the bundled reflector directory snapshot
+# (apps/macos/Resources/reflectors.json → astar.app/Contents/Resources/).
+# RUN THIS AT RELEASE TIME and commit the result: the snapshot is what a first
+# launch with no network reads, and nothing else ever refreshes it.
+reflectors:
+    apps/macos/Tools/fetch-reflectors.sh
+
 # Regenerate app icons + the menu-bar template from the art/ SVG masters.
 icons:
     apps/macos/Tools/render-icons.sh

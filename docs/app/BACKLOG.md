@@ -420,27 +420,38 @@ The 'Save changes to <config>' button in Quick settings always shows even when n
 
 **Design:** Phase 2 analysis tool, deliberately undesigned for now. Port of the Mac call spectrum; FFT axis math and trace state belong in shared Rust per the fat-core principle. Design when phase 1 operating set ships: docs/superpowers/specs/2026-07-01-gui-rs-parity-roadmap-design.md
 
-### astar-refl-ship — Reflector directory: ship the bundled snapshot and wire the UI
+### astar-refl-ui — Reflector directory: the picker, the search sheet and Sync Now
 *P2 medium · feature · labels: macos, ui*
 
-The data layer landed in AstarCore: `ReflectorFeed` / `DirectoryEntry` /
-`ReflectorDial` / `ReflectorNetwork`, and `ReflectorDirectory` with
-`search` / `resolve` / `sync`. Design: `docs/app/design/reflector-directory.md`.
-Two pieces are deliberately not in it.
+Design: `docs/app/design/reflector-directory.md`. The data layer and dialling by
+name are done (astar-refl-ship): `ReflectorFeed` / `DirectoryEntry` /
+`ReflectorDial` / `ReflectorNetwork`, `ReflectorDirectory` with
+`search` / `resolve` / `sync`, `ReflectorIndex.resolveDial` resolving names
+ahead of the address parsers, and a bundled snapshot that ships in
+`astar.app/Contents/Resources/reflectors.json`. What is left is the UI.
 
-**The bundled snapshot.** `FileReflectorDirectoryStorage` already prefers the
-Application Support cache and falls back to a snapshot in `Bundle.main`, but no
-build ships one — `astar.app/Contents/Resources/reflectors.json` does not exist,
-so a first launch with no network has an empty directory rather than a stale
-one. That needs the ~1.2 MB file committed and listed in
-`apps/macos/project.yml`, plus a decision about how it gets refreshed at release
-time (regenerating it by hand every release is how it goes stale silently).
+**The search sheet.** A magnifying-glass button beside the dial field opening a
+searchable list over the popover — search field, network filter defaulting to
+the selected network, rows of name/country/description. Selecting a row fills
+the dial field and dismisses; it does not connect. `ReflectorDirectory.search`
+already returns un-dialable entries on purpose, and they render disabled with a
+reason rather than being hidden.
 
-**The UI.** The search sheet, the network filter, the Settings section with its
-counts and Sync Now button, and the CC BY attribution line — which is a licence
-condition, not decoration, and the only reason `ReflectorFeed` keeps the
-envelope. `ReflectorDirectory.attribution` and `feed.counts` exist for it.
+**The module picker.** Today a bare `XLX836` resolves and shows
+`XLX836 · module — · 45.56.69.219:30001` under the dial field, with Connect
+off. That is honest but bare: the sheet should offer the letter, and the last
+module used per reflector should be remembered and pre-selected (a
+recollection, not a default — see the design's note on why there is no default).
 
-Dial-field integration (directory-then-address resolution, and requiring a
-D-Star module before Connect) is a separate item: the directory hands back an
-entry and deliberately never picks a module.
+**Settings section + automatic sync.** Counts, last-synced, a Sync Now button,
+and the CC BY attribution line — which is a licence condition, not decoration,
+and the only reason `ReflectorFeed` keeps the envelope
+(`ReflectorDirectory.attribution`, `feed.counts`). The launch-time automatic
+sync (`sync(trigger: .automatic)`, throttled by the feed's own
+`client_refresh_days`) belongs with it and not before it: a background fetch
+with nowhere to report a failure is a fetch nobody can debug. Until it lands,
+the bundled snapshot is the only data an install ever has.
+
+**Release-time chore this creates:** `just reflectors` refreshes the committed
+snapshot at `apps/macos/Resources/reflectors.json`. Run it with the version
+bump, every release.

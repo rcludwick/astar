@@ -65,7 +65,14 @@ targets:
         platforms: [macOS]
     sources:
       - path: Sources
+      # Everything under Resources is copied into the bundle, not compiled.
+      # Stated rather than inferred, because one of the files in there is
+      # load-bearing: reflectors.json becomes
+      # astar.app/Contents/Resources/reflectors.json, which is the bundled
+      # directory snapshot ReflectorDirectory reads on a first launch with no
+      # network. Refresh it with `just reflectors` at release time.
       - path: Resources
+        buildPhase: resources
     settings:
       # XcodeGen does not filter settings by platform for a multiplatform
       # target, so these live in base. Each is a no-op on the platform it does
