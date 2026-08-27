@@ -12,7 +12,7 @@ inline. All 129 issues (107 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (36)
+## Open items (37)
 
 ### astar-menu — MainMenu.install never wins; SwiftUI's default menu ships instead
 *P3 low · bug · labels: macos, ui, cx:2*
@@ -419,3 +419,28 @@ The 'Save changes to <config>' button in Quick settings always shows even when n
 *P3 low · feature · labels: cx:3, gui-rs, phase2*
 
 **Design:** Phase 2 analysis tool, deliberately undesigned for now. Port of the Mac call spectrum; FFT axis math and trace state belong in shared Rust per the fat-core principle. Design when phase 1 operating set ships: docs/superpowers/specs/2026-07-01-gui-rs-parity-roadmap-design.md
+
+### astar-refl-ship — Reflector directory: ship the bundled snapshot and wire the UI
+*P2 medium · feature · labels: macos, ui*
+
+The data layer landed in AstarCore: `ReflectorFeed` / `DirectoryEntry` /
+`ReflectorDial` / `ReflectorNetwork`, and `ReflectorDirectory` with
+`search` / `resolve` / `sync`. Design: `docs/app/design/reflector-directory.md`.
+Two pieces are deliberately not in it.
+
+**The bundled snapshot.** `FileReflectorDirectoryStorage` already prefers the
+Application Support cache and falls back to a snapshot in `Bundle.main`, but no
+build ships one — `astar.app/Contents/Resources/reflectors.json` does not exist,
+so a first launch with no network has an empty directory rather than a stale
+one. That needs the ~1.2 MB file committed and listed in
+`apps/macos/project.yml`, plus a decision about how it gets refreshed at release
+time (regenerating it by hand every release is how it goes stale silently).
+
+**The UI.** The search sheet, the network filter, the Settings section with its
+counts and Sync Now button, and the CC BY attribution line — which is a licence
+condition, not decoration, and the only reason `ReflectorFeed` keeps the
+envelope. `ReflectorDirectory.attribution` and `feed.counts` exist for it.
+
+Dial-field integration (directory-then-address resolution, and requiring a
+D-Star module before Connect) is a separate item: the directory hands back an
+entry and deliberately never picks a module.
