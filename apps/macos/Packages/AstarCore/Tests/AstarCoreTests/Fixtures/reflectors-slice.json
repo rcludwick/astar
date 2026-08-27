@@ -1,0 +1,163 @@
+{
+  "api_version": "v1",
+  "attribution": "XLX reflector data from the XLX registry maintained by Luc Engelmann, LX1IQ (http://xlxapi.rlx.lu/). Reflector data provided by DVRef \u2014 https://dvref.com/ Reflector data provided by DVRef \u2014 https://dvref.com/",
+  "client_refresh_days": 7,
+  "count": 8,
+  "generated": "2026-08-26",
+  "license": "CC BY 4.0",
+  "license_url": "https://creativecommons.org/licenses/by/4.0/",
+  "modifications": "Reformatted from the upstream source into hamcall-db's common reflector JSON schema. Field names and structure differ from upstream. Email addresses have been removed from the free-text fields (name, sponsor, description) and replaced with '[email removed]'; values are otherwise unmodified.",
+  "networks": {
+    "dstar": 2,
+    "m17": 1,
+    "nxdn": 1,
+    "p25": 1,
+    "urf": 2,
+    "ysf": 1
+  },
+  "reflectors": [
+    {
+      "aliases": [
+        "XRF000"
+      ],
+      "country": "Brazil",
+      "dashboard": "http://xlx000.dmr.net.br",
+      "description": "AMRASE - Rio de Janeiro, Brazil",
+      "dial": {
+        "callsign": "XRF000",
+        "host": "201.62.48.60",
+        "kind": "dextra",
+        "port": 30001
+      },
+      "id": "XLX000",
+      "name": "XLX000",
+      "network": "dstar",
+      "source": "xlx"
+    },
+    {
+      "aliases": [
+        "XRF836"
+      ],
+      "country": "USA",
+      "dashboard": "http://xlx.n7mky.com",
+      "description": "Welcome",
+      "dial": {
+        "callsign": "XRF836",
+        "host": "45.56.69.219",
+        "kind": "dextra",
+        "port": 30001
+      },
+      "id": "XLX836",
+      "name": "XLX836",
+      "network": "dstar",
+      "source": "xlx"
+    },
+    {
+      "country": "GB",
+      "dashboard": "http://urf001.cumbriacq.com:98/urf/",
+      "description": "<p>More info on <a href=\"https://cumbriaCQ.com\">https://cumbriaCQ.com</a><br>M17-002 is bridged into the cumbriaCQ Network&nbsp;</p>",
+      "dial": {
+        "callsign": "M17-002",
+        "host": "89.240.4.99",
+        "kind": "m17",
+        "modules": [
+          "A"
+        ],
+        "port": 17000
+      },
+      "id": "M17-002",
+      "name": "M17-002",
+      "network": "m17",
+      "source": "dvref",
+      "sponsor": "cumbriaCQ.com"
+    },
+    {
+      "country": "GR",
+      "dashboard": "https://hellaszone.com/ycs/",
+      "description": "(YCS202)",
+      "dial": {
+        "host": "hellaszone.com",
+        "kind": "ysf",
+        "port": 42000
+      },
+      "id": "00006",
+      "name": "HELLAS Zone A",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "HELLAS Zone Net!  By SA7SVR"
+    },
+    {
+      "country": "GR",
+      "dashboard": "http://nxref.duckdns.org:8008/nxdn/",
+      "dial": {
+        "host": "2.87.21.221",
+        "kind": "nxdn",
+        "port": 41400
+      },
+      "id": "100",
+      "name": "NXDN 100",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "GR-Kenwood NXDN"
+    },
+    {
+      "country": "GR",
+      "dashboard": "http://svham.eu:89",
+      "description": "<h5>What is \"Aether Hellas\"?</h5>\r\n<p>In Greek Mythology,&nbsp;<strong>Aether</strong>&nbsp;was the personification of the upper air breathed by the Gods. In early physics, it was believed to be the medium that fills the universe, allowing waves to propagate through space.<br><br>For us,&nbsp;<strong>Aether Hellas</strong> represents the \"invisible web\" that connects Greece to the world. It is our digital gateway that transforms the air into communication, bridging the distances between Rhodes, Thessaly, and Central Greece, uniting people and technology under a shared amateur radio vision.</p>",
+      "dial": {
+        "host": "38.19.202.24",
+        "kind": "p25",
+        "port": 41000
+      },
+      "id": "1005",
+      "name": "AETHER HELLAS P25 - 1005 REFLECTOR",
+      "network": "p25",
+      "source": "dvref",
+      "sponsor": "AETHER HELLAS NET By SV4JYD"
+    },
+    {
+      "country": "IT",
+      "dashboard": "http://rudinet.giize.com",
+      "dial": {
+        "host": "rudinet.giize.com",
+        "kind": "urf"
+      },
+      "id": "003",
+      "name": "XRF232",
+      "network": "urf",
+      "source": "dvref",
+      "sponsor": "IW3HWH"
+    },
+    {
+      "country": "ES",
+      "dashboard": "https://ea8ee.c4fm.es/ref/",
+      "dial": {
+        "host": "ea8ee.c4fm.es",
+        "kind": "urf",
+        "modules": [
+          "A",
+          "B",
+          "C",
+          "D",
+          "E"
+        ]
+      },
+      "id": "007",
+      "name": "XRF007 D-STAR SPAIN",
+      "network": "urf",
+      "source": "dvref",
+      "sponsor": "xreflector.es"
+    }
+  ],
+  "schema_version": 1,
+  "sources": [
+    {
+      "name": "XLX registry (LX1IQ) + DVRef",
+      "url": "http://xlxapi.rlx.lu/api.php?do=GetReflectorList"
+    },
+    {
+      "name": "DVRef",
+      "url": "https://dvref.com/api/v2/"
+    }
+  ]
+}
