@@ -426,6 +426,52 @@ public final class CallSession: ObservableObject {
             : storedCallsign
     }
 
+    /// The reflector directory's name lookup, as of the last load or sync.
+    ///
+    /// A value, not the `@MainActor ReflectorDirectory` itself: dialling runs
+    /// on a background thread by contract, so the dial path cannot hold an
+    /// actor-isolated object. The app assigns this from
+    /// `ReflectorDirectory.index` and re-assigns it whenever a sync replaces
+    /// the feed; a session that is never given one keeps `.empty`, and every
+    /// name then resolves to `notInDirectory` — which is exactly the
+    /// address-only behaviour that existed before the directory did. Nothing
+    /// about dialling requires a directory to be present.
+    ///
+    /// `@Published` so the resolved-target line under the dial field refreshes
+    /// when a sync replaces the feed, not only when the operator next types.
+    @Published public var reflectorIndex: ReflectorIndex = .empty
+
+    /// Interpret dial-field text against the directory, ahead of any address
+    /// grammar. The single seam through which "directory first, address
+    /// second" is enforced for every caller — see `ReflectorIndex.resolveDial`.
+    public func resolveReflector(_ raw: String, network: ReflectorNetwork)
+        -> ReflectorDialResolution
+    {
+        reflectorIndex.resolveDial(raw, network: network)
+    }
+
+    /// Whether the dial field's text is a *complete* target for `network` —
+    /// what gates the Connect button, and the same decision `connect` will
+    /// make when it runs.
+    ///
+    /// A resolved reflector still missing its module answers `false` here, and
+    /// that is the resolved-but-incomplete state doing its job: the reflector
+    /// is known, the room is not, and nothing may be dialled until it is.
+    public func canDial(_ raw: String, network: Network) -> Bool {
+        if let reflectorNetwork = network.reflectorNetwork {
+            switch resolveReflector(raw, network: reflectorNetwork) {
+            case .ready: return true
+            case .needsModule, .notDialable: return false
+            // The one way through to an address grammar, here as everywhere.
+            case .notInDirectory: break
+            }
+        }
+        switch network {
+        case .m17: return M17Dial.parse(raw) != nil
+        case .allstar, .hamlink: return DialTarget.parse(raw) != nil
+        }
+    }
+
     /// Prefill the M17 callsign field from the configured AllStarLink portal
     /// user (astar-c2e5/iax-f2b8 Task 8) — many hams reuse the same handle as
     /// their portal login. Matches only when `user` is shaped like a ham
@@ -621,7 +667,10 @@ public final class CallSession: ObservableObject {
     // MARK: - Commands (pass through to the station)
 
     /// Why a connect was refused before dialing.
-    public enum ConnectError: Error, LocalizedError {
+    /// `Equatable` explicitly: the payload-carrying cases below cost the
+    /// automatic conformance a payload-free enum gets for free, and the
+    /// suites compare these by value.
+    public enum ConnectError: Error, Equatable, LocalizedError {
         /// No AllStarLink account is configured. Connections require one — guest
         /// dialing was removed (au-1517) so every call goes on air as the user's
         /// node, never anonymously.
@@ -638,6 +687,19 @@ public final class CallSession: ObservableObject {
         /// dial with an empty `m17Callsign` is refused before it ever reaches
         /// the station (astar-c2e5).
         case missingCallsign
+        /// The text named a reflector in the directory but no module
+        /// (astar-refl-ship). Carries the entry's id so the message can name
+        /// what *was* understood. Not a parse failure: the reflector resolved,
+        /// the room did not, and there is nothing to default it to — on these
+        /// networks the module is the room, so a guess would connect the
+        /// operator to a conversation they never asked for. The UI keeps
+        /// Connect off in this state, so reaching this error means something
+        /// dialled anyway (Enter on an incomplete field).
+        case needsModule(String)
+        /// The text named a reflector the directory lists but astar cannot
+        /// dial — no `dial` object, or a `kind` this build has no protocol
+        /// for. Refusing is the point of listing it (astar-refl-ship).
+        case reflectorNotDialable(String)
         /// Another dial is already in flight (astar-dialrace, single-flight):
         /// refused, touching nothing, rather than let a second engine call
         /// start alongside it. Transient — retry once the in-flight dial's
@@ -659,6 +721,10 @@ public final class CallSession: ObservableObject {
                     + "e.g. m17-reflector.example:17000/A."
             case .missingCallsign:
                 return "Enter your callsign to connect via M17."
+            case .needsModule(let name):
+                return "\(name) needs a module — try \(name) A."
+            case .reflectorNotDialable(let name):
+                return "astar can't connect to \(name) yet."
             case .dialInProgress:
                 return "Already connecting — try again in a moment."
             }
@@ -705,8 +771,43 @@ public final class CallSession: ObservableObject {
         }
     }
 
+    /// Turn the M17 dial field's text into a host, port and module —
+    /// **directory first, address second** (astar-refl-ship).
+    ///
+    /// `M17-002 A` is a name; `m17.example:17000/A` is an address. Asking the
+    /// address parser first would be wrong rather than merely unhelpful: a
+    /// reflector name is a well-formed hostname, so the address grammar
+    /// accepts one happily and dials whatever DNS says it is. The directory
+    /// therefore gets first refusal, and `notInDirectory` — an unknown name,
+    /// or a directory that was never loaded at all — is the only way through
+    /// to `M17Dial.parse`, which behaves exactly as it did before.
+    private func m17Target(_ target: String) throws -> (
+        host: String, port: UInt16, module: Character
+    ) {
+        switch resolveReflector(target, network: .m17) {
+        case .ready(let reflector):
+            guard let module = reflector.module else {
+                // Unreachable for M17 — a module-addressing dial resolves to
+                // `needsModule` without one — but stated rather than forced,
+                // because the alternative is inventing a letter.
+                throw ConnectError.needsModule(reflector.entry.id)
+            }
+            return (host: reflector.host, port: reflector.port, module: module)
+        case .needsModule(let entry):
+            throw ConnectError.needsModule(entry.id)
+        case .notDialable(let entry):
+            throw ConnectError.reflectorNotDialable(entry.id)
+        case .notInDirectory:
+            guard let parsed = M17Dial.parse(target) else {
+                throw ConnectError.badM17Target
+            }
+            return parsed
+        }
+    }
+
     /// The `.m17` arm of `connect(node:network:)` (astar-c2e5/iax-f2b8 Task 8).
-    /// Parses `target` via `M17Dial.parse` and requires a non-empty
+    /// Resolves `target` via `m17Target` — directory first, address second —
+    /// and requires a non-empty
     /// `m17Callsign` BEFORE touching any state (mirrors the `needsAccount`
     /// guard: a bad dial string or missing callsign must leave the session
     /// untouched). Only then tears down any stale prior call, records the
@@ -715,9 +816,7 @@ public final class CallSession: ObservableObject {
     /// `connectM17` itself succeeds, so a failed dial never reports `.m17` as
     /// active.
     private func connectM17(target: String) throws {
-        guard let parsed = M17Dial.parse(target) else {
-            throw ConnectError.badM17Target
-        }
+        let parsed = try m17Target(target)
         let callsign = m17Callsign.trimmingCharacters(in: .whitespaces)
         guard !callsign.isEmpty else {
             throw ConnectError.missingCallsign

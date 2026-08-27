@@ -8,9 +8,11 @@ import Foundation
 /// The cached reflector directory: search it, resolve a name against it, and
 /// refresh it on the cadence the data itself publishes.
 ///
-/// Three operations and nothing else. It does not connect, it does not pick a
-/// module, and it does not know what the dial field's grammar is — resolution
-/// hands back an entry and the caller decides what to do with it.
+/// It does not connect and it does not pick a module: resolution hands back an
+/// entry, or a resolution that says a module is still missing, and the caller
+/// decides what to do with it. The dial grammar itself lives in
+/// `ReflectorDialText`, and the lookup in the immutable `index` — this type
+/// owns the file, the clock and the publishing, and nothing else.
 @MainActor
 public final class ReflectorDirectory: ObservableObject {
 
@@ -85,6 +87,13 @@ public final class ReflectorDirectory: ObservableObject {
     /// Where the loaded feed came from, so Settings can say "bundled, never
     /// synced" rather than showing a blank date.
     @Published public private(set) var origin: Origin
+    /// The name lookup over the loaded feed, republished on every load and
+    /// every sync that changes the data.
+    ///
+    /// Handed to the dial path rather than the directory itself: this is an
+    /// immutable `Sendable` value, and dialling happens off the main thread
+    /// (see `ReflectorIndex`).
+    @Published public private(set) var index: ReflectorIndex
 
     public enum Origin: Hashable, Sendable {
         /// Nothing loaded — no cache, no bundled snapshot.
@@ -105,8 +114,6 @@ public final class ReflectorDirectory: ObservableObject {
     /// Lowercased search haystacks, one per entry, built once per load. 3,000
     /// rows × six fields is not worth re-lowercasing on every keystroke.
     private var haystacks: [String] = []
-    /// Lowercased `id` and every alias → index into `feed.entries`.
-    private var byName: [String: [Int]] = [:]
 
     public init(
         storage: ReflectorDirectoryStoring,
@@ -121,6 +128,7 @@ public final class ReflectorDirectory: ObservableObject {
         self.metadata = storage.syncMetadata()
         self.feed = .empty
         self.origin = .none
+        self.index = .empty
         load()
     }
 
@@ -152,12 +160,7 @@ public final class ReflectorDirectory: ObservableObject {
         self.feed = feed
         self.origin = origin
         haystacks = feed.entries.map(Self.haystack(for:))
-        byName = [:]
-        for (index, entry) in feed.entries.enumerated() {
-            for name in [entry.id] + entry.aliases {
-                byName[name.lowercased(), default: []].append(index)
-            }
-        }
+        index = ReflectorIndex(entries: feed.entries)
     }
 
     private static func haystack(for entry: DirectoryEntry) -> String {
@@ -213,11 +216,16 @@ public final class ReflectorDirectory: ObservableObject {
     /// because the registry does not publish it. Choosing the module is the
     /// caller's problem, and the UI's job is to require one before Connect.
     public func resolve(_ name: String, network: ReflectorNetwork) -> DirectoryEntry? {
-        let key = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !key.isEmpty, let indices = byName[key] else { return nil }
-        // An id can repeat across networks ("100" is both an NXDN and a P25
-        // reflector), so the network is part of the match, not a filter on it.
-        return indices.lazy.map { self.feed.entries[$0] }.first { $0.network == network }
+        index.entry(named: name, network: network)
+    }
+
+    /// Interpret dial-field text — `XLX836`, `XLX836 A`, `XLX836/B` — against
+    /// the loaded feed, ahead of any address parsing. Delegates to `index`,
+    /// which is also what the dial path itself holds; this overload exists so
+    /// a caller already on the main actor need not reach for the index by
+    /// hand. See `ReflectorIndex.resolveDial`.
+    public func resolveDial(_ raw: String, network: ReflectorNetwork) -> ReflectorDialResolution {
+        index.resolveDial(raw, network: network)
     }
 
     // MARK: - Sync

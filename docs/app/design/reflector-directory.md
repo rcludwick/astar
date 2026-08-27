@@ -69,6 +69,22 @@ func sync() async throws -> SyncOutcome
 | Bundled snapshot | `astar.app/Contents/Resources/reflectors.json` | First launch works offline, before any sync, and before the user has a network. |
 | Cache | `~/Library/Application Support/astar/reflectors.json` | What sync writes. Preferred when present and parseable. |
 
+The snapshot is committed at `apps/macos/Resources/reflectors.json` and copied
+into the bundle by the `Resources` path in `apps/macos/project.yml`. **Refresh
+it with `just reflectors` at release time**, in the same pass as the version
+bump, and commit the result — nothing else ever refreshes it, and a snapshot
+that silently rots is worse than one that is obviously old. The fetch validates
+the payload before it overwrites anything, for the same reason sync parses
+before it writes: a 200 carrying an error page must not replace a directory
+that works, and here the damage would not surface until someone launched the
+app offline.
+
+It ships whole — all 3,185 rows, every network, ~1.2 MB — rather than trimmed
+to what astar can dial today. Trimming would make the bundled state and the
+synced state different shapes, which is a bug source for the sake of a
+rounding error in a DMG, and it would break the "listed but not dialable"
+contract on a first launch specifically.
+
 A corrupt or truncated cache falls back to the bundled copy rather than leaving
 the picker empty — an empty reflector list looks identical to "this feature is
 broken," and only one of those is recoverable by the user.
@@ -88,6 +104,33 @@ number from a host. Directory resolution slots in ahead of the address parser:
 **Resolution order is directory-then-address**, not the reverse, so a name never
 gets mistaken for a hostname. Matching is case-insensitive and checks `aliases`,
 so `XRF836` finds the XLX entry it genuinely aliases.
+
+### How it is built (astar-refl-ship)
+
+`ReflectorIndex.resolveDial` is the whole of it, and the ordering is a property
+of its return type rather than a convention: `ReflectorDialResolution` has four
+cases — `ready`, `needsModule`, `notDialable`, `notInDirectory` — and
+`notInDirectory` is the *only* one that lets a caller reach an address parser.
+There is no code path from dial text to `M17Dial.parse` that has not already
+asked the directory.
+
+The index is a frozen, `Sendable` value the directory republishes on every load
+and sync, not the `@MainActor` directory itself. Dialling runs off the main
+thread by contract (the AllStar path mints a portal token over HTTP first), so
+the dial path cannot hold an actor-isolated object; a value also means a
+resolution test needs no storage, no clock and no network. A session that was
+never handed one holds `.empty`, every name answers `notInDirectory`, and
+dialling is address-only — the behaviour that existed before the directory did.
+
+`CallSession.canDial` is the single gate the Connect button and the dial itself
+both consult, so the two cannot disagree about whether a field is complete.
+
+One correction to the sketch above: the grammar (`NAME`, `NAME module`,
+`NAME/module`) is shared by D-Star and M17 rather than being a D-Star path —
+`ReflectorDialText` splits the text and knows nothing about either. Only M17
+reaches it from the UI today, because `Network` has no D-Star case yet; D-Star
+resolution works and is tested through the core API, and gains nothing new when
+the picker does grow a segment for it. There is no `DStarDial` type.
 
 ### The module: no default, because there is nothing to base one on
 
@@ -115,7 +158,21 @@ XLX836 ·  module A  · 45.56.69.219:30001      Connect enabled
 
 The last module used per reflector is remembered and pre-selected on return, so
 the cost lands once per reflector rather than once per call. That is a
-recollection, not an assumption — it is a thing you actually did.
+recollection, not an assumption — it is a thing you actually did. (Not built
+yet; it needs the picker, which is a separate item.)
+
+Two cases the draft did not cover, settled in astar-refl-ship:
+
+* **A half-typed module** (`XLX836 AB`) resolves as `needsModule`, not as a
+  miss. The reflector is still right and only the letter is unusable, so the
+  resolved line must stay on screen while the operator fixes the letter rather
+  than flickering out to "not a reflector" and back.
+* **Networks with no module at all** — YSF, NXDN, P25 — are complete without
+  one. Which dials address a module is a property of the `kind`
+  (`ReflectorDial.addressesModule`), never of whether `modules` happens to be
+  populated: that array is what the publisher *listed*, it is empty for every
+  D-Star row, and reading emptiness as "no module needed" is precisely how a
+  client ends up dialling into a room nobody chose.
 
 ## 4. Browsing and search
 
