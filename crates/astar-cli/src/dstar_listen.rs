@@ -72,6 +72,12 @@ pub struct ListenOptions {
     pub module: char,
     pub callsign: String,
     pub wav: Option<PathBuf>,
+    /// The DESTINATION reflector's callsign as the directories list it
+    /// (`XLX836`, `XRF757`), filling the transmitted RF header's
+    /// `RPT1`/`RPT2`. `None` derives it from `host` — see
+    /// `Station::dstar_connect`; it is worth passing when `host` is a bare
+    /// IP address, which has nothing to derive from.
+    pub reflector: Option<String>,
 }
 
 pub fn run(args: impl Iterator<Item = String>) -> Result<(), String> {
@@ -90,6 +96,7 @@ pub fn parse(mut args: impl Iterator<Item = String>) -> Result<Parsed, String> {
     let mut port = DEFAULT_PORT;
     let mut callsign: Option<String> = None;
     let mut wav: Option<PathBuf> = None;
+    let mut reflector: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -103,6 +110,7 @@ pub fn parse(mut args: impl Iterator<Item = String>) -> Result<Parsed, String> {
             }
             "--callsign" => callsign = Some(crate::cli::flag_value(&mut args, "--callsign")?),
             "--wav" => wav = Some(PathBuf::from(crate::cli::flag_value(&mut args, "--wav")?)),
+            "--reflector" => reflector = Some(crate::cli::flag_value(&mut args, "--reflector")?),
             flag if flag.starts_with("--") => {
                 return Err(format!("unknown flag: {flag}\n\n{DSTAR_LISTEN_USAGE}"));
             }
@@ -140,6 +148,7 @@ pub fn parse(mut args: impl Iterator<Item = String>) -> Result<Parsed, String> {
         module,
         callsign,
         wav,
+        reflector,
     }))
 }
 
@@ -184,7 +193,13 @@ fn listen(opts: &ListenOptions) -> Result<(), String> {
         opts.host, opts.module, opts.callsign
     );
     station
-        .dstar_connect(&opts.host, opts.port, opts.module, &opts.callsign)
+        .dstar_connect(
+            &opts.host,
+            opts.port,
+            opts.module,
+            &opts.callsign,
+            opts.reflector.as_deref(),
+        )
         .map_err(|e| format!("dstar connect failed: {e}"))?;
 
     let mut tracker = PrintTracker::new(opts.host.clone(), opts.module);
@@ -747,6 +762,26 @@ mod tests {
         assert_eq!(o.callsign, "AJ7HR");
         assert_eq!(o.port, DEFAULT_PORT);
         assert!(o.wav.is_none());
+        assert!(
+            o.reflector.is_none(),
+            "the destination reflector is derived from <host> unless named"
+        );
+    }
+
+    /// `--reflector` is the bare-IP escape hatch: a numeric host has no DNS
+    /// label to derive the destination reflector's callsign from, and without
+    /// one the transmitted RF header's RPT1/RPT2 go out blank.
+    #[test]
+    fn parses_an_explicit_reflector_callsign() {
+        let o = parse_ok(&[
+            "127.0.0.1",
+            "a",
+            "--callsign",
+            "AJ7HR",
+            "--reflector",
+            "XLX836",
+        ]);
+        assert_eq!(o.reflector.as_deref(), Some("XLX836"));
     }
 
     #[test]

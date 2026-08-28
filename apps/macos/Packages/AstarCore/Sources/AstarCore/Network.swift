@@ -16,15 +16,29 @@ public enum Network: String, CaseIterable, Codable, Sendable {
     /// once `CallSession.m17Available` (the snapshot's engine-capability flag)
     /// says the running build can actually place the call.
     case m17
+    /// D-Star (DExtra) reflector dialing. The engine has had the whole path
+    /// since iax-a9d4/iax-2f6b — `dstar_connect`/`dstar_disconnect`/
+    /// `dstar_available`, RX and TX — and this case is what lets the app
+    /// reach it.
+    ///
+    /// Availability is HARDWARE, not a build flag: D-Star voice is AMBE, and
+    /// astar has no software vocoder. `dstarAvailable` is true only when the
+    /// engine found a ThumbDV, so this segment appears when a dongle is
+    /// attached and not otherwise. That is the honest gate — a picker entry
+    /// that always failed to connect would be worse than no entry.
+    case dstar
 
     /// The networks the engine can actually drive right now. AllStar is
     /// always available; `hamlink` stays unavailable until the engine gains
-    /// reflector capability (iax-b3d7) — `m17` is available exactly when the
-    /// caller's own `m17Available` flag (from `CallSession`, mirroring the
-    /// engine's snapshot) says so.
-    public static func available(m17: Bool) -> [Network] {
+    /// reflector capability (iax-b3d7). `m17` and `dstar` are each available
+    /// exactly when the caller's own capability flag (from `CallSession`,
+    /// mirroring the engine's snapshot) says so — for `dstar` that flag
+    /// means "a vocoder dongle is present", which is a fact about the desk,
+    /// not about the build.
+    public static func available(m17: Bool, dstar: Bool = false) -> [Network] {
         var networks: [Network] = [.allstar]
         if m17 { networks.append(.m17) }
+        if dstar { networks.append(.dstar) }
         return networks
     }
 
@@ -32,9 +46,9 @@ public enum Network: String, CaseIterable, Codable, Sendable {
     /// nil, and known-but-unavailable networks all fall back to `.allstar`
     /// (always the default; nothing user-actionable in the mismatch). `m17`
     /// mirrors `available(m17:)`'s flag.
-    public static func resolve(_ raw: String?, m17: Bool) -> Network {
+    public static func resolve(_ raw: String?, m17: Bool, dstar: Bool = false) -> Network {
         guard let raw, let network = Network(rawValue: raw),
-            available(m17: m17).contains(network)
+            available(m17: m17, dstar: dstar).contains(network)
         else { return .allstar }
         return network
     }
@@ -45,6 +59,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         case .allstar: return "AllStar"
         case .hamlink: return "Hamlink"
         case .m17: return "M17"
+        case .dstar: return "D-Star"
         }
     }
 
@@ -55,6 +70,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         case .allstar: return "ASL"
         case .hamlink: return "SVX"
         case .m17: return "M17"
+        case .dstar: return "DSTAR"
         }
     }
 
@@ -64,6 +80,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         case .allstar: return "antenna.radiowaves.left.and.right"
         case .hamlink: return "dot.radiowaves.left.and.right"
         case .m17: return "waveform"
+        case .dstar: return "waveform.circle"
         }
     }
 
@@ -73,6 +90,10 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         case .allstar: return "Node or IP address"
         case .hamlink: return "Reflector host / talkgroup"
         case .m17: return "Reflector host:port / module"
+        // Names first, because names are what the directory holds: 944 D-Star
+        // reflectors are reachable by `XLX836 A`, and the address form is the
+        // fallback for the one nobody has listed.
+        case .dstar: return "Reflector name or host / module"
         }
     }
 
@@ -87,10 +108,12 @@ public enum Network: String, CaseIterable, Codable, Sendable {
             return c.isASCII && (c.isLetter || c.isNumber || ".:-*#".contains(c))
         case .hamlink:
             return (c.isASCII && (c.isLetter || c.isNumber)) || ".:-/#".contains(c)
-        case .m17:
-            // `host[:port]/module` or `host[:port] module` (M17Dial.parse) —
-            // unlike every other network, the space is part of the grammar
-            // (the alternate separator), not something to drop.
+        case .m17, .dstar:
+            // `host[:port]/module` or `host[:port] module`
+            // (`ReflectorAddressDial`) — unlike the node networks, the space
+            // is part of the grammar (the alternate separator), not something
+            // to drop. Both reflector networks share it because they share the
+            // grammar; only the default port differs.
             return (c.isASCII && (c.isLetter || c.isNumber)) || ".:-/ ".contains(c)
         }
     }

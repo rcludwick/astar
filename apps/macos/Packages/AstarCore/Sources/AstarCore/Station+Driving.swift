@@ -17,7 +17,8 @@ extension Station: StationDriving {
             txDB: s.txDB, rxDB: s.rxDB, inputDB: s.inputDB, rttMS: s.rttMS,
             negotiatedFormat: s.negotiatedFormat,
             dtmfPlayed: s.dtmfPlayed, dtmfTotal: s.dtmfTotal,
-            m17Available: s.m17Available, m17Active: s.m17Active
+            m17Available: s.m17Available, m17Active: s.m17Active,
+            dstarAvailable: s.dstarAvailable, dstarActive: s.dstarActive
         )
     }
 
@@ -34,6 +35,8 @@ extension Station: StationDriving {
     // connectM17/m17Disconnect/setCodecDirs (iax-f2b8 Task 8) also match the
     // protocol verbatim (defaulted `port` on the vendored method is call-site
     // sugar only — it doesn't affect conformance), so they need no adapter either.
+    // connectDStar/dstarDisconnect/dstarState (iax-4c8e) likewise: the vendored
+    // signatures are already the protocol's, defaulted arguments included.
 }
 
 /// Errors from the fallback `NullStation` (no real engine available).
@@ -57,6 +60,16 @@ public struct NullStation: StationDriving {
     public func connectM17(host: String, port: UInt16, module: Character, callsign: String) throws {
     }
     public func m17Disconnect() throws {}
+    public func connectDStar(
+        host: String, port: UInt16, module: Character, callsign: String,
+        reflectorCallsign: String?
+    ) throws {
+        throw NullStationError.noEngine
+    }
+    public func dstarDisconnect() throws {}
+    /// No engine, so no session — the same answer the real station gives while
+    /// idle, which keeps the talker line absent rather than wrong.
+    public func dstarState() throws -> DStarState? { nil }
     public func setCodecDirs(_ dirs: [String]) throws {}
     public func listInputs() throws -> [String] { [] }
     public func listOutputs() throws -> [String] { [] }

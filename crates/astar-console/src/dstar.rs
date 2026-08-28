@@ -340,13 +340,16 @@ pub struct DstarConfig {
     /// is NOT fatal: the capture device is opened lazily on the first
     /// key-down, so a receive-only session works without one.
     pub input: Option<String>,
-    /// The destination reflector's CALLSIGN (e.g. `"XRF757"`), used to fill
-    /// the TX RF header's `RPT2`/`RPT1` fields — see [`tx_repeater_fields`]
-    /// for why those matter and what is filled. `None` falls back to
-    /// deriving it from [`Self::host`]'s first DNS label when that label
-    /// looks like a reflector callsign (`XRF757`, `XLX458`, `REF030`, …),
-    /// and to blank fields (with a warning) when even that fails — e.g. when
-    /// connecting by bare IP address.
+    /// The destination reflector's CALLSIGN as the directories list it
+    /// (e.g. `"XRF757"`, `"XLX836"`), used to fill the TX RF header's
+    /// `RPT2`/`RPT1` fields — see [`tx_repeater_fields`] for why those matter
+    /// and what is filled. An `XLX…` name is translated to the `XRF…` one the
+    /// reflector answers to on the `DExtra` wire, so either spelling works
+    /// here. `None` falls back to deriving it from [`Self::host`]'s first DNS
+    /// label when that label looks like a reflector callsign (`XRF757`,
+    /// `XLX458`, `XLXARG`, `REF030`, …), and to blank fields (with a warning)
+    /// when even that fails — e.g. when connecting by bare IP address, which
+    /// is exactly the case a caller should fill this in for.
     pub reflector_callsign: Option<String>,
 }
 
@@ -421,6 +424,22 @@ struct SharedState {
     tx_dbfs: AtomicU32,
     rx_dbfs: AtomicU32,
     input_dbfs: AtomicU32,
+    /// Listener-side audio preferences, the same three
+    /// [`crate::ConsoleSession`] fans out to every other network.
+    ///
+    /// D-Star was never wired into that fan-out (iax-dstaraudio): the setters
+    /// had an IAX2 arm and an M17 arm and no D-Star arm, so the operator's
+    /// volume never reached a D-Star session and it played at the router's
+    /// 1.0 default while every other network was at whatever they had chosen.
+    /// Reported as "D-Star is louder than it should be", which is exactly what
+    /// an ignored attenuation sounds like.
+    ///
+    /// Held here rather than on the session because the router and the output
+    /// bus both move into the run-loop thread; this is the cell that thread
+    /// reads. Same shape as [`crate::m17`]'s `Prefs`.
+    output_gain: AtomicU32,
+    rx_compress: AtomicBool,
+    rx_compress_level: AtomicU32,
 }
 
 impl SharedState {
@@ -433,7 +452,34 @@ impl SharedState {
             tx_dbfs: AtomicU32::new((-60.0f32).to_bits()),
             rx_dbfs: AtomicU32::new((-60.0f32).to_bits()),
             input_dbfs: AtomicU32::new((-60.0f32).to_bits()),
+            // Unity and off — the router's own defaults, so a session nobody
+            // has configured sounds exactly as it did before this existed.
+            // `dstar_adopt` overwrites these with the console's real values
+            // before the operator can hear anything.
+            output_gain: AtomicU32::new(1.0f32.to_bits()),
+            rx_compress: AtomicBool::new(false),
+            rx_compress_level: AtomicU32::new(0.5f32.to_bits()),
         }
+    }
+
+    /// Push the listener-side preferences onto the open output bus.
+    ///
+    /// Called once at connect, before the run-loop thread starts, and again on
+    /// every tick — a handful of atomic loads and the router's own atomic
+    /// stores, so it needs no dirty-flag tracking. Mirrors
+    /// [`crate::m17::Prefs::apply`], deliberately: two networks applying the
+    /// same preferences by different mechanisms is how one of them silently
+    /// stops applying them.
+    fn apply_audio(&self, router: &AudioRouter, out: &OutputId) {
+        router.set_output_gain(
+            out,
+            f32::from_bits(self.output_gain.load(Ordering::Relaxed)),
+        );
+        router.set_output_compress(out, self.rx_compress.load(Ordering::Relaxed));
+        router.set_output_compress_level(
+            out,
+            f32::from_bits(self.rx_compress_level.load(Ordering::Relaxed)),
+        );
     }
 
     fn snapshot(&self, backend: AmbeBackend) -> DstarSnapshotState {
@@ -683,6 +729,52 @@ impl DstarSession {
     /// Mirrors [`crate::m17::M17Session::set_ptt`] exactly. Nothing in this
     /// session ever keys on its own — this is the ONLY path that can set the
     /// request true (see the module docs' TX-safety section).
+    /// Set the output (RX/speaker) gain multiplier, 0.0..=4.0 (the router
+    /// clamps). Takes effect on the live session's output bus within a tick.
+    ///
+    /// `&self`, like [`crate::m17::M17Session::set_output_gain`], so
+    /// [`crate::ConsoleSession`] can fan a preference out to whichever
+    /// networks are live without needing a mutable borrow of each.
+    pub fn set_output_gain(&self, gain: f32) {
+        let gain = if gain.is_nan() {
+            1.0
+        } else {
+            gain.clamp(0.0, 4.0)
+        };
+        self.shared
+            .output_gain
+            .store(gain.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Toggle automatic leveling of the RECEIVED audio on this session's
+    /// output bus.
+    pub fn set_rx_compression(&self, on: bool) {
+        self.shared.rx_compress.store(on, Ordering::Relaxed);
+    }
+
+    /// Set the RX/output compression strength (0.0..=1.0, clamped).
+    pub fn set_rx_compression_level(&self, level: f32) {
+        let level = if level.is_nan() {
+            0.5
+        } else {
+            level.clamp(0.0, 1.0)
+        };
+        self.shared
+            .rx_compress_level
+            .store(level.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The listener-side preferences currently in force, for tests and for
+    /// anything that needs to prove the fan-out reached this session.
+    #[must_use]
+    pub fn audio_prefs(&self) -> (f32, bool, f32) {
+        (
+            f32::from_bits(self.shared.output_gain.load(Ordering::Relaxed)),
+            self.shared.rx_compress.load(Ordering::Relaxed),
+            f32::from_bits(self.shared.rx_compress_level.load(Ordering::Relaxed)),
+        )
+    }
+
     pub fn set_ptt(&mut self, on: bool) {
         self.ptt_request.store(on, Ordering::Relaxed);
     }
@@ -797,11 +889,14 @@ fn connect_udp_socket(host: &str, port: u16) -> Result<UdpSocket, ConsoleError> 
 /// Resolution order:
 /// 1. `explicit` — the caller named the reflector ([`DstarConfig::reflector_callsign`]);
 /// 2. `host`'s first DNS label, when it has the shape of a reflector callsign
-///    (three letters then three digits: `xrf757.openquad.net`,
-///    `xlx458.example.org`, `ref030…`) — the naming convention every public
-///    reflector host list follows;
+///    (see [`reflector_callsign_from_host`]) — the naming convention every
+///    public reflector host list follows;
 /// 3. [`BLANK_RPT`] for both, with a warning — the bare-IP case, where
 ///    inventing a callsign would be a guess.
+///
+/// Either way the name is translated to the one the reflector answers to on
+/// the `DExtra` wire before it is packed — an `XLX836` is `XRF836` there; see
+/// [`astar_dstar::dextra_callsign`], which [`repeater_fields`] applies.
 fn tx_repeater_fields(explicit: Option<&str>, host: &str, module: u8) -> ([u8; 8], [u8; 8]) {
     let derived = explicit
         .map(str::to_string)
@@ -817,22 +912,41 @@ fn tx_repeater_fields(explicit: Option<&str>, host: &str, module: u8) -> ([u8; 8
     (BLANK_RPT, BLANK_RPT)
 }
 
+/// The reflector-family prefixes a six-character hostname label may be
+/// derived from. Requiring one of these (rather than any three letters) is
+/// what lets the suffix be ALPHANUMERIC without turning ordinary hostnames
+/// into callsigns: `server.example.com` and `router.example.com` are
+/// six-letter labels that are emphatically not reflectors, while `xlxarg`,
+/// `xrf757` and `dcs019` all are.
+const REFLECTOR_PREFIXES: [&str; 4] = ["XRF", "XLX", "REF", "DCS"];
+
 /// `Some(uppercased label)` when `host`'s first DNS label looks like a
-/// reflector callsign — three ASCII letters followed by three ASCII digits
-/// (`XRF757`, `XLX458`, `REF030`, `DCS019`). Deliberately narrow: anything
-/// else (a bare IP, `example.com`, a hostname that merely contains digits) is
-/// left to the blank fallback rather than guessed at.
+/// reflector callsign — one of [`REFLECTOR_PREFIXES`] followed by three ASCII
+/// ALPHANUMERIC characters (`XRF757`, `XLX458`, `REF030`, `DCS019`, and the
+/// letter-suffixed reflectors like `XLXARG`, which are ~15% of the published
+/// XLX list and used to fall through to blank `RPT1`/`RPT2` here).
+///
+/// This returns the DIRECTORY name, not the wire name: `xlx836.…` derives
+/// `XLX836`, which [`repeater_fields`] then addresses as `XRF836` (see
+/// [`astar_dstar::dextra_callsign`]).
+///
+/// Deliberately narrow: anything else (a bare IP, `example.com`, a hostname
+/// that merely contains digits) is left to the blank fallback rather than
+/// guessed at.
 fn reflector_callsign_from_host(host: &str) -> Option<String> {
     let label = host.split('.').next()?;
-    let bytes = label.as_bytes();
-    if bytes.len() == 6
-        && bytes[..3].iter().all(u8::is_ascii_alphabetic)
-        && bytes[3..].iter().all(u8::is_ascii_digit)
-    {
-        Some(label.to_ascii_uppercase())
-    } else {
-        None
+    if label.len() != 6 || !label.is_ascii() {
+        return None;
     }
+    let upper = label.to_ascii_uppercase();
+    let (prefix, suffix) = upper.split_at(3);
+    if !REFLECTOR_PREFIXES.contains(&prefix) {
+        return None;
+    }
+    suffix
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric())
+        .then_some(upper)
 }
 
 /// Send one already-encoded packet, logging (rather than discarding) a
@@ -1863,6 +1977,11 @@ fn run_loop(p: RunLoopParams) {
             break;
         }
 
+        // The operator's volume and RX leveling, re-asserted every tick so a
+        // change made mid-QSO is heard on the next one. Cheap: three atomic
+        // loads and the router's own atomic stores.
+        shared.apply_audio(&router, &out);
+
         // Apply a pending PTT edge (set_ptt only requests; this is where it
         // actually takes effect), plus the forced-unkey rules PttGate owns
         // (link lost mid-transmission, time-out timer, refusals).
@@ -2717,7 +2836,59 @@ mod tx_tests {
         assert_eq!(&rpt1, b"XRF757 G", "RPT1 names the gateway");
         // An explicit callsign wins over the host derivation.
         let (_, rpt2) = tx_repeater_fields(Some("XLX458"), "1.2.3.4", b'B');
-        assert_eq!(&rpt2, b"XLX458 B");
+        assert_eq!(
+            &rpt2, b"XRF458 B",
+            "an XLX reflector is addressed by its DExtra (XRF) callsign"
+        );
+    }
+
+    /// The bug this pins: an XLX reflector reached by its published hostname
+    /// must be addressed as `XRF###`, which is what the one real capture this
+    /// project owns shows arriving FROM XLX458 (`astar_dstar::dsvt`'s
+    /// `parses_a_real_xlx_header_with_a_zero_crc` → `RPT2 = "XRF458 A"`).
+    /// Deriving `XLX836` from the hostname and packing it verbatim addressed
+    /// a reflector nobody on that wire answers to.
+    #[test]
+    fn an_xlx_host_is_addressed_by_its_dextra_callsign() {
+        let (rpt1, rpt2) = tx_repeater_fields(None, "xlx836.example.org", b'A');
+        assert_eq!(&rpt2, b"XRF836 A");
+        assert_eq!(&rpt1, b"XRF836 G");
+    }
+
+    /// A reflector's three-character suffix is ALPHANUMERIC, not always
+    /// digits — `XLXARG` and friends are ~15% of the published XLX list, and
+    /// a digits-only derivation dropped every one of them onto the blank-RPT
+    /// fallback: transmitting with no destination identity at all.
+    #[test]
+    fn a_letter_suffixed_reflector_host_still_names_the_destination() {
+        assert_eq!(
+            reflector_callsign_from_host("xlxarg.example.org").as_deref(),
+            Some("XLXARG")
+        );
+        let (rpt1, rpt2) = tx_repeater_fields(None, "xlxarg.example.org", b'C');
+        assert_ne!(rpt2, BLANK_RPT, "a letter suffix must not blank the header");
+        assert_eq!(&rpt2, b"XRFARG C");
+        assert_eq!(&rpt1, b"XRFARG G");
+    }
+
+    /// The other half of widening the suffix to alphanumerics: an ordinary
+    /// six-letter hostname label must NOT become a callsign. Requiring a
+    /// reflector-family prefix is what keeps `server.example.com` from
+    /// transmitting `RPT2 = "SERVER A"`.
+    #[test]
+    fn an_ordinary_six_letter_hostname_is_not_mistaken_for_a_reflector() {
+        for host in [
+            "server.example.com",
+            "router.example.com",
+            "gw.example.com",
+            "mumble.example.com",
+        ] {
+            assert_eq!(
+                reflector_callsign_from_host(host),
+                None,
+                "{host} is not a reflector callsign"
+            );
+        }
     }
 
     #[test]
@@ -2739,9 +2910,15 @@ mod tx_tests {
             reflector_callsign_from_host("REF030").as_deref(),
             Some("REF030")
         );
+        assert_eq!(
+            reflector_callsign_from_host("dcs019.example.org").as_deref(),
+            Some("DCS019")
+        );
         assert_eq!(reflector_callsign_from_host("127.0.0.1"), None);
         assert_eq!(reflector_callsign_from_host("example.com"), None);
         assert_eq!(reflector_callsign_from_host("xrf7570.net"), None);
+        assert_eq!(reflector_callsign_from_host("xrf75.net"), None);
+        assert_eq!(reflector_callsign_from_host("xyz757.net"), None);
         assert_eq!(reflector_callsign_from_host(""), None);
     }
 

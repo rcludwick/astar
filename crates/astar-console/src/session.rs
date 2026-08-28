@@ -591,6 +591,10 @@ impl ConsoleSession {
         if let Some(m17) = self.m17.as_ref() {
             m17.set_rx_compress(on);
         }
+        #[cfg(feature = "dstar")]
+        if let Some(dstar) = self.dstar.as_ref() {
+            dstar.set_rx_compression(on);
+        }
     }
 
     /// Set the RX/output compression strength (0.0..=1.0, clamped) on the
@@ -606,6 +610,10 @@ impl ConsoleSession {
         #[cfg(feature = "m17")]
         if let Some(m17) = self.m17.as_ref() {
             m17.set_rx_compression_level(level);
+        }
+        #[cfg(feature = "dstar")]
+        if let Some(dstar) = self.dstar.as_ref() {
+            dstar.set_rx_compression_level(level);
         }
     }
 
@@ -1609,8 +1617,27 @@ impl ConsoleSession {
             session.disconnect();
             return Err(e);
         }
+        // Seed the new session with what the operator has already chosen.
+        // Without this a D-Star session starts at the router's unity default
+        // and only picks up the real value if a slider happens to move
+        // afterwards — which is the bug that shipped, just narrowed to the
+        // first session instead of every one.
+        session.set_output_gain(self.output_gain.get());
+        session.set_rx_compression(self.rx_compress.load(Ordering::Relaxed));
+        session.set_rx_compression_level(f32::from_bits(
+            self.rx_compress_level.load(Ordering::Relaxed),
+        ));
         self.dstar = Some(session);
         Ok(())
+    }
+
+    /// The live D-Star session's listener-side audio preferences, or `None`
+    /// when no session is active. Exists so the fan-out that reaches it can be
+    /// proven rather than assumed — see `dstar_session_audio_prefs`'s test.
+    #[cfg(feature = "dstar")]
+    #[must_use]
+    pub fn dstar_session_audio_prefs(&self) -> Option<(f32, bool, f32)> {
+        self.dstar.as_ref().map(DstarSession::audio_prefs)
     }
 
     /// Disconnect the live D-Star session, if any (iax-a9d4 Task 6). No-op
@@ -1733,6 +1760,15 @@ impl ConsoleSession {
         #[cfg(feature = "m17")]
         if let Some(m17) = self.m17.as_ref() {
             m17.set_output_gain(clamped);
+        }
+        // D-Star was missing from this fan-out until iax-dstaraudio, so the
+        // operator's volume never reached a live D-Star session and it played
+        // at the router's unity default while every other network sat at
+        // whatever they had chosen. That is what "D-Star is louder than it
+        // should be" was.
+        #[cfg(feature = "dstar")]
+        if let Some(dstar) = self.dstar.as_ref() {
+            dstar.set_output_gain(clamped);
         }
     }
 

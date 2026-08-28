@@ -30,4 +30,4 @@ pub use fsm::{DextraFsm, FsmAction, FsmError, LinkState};
 pub use header::{HeaderError, RfHeader, crc_ccitt};
 pub use reflector::{Reflector, ReflectorHandle};
 pub use slowdata::{SCRAMBLE, SlowDataRx};
-pub use tx::{CQCQCQ, NULL_AMBE, TxStream, generate_stream_id, repeater_fields};
+pub use tx::{CQCQCQ, NULL_AMBE, TxStream, dextra_callsign, generate_stream_id, repeater_fields};

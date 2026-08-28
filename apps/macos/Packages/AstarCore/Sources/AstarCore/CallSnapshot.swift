@@ -38,13 +38,26 @@ public struct CallSnapshot: Equatable {
     /// Whether the live call is an M17 session (as opposed to IAX2). Defaults
     /// `false`; the two networks are mutually exclusive at the engine.
     public var m17Active: Bool
+    /// Whether the engine can dial D-Star: the `dstar` feature is compiled in
+    /// AND a working AMBE vocoder was found. Unlike `m17Available` this is a
+    /// fact about the HARDWARE on the desk — D-Star has no software vocoder,
+    /// so this is false whenever no ThumbDV is attached. Defaults `false` so
+    /// pre-existing fixtures (and `NullStation`) need no change.
+    ///
+    /// The engine's probe is memoized process-wide, so a dongle plugged in
+    /// after launch is not noticed until the next launch.
+    public var dstarAvailable: Bool
+    /// Whether the live session is D-Star. Mutually exclusive with an IAX2
+    /// call and with M17 at the engine.
+    public var dstarActive: Bool
 
     public init(
         status: IaxStatus, ptt: Bool, remotePTT: Bool,
         txDB: Float, rxDB: Float, inputDB: Float = -60, rttMS: Int?,
         negotiatedFormat: VoiceFormat? = nil,
         dtmfPlayed: Int = 0, dtmfTotal: Int = 0,
-        m17Available: Bool = false, m17Active: Bool = false
+        m17Available: Bool = false, m17Active: Bool = false,
+        dstarAvailable: Bool = false, dstarActive: Bool = false
     ) {
         self.status = status
         self.ptt = ptt
@@ -58,6 +71,8 @@ public struct CallSnapshot: Equatable {
         self.dtmfTotal = dtmfTotal
         self.m17Available = m17Available
         self.m17Active = m17Active
+        self.dstarAvailable = dstarAvailable
+        self.dstarActive = dstarActive
     }
 
     /// The idle resting state: no call, meters at the floor.

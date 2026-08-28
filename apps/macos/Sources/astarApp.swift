@@ -3,6 +3,7 @@
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 
 import AstarCore
+import Combine
 import SwiftUI
 
 /// astar — a native AllStarLink client.
@@ -85,6 +86,17 @@ struct AstarApp: App {
     @MainActor
     final class AppDelegate: NSObject, NSApplicationDelegate {
         let session = CallSession.live()
+        // The cached reflector directory (astar-refl-ship). Constructed here,
+        // on the main actor, because it is `@MainActor` — `CallSession.live()`
+        // is not, and the dial path holds the directory's `index` value rather
+        // than the directory itself for exactly that reason. The bundled
+        // snapshot in `Contents/Resources/reflectors.json` means this is
+        // populated on a first launch with no network.
+        let reflectors = ReflectorDirectory(storage: FileReflectorDirectoryStorage())
+        /// Keeps `session.reflectorIndex` equal to the directory's, so a sync
+        /// that replaces the feed also replaces what the dial field resolves
+        /// against. Retained here; the subscription is what does the work.
+        private var reflectorIndexSubscription: AnyCancellable?
         // The macOS-only serial PTT source (UCI150). Owns the IOKit-linked
         // SerialClient and installs CallSession's serial-free pttSourceTick hook, so
         // AstarCore stays multiplatform. Re-opens on launch if previously enabled.
@@ -123,10 +135,18 @@ struct AstarApp: App {
             // migration possible today — it is what makes the NEXT version able
             // to tell 1 from 2 without guessing from which keys happen to exist.
             ConfigVersion.stamp()
+            // Hand the dial path the directory's name lookup, and keep handing
+            // it: `$index` republishes on every load and every sync. With no
+            // snapshot and no cache this is `.empty`, and dialling is
+            // address-only — which is what it was before the directory
+            // existed, not a failure (astar-refl-ship).
+            session.reflectorIndex = reflectors.index
+            reflectorIndexSubscription = reflectors.$index
+                .sink { [weak session] index in session?.reflectorIndex = index }
             setups.attach(session: session, serial: serial)
             statusController = StatusItemController(
                 session: session, serial: serial, setups: setups, micAnalyzer: micAnalyzer,
-                deviceMonitor: deviceMonitor, navigation: navigation)
+                deviceMonitor: deviceMonitor, navigation: navigation, reflectors: reflectors)
             // Replace SwiftUI's placeholder menu (whose Settings… item opened the
             // empty `Settings { EmptyView() }` scene) with a real one — astar-1f7d.
             MainMenu.install(target: self)
@@ -144,6 +164,20 @@ struct AstarApp: App {
             // together with the menu-bar asterisk rather than ahead of it.
             DockPolicy.apply()
             showWelcomeIfUnconfigured()
+            // The unattended directory refresh (astar-refl-ui). Started and
+            // forgotten on purpose: it must never delay launch, and it has
+            // nothing to report to — a failure lands on
+            // `reflectors.lastSyncError`, which the Settings section shows.
+            // That is why this sync waited for that section to exist.
+            //
+            // Cheap in the common case. `.automatic` returns
+            // `.skipped(.notDue)` without opening a socket until the feed's own
+            // `client_refresh_days` (7) has passed since the last definitive
+            // answer — the cadence is the publisher's number, not astar's, so a
+            // change upstream takes effect without a release. When it does run
+            // it is a conditional GET, and hamcall-db's build is byte-stable,
+            // so most weeks it costs a 304.
+            Task { @MainActor in try? await reflectors.sync(trigger: .automatic) }
         }
 
         /// First launch with no AllStarLink account: raise the window on Settings

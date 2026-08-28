@@ -6,12 +6,13 @@
 
 <p align="center">
   A native ham-radio digital-voice client and node —
-  <strong>AllStarLink (IAX2)</strong> and <strong>M17</strong>,
-  in one Rust engine with native front-ends.
+  <strong>AllStarLink (IAX2)</strong> and <strong>M17</strong>, plus
+  <strong>D-Star</strong> in the engine, on one Rust core with native
+  front-ends.
 </p>
 
 <p align="center">
-  <strong>0.1.3beta</strong> (<a href="CHANGELOG.md">changelog</a>) · AGPL-3.0-only · macOS today, Windows and Linux in progress
+  <strong>0.1.7beta</strong> (<a href="CHANGELOG.md">changelog</a>) · AGPL-3.0-only · macOS today, Windows and Linux in progress
 </p>
 
 <p align="center">
@@ -28,7 +29,7 @@ meters — with support for generic USB radio interfaces (serial PTT + USB audio
 the AllScan UCI150 is the reference device). It also runs as an always-on node
 daemon.
 
-> ### Latest release — `0.1.3beta`
+> ### Latest release — `0.1.7beta`
 >
 > A signed and notarized **`astar.dmg`** is on the
 > [releases page](https://github.com/rcludwick/astar/releases/latest). It opens
@@ -39,9 +40,13 @@ daemon.
 > single `arm64` slice; an Intel Mac has to [build from source](#building).
 > There is still no Homebrew tap, no cask, and no App Store listing.
 >
-> **M17 needs `brew install codec2`.** The app does not bundle `libcodec2` yet,
-> so M17 stays unavailable until a system copy is present. AllStarLink works out
-> of the box.
+> **M17 needs nothing installed.** The app has linked Codec 2 in since
+> `0.1.4beta`; a system `libcodec2` is still preferred when one is present.
+>
+> **D-Star is engine-only for now.** It is implemented in the crates but no GUI
+> client offers it yet. D-Star voice is AMBE+2 and there is no software vocoder,
+> so it needs a ThumbDV or DV3000 dongle wherever it does run. AllStarLink needs
+> neither.
 >
 > This is a beta of a project that has only just started shipping. Expect rough
 > edges, expect things to move.
@@ -53,16 +58,25 @@ daemon.
 Be aware that "the engine supports it" and "you can click it in the app" are
 two different things right now. This is the honest state:
 
-| | AllStar (IAX2) | M17 |
-|---|---|---|
-| **Engine** (`crates/`) | yes | yes |
-| **macOS app** (`apps/macos`) | yes | yes¹ |
-| **Iced client** (`apps/gui`) | yes | yes¹ |
-| **CLI** (`astar-cli`) | yes | **no** — IAX2 only |
+| | AllStar (IAX2) | M17 | D-Star |
+|---|---|---|---|
+| **Engine** (`crates/`) | yes | yes | yes — `dstar` feature |
+| **macOS app** (`apps/macos`) | yes | yes¹ | **no** — not lit up yet² |
+| **Iced client** (`apps/gui`) | yes | yes¹ | **no** — not lit up yet |
+| **CLI** (`astar-cli`) | yes | **no** — IAX2 only | yes — `dstar` feature |
 
 ¹ M17 is capability-gated: the client shows it only when the running build can
-actually place the call. On macOS that currently means a system `libcodec2` —
-see [M17 and Codec 2](#m17-and-codec-2).
+actually place the call. Since `0.1.4beta` the macOS app links Codec 2 in, so
+that is satisfied out of the box — see [M17 and Codec 2](#m17-and-codec-2).
+
+² D-Star is implemented in the engine and reachable from `astar-cli`, but no
+GUI client offers it yet. Where it does run it is capability-gated on
+**hardware** rather than on the build: the vocoder is a ThumbDV or DV3000 USB
+dongle, so the capability appears when one is plugged in and disappears when it
+is pulled. `astar-server` does not enable `dstar` in its own manifest, though a
+workspace build unifies features and compiles it in anyway; the daemon refuses
+to key while a D-Star session is active. See
+[On-air safety](https://rcludwick.github.io/astar/about/safety/).
 
 M17 is **compiled in by default** everywhere it is implemented — the engine,
 the C ABI the macOS app links, the Iced client and the node daemon all get it
@@ -155,7 +169,8 @@ client's dependency graph; the engine crates on their own build on 1.86.
 
 ### The macOS app
 
-macOS 13+ (`MenuBarExtra` is the floor), plus:
+macOS 13+ (the declared deployment target; `ViewThatFits` and other macOS 13
+SwiftUI APIs are used), plus:
 
 | Requirement | Why | Install |
 |---|---|---|
@@ -180,7 +195,7 @@ After launch, look for the **rainbow asterisk** in the menu bar — and, unless 
 turn it off, an astar icon in the Dock. Left-click the asterisk opens the dial
 popover; `Show in Dock` in the right-click menu drops back to menu-bar-only. The
 running
-version (`0.1.3beta`) is shown in the popover footer, so you can always tell
+version (`0.1.7beta`) is shown in the popover footer, so you can always tell
 what you are actually running.
 
 ### A local .dmg
@@ -245,12 +260,24 @@ surfaces as a "serial device error", never a UI hang.
 
 ### M17 and Codec 2
 
-M17 needs Codec 2. The engine looks for a system `libcodec2` at runtime
-(`/opt/homebrew/lib`, `/usr/local/lib`, `/usr/lib`, or a path in
-`IAX_CODEC2_PATH`) and reports M17 as unavailable when it finds none — which
-is why the network picker can hide M17 on an otherwise working build. On macOS
-that means a Homebrew `codec2` today. Bundling the library so M17 works out of
-the box is an open backlog item.
+M17 needs Codec 2, and where it comes from depends on what you are building.
+
+**The macOS app links its own** since `0.1.4beta`: `just xcframework` builds
+`astar-sys` with `--features codec2-static`, so the shipped DMG and a
+self-built app both have M17 with nothing else installed.
+
+**Everything else resolves a system `libcodec2` at runtime** — the engine,
+`astar-server` and the Iced client `dlopen` it, trying `IAX_CODEC2_PATH`, then
+configured search directories, then `/opt/homebrew/lib`, `/usr/local/lib` and
+`/usr/lib`. A build that finds neither a system copy nor a linked one reports
+M17 as unavailable, which is why the network picker can hide M17 on an
+otherwise working build.
+
+The runtime path wins where both exist: a healthy system library is preferred
+and the linked copy is the fallback. Keeping Codec 2 out of every *default*
+build is deliberate — it is LGPL-2.1 and MIT, so both `codec2-static` and
+`codec2-runtime` are opt-in and `ci/guard-codec2-licensing.sh` fails the build
+if a plain `cargo build` ever pulls LGPL code in.
 
 ---
 

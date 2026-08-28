@@ -15,7 +15,7 @@
 [project]
 
 site_name = "astar"
-site_description = "Native ham-radio client for AllStarLink and M17 — a macOS menu-bar app, the astar-server node daemon, and the astar-lib engine they share."
+site_description = "Digital-voice client for AllStarLink (IAX2) and M17 — a macOS menu-bar app over a shared Rust engine."
 site_author = "Rob Ludwick"
 
 # Must carry the /astar/ sub-path: GitHub Pages serves the project site from
@@ -42,7 +42,7 @@ site_dir = "docs/.site"
 
 # The version chip. `copyright` accepts raw HTML; astar.css styles the span.
 # Bump this in lockstep with MARKETING_VERSION in apps/macos/project.yml.
-copyright = "Copyright &copy; 2026 Rob Ludwick — AGPL-3.0-only &nbsp;<span class=\"astar-version\">v0.1.7beta</span>"
+copyright = "Copyright &copy; 2026 Rob Ludwick — AGPL-3.0-only &nbsp;<span class=\"astar-version\">v0.1.8beta</span>"
 
 extra_css = ["stylesheets/astar.css"]
 
@@ -59,6 +59,11 @@ nav = [
     "build/server.md",
     "build/verifying.md",
   ] },
+  { "astar-server" = [
+    "server/index.md",
+    "server/configuration.md",
+    "server/control-api.md",
+  ] },
   { "macOS app" = [
     "macos/index.md",
     "macos/first-run.md",
@@ -74,6 +79,8 @@ nav = [
   { "About" = [
     "about/safety.md",
     "about/license.md",
+    "about/reflector-data.md",
+    "changelog.md",
   ] },
 ]
 

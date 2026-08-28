@@ -15,6 +15,11 @@
     struct MenuPopover: View {
         @EnvironmentObject private var session: CallSession
         @EnvironmentObject private var serial: SerialController
+        /// The cached reflector directory (astar-refl-ui), for the search
+        /// sheet and the module picker. The *dial* path does not go through
+        /// this — it holds the directory's frozen `index` value instead, so
+        /// resolution can run off the main thread (see `ReflectorIndex`).
+        @EnvironmentObject private var reflectors: ReflectorDirectory
         /// Which pane to show. Shared (not `@State`) so the main menu's `Settings…`
         /// item can open this same pane — see `AppNavigation`.
         @EnvironmentObject private var navigation: AppNavigation
@@ -23,6 +28,11 @@
         @State private var keyed = false  // PTT currently held
         @State private var keyMonitor: Any?  // spacebar hold-to-talk event monitor
         @State private var showFavoriteEditor = false  // inline "save favorite" popover
+        /// Whether the reflector search sheet is up (astar-refl-ui).
+        @State private var showReflectorSearch = false
+        /// Last module used per reflector, offered pre-selected in the picker.
+        /// A recollection, never a default — nothing reads it at dial time.
+        private let moduleMemory = ReflectorModuleMemory()
         @State private var favoriteLabel = ""  // editable label for the favorite
         /// Local mirror of `session.m17Callsign` while the M17 callsign prompt
         /// (astar-c2e5 Task 9) is showing — see `m17CallsignField`. Only
@@ -45,8 +55,16 @@
         @AppStorage("audio.input") private var selectedInputDevice: String?
         @AppStorage("audio.output") private var selectedOutputDevice: String?
         @AppStorage("ui.network") private var networkRaw = Network.allstar.rawValue
+        /// The networks the engine can drive right now. `dstar` is a fact
+        /// about the desk rather than the build — the segment appears when a
+        /// ThumbDV is attached, because D-Star voice is AMBE and astar has no
+        /// software vocoder to offer without one.
+        private var availableNetworks: [Network] {
+            Network.available(m17: session.m17Available, dstar: session.dstarAvailable)
+        }
+
         private var selectedNetwork: Network {
-            Network.resolve(networkRaw, m17: session.m17Available)
+            Network.resolve(networkRaw, m17: session.m17Available, dstar: session.dstarAvailable)
         }
         /// Whether the "Quick settings" box is expanded (remembered across launches).
         @AppStorage("ui.quickSettingsExpanded") private var quickSettingsExpanded = false
@@ -85,7 +103,7 @@
         private var hasStatusBadges: Bool {
             session.negotiatedFormat != nil
                 || (isInCall && session.activeCallNetwork == .m17)
-                || (isInCall && Network.available(m17: session.m17Available).count > 1
+                || (isInCall && availableNetworks.count > 1
                     && session.activeCallNetwork != nil)
         }
 
@@ -270,6 +288,7 @@
                     SetupsView()
                     FavoritesSettingsView(directoryRevision: $directoryRevision)
                     MicProfilesView()
+                    ReflectorSettingsView()
                     SpectrumSettingsView()
                     ConfigTransferView(directoryRevision: $directoryRevision)
                 }
@@ -381,7 +400,7 @@
                             // `isInCall` (astar-c7a1) — `activeCallNetwork` only
                             // clears in `disconnect()`, so without this a stale
                             // value could badge a card that's no longer live.
-                            if isInCall, Network.available(m17: session.m17Available).count > 1,
+                            if isInCall, availableNetworks.count > 1,
                                 let network = session.activeCallNetwork
                             {
                                 Text(network.badge)
@@ -422,6 +441,14 @@
                                 .truncationMode(.tail)
                             talkTimerDot
                         }
+                    }
+                    // Who is talking on the reflector, and anything they sent
+                    // as slow data (iax-4c8e). D-Star's own fields, so this
+                    // shows only on a D-Star call — and it is most of the
+                    // point of listening in: a reflector with no talker line
+                    // is an anonymous voice.
+                    if isInCall, session.activeCallNetwork == .dstar {
+                        dstarTalkerLine
                     }
                 }
                 // astar-5e2c: the text column takes its ideal width BEFORE the
@@ -466,9 +493,9 @@
                 // Network picker (astar-9b3e): latent until a second network is
                 // available — hidden entirely today so the dial form is
                 // pixel-identical to pre-9b3e.
-                if Network.available(m17: session.m17Available).count > 1 {
+                if availableNetworks.count > 1 {
                     Picker("Network", selection: $networkRaw) {
-                        ForEach(Network.available(m17: session.m17Available), id: \.rawValue) {
+                        ForEach(availableNetworks, id: \.rawValue) {
                             network in
                             Label(network.displayName, systemImage: network.symbol)
                                 .tag(network.rawValue)
@@ -522,6 +549,7 @@
                                 + "dials that address directly — for a node that isn’t "
                                 + "reachable at its published address (e.g. your own "
                                 + "node on localhost).")
+                    reflectorSearchButton
                     directoryMenu
                     favoriteToggle
                     Button(action: connect) {
@@ -556,10 +584,56 @@
                         // Same fade/slide as the M17 callsign field above.
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
+                // The one place the directory is visible so far
+                // (astar-refl-ship): what the typed name resolved to, and —
+                // when the module is still blank — what is still missing. Not
+                // styled as an error: nothing is wrong, the form is
+                // unfinished. The picker and search sheet are a separate item.
+                if let resolvedReflectorLine {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(resolvedReflectorLine)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("Resolved reflector")
+                            .accessibilityValue(resolvedReflectorLine)
+                        // The letter, offered where the gap is. Without this
+                        // the typed path dead-ends at a correct-but-unfinished
+                        // line: the operator is told a module is missing and
+                        // given nowhere to supply one but the keyboard.
+                        if case .needsModule(let entry) = reflectorResolution {
+                            modulePicker(for: entry)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .popover(isPresented: $showFavoriteEditor, arrowEdge: .bottom) { favoriteEditor }
+            .sheet(isPresented: $showReflectorSearch) {
+                ReflectorSearchSheet(preferredNetwork: selectedNetwork.reflectorNetwork) {
+                    text, network in
+                    // Switch the picker to the chosen reflector's own network
+                    // before filling the field — the sheet can browse past the
+                    // network the dial is set to, and text resolved against
+                    // the wrong one silently finds nothing. Same move the
+                    // favorites menu already makes. Unavailable networks
+                    // cannot appear here: `Network.resolve` refuses them, so
+                    // this cannot select a segment that is not offered.
+                    if let appNetwork = Network.matching(network),
+                        availableNetworks.contains(appNetwork)
+                    {
+                        networkRaw = appNetwork.rawValue
+                    }
+                    // The sheet hands back dial text, not a target: this field
+                    // stays the single source of truth for what Connect will
+                    // dial. Selecting never connects — that is still a
+                    // deliberate second action.
+                    node = text
+                }
+                .environmentObject(reflectors)
+            }
         }
 
         /// Whether an AllStarLink account is required right now (astar-c2e5
@@ -581,8 +655,8 @@
         /// field only commits on submit/Connect, see `commitCallsignDraft`) —
         /// either one being non-empty satisfies the requirement.
         private var needsM17CallsignToConnect: Bool {
-            selectedNetwork == .m17
-                && session.m17Callsign.trimmingCharacters(in: .whitespaces).isEmpty
+            CallSession.requiresCallsign(selectedNetwork)
+                && session.operatorCallsign.trimmingCharacters(in: .whitespaces).isEmpty
                 && callsignDraft.trimmingCharacters(in: .whitespaces).isEmpty
         }
 
@@ -591,8 +665,8 @@
         /// callsign is set (here or in Settings — either writes
         /// `session.m17Callsign`, so this hides either way).
         private var needsM17Callsign: Bool {
-            selectedNetwork == .m17
-                && session.m17Callsign.trimmingCharacters(in: .whitespaces).isEmpty
+            CallSession.requiresCallsign(selectedNetwork)
+                && session.operatorCallsign.trimmingCharacters(in: .whitespaces).isEmpty
         }
 
         /// One-line "set your callsign" prompt (astar-c2e5 Task 9), shown only
@@ -610,16 +684,24 @@
             VStack(alignment: .leading, spacing: 2) {
                 TextField("Your callsign", text: $callsignDraft)
                     .textFieldStyle(.roundedBorder)
-                    .onAppear { callsignDraft = session.m17Callsign }
+                    .onAppear { callsignDraft = session.operatorCallsign }
                     .onChange(of: callsignDraft) { value in
                         let upper = value.uppercased()
                         if upper != value { callsignDraft = upper }
                     }
                     .onSubmit(commitCallsignDraft)
                     .accessibilityLabel("Your callsign")
-                Text("M17 transmits your callsign — set it once here or in Settings.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                // One callsign, both reflector networks — M17 sends it in
+                // every frame and D-Star puts it in every header, and it is
+                // the same callsign. Naming the network the operator is
+                // actually on keeps that concrete without implying there are
+                // two settings.
+                Text(
+                    "\(selectedNetwork.displayName) transmits your callsign — "
+                        + "set it once here or in Settings."
+                )
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             }
         }
 
@@ -630,7 +712,7 @@
         private func commitCallsignDraft() {
             let trimmed = callsignDraft.trimmingCharacters(in: .whitespaces).uppercased()
             guard !trimmed.isEmpty else { return }
-            session.m17Callsign = trimmed
+            session.operatorCallsign = trimmed
         }
 
         /// The repeater-courtesy talk-timer dot (astar-fda3): a small circle next
@@ -678,6 +760,107 @@
         /// what the status card shows — no separate formatting to drift.
         private func connectedNodeLabel(for node: String) -> String {
             session.connectedTargetLabel(for: node)
+        }
+
+        /// Magnifying glass beside the dial field: opens the reflector search
+        /// sheet (astar-refl-ui).
+        ///
+        /// Shown only for a network that HAS a reflector directory. AllStar
+        /// nodes are not reflectors and never appear in this data, so offering
+        /// to search it there would be an empty promise — the same reasoning
+        /// that keeps the network picker itself hidden until a second network
+        /// exists.
+        @ViewBuilder
+        private var reflectorSearchButton: some View {
+            if selectedNetwork.reflectorNetwork != nil {
+                Button {
+                    showReflectorSearch = true
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                }
+                .buttonStyle(.borderless)
+                .disabled(needsCredentials)
+                .help("Search the reflector directory")
+                // Icon-only: `.help` is a hover tooltip, not the a11y label.
+                .accessibilityLabel("Search the reflector directory")
+            }
+        }
+
+        /// The module letters for a reflector the dial field has resolved but
+        /// not finished — a menu rather than 26 buttons, because it sits
+        /// inline under a field in a 330 pt popover.
+        ///
+        /// Writes back into `node` rather than holding a module of its own:
+        /// two places each holding half a target is how a UI comes to show
+        /// `XLX836 A` and dial `XLX836`.
+        private func modulePicker(for entry: DirectoryEntry) -> some View {
+            let options = ReflectorModuleOptions.options(for: entry.dial)
+            let remembered = moduleMemory.module(for: entry)
+            return Menu {
+                ForEach(options, id: \.self) { letter in
+                    Button {
+                        moduleMemory.remember(letter, for: entry)
+                        node = ReflectorDialText.applying(module: letter, to: node)
+                    } label: {
+                        // The remembered letter is marked, not pre-applied:
+                        // it is a thing the operator did, shown back to them,
+                        // and still their choice to repeat.
+                        if letter == remembered {
+                            Label("Module \(String(letter))", systemImage: "clock.arrow.circlepath")
+                        } else {
+                            Text("Module \(String(letter))")
+                        }
+                    }
+                }
+            } label: {
+                Text("Set module")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .font(.caption)
+            .disabled(options.isEmpty)
+            .accessibilityLabel("Set module")
+            .accessibilityHint(
+                remembered.map { "Last used module \(String($0))" } ?? "No module chosen yet")
+        }
+
+        /// The D-Star last-heard line: the talker's callsign, and the slow-data
+        /// message if one has arrived.
+        ///
+        /// **Last heard, not talking now.** The engine keeps both past
+        /// end-of-transmission on purpose, so this names whoever most recently
+        /// keyed up rather than whoever is keyed right now — the status dot
+        /// and the RX meter are what say that. Absent entirely until a header
+        /// arrives, because an empty "Hearing —" reads as a fault when the
+        /// truth is that the reflector has simply been quiet.
+        @ViewBuilder
+        private var dstarTalkerLine: some View {
+            if let talker = session.dstarTalker {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Last heard \(talker)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .accessibilityLabel("Last heard")
+                        .accessibilityValue(talker)
+                    // Slow data is typed by whoever is transmitting on the
+                    // reflector — attacker-controlled text from astar's point
+                    // of view. `Text` renders it verbatim and interprets
+                    // nothing, which is the whole requirement; the line limit
+                    // stops a long one reflowing the status card.
+                    if let message = session.dstarSlowText, !message.isEmpty {
+                        Text(message)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .help(message)
+                            .accessibilityLabel("Message")
+                            .accessibilityValue(message)
+                    }
+                }
+            }
         }
 
         /// Compact directory picker next to the node field: Favorites then Recents.
@@ -1255,19 +1438,39 @@
 
         private var trimmedNode: String { node.trimmingCharacters(in: .whitespaces) }
 
-        /// Whether the dial field currently parses for the SELECTED network
-        /// (astar-c2e5 Task 9) — gates the Connect button and, via `connect()`,
-        /// the Enter/onSubmit path too. Each network parses its own grammar:
-        /// AllStar (and the still-unavailable hamlink) via `DialTarget.parse`
-        /// (node number or host[:port]), M17 via `M17Dial.parse`
-        /// (`host[:port]/module`).
+        /// Whether the dial field currently holds a COMPLETE target for the
+        /// selected network — gates the Connect button and, via `connect()`,
+        /// the Enter/onSubmit path too.
+        ///
+        /// The decision itself lives in `CallSession.canDial` (astar-refl-ship)
+        /// so the button and the dial agree by construction: reflector names
+        /// resolve through the directory first and addresses parse second,
+        /// with each network's own grammar underneath (astar-c2e5 Task 9).
+        /// A resolved reflector with no module yet answers `false` — nothing
+        /// is wrong, the form is unfinished, and `resolvedReflectorLine` says
+        /// so below the field.
         private var isDialTargetValid: Bool {
-            switch selectedNetwork {
-            case .allstar, .hamlink:
-                return DialTarget.parse(node) != nil
-            case .m17:
-                return M17Dial.parse(node) != nil
-            }
+            session.canDial(node, network: selectedNetwork)
+        }
+
+        /// The resolved-target line under the dial field (astar-refl-ship):
+        /// `XLX836 · module — · 45.56.69.219:30001`, filling itself in as the
+        /// module arrives. `nil` — and so absent — whenever the text names
+        /// nothing in the directory, which includes every address and every
+        /// launch before the directory has loaded.
+        private var resolvedReflectorLine: String? { reflectorResolution.statusLine }
+
+        /// What the dial field's text resolves to in the directory, for the
+        /// line under the field AND the module picker beside it. One read, so
+        /// the sentence and the control that completes it cannot disagree
+        /// about which reflector is being talked about.
+        ///
+        /// `.notInDirectory` for a network with no directory counterpart
+        /// (AllStar), which is also what it means: nothing here names a
+        /// reflector, so nothing is shown.
+        private var reflectorResolution: ReflectorDialResolution {
+            guard let network = selectedNetwork.reflectorNetwork else { return .notInDirectory }
+            return session.resolveReflector(node, network: network)
         }
 
         private func connect() {
@@ -1291,17 +1494,18 @@
                 case .address(let value):
                     dispatchConnect(node: value, network: network, address: value)
                 }
-            case .m17:
-                // M17's grammar (`host[:port]/module`) is parsed engine-side
-                // (`CallSession.connect(node:network:)` re-parses via
-                // `M17Dial.parse`) — this is only the same "unreachable via the
-                // disabled button, but refuse it on Enter too" guard as above.
-                guard M17Dial.parse(node) != nil else { return }
+            case .m17, .dstar:
+                // Both reflector networks resolve their target engine-side
+                // (`CallSession.connect(node:network:)` → `m17Target` /
+                // `dstarTarget`, directory first and address second) — this is
+                // only the same "unreachable via the disabled button, but
+                // refuse it on Enter too" guard as above.
+                guard session.canDial(node, network: network) else { return }
                 // Pick up whatever's in the callsign prompt (if it's still
                 // showing) before dialing, so a dial started without leaving
                 // that field still uses what was typed (astar-c2e5 Task 9).
                 commitCallsignDraft()
-                dispatchConnect(node: trimmedNode, network: .m17, address: nil)
+                dispatchConnect(node: trimmedNode, network: network, address: nil)
             }
         }
 

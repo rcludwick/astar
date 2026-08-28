@@ -7,26 +7,30 @@ icon: lucide/radio-tower
 
 # astar
 
-A native ham-radio digital-voice client and node — **AllStarLink (IAX2)** and
-**M17** — built on one Rust engine with native front-ends.
+astar is a digital-voice client for **AllStarLink** and **M17**. It connects over
+the network as a softclient — no radio, no hotspot, no repeater in the path —
+and handles audio, push-to-talk, DTMF and level metering itself.
 
-astar dials nodes and reflectors as a client: audio, push-to-talk, DTMF, live
-meters, and support for the generic class of USB radio interfaces (serial PTT
-plus USB audio).
+**D-Star** is implemented in the engine — DExtra, XLX/XRF reflectors, AMBE+2 on
+a ThumbDV or DV3000 dongle — but is **not yet exposed in the macOS client**. It
+is reachable from the Rust crates today; the network picker does not offer it.
 
-!!! info "Work in Progress"
+Protocol, codec and audio handling live in one Rust engine; each platform gets a
+native front-end over it rather than a shared web shell.
 
-    astar is **beta** and moves quickly. **AllStarLink** is the primary target
-    and takes the most testing. **M17** is native, reflectors included, and
-    needs nothing installed — Codec 2 ships inside the app as of `0.1.4beta`.
-    Other networks are in the tree at various stages and are **not** claimed
-    as working.
+!!! info "Beta"
 
-    The download is signed with a Developer ID and notarized by Apple, so it
-    opens without a Gatekeeper warning. It is **Apple Silicon only** — a
-    single `arm64` slice — and needs **macOS 13 (Ventura) or later**. On an
-    Intel Mac, [build from source](build/index.md). There is no Homebrew tap,
-    no cask, and no App Store listing.
+    astar is beta and moves quickly. AllStarLink is the primary target and takes
+    the most testing. M17 needs nothing installed — Codec 2 is linked into the
+    app as of `0.1.4beta`. D-Star exists in the engine but has no client UI yet.
+    Other protocols are in the tree at various stages and are not claimed as
+    working.
+
+    The download is Developer ID-signed and notarized, so it opens without a
+    Gatekeeper override. It is Apple Silicon only — a single `arm64` slice — and
+    needs macOS 13 (Ventura) or later. On an Intel Mac,
+    [build from source](build/index.md). There is no Homebrew tap, no cask, and
+    no App Store listing.
 
 [Download for macOS](https://github.com/rcludwick/astar/releases/latest){ .md-button .md-button--primary }
 [Build it from source](build/index.md){ .md-button }
@@ -37,27 +41,41 @@ plus USB audio).
 </div>
 </div>
 
-## Three surfaces, one engine
+## Networks
+
+| Network | Transport | Voice codec | Dials | Identifies as |
+|---|---|---|---|---|
+| AllStarLink | IAX2 (RFC 5456), UDP 4569 | µ-law / GSM / signed-linear, negotiated | Node numbers | Node number, via the allstarlink.org portal |
+| M17 | UDP 17000 | Codec 2 3200 | Reflector + module | Callsign |
+| D-Star *(engine only)* | DExtra, UDP 30001 | AMBE+2, on the dongle | XLX/XRF reflector + module | Callsign |
+
+M17 transmits your callsign on the air; AllStarLink identifies by node number
+instead, and authenticates against the portal rather than a per-node secret.
+
+The D-Star row describes the engine implementation. The macOS client does not
+offer D-Star yet — [Building the engine](build/engine.md) covers reaching it
+from the crates.
+
+## Where to start
 
 <div class="grid cards" markdown>
 
 -   __[The macOS app](macos/index.md)__
 
-    A SwiftUI **menu-bar** client: a **rainbow asterisk** in the menu bar that
-    opens a dial popover, plus a Dock icon you can turn off. macOS 13 or later.
+    A SwiftUI menu-bar client: an NSStatusItem that opens a dial popover, plus
+    an optional Dock icon. macOS 13 or later.
     [Build it from source](build/macos-app.md).
 
--   __[astar-server](build/server.md)__
+-   __[Building astar](build/index.md)__
 
-    The headless **node daemon**, still work in progress — an inbound IAX2
-    listener, registration with the AllStarLink registrar, a conference bridge,
-    and a loopback HTTP + SSE control channel.
+    Toolchains, the Rust workspace, the Swift xcframeworks, and the Iced client
+    for Windows and Linux.
 
 -   __astar-lib__
 
-    The engine every front-end sits on: IAX2 framing and session state, codecs,
-    audio I/O, PTT backends, and the multi-network station facade. Pure Rust,
-    no UI, exposed to Swift and Python through a C ABI.
+    The engine: IAX2 framing and session state, codecs, audio I/O, PTT
+    backends, and the multi-network station facade. Pure Rust, no UI, exposed
+    to Swift and Python through a C ABI.
 
 -   __[Protocol notes](reference/index.md)__
 
@@ -66,24 +84,34 @@ plus USB audio).
 
 </div>
 
-## Architecture: fat core, thin views
+## Hardware
+
+For push-to-talk, astar drives the generic class of USB radio interfaces —
+serial PTT plus USB audio. The AllScan UCI150 (WCH CH343) is the reference
+device, not a special case. Raw USB is the default transport and needs no
+driver; the tty path is opt-in and on macOS needs WCH's driver. See
+[Hardware](macos/hardware.md).
+
+D-Star, in the engine, is hardware-only. AMBE+2 has no freely licensable
+software implementation, so the codec runs on a ThumbDV or DV3000 dongle —
+Codec 2 you can install, AMBE you have to own.
+
+## Architecture
 
 All protocol, audio and PTT logic lives in the Rust crates. The front-ends are
 views over that engine, so a feature lands once and every client gets it, with
-per-platform native UI rather than a shared web shell.
+per-platform native UI.
 
-## Platform status
+## Platform support
 
-| Platform | Status |
+| Platform | State |
 |---|---|
-| **macOS 13+** | The supported client. Menu-bar app, built from source — [how to build it](build/macos-app.md). |
-| **Windows / Linux** | **In progress.** The engine is cross-platform and an [Iced](https://iced.rs) client (`apps/gui`) builds and runs on both, but it is not finished and should not be treated as ready. [Building it](build/clients.md) is documented; using it is not. |
-| **Server** | `astar-server` runs headless anywhere the engine builds. [Building it](build/server.md). |
-| **iOS** | Targeted. The Xcode project already builds a multiplatform target; there is no shipping iOS client. |
+| macOS 13+ | Supported. Menu-bar app; signed, notarized `arm64` [download](https://github.com/rcludwick/astar/releases/latest), or [build it](build/macos-app.md). Intel Macs build from source. |
+| Windows / Linux | In progress. The engine is cross-platform and an [Iced](https://iced.rs) client (`apps/gui`) builds and runs on both, but it is unfinished. [Building it](build/clients.md) is documented; using it is not. |
+| iOS | Targeted. The Xcode project builds a multiplatform target; there is no shipping iOS client. |
 
-**Everything is built from source** — [Building astar](build/index.md) covers
-all of it. The day-to-day *usage* pages are macOS-only for now; when the Iced
-client is ready, usage pages for Windows and Linux will join them.
+The macOS app is the only published binary; everything else is built from
+source. Day-to-day usage documentation is macOS-only for now.
 
 ## Licence
 

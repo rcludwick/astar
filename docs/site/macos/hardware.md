@@ -88,9 +88,16 @@ install the driver above.
 
 ## Vocoder dongles
 
-The tree contains support for a USB vocoder dongle, used by work that has not
-reached the clients. Nothing in the macOS app uses it today, and you do not need
-one to run astar.
+A USB vocoder dongle — a ThumbDV or DV3000 — is what makes **D-Star** work. It
+carries the AMBE+2 codec in hardware, and there is no software alternative: no
+freely licensable AMBE vocoder exists. Nothing else astar does needs one.
+
+**This client does not offer D-Star yet.** The engine implements it and the
+dongle is what it runs on, so the hardware is worth knowing about if you are
+working from the Rust crates — see
+[A vocoder dongle](../build/prerequisites.md#a-vocoder-dongle-only-for-d-star).
+Detection is hotplug: the capability comes and goes with the hardware rather
+than being latched at launch.
 
 If you do have one attached, the rule that governs it is a safety rule rather
 than a convenience: `IAX_THUMBDV_PORT` only ever **narrows** the USB VID/PID

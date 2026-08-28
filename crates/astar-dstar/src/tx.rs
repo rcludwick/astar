@@ -114,6 +114,31 @@ pub fn generate_stream_id() -> u16 {
         })
 }
 
+/// The callsign a reflector answers to ON THE `DExtra` WIRE, given the name
+/// it is listed under (`"XLX836"` → `"XRF836"`; everything else is returned
+/// uppercased and otherwise unchanged).
+///
+/// `xlxd` serves several protocols from one reflector, and its `DExtra`
+/// personality is the historical `XRF` one: a reflector the directories list
+/// as `XLX###` identifies itself as `XRF###` in every `DExtra` RF header it
+/// forwards. The one piece of real traffic this project owns proves it — the
+/// 56-byte header captured off XLX458 (KC-Wide) and pinned in `dsvt.rs`'s
+/// `parses_a_real_xlx_header_with_a_zero_crc` carries `RPT2 = "XRF458 A"`,
+/// not `"XLX458 A"`. Addressing a transmission to `XLX458` addresses a
+/// reflector nobody on that wire answers to.
+///
+/// The three characters after the prefix are ALPHANUMERIC, not necessarily
+/// digits (`XLXARG` → `XRFARG`), and are carried through untouched: the
+/// prefix is the only thing this rewrites.
+#[must_use]
+pub fn dextra_callsign(reflector_callsign: &str) -> String {
+    let upper = reflector_callsign.trim().to_ascii_uppercase();
+    match upper.strip_prefix("XLX") {
+        Some(rest) => format!("XRF{rest}"),
+        None => upper,
+    }
+}
+
 /// Builds the `RPT1`/`RPT2` pair for a transmission addressed at
 /// `reflector_callsign`'s module `module` (e.g. `("XRF757", b'A')` →
 /// `rpt1 = "XRF757 G"`, `rpt2 = "XRF757 A"`).
@@ -128,13 +153,14 @@ pub fn generate_stream_id() -> u16 {
 /// `IsValidModule(rpt2.GetModule())`, so a blank `RPT2` drops every REF-family
 /// transmission at the reflector with no error at the client.
 ///
-/// The callsign is uppercased, stripped of whitespace and truncated to 7
-/// characters (byte 7 is always the module/`G` slot, matching the real
-/// capture's `"XRF458 A"` shape).
+/// The callsign is put through [`dextra_callsign`] first (an `XLX…`
+/// reflector answers to `XRF…` here), then uppercased, stripped of whitespace
+/// and truncated to 7 characters (byte 7 is always the module/`G` slot,
+/// matching the real capture's `"XRF458 A"` shape).
 #[must_use]
 pub fn repeater_fields(reflector_callsign: &str, module: u8) -> ([u8; 8], [u8; 8]) {
     let mut base = [b' '; 8];
-    for (i, c) in reflector_callsign
+    for (i, c) in dextra_callsign(reflector_callsign)
         .bytes()
         .filter(|b| !b.is_ascii_whitespace())
         .take(7)
@@ -519,8 +545,8 @@ mod tests {
     #[test]
     fn repeater_fields_normalize_case_padding_and_overlong_callsigns() {
         let (rpt1, rpt2) = repeater_fields("xlx458", b'b');
-        assert_eq!(&rpt2, b"XLX458 B");
-        assert_eq!(&rpt1, b"XLX458 G");
+        assert_eq!(&rpt2, b"XRF458 B");
+        assert_eq!(&rpt1, b"XRF458 G");
         // Whitespace stripped, and never more than 7 callsign characters so
         // byte 7 always stays the module slot.
         let (_, rpt2) = repeater_fields(" xrf 757 ", b'C');
@@ -528,6 +554,43 @@ mod tests {
         let (rpt1, rpt2) = repeater_fields("ABCDEFGHIJ", b'D');
         assert_eq!(&rpt2, b"ABCDEFGD");
         assert_eq!(&rpt1, b"ABCDEFGG");
+    }
+
+    /// The `DExtra` alias, proved by the one real capture this project owns:
+    /// `dsvt.rs`'s `parses_a_real_xlx_header_with_a_zero_crc` is a header
+    /// received FROM XLX458, and it says `XRF458`. Addressing a transmission
+    /// to `XLX458` addresses a reflector nobody on that wire answers to.
+    #[test]
+    fn an_xlx_reflector_is_addressed_as_xrf_on_the_dextra_wire() {
+        assert_eq!(dextra_callsign("XLX458"), "XRF458");
+        assert_eq!(dextra_callsign("xlx836"), "XRF836");
+        let (rpt1, rpt2) = repeater_fields("XLX836", b'A');
+        assert_eq!(&rpt2, b"XRF836 A");
+        assert_eq!(&rpt1, b"XRF836 G");
+    }
+
+    /// Reflector suffixes are three ALPHANUMERIC characters, not always
+    /// digits: `XLXARG` is a real reflector, and letter-suffixed ones are
+    /// ~15% of the published XLX list. Only the prefix is rewritten.
+    #[test]
+    fn a_letter_suffixed_xlx_reflector_keeps_its_suffix() {
+        assert_eq!(dextra_callsign("XLXARG"), "XRFARG");
+        let (_, rpt2) = repeater_fields("xlxarg", b'd');
+        assert_eq!(&rpt2, b"XRFARG D");
+    }
+
+    /// Only `XLX` is aliased. Every other family — including the `XRF` names
+    /// that are already the wire form — is passed through, so this rewrite
+    /// can never invent a destination for a reflector that did not ask for
+    /// one.
+    #[test]
+    fn no_other_reflector_family_is_rewritten() {
+        assert_eq!(dextra_callsign("XRF757"), "XRF757");
+        assert_eq!(dextra_callsign("REF030"), "REF030");
+        assert_eq!(dextra_callsign("DCS019"), "DCS019");
+        assert_eq!(dextra_callsign("N0CALL"), "N0CALL");
+        // Not a prefix match: nothing to rewrite.
+        assert_eq!(dextra_callsign("MYXLX1"), "MYXLX1");
     }
 
     #[test]

@@ -172,7 +172,7 @@ fn dstar_connect_reaches_linked_and_reports_active() {
     // Lowercase module + uppercase callsign both round-trip: the station
     // uppercases `module` before validating/dialing.
     station
-        .dstar_connect(&addr.ip().to_string(), addr.port(), 'a', "N0CALL")
+        .dstar_connect(&addr.ip().to_string(), addr.port(), 'a', "N0CALL", None)
         .expect("dstar connect");
 
     assert!(
@@ -197,12 +197,12 @@ fn dstar_connect_reaches_linked_and_reports_active() {
 fn dstar_connect_rejects_invalid_module_and_empty_callsign() {
     let station = test_station();
     let err = station
-        .dstar_connect("127.0.0.1", 30_001, '1', "N0CALL")
+        .dstar_connect("127.0.0.1", 30_001, '1', "N0CALL", None)
         .expect_err("a digit is not A-Z");
     assert!(matches!(err, StationError::Dstar(_)), "got {err:?}");
 
     let err = station
-        .dstar_connect("127.0.0.1", 30_001, 'A', "")
+        .dstar_connect("127.0.0.1", 30_001, 'A', "", None)
         .expect_err("empty callsign must be rejected");
     assert!(matches!(err, StationError::Dstar(_)), "got {err:?}");
 }
@@ -220,7 +220,7 @@ fn set_ptt_keys_and_unkeys_a_live_dstar_session() {
     let addr = spawn_reflector();
     let station = test_station();
     station
-        .dstar_connect(&addr.ip().to_string(), addr.port(), 'A', "N0CALL")
+        .dstar_connect(&addr.ip().to_string(), addr.port(), 'A', "N0CALL", None)
         .expect("dstar connect");
     assert!(
         wait_until(
@@ -297,7 +297,7 @@ fn iax2_connect_is_refused_while_dstar_is_live() {
     let (station, session) = shared_station();
 
     station
-        .dstar_connect(&addr.ip().to_string(), addr.port(), 'A', "N0CALL")
+        .dstar_connect(&addr.ip().to_string(), addr.port(), 'A', "N0CALL", None)
         .expect("dstar connect");
     assert!(
         wait_until(
@@ -342,7 +342,7 @@ fn dstar_connect_is_refused_while_an_iax2_call_is_live() {
         .expect("dial pools a call");
 
     let err = station
-        .dstar_connect("127.0.0.1", 30_001, 'A', "N0CALL")
+        .dstar_connect("127.0.0.1", 30_001, 'A', "N0CALL", None)
         .expect_err("D-Star connect must be refused while an IAX2 call is live");
     assert!(
         matches!(err, StationError::AlreadyConnected),
@@ -365,7 +365,7 @@ fn disconnect_clears_a_live_dstar_session_so_a_fresh_dstar_connect_succeeds() {
     let station = test_station();
 
     station
-        .dstar_connect(&addr.ip().to_string(), addr.port(), 'A', "N0CALL")
+        .dstar_connect(&addr.ip().to_string(), addr.port(), 'A', "N0CALL", None)
         .expect("dstar connect");
     assert!(
         wait_until(
@@ -389,7 +389,7 @@ fn disconnect_clears_a_live_dstar_session_so_a_fresh_dstar_connect_succeeds() {
     // AlreadyConnected guard.
     let addr2 = spawn_reflector();
     station
-        .dstar_connect(&addr2.ip().to_string(), addr2.port(), 'A', "N0CALL")
+        .dstar_connect(&addr2.ip().to_string(), addr2.port(), 'A', "N0CALL", None)
         .expect("a fresh dstar_connect must succeed once disconnect() cleared the prior session");
     assert!(
         wait_until(
@@ -414,7 +414,7 @@ fn disconnect_clears_a_live_dstar_session_so_an_iax2_connect_succeeds() {
     let (station, session) = shared_station();
 
     station
-        .dstar_connect(&addr.ip().to_string(), addr.port(), 'A', "N0CALL")
+        .dstar_connect(&addr.ip().to_string(), addr.port(), 'A', "N0CALL", None)
         .expect("dstar connect");
     assert!(
         wait_until(
@@ -468,7 +468,7 @@ fn disconnect_while_keyed_flushes_and_terminates_the_stream_through_station() {
     let station = Arc::new(test_station());
 
     station
-        .dstar_connect(&addr.ip().to_string(), addr.port(), 'A', "N0CALL")
+        .dstar_connect(&addr.ip().to_string(), addr.port(), 'A', "N0CALL", None)
         .expect("dstar connect");
     assert!(
         wait_until(
@@ -733,7 +733,7 @@ fn dstar_session_drains_a_short_stream_through_the_station_facade() {
     let (station, output_tap) = station_with_pull_backend();
 
     station
-        .dstar_connect(&addr.ip().to_string(), addr.port(), 'A', "N0CALL")
+        .dstar_connect(&addr.ip().to_string(), addr.port(), 'A', "N0CALL", None)
         .expect("dstar connect");
     assert!(
         wait_until(
@@ -819,7 +819,7 @@ fn dstar_connect_without_a_thumbdv_fails_with_stationerror_dstar() {
         std::env::set_var("IAX_THUMBDV_PORT", "/dev/cu.usbserial-NOSUCHDEVICE");
     }
     let station = test_station();
-    let err = station.dstar_connect("127.0.0.1", 30_001, 'A', "N0CALL");
+    let err = station.dstar_connect("127.0.0.1", 30_001, 'A', "N0CALL", None);
     // SAFETY: same serialization as the `set_var` above.
     unsafe {
         std::env::remove_var("IAX_THUMBDV_PORT");
@@ -919,7 +919,7 @@ fn dstar_connect_does_not_block_snapshot_polling() {
     let station = Arc::new(slow_backend_station(CONNECT_DELAY));
     let connector = Arc::clone(&station);
     let handle = thread::spawn(move || {
-        let _ = connector.dstar_connect("127.0.0.1", 30_001, 'A', "N0CALL");
+        let _ = connector.dstar_connect("127.0.0.1", 30_001, 'A', "N0CALL", None);
     });
 
     // Poll the way a menu-bar UI does while the connect is in flight.

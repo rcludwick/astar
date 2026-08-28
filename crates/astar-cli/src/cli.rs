@@ -122,6 +122,10 @@ OPTIONS:
     --wav <path>        Write decoded audio as an 8 kHz s16 mono WAV file at
                          <path> instead of playing it on the default output
                          device.
+    --reflector <CS>    Destination reflector callsign (e.g. XLX836), which
+                         fills the transmitted RF header's RPT1/RPT2. Derived
+                         from <host> when omitted; pass it when connecting by
+                         bare IP address, which has nothing to derive from.
     -h, --help          Print this help and exit.
 
 D-Star is hardware-only: a ThumbDV USB dongle must be attached (no software

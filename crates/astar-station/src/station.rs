@@ -815,6 +815,16 @@ impl Station {
     /// selected input+output devices (mirrors [`Station::m17_connect`]'s
     /// device resolution exactly).
     ///
+    /// `reflector_callsign` names the DESTINATION reflector as the
+    /// directories list it (`"XLX836"`, `"XRF757"`) and fills the transmitted
+    /// RF header's `RPT1`/`RPT2` — the fields that say where a transmission
+    /// is going, which `xlxd` gates REF-family traffic on and every receiving
+    /// radio and dashboard renders. `None` derives it from `host`'s first DNS
+    /// label (`xlx836.…` → `XLX836`, addressed as `XRF836` on the `DExtra`
+    /// wire), which covers every reflector reached by its published hostname;
+    /// pass it explicitly when connecting by bare IP, where there is nothing
+    /// to derive from and the header would otherwise go out blank.
+    ///
     /// The station-level signature deliberately mirrors
     /// [`Station::m17_connect`]'s primitive-args shape (rather than taking
     /// an `astar_console::DstarConfig` directly): that type only exists
@@ -862,6 +872,7 @@ impl Station {
         port: u16,
         module: char,
         callsign: &str,
+        reflector_callsign: Option<&str>,
     ) -> Result<(), StationError> {
         let module = module.to_ascii_uppercase();
         if !module.is_ascii_uppercase() {
@@ -881,13 +892,14 @@ impl Station {
                 callsign: callsign.to_string(),
                 output,
                 input,
-                // The station-level signature stays primitive-args only (see
-                // this method's doc), so the destination reflector's callsign
-                // — which fills the TX header's RPT1/RPT2 — is derived from
-                // `host` (`xrf757.…` → `XRF757`); connecting by bare IP
-                // transmits with those fields blank. See
-                // `astar_console::dstar`'s `tx_repeater_fields`.
-                reflector_callsign: None,
+                // The destination reflector's callsign fills the TX header's
+                // RPT1/RPT2 (see `astar_console::dstar`'s
+                // `tx_repeater_fields`). `None` means "derive it from `host`"
+                // — `xlx836.…` → `XLX836` → `XRF836` on the wire — which is
+                // right for every reflector reached by its published
+                // hostname; a caller connecting by bare IP passes it
+                // explicitly instead of transmitting blank fields.
+                reflector_callsign: reflector_callsign.map(str::to_string),
             };
             // Refuse early and cheaply when something else already owns the
             // session: the lock is held for a few instructions here, not for
@@ -923,7 +935,7 @@ impl Station {
         }
         #[cfg(not(feature = "dstar"))]
         {
-            let _ = (host, port);
+            let _ = (host, port, reflector_callsign);
             Err(StationError::Dstar("dstar support not compiled".into()))
         }
     }

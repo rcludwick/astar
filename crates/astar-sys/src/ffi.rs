@@ -2417,8 +2417,19 @@ pub unsafe extern "C" fn iax_station_set_codec_dirs(
 /// [`IaxSnapshot::dstar_available`] and offer the affordance only when it is
 /// `true`, rather than calling this speculatively.
 ///
+/// `reflector_callsign` names the DESTINATION reflector as the directories
+/// list it (`"XLX836"`, `"XRF757"`) and fills the transmitted RF header's
+/// `RPT1`/`RPT2` — the fields that say where a transmission is going. Pass
+/// NULL to derive it from `host`'s first DNS label (`xlx836.…` → `XLX836`,
+/// which goes on the `DExtra` wire as `XRF836`), which is right for every
+/// reflector reached by its published hostname. A front-end that connects by
+/// bare IP address should pass it, because there is nothing to derive from
+/// and the header then transmits with `RPT1`/`RPT2` blank — no destination or
+/// repeater identity at all.
+///
 /// `host` and `callsign` are required (NULL/non-UTF-8 → [`IAX_ERR_NULL`] /
-/// [`IAX_ERR_UTF8`]). `module` must be a single ASCII byte; a non-ASCII byte
+/// [`IAX_ERR_UTF8`]); `reflector_callsign` is optional, but a non-NULL,
+/// non-UTF-8 one is [`IAX_ERR_UTF8`]. `module` must be a single ASCII byte; a non-ASCII byte
 /// is rejected here with [`IAX_ERR_DSTAR`] before it reaches the station —
 /// the remaining `A`-`Z` validation (and an empty `callsign`) is caught by
 /// the station and also maps to [`IAX_ERR_DSTAR`]. Returns [`IAX_OK`],
@@ -2436,6 +2447,7 @@ pub unsafe extern "C" fn iax_station_connect_dstar(
     port: u16,
     module: c_char,
     callsign: *const c_char,
+    reflector_callsign: *const c_char,
 ) -> c_int {
     if st.is_null() {
         return IAX_ERR_NULL;
@@ -2450,6 +2462,18 @@ pub unsafe extern "C" fn iax_station_connect_dstar(
             Ok(s) => s,
             Err(c) => return c,
         };
+        // Optional: NULL means "derive the reflector's callsign from `host`"
+        // (see this function's doc). A non-NULL one is held to the same
+        // strict-UTF-8 rule as the required strings — a lossy conversion
+        // would silently transmit a corrupted destination callsign.
+        let reflector_callsign = if reflector_callsign.is_null() {
+            None
+        } else {
+            match unsafe { req_str(reflector_callsign) } {
+                Ok(s) => Some(s),
+                Err(c) => return c,
+            }
+        };
         // c_char may be signed; reinterpret the raw byte (no sign loss) — a
         // non-ASCII byte is never a valid module letter. The remaining A-Z
         // check is the station's job (`Station::dstar_connect`).
@@ -2457,11 +2481,13 @@ pub unsafe extern "C" fn iax_station_connect_dstar(
         if !byte.is_ascii() {
             return IAX_ERR_DSTAR;
         }
-        result_code(
-            station
-                .inner
-                .dstar_connect(host, port, char::from(byte), callsign),
-        )
+        result_code(station.inner.dstar_connect(
+            host,
+            port,
+            char::from(byte),
+            callsign,
+            reflector_callsign,
+        ))
     }))
     .unwrap_or(IAX_ERR_PANIC)
 }

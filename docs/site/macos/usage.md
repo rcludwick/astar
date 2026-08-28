@@ -24,6 +24,7 @@ What this page will eventually cover:
 * Reading the level meters and the spectrum display.
 * Microphone characterization and per-profile gain.
 * M17 sessions.
+* D-Star, once it reaches this client.
 
 In the meantime:
 

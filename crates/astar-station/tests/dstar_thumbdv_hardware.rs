@@ -347,7 +347,7 @@ fn hardware_dstar_session_decodes_a_canned_stream_to_nonsilent_pcm() {
     let (station, output_tap) = station_with_pull_backend();
 
     station
-        .dstar_connect(&addr.ip().to_string(), addr.port(), 'A', "N0CALL")
+        .dstar_connect(&addr.ip().to_string(), addr.port(), 'A', "N0CALL", None)
         .expect("dstar connect against the local loopback parrot");
     assert!(
         wait_until(
@@ -632,7 +632,7 @@ fn hardware_dstar_tx_rx_round_trip_through_the_real_thumbdv() {
     let (station, mic_sink, output_tap) = station_with_push_pull_backend();
 
     station
-        .dstar_connect(&addr.ip().to_string(), addr.port(), 'A', "AJ7HR")
+        .dstar_connect(&addr.ip().to_string(), addr.port(), 'A', "AJ7HR", None)
         .expect("dstar connect against the local loopback parrot");
     assert!(
         wait_until(

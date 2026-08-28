@@ -1,3 +1,6 @@
+// astar — Copyright (c) 2026 Rob Ludwick.
+// SPDX-License-Identifier: AGPL-3.0-only
+// Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 //! Print the engine's own view of the host's audio devices.
 //!
 //! `cargo run -p astar-audio --example list_devices`
