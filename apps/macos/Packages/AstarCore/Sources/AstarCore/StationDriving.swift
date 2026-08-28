@@ -56,6 +56,40 @@ public protocol StationDriving {
     /// Disconnect the live M17 session, if any. Idempotent — a no-op while idle.
     /// Mirrors `Station.m17Disconnect()` 1:1.
     func m17Disconnect() throws
+    // MARK: D-Star (iax-4c8e)
+
+    /// Connect to a D-Star reflector over DExtra and open a full-transceive
+    /// session on `module`, mutually exclusive with an IAX2 call and an M17
+    /// session. Mirrors `Station.connectDStar(host:port:module:callsign:
+    /// reflectorCallsign:)` 1:1.
+    ///
+    /// HARDWARE-ONLY: this opens a ThumbDV AMBE dongle and fails when there
+    /// is none. There is no software vocoder to fall back to, which is why
+    /// callers gate on `CallSnapshot.dstarAvailable` rather than calling
+    /// speculatively.
+    ///
+    /// `reflectorCallsign` names the destination the way the directories list
+    /// it ("XRF836") and fills the transmitted header's RPT1/RPT2. `nil`
+    /// derives it from `host`'s first DNS label, which is right for a
+    /// reflector reached by its published hostname and wrong for a bare IP —
+    /// so the directory path always passes it explicitly.
+    ///
+    /// Blocks for a serial scan plus a per-port dongle init before it touches
+    /// the network. Call it off the main thread.
+    func connectDStar(
+        host: String, port: UInt16, module: Character, callsign: String,
+        reflectorCallsign: String?
+    ) throws
+    /// Disconnect the live D-Star session, if any. Idempotent — a no-op while
+    /// idle. Mirrors `Station.dstarDisconnect()` 1:1.
+    func dstarDisconnect() throws
+    /// The live D-Star session's own state — link, last-heard talker, slow-data
+    /// text — or `nil` when none is active. Mirrors `Station.dstarState()` 1:1.
+    ///
+    /// Costlier than `readSnapshot()`: it crosses the ABI with a buffer and
+    /// parses JSON. Poll the snapshot for meters; call this at UI rate.
+    func dstarState() throws -> DStarState?
+
     /// Set extra directories to search for a runtime `libcodec2`, ahead of the hard-coded
     /// system paths — e.g. to point at an app bundle's own copy of the library. Call before
     /// `connectM17`; it does not affect a session already in progress. Mirrors

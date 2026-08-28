@@ -19,39 +19,9 @@ public enum M17Dial {
     /// separator, an unparseable/zero/out-of-range port, or a module that
     /// isn't exactly one ASCII letter.
     public static func parse(_ raw: String) -> (host: String, port: UInt16, module: Character)? {
-        let text = raw.trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty else { return nil }
-
-        // `host[:port]` never itself contains `/` or ` ` (host has no internal
-        // whitespace, port is digits only), so the FIRST occurrence of either
-        // is unambiguously the module separator — whichever grammar form was
-        // used.
-        guard let sepIndex = text.firstIndex(where: { $0 == "/" || $0 == " " }) else {
-            return nil
-        }
-        let hostPort = text[..<sepIndex]
-        let modulePart = text[text.index(after: sepIndex)...]
-            .trimmingCharacters(in: .whitespaces)
-
-        guard modulePart.count == 1, let module = modulePart.first,
-            module.isASCII, module.isLetter
-        else { return nil }
-
-        // At most one `:` — the part before it is the host, the part after
-        // (if present) is the port.
-        let hostPortParts = hostPort.split(separator: ":", omittingEmptySubsequences: false)
-        guard hostPortParts.count <= 2 else { return nil }
-        let host = String(hostPortParts[0])
-        guard !host.isEmpty, !host.contains(where: \.isWhitespace) else { return nil }
-
-        let port: UInt16
-        if hostPortParts.count == 2 {
-            guard let parsed = UInt16(hostPortParts[1]), parsed > 0 else { return nil }
-            port = parsed
-        } else {
-            port = 17000
-        }
-
-        return (host: host, port: port, module: Character(module.uppercased()))
+        ReflectorAddressDial.parse(raw, defaultPort: defaultPort)
     }
+
+    /// The M17 reflector default, applied when the text omits a port.
+    public static let defaultPort: UInt16 = 17000
 }

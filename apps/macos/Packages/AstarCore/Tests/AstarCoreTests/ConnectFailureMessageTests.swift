@@ -77,4 +77,17 @@ final class ConnectFailureMessageTests: XCTestCase {
             "expected the Foundation default, got: \(before)")
         XCTAssertFalse(before.contains("offline"), "before-text carries no useful hint")
     }
+
+    /// The engine classifies D-Star failures precisely, but that text does not
+    /// cross the C-ABI — `iax_error_text(-19)` is the static string "dstar
+    /// error". Left alone the operator would read "astarstation error -19:
+    /// dstar error", which says nothing about the one thing that is almost
+    /// always wrong: the dongle.
+    func testADStarFailureNamesTheDongleRatherThanTheErrorCode() {
+        let message = connectFailureMessage(
+            for: StationError(code: -19, text: "dstar error"), node: "XLX836 A")
+        XCTAssertTrue(message.contains("ThumbDV"), message)
+        XCTAssertTrue(message.contains("XLX836 A"), message)
+        XCTAssertFalse(message.contains("-19"), "an error code is not a diagnosis")
+    }
 }

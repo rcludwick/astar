@@ -43,6 +43,30 @@ public final class CallSession: ObservableObject {
     /// Edge-guarded in `poll()` like the rest of this published state.
     @Published public private(set) var m17Available = false
 
+    /// Whether the engine can dial D-Star (iax-4c8e): mirrors the snapshot's
+    /// `dstarAvailable` flag. Gates the D-Star picker segment
+    /// (`Network.available(m17:dstar:)`).
+    ///
+    /// Unlike `m17Available` this reports HARDWARE, not a build: D-Star voice
+    /// is AMBE and astar ships no software vocoder, so it is true only while a
+    /// ThumbDV is attached. The engine memoizes the probe process-wide, so a
+    /// dongle plugged in after launch does not appear until the next one.
+    @Published public private(set) var dstarAvailable = false
+
+    /// The MY callsign of the most recently heard D-Star transmission, or
+    /// `nil` until one arrives. **Last heard, not talking now** — it persists
+    /// past end-of-transmission by design (`receiving` is what says whether
+    /// audio is flowing). Cleared when the session ends.
+    @Published public private(set) var dstarTalker: String?
+    /// The most recent D-Star slow-data free-text message, or `nil` if none
+    /// has arrived. Persists like `dstarTalker`.
+    ///
+    /// **Attacker-controlled**: it is typed by whoever is transmitting on the
+    /// reflector. Render it as text, never as markup, and never interpret it.
+    @Published public private(set) var dstarSlowText: String?
+    /// The DExtra link's own state, or `nil` when no D-Star session is live.
+    @Published public private(set) var dstarLink: DStarState.Link?
+
     /// The node most recently dialed (set at `connect`, cleared at `disconnect`).
     /// Surfaces who we're connected to — e.g. the menu-bar right-click menu.
     /// Display should still gate on `status`, since a stale value can outlive a
@@ -284,6 +308,27 @@ public final class CallSession: ObservableObject {
         }
     }
     private static let m17CallsignKey = "m17.callsign"
+
+    /// The operator's own callsign, which is one fact about the operator and
+    /// not one per network: M17 sends it in every frame and D-Star puts it in
+    /// every header, and it is the same string in both.
+    ///
+    /// Backed by `m17Callsign` and so by the `m17.callsign` defaults key. The
+    /// key keeps its old name deliberately: renaming it would be a config
+    /// migration (`ConfigVersion` bump plus a translation in both directions)
+    /// bought for nothing, because the VALUE is already exactly this and no
+    /// reader would misinterpret it. The name is an implementation detail; the
+    /// meaning never changed.
+    public var operatorCallsign: String {
+        get { m17Callsign }
+        set { m17Callsign = newValue }
+    }
+
+    /// Whether `network` needs the operator's callsign before it can dial.
+    /// Both reflector networks transmit it; AllStar dials as the user's node.
+    public static func requiresCallsign(_ network: Network) -> Bool {
+        network == .m17 || network == .dstar
+    }
     /// Backing store for `m17Callsign`. Injected (defaults to `.standard`) so
     /// tests can assert persistence without touching real defaults.
     private let m17Defaults: UserDefaults
@@ -468,6 +513,7 @@ public final class CallSession: ObservableObject {
         }
         switch network {
         case .m17: return M17Dial.parse(raw) != nil
+        case .dstar: return DStarDial.parse(raw) != nil
         case .allstar, .hamlink: return DialTarget.parse(raw) != nil
         }
     }
@@ -542,6 +588,19 @@ public final class CallSession: ObservableObject {
             if dtmfPlayed != snap.dtmfPlayed { dtmfPlayed = snap.dtmfPlayed }
             if dtmfTotal != snap.dtmfTotal { dtmfTotal = snap.dtmfTotal }
             if m17Available != snap.m17Available { m17Available = snap.m17Available }
+            if dstarAvailable != snap.dstarAvailable { dstarAvailable = snap.dstarAvailable }
+            // D-Star's own fields are NOT in the snapshot — the engine keeps
+            // them behind a second call that crosses the ABI with a buffer and
+            // parses JSON. So it is asked only while a D-Star session is live,
+            // never on the idle path, and never on a poll for another network.
+            if snap.dstarActive {
+                let state = try? station.dstarState()
+                if dstarTalker != state?.talker { dstarTalker = state?.talker }
+                if dstarSlowText != state?.slowText { dstarSlowText = state?.slowText }
+                if dstarLink != state?.link { dstarLink = state?.link }
+            } else if dstarLink != nil || dstarTalker != nil || dstarSlowText != nil {
+                clearDStarState()
+            }
             // Quarter-second peak-hold for the VU meters (astar-f78a) so they read
             // steadily instead of flickering at the poll rate.
             let meterNow = Date()
@@ -621,6 +680,17 @@ public final class CallSession: ObservableObject {
             {
                 restoreStandardTxProcessing()
                 setActiveCallNetwork(nil)
+            }
+            // The same edge for D-Star: a link the reflector dropped, or a
+            // dongle pulled out of the USB port, never reaches `disconnect()`.
+            // There is no TX override to restore — D-Star does not have one —
+            // so this only clears the stale network and the last-heard fields,
+            // which would otherwise name a talker from a session that ended.
+            if activeCallNetwork == .dstar, snap.status == .hangup || snap.status == .idle,
+                lastPolledStatus != .hangup, lastPolledStatus != .idle
+            {
+                setActiveCallNetwork(nil)
+                clearDStarState()
             }
             lastPolledStatus = snap.status
             // "Receiving" = far end keyed (when the node reports it) OR live rx
@@ -708,6 +778,16 @@ public final class CallSession: ObservableObject {
         /// stale dial's completion tearing down a NEWER dial's live session)
         /// impossible by construction rather than merely unreachable today.
         case dialInProgress
+        /// The D-Star dial field's text names nothing in the directory and
+        /// does not parse as `host[:port]/module` either.
+        case badDStarTarget
+        /// D-Star was dialled with no vocoder present. Refused here rather
+        /// than at the engine so the message can say what to do about it:
+        /// D-Star voice is AMBE, astar has no software vocoder, and a
+        /// ThumbDV is the only way to hear one. Defensive — the picker does
+        /// not offer D-Star without a dongle — but reachable if the dongle is
+        /// unplugged between the picker appearing and Connect being pressed.
+        case dstarUnavailable
 
         public var errorDescription: String? {
             switch self {
@@ -727,6 +807,14 @@ public final class CallSession: ObservableObject {
                 return "astar can't connect to \(name) yet."
             case .dialInProgress:
                 return "Already connecting — try again in a moment."
+            case .badDStarTarget:
+                return
+                    "Enter a reflector name and module (XLX836 A), "
+                    + "or an address as host[:port]/module."
+            case .dstarUnavailable:
+                return
+                    "D-Star needs a ThumbDV vocoder dongle attached — "
+                    + "astar has no software AMBE decoder."
             }
         }
     }
@@ -768,6 +856,8 @@ public final class CallSession: ObservableObject {
             throw ConnectError.unsupportedNetwork
         case .m17:
             try connectM17(target: node)
+        case .dstar:
+            try connectDStar(target: node)
         }
     }
 
@@ -875,6 +965,105 @@ public final class CallSession: ObservableObject {
             },
             onStale: {
                 try? station.m17Disconnect()
+                try? station.disconnect()
+            })
+    }
+
+    /// Turn the D-Star dial field's text into a host, port, module and the
+    /// destination reflector's callsign — **directory first, address second**,
+    /// the same order and for the same reason as `m17Target`.
+    ///
+    /// The fourth value is what makes this more than a copy. D-Star transmits
+    /// the destination in the RF header's RPT1/RPT2, and the engine derives it
+    /// from the hostname when told nothing (`xlx836.…` → `XLX836` → `XRF836`
+    /// on the DExtra wire). That derivation is right for a reflector reached
+    /// by its published hostname and impossible for one reached by a bare IP —
+    /// and the directory publishes plenty of the latter (XLX836 itself is
+    /// `45.56.69.219`). So a directory dial always passes the callsign the
+    /// feed gave us, and only the typed-address path leaves it to the engine.
+    private func dstarTarget(_ target: String) throws -> (
+        host: String, port: UInt16, module: Character, reflectorCallsign: String?
+    ) {
+        switch resolveReflector(target, network: .dstar) {
+        case .ready(let reflector):
+            guard let module = reflector.module else {
+                // Unreachable — a module-addressing dial resolves to
+                // `needsModule` without one — but stated rather than forced,
+                // because the alternative is inventing a letter, and on D-Star
+                // the letter is the room.
+                throw ConnectError.needsModule(reflector.entry.id)
+            }
+            return (
+                host: reflector.host, port: reflector.port, module: module,
+                reflectorCallsign: reflector.callsign
+            )
+        case .needsModule(let entry):
+            throw ConnectError.needsModule(entry.id)
+        case .notDialable(let entry):
+            throw ConnectError.reflectorNotDialable(entry.id)
+        case .notInDirectory:
+            guard let parsed = DStarDial.parse(target) else {
+                throw ConnectError.badDStarTarget
+            }
+            // `nil`: let the engine derive RPT1/RPT2 from the hostname. The
+            // operator typed an address we know nothing else about, and a
+            // guessed reflector callsign would be transmitted on the air.
+            return (
+                host: parsed.host, port: parsed.port, module: parsed.module,
+                reflectorCallsign: nil
+            )
+        }
+    }
+
+    /// The `.dstar` arm of `connect(node:network:)` (iax-4c8e).
+    ///
+    /// Structured exactly like `connectM17` — validate everything before
+    /// touching any state, claim the single-flight dial slot, then dial with
+    /// every post-completion write generation-gated — because the races are
+    /// the same races (astar-dialrace) and two connect paths that guard them
+    /// differently is how one of them ends up not guarding them at all.
+    ///
+    /// Two things are D-Star's own. The vocoder is checked up front: D-Star is
+    /// hardware-only, and "no dongle" deserves a sentence about a dongle
+    /// rather than the engine's generic refusal several layers down. And the
+    /// engine call BLOCKS for a serial scan plus a per-port dongle init before
+    /// it touches the network — around a second, sometimes more on a flaky
+    /// dongle — which is why every caller runs this off the main thread.
+    private func connectDStar(target: String) throws {
+        let parsed = try dstarTarget(target)
+        let callsign = operatorCallsign.trimmingCharacters(in: .whitespaces)
+        guard !callsign.isEmpty else {
+            throw ConnectError.missingCallsign
+        }
+        guard dstarAvailable else {
+            throw ConnectError.dstarUnavailable
+        }
+        let generation = try claimDial()
+        try? station.disconnect()
+        setDialedNode(target)
+        recordedRecentForCall = false
+        dialAwaitingAnswer = false
+        setLastDialFailure(nil)
+        do {
+            try station.connectDStar(
+                host: parsed.host, port: parsed.port, module: parsed.module,
+                callsign: callsign, reflectorCallsign: parsed.reflectorCallsign)
+        } catch {
+            testPostEngineCallHook?()
+            releaseDial(
+                generation: generation,
+                onCurrent: { setDialedNode(nil) },
+                onStale: {})
+            throw error
+        }
+        testPostEngineCallHook?()
+        releaseDial(
+            generation: generation,
+            onCurrent: { setActiveCallNetwork(.dstar) },
+            // A disconnect superseded us while the dongle was initialising:
+            // the session we just established is nobody's. Tear it down.
+            onStale: {
+                try? station.dstarDisconnect()
                 try? station.disconnect()
             })
     }
@@ -1089,10 +1278,29 @@ public final class CallSession: ObservableObject {
                 // before the network is cleared below.
                 restoreStandardTxProcessing()
             }
+            // Same belt-and-suspenders as M17's: `Station.disconnect()`
+            // already tears a D-Star session down engine-side, but saying so
+            // explicitly keeps the teardown observable on a fake station and
+            // reads at the call site rather than one layer down.
+            if activeCallNetwork == .dstar {
+                try? station.dstarDisconnect()
+                clearDStarState()
+            }
             try station.disconnect()
             setDialedNode(nil)
             setActiveCallNetwork(nil)
         }
+    }
+
+    /// Drop the last-heard D-Star fields. Called on every path a session can
+    /// end by — the explicit hangup, the poll's teardown edge, and a snapshot
+    /// that simply stops reporting one — because a talker callsign left on
+    /// screen after the link is gone is a claim about the present that is no
+    /// longer true.
+    private func clearDStarState() {
+        dstarTalker = nil
+        dstarSlowText = nil
+        dstarLink = nil
     }
 
     /// Record (or clear) the dialed node. `@Published`, so hop to the main thread —
@@ -1716,6 +1924,20 @@ public func connectFailureMessage(for error: Error, node: String) -> String {
         // the account side, not the node.
         return "Couldn’t sign in to AllStarLink — check your AllStarLink "
             + "account in Settings."
+    case -19:  // IAX_ERR_DSTAR — every D-Star connect failure, and the most
+        // likely one by far is the dongle. The engine DOES classify these
+        // precisely ("ThumbDV at /dev/cu.usbserial-… is busy — another
+        // process has it open", "no dongle", "wrong device"), but that text
+        // does not cross the C-ABI: `iax_error_text(-19)` is the static
+        // string "dstar error", so `stationError.description` would show
+        // "astarstation error -19: dstar error" and tell the operator
+        // nothing. Naming the three real causes is more use than that, and
+        // more honest than picking one we cannot distinguish from here.
+        //
+        // The fix that would beat this is an engine-side last-error accessor
+        // on the C-ABI; until then, this.
+        return "Couldn’t connect to \(node) — check the ThumbDV is plugged in "
+            + "and not in use by another app."
     default:
         return stationError.description
     }
