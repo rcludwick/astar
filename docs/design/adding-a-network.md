@@ -70,7 +70,11 @@ driver: a different RATEP word plus that network's frame packing. Do not plan a
 new vocoder integration for them; plan a RATEP table.
 
 P25 Phase 1 is IMBE, a different rate again — **verify against the chip before
-promising it**, rather than assuming the family extends.
+promising it**, rather than assuming the family extends. See
+`p25-network.md`, which makes that verification the gating step and records what
+to do if the answer is no.
+
+Per-network designs: `ysf-network.md`, `nxdn-network.md`, `p25-network.md`.
 
 > **Licence gate.** A vocoder's terms decide where it may live. Check them before
 > writing code, put the dependency behind a non-default feature, and record the

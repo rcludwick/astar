@@ -517,6 +517,8 @@ touches, derived from M17 and D-Star. The vocoder is not the expensive layer:
 AMBE+2 is a RATEP word on the ThumbDV astar already drives, and the directory
 already publishes these reflectors with a `dial.kind`.
 
+**Design:** `docs/design/ysf-network.md`.
+
 ### iax-b9c2 — NXDN engine backend: NXDNReflector protocol
 *P4 backlog · feature · labels: nxdn, protocol, cx:4*
 
@@ -528,6 +530,8 @@ capability pattern from iax-f2b8.
 touches, derived from M17 and D-Star. The vocoder is not the expensive layer:
 AMBE+2 is a RATEP word on the ThumbDV astar already drives, and the directory
 already publishes these reflectors with a `dial.kind`.
+
+**Design:** `docs/design/nxdn-network.md`.
 
 ### iax-c9f4 — Hams Over IP engine backend: SIP/RTP client (G.711)
 *P3 low · feature · labels: hoip, protocol, cx:4*
