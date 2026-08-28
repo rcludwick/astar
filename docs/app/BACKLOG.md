@@ -12,7 +12,7 @@ inline. All 129 issues (107 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (36)
+## Open items (35)
 
 ### astar-menu — MainMenu.install never wins; SwiftUI's default menu ships instead
 *P3 low · bug · labels: macos, ui, cx:2*
@@ -97,17 +97,21 @@ macOS 13 floor: `docs/site/macos/index.md:18`,
 sets the floor now (SwiftUI/Ventura API use, not `MenuBarExtra`) and reword all
 three. Spotted while correcting the Dock-icon claims for astar-7c31.
 
-### astar-e2b9 — D-Star network light-up (blocked on iax-a9d4)
-*P2 medium · feature · labels: network, dstar, cx:2*
+### astar-e2b9 — D-Star per-network audio profile
+*P3 low · feature · labels: network, dstar, audio*
 
-When the engine's decode-only D-Star milestone (astar-lib iax-a9d4)
-lands: network-switcher gains a D-Star entry (listen-only at first —
-reuse the existing TX-disabled/listen-only presentation), reflector
-host + module target field, per-network audio profile, talker callsign +
-slow-data message display, vendored binding bump for the new Station
-surface. Spec: `docs/superpowers/specs/2026-08-06-ambe-thumbdv-dstar-design.md`
-(later-milestones section); same design bar as the M17 light-up. Optional
-build: D-Star only appears when the engine was built with its features on.
+What is left of the D-Star light-up. The network itself shipped: `Network.dstar`
+in the switcher (gated on a ThumbDV being attached), the reflector-name +
+module dial field resolving through the directory's 944 D-Star rows, the
+talker-callsign and slow-data display, and full transceive through the engine's
+existing DExtra path. See `docs/app/design/reflector-directory.md` §5b.
+
+The gap is audio: M17 carries its own TX chain (`M17AudioOverrides` — noise
+reduction, compression, TX trim, input gain, pushed on dial and restored on
+teardown), and D-Star runs on the shared chain with no equivalent. A vocoder
+that is not codec2 wants its own levels; this is where they would live. Mirror
+`pushM17TxOverrides`/`restoreStandardTxProcessing`, and give it the same
+progressive-disclosure treatment in Quick settings.
 
 ### astar-d4c2 — Accessibility phase 2.5: remaining P2s (focus, menu-bar state, color-only tint, canvas values, contrast)
 *P2 medium · task · labels: a11y, cx:2*
@@ -194,16 +198,6 @@ does). (6) hide/disable VOX controls while M17 active until the engine
 mirrors input_level_db (iax-e2c8 item 6). (7) network-switch animation
 shipped on Mac 2026-08-03 (work/astar-anim); gui-rs look-and-feel parity
 pending.
-
-### astar-d5a7 — D-Star network: Network.dstar light-up (XLX/XRF reflectors)
-*P4 backlog · feature · labels: cx:3, dstar*
-**Blocked by:** iax-d7e3 (D-Star engine backend)
-
-**Design:** Undesigned placeholder per Rob 2026-08-03: D-Star as a switcher
-network (KC-Wide is XLX458/XRF458 module A). UI shape mirrors astar-c2e5
-(reflector + module + callsign). HARD GATE inherited from the engine item:
-D-Star voice is AMBE — no freely-licensable software vocoder (hardware
-dongle or legally-gray mbelib); design starts there.
 
 ### astar-e7b3 — YSF network: Network.ysf light-up (YSF reflectors)
 *P4 backlog · feature · labels: cx:3, ysf*

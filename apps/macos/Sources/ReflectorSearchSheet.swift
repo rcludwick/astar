@@ -26,10 +26,18 @@
         /// dial right now. `nil` means the app network has no directory
         /// counterpart (AllStar), and the sheet opens showing everything.
         let preferredNetwork: ReflectorNetwork?
-        /// Hands back the finished dial text. The sheet writes a string, not a
-        /// target: the dial field stays the single source of truth for what
-        /// will be dialled, so there is no second place holding half of it.
-        let onSelect: (String) -> Void
+        /// Hands back the finished dial text **and the network it belongs
+        /// to**. The sheet writes a string, not a target: the dial field stays
+        /// the single source of truth for what will be dialled, so there is no
+        /// second place holding half of it.
+        ///
+        /// The network travels with it because the filter can be changed. Pick
+        /// a D-Star reflector while the picker sits on M17 and the text is
+        /// perfectly good — it just resolves against the wrong network, finds
+        /// nothing, and falls through to an address parser that fails. Handing
+        /// the network back lets the caller switch to it, the same way the
+        /// favorites menu already switches to a favorite's own network.
+        let onSelect: (String, ReflectorNetwork) -> Void
 
         @EnvironmentObject private var reflectors: ReflectorDirectory
         @Environment(\.dismiss) private var dismiss
@@ -227,7 +235,7 @@
         private func select(_ entry: DirectoryEntry) {
             guard entry.isDialable else { return }
             if ReflectorModuleOptions.options(for: entry.dial).isEmpty {
-                onSelect(entry.id)
+                onSelect(entry.id, entry.network)
                 dismiss()
             } else {
                 choosingModuleFor = entry
@@ -311,7 +319,7 @@
                 // A recollection, written down only because the operator
                 // actually chose it. Nothing reads this at dial time.
                 memory.remember(letter, for: entry)
-                onSelect(ReflectorDialText.applying(module: letter, to: entry.id))
+                onSelect(ReflectorDialText.applying(module: letter, to: entry.id), entry.network)
                 dismiss()
             } label: {
                 Text(String(letter))

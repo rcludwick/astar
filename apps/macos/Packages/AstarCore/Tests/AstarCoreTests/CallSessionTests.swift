@@ -170,6 +170,34 @@ final class FakeStation: StationDriving {
     func setCodecDirs(_ dirs: [String]) throws {
         codecDirs.append(dirs)
     }
+
+    // D-Star (iax-4c8e) scripting/recording. The reflector callsign is
+    // recorded because it is the field that goes out on the air in RPT1/RPT2
+    // — the one argument here whose value a listener elsewhere can observe.
+    private(set) var dstarConnects:
+        [(
+            host: String, port: UInt16, module: Character, callsign: String,
+            reflectorCallsign: String?
+        )] = []
+    private(set) var dstarDisconnects = 0
+    /// When set, `connectDStar` throws — the "no dongle attached" shape.
+    var dstarConnectError: Error?
+    /// What `dstarState()` reports; `nil` is "no session", the idle answer.
+    var dstarStateValue: DStarState?
+    func connectDStar(
+        host: String, port: UInt16, module: Character, callsign: String,
+        reflectorCallsign: String?
+    ) throws {
+        waitForGateIfSet()
+        if let dstarConnectError { throw dstarConnectError }
+        dstarConnects.append((host, port, module, callsign, reflectorCallsign))
+        callLog.append("connectDStar")
+    }
+    func dstarDisconnect() throws {
+        dstarDisconnects += 1
+        callLog.append("dstarDisconnect")
+    }
+    func dstarState() throws -> DStarState? { dstarStateValue }
 }
 
 /// A station whose device enumeration always throws, to verify CallSession's
@@ -211,6 +239,12 @@ private struct ThrowingStation: StationDriving {
     }
     func m17Disconnect() throws { throw Boom() }
     func setCodecDirs(_ dirs: [String]) throws { throw Boom() }
+    func connectDStar(
+        host: String, port: UInt16, module: Character, callsign: String,
+        reflectorCallsign: String?
+    ) throws { throw Boom() }
+    func dstarDisconnect() throws { throw Boom() }
+    func dstarState() throws -> DStarState? { throw Boom() }
 }
 
 /// An in-memory audio store so persistence-path tests don't touch real defaults.

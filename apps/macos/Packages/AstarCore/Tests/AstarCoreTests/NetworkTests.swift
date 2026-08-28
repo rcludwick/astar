@@ -93,4 +93,51 @@ final class NetworkTests: XCTestCase {
             XCTAssertFalse(Network.m17.admitsDialCharacter(c), "\(c) must be dropped")
         }
     }
+
+    // MARK: - D-Star (iax-4c8e)
+
+    /// The picker offers D-Star only when a vocoder dongle is present. This is
+    /// not the usual build-flag gate: D-Star voice is AMBE and astar ships no
+    /// software decoder, so an entry offered without hardware behind it would
+    /// be an affordance that always fails.
+    func testDStarAppearsOnlyWhenAVocoderIsPresent() {
+        XCTAssertEqual(Network.available(m17: false, dstar: false), [.allstar])
+        XCTAssertEqual(Network.available(m17: false, dstar: true), [.allstar, .dstar])
+        XCTAssertEqual(Network.available(m17: true, dstar: true), [.allstar, .m17, .dstar])
+    }
+
+    /// Unplugging the dongle between launches must not leave the app selected
+    /// on a network it cannot dial — it falls back to AllStar, like every
+    /// other unavailable network.
+    func testAPersistedDStarSelectionFallsBackWhenTheDongleIsGone() {
+        XCTAssertEqual(Network.resolve("dstar", m17: true, dstar: true), .dstar)
+        XCTAssertEqual(Network.resolve("dstar", m17: true, dstar: false), .allstar)
+    }
+
+    /// D-Star's rows are in the directory, so the case has to bridge to it —
+    /// this is what makes 944 published reflectors dialable rather than merely
+    /// listed.
+    func testDStarBridgesToItsDirectoryNetwork() {
+        XCTAssertEqual(Network.dstar.reflectorNetwork, .dstar)
+        XCTAssertEqual(Network.m17.reflectorNetwork, .m17)
+        XCTAssertNil(Network.allstar.reflectorNetwork)
+    }
+
+    /// The space is part of the reflector grammar (`XLX836 A`), not something
+    /// to filter out of the field as the operator types.
+    func testDStarAdmitsTheModuleSeparators() {
+        XCTAssertTrue(Network.dstar.admitsDialCharacter(" "))
+        XCTAssertTrue(Network.dstar.admitsDialCharacter("/"))
+        XCTAssertTrue(Network.dstar.admitsDialCharacter("8"))
+        XCTAssertFalse(Network.dstar.admitsDialCharacter("*"))
+    }
+
+    /// One grammar, two default ports — the networks differ in protocol, not
+    /// in how an address is typed.
+    func testTheAddressGrammarIsSharedAndOnlyThePortDiffers() {
+        XCTAssertEqual(DStarDial.parse("xrf757.example/A")?.port, 30001)
+        XCTAssertEqual(M17Dial.parse("m17.example/A")?.port, 17000)
+        XCTAssertEqual(DStarDial.parse("host:30051 b")?.module, "B")
+        XCTAssertNil(DStarDial.parse("XLX836"), "no module — not an address")
+    }
 }

@@ -127,10 +127,17 @@ both consult, so the two cannot disagree about whether a field is complete.
 
 One correction to the sketch above: the grammar (`NAME`, `NAME module`,
 `NAME/module`) is shared by D-Star and M17 rather than being a D-Star path —
-`ReflectorDialText` splits the text and knows nothing about either. Only M17
-reaches it from the UI today, because `Network` has no D-Star case yet; D-Star
-resolution works and is tested through the core API, and gains nothing new when
-the picker does grow a segment for it. There is no `DStarDial` type.
+`ReflectorDialText` splits the text and knows nothing about either.
+
+That prediction held when `Network.dstar` landed: the name grammar gained
+nothing. What it *did* need was the address half. While D-Star was reachable
+only through the directory there was no `DStarDial` type and no reason for one;
+a picker segment means an operator can type a bare address into the field, and
+refusing to parse one would be a worse answer than parsing it. So the address
+grammar moved to `ReflectorAddressDial`, which both networks now share —
+`M17Dial` and `DStarDial` are the same parser with different default ports
+(17000 and 30001), because the networks differ in protocol, not in how someone
+types a host.
 
 ### The module: no default, because there is nothing to base one on
 
@@ -294,6 +301,63 @@ The freshness line has a case of its own for an install that has never reached
 the network: "Bundled with astar — never synced". "Never synced" on its own
 reads as a failure, and it is not one — there is a complete directory loaded,
 and naming which one is the difference between reassurance and alarm.
+
+## 5b. D-Star, the first network the directory actually unlocked
+
+The directory shipped listing 944 D-Star reflectors that astar could not dial,
+because `Network` had no D-Star case — browsable and honest, and useless. That
+is now closed, and almost none of the work was in the directory.
+
+**The engine was already there.** `Station.dstar_connect` / `dstar_disconnect` /
+`dstar_available` and the whole DExtra path have existed since iax-a9d4 and
+iax-2f6b, and the C-ABI and Swift binding expose all of it. What was missing
+was the four layers above: `CallSnapshot` did not carry the flags,
+`StationDriving` had no methods, `Network` had no case, and `CallSession` had
+no arm. Adding them is what this was.
+
+**Availability is hardware, not a build flag.** D-Star voice is AMBE and astar
+ships no software vocoder, so `dstarAvailable` is true only while a ThumbDV is
+attached — the segment appears when the dongle is plugged in and not otherwise.
+That is the honest gate: a picker entry that always failed to connect would be
+worse than no entry. The engine memoizes its probe process-wide, so a dongle
+plugged in *after* launch is not noticed until the next one.
+
+**The reflector callsign is the one genuinely new argument.** D-Star transmits
+the destination in the RF header's `RPT1`/`RPT2`, and the engine derives it
+from the hostname when told nothing (`xlx836.…` → `XLX836` → `XRF836` on the
+DExtra wire). That derivation is right for a reflector reached by its published
+hostname and *impossible* for one reached by a bare IP — and the feed publishes
+plenty of those; XLX836 itself is `45.56.69.219`. So a directory dial always
+passes the callsign the feed gave it, and only the typed-address path leaves it
+to the engine, with `nil` meaning "derive it" rather than a guess going out on
+the air.
+
+**One callsign, not one per network.** M17 sends it in every frame and D-Star
+puts it in every header, and it is the same string, so it is one field:
+`CallSession.operatorCallsign`. It is backed by the existing `m17.callsign`
+defaults key, deliberately — renaming the key would be a `ConfigVersion` bump
+plus a translation in both directions, bought for nothing, because the value is
+already exactly this and no reader would misread it. The name is an
+implementation detail; the meaning never changed.
+
+**Last heard, not talking now.** A D-Star call publishes `dstarTalker` and
+`dstarSlowText`, shown under the connected-node line. Both persist past
+end-of-transmission by design — the status dot and the RX meter say who is
+keyed *now* — and both clear on every path a session can end by, because a
+talker callsign left on screen after the link drops is a claim about the
+present that is no longer true. The slow-data text is typed by whoever is
+transmitting on the reflector: render it, never interpret it.
+
+**The failure message does not come from the engine.** `iax_error_text(-19)` is
+the static string `"dstar error"`, so the engine's precise classification
+("ThumbDV at /dev/cu.usbserial-… is busy — another process has it open") never
+crosses the C-ABI. `connectFailureMessage` names the three real causes instead,
+which is more use than an error code and more honest than picking one it cannot
+distinguish. An engine-side last-error accessor would beat it; until then, this.
+
+**Still open:** a per-network audio profile for D-Star, the equivalent of M17's
+TX overrides (`M17AudioOverrides`). D-Star currently runs on the shared audio
+chain.
 
 ## 6. What this gives the other networks
 

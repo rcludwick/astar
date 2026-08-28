@@ -96,15 +96,33 @@ extension ReflectorNetwork: Codable {
 extension Network {
     /// The directory network this app network dials, when there is one.
     ///
-    /// Only M17 has a counterpart today: `allstar` is not a reflector network
-    /// at all and `hamlink` (SvxReflector) is not in hamcall-db. D-Star has a
-    /// directory network but no `Network` case yet — the app cannot select it,
-    /// so there is nothing to bridge from. When D-Star reaches the picker this
-    /// gains one line, and nothing else here changes.
+    /// `allstar` is not a reflector network at all, and `hamlink`
+    /// (SvxReflector) is not in hamcall-db — those two have no counterpart.
+    /// M17 and D-Star do, and gaining D-Star's line here is what makes the
+    /// directory's 944 D-Star rows dialable rather than merely listed.
     public var reflectorNetwork: ReflectorNetwork? {
         switch self {
         case .m17: return .m17
+        case .dstar: return .dstar
         case .allstar, .hamlink: return nil
+        }
+    }
+}
+
+extension Network {
+    /// The app network that dials `directory`, or `nil` when astar has no
+    /// case for it.
+    ///
+    /// The inverse of `reflectorNetwork`, and deliberately partial: the
+    /// directory covers networks astar will never dial (NXDN, P25, URF), and
+    /// `nil` for those is the honest answer rather than a fallback to
+    /// something dialable. Used where a directory row has to reach the network
+    /// picker — the search sheet browsing past the selected network.
+    public static func matching(_ directory: ReflectorNetwork) -> Network? {
+        switch directory {
+        case .m17: return .m17
+        case .dstar: return .dstar
+        case .ysf, .nxdn, .p25, .urf, .other: return nil
         }
     }
 }
