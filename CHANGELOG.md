@@ -8,6 +8,84 @@ else is still built from source. Versions are `MAJOR.MINOR.PATCHbeta` and will
 stay on `beta` until the client has had a real sit-down-and-use-it pass on all
 three platforms.
 
+## 0.1.8beta — 2026-08-28
+
+The big one: astar can find a reflector it doesn't already know, and it can talk
+to D-Star.
+
+### Added
+
+- **A reflector directory.** 3,188 reflectors across D-Star, M17, YSF, NXDN, P25
+  and URF, searchable inside the app — no account, no API token, no network
+  round-trip when you dial. A magnifying glass beside the dial field opens a
+  search sheet; pick a reflector, pick a module, and the dial field fills in. It
+  never connects for you: dialling stays a deliberate second action.
+
+  The list ships inside the app, so a first launch with no network still has a
+  complete directory, and refreshes itself **at most once a week** — the cadence
+  is published by the data, not hard-coded, so it can change without an astar
+  release. Settings gains a **Reflector directory** section with the counts, when
+  it last synced, when it next will, and a **Sync Now** button.
+
+- **Dial a reflector by name.** Type `XLX836 A` or `M17-002 A` instead of an
+  address. The directory gets first refusal on the text and the address parsers
+  only see what it doesn't recognise — so a reflector name can never be mistaken
+  for a hostname and quietly resolved to something else.
+
+- **D-Star.** A D-Star entry in the network switcher, reflector-and-module
+  dialling against those 943 D-Star reflectors, and the callsign of whoever is
+  talking shown under the connected-node line along with any slow-data message.
+
+  D-Star voice is AMBE and astar ships no software vocoder, so the entry appears
+  only while a **ThumbDV** dongle is attached. That is the honest gate: an entry
+  that always failed to connect would be worse than no entry. (The probe runs
+  once at launch, so a dongle plugged in afterwards needs a restart.)
+
+- **Module pickers that ask rather than guess.** On D-Star the module *is* the
+  room, and the registries publish no list of active ones — so astar offers the
+  letters and says plainly that it cannot tell which are live. It never fills one
+  in for you. Where a reflector does publish its modules (M17, URF), those are
+  what you are offered. The module you last used on a reflector is remembered and
+  shown marked on your return — a recollection you can see and change, not a
+  default applied behind your back.
+
+### Fixed
+
+- **`XRF002` dialled the wrong reflector.** Some XLX reflectors carry an
+  `XRF`-form alias that is also the real name of a *different*, standalone
+  reflector — 44 names collided this way, and typing one reached whichever entry
+  the directory happened to index first. `XRF002` reached a reflector in China
+  rather than the one in the US that actually bears the name. Names that mean two
+  reflectors are no longer published as aliases; the reflector keeps its own
+  name, and the wire callsign it needs is unaffected.
+
+- **D-Star transmissions addressed the destination reflector.** The `RPT1`/`RPT2`
+  header fields now carry the reflector being called, derived from its published
+  hostname or taken from the directory when it is only reachable by IP — rather
+  than going out blank.
+
+### Known issues
+
+- **D-Star receive audio runs louder** than the other networks at the same
+  output setting. AMBE does not decode to the same level as codec2 or G.711 and
+  nothing trims it per network yet; turn the output volume down for now. A
+  per-network D-Star audio profile is the next piece of work on it.
+
+### Changed
+
+- **One callsign, not one per network.** M17 sends it in every frame and D-Star
+  puts it in every header, and it is the same callsign — so it is one field, and
+  the prompt names whichever network you are on. Nothing to re-enter; what you
+  had is what it uses.
+
+- Reflectors are searchable under **every name they answer to**. One XLX box is
+  `XLX836`, `XRF836`, `REF836` and `DCS836` at once, and any of those now finds
+  it.
+
+- The documentation site was rewritten to be technical rather than promotional,
+  `astar-server` got its own page saying plainly that it is a work in progress,
+  and the changelog you are reading is now published there too.
+
 ## 0.1.7beta — 2026-08-22
 
 One fix, in the status row at the top of the popover.
