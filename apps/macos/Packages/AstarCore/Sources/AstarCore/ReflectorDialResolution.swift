@@ -155,6 +155,29 @@ public enum ReflectorDialText {
         }
         return Character(letter.uppercased())
     }
+
+    /// Rewrite dial text to carry `module`, keeping the name exactly as typed.
+    ///
+    /// This is how a module picker reaches the dial field. The field stays the
+    /// single source of truth for what will be dialled — the picker does not
+    /// hold a module of its own beside it, because two places holding half a
+    /// target each is how a UI comes to show `XLX836 A` and dial `XLX836`.
+    ///
+    /// The separator the operator already used is preserved, so someone typing
+    /// `XLX836/` gets `XLX836/A` and someone typing `XLX836 ` gets `XLX836 A`.
+    /// Text that names nothing comes back unchanged: there is no name to
+    /// attach a module to, and inventing one would put a letter in an empty
+    /// field.
+    public static func applying(module letter: Character?, to raw: String) -> String {
+        guard let parts = split(raw) else { return raw }
+        // Normalised through `module(_:)` rather than trusted, so the one
+        // definition of "a module letter" serves the picker and the parser
+        // alike. A letter that would not parse produces the bare name — the
+        // same incomplete-but-honest state as typing nothing.
+        guard let letter, let normalised = module(String(letter)) else { return parts.name }
+        let separator = raw.first { $0 == "/" || $0 == " " } ?? " "
+        return "\(parts.name)\(separator)\(normalised)"
+    }
 }
 
 extension ReflectorDial {

@@ -1,0 +1,367 @@
+// astar — Copyright (c) 2026 Rob Ludwick.
+// SPDX-License-Identifier: AGPL-3.0-only
+// Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
+
+#if os(macOS)
+    import AstarCore
+    import SwiftUI
+
+    /// Browse and search the cached reflector directory (astar-refl-ui).
+    ///
+    /// A sheet over the popover rather than an expansion of it: the popover is
+    /// already tight, and a list of 3,000 reflectors is not something to grow a
+    /// 330 pt window into.
+    ///
+    /// **Selecting a row fills the dial field and dismisses — it never
+    /// connects.** Dialling stays a deliberate second action, the same as
+    /// every other way of putting a target in that field.
+    ///
+    /// Two steps, not one, for the module-bearing networks: pick a reflector,
+    /// then pick a room. That is not ceremony. On D-Star the module *is* the
+    /// room, the registry publishes none of them, and a picker that quietly
+    /// filled in "A" would put an operator into someone else's conversation
+    /// keyed up under their own callsign. The letter is asked for, out loud.
+    struct ReflectorSearchSheet: View {
+        /// Pre-selects the network filter — whatever the dial field is set to
+        /// dial right now. `nil` means the app network has no directory
+        /// counterpart (AllStar), and the sheet opens showing everything.
+        let preferredNetwork: ReflectorNetwork?
+        /// Hands back the finished dial text. The sheet writes a string, not a
+        /// target: the dial field stays the single source of truth for what
+        /// will be dialled, so there is no second place holding half of it.
+        let onSelect: (String) -> Void
+
+        @EnvironmentObject private var reflectors: ReflectorDirectory
+        @Environment(\.dismiss) private var dismiss
+
+        @State private var query = ""
+        @State private var filter: ReflectorNetwork?
+        @State private var results: [DirectoryEntry] = []
+        /// The reflector whose module is being chosen — the second step. `nil`
+        /// while browsing.
+        @State private var choosingModuleFor: DirectoryEntry?
+        @FocusState private var searchFocused: Bool
+
+        private let memory = ReflectorModuleMemory()
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 0) {
+                if let entry = choosingModuleFor {
+                    modulePicker(for: entry)
+                } else {
+                    browser
+                }
+            }
+            .frame(minWidth: 330, idealWidth: 380, minHeight: 420, idealHeight: 480)
+            .onAppear {
+                filter = preferredNetwork
+                refresh()
+                searchFocused = true
+            }
+        }
+
+        // MARK: - Step one: find the reflector
+
+        private var browser: some View {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 8) {
+                    Text("Reflectors").font(.headline)
+                    Spacer()
+                    Button("Done") { dismiss() }
+                        .keyboardShortcut(.cancelAction)
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
+
+                HStack(spacing: 8) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
+                        TextField("Name, place or sponsor", text: $query)
+                            .textFieldStyle(.plain)
+                            .focused($searchFocused)
+                            .accessibilityLabel("Search reflectors")
+                        if !query.isEmpty {
+                            Button {
+                                query = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel("Clear search")
+                        }
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 5)
+                    .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+
+                    // A menu, not segments: six networks plus "All" will not
+                    // fit across a 330 pt popover, and the filter is a
+                    // narrowing tool rather than a mode.
+                    Picker("Network", selection: $filter) {
+                        Text("All networks").tag(ReflectorNetwork?.none)
+                        ForEach(availableNetworks, id: \.rawValue) { network in
+                            Text(network.displayName).tag(ReflectorNetwork?.some(network))
+                        }
+                    }
+                    .labelsHidden()
+                    .fixedSize()
+                    .accessibilityLabel("Network filter")
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 8)
+                .onChange(of: query) { _ in refresh() }
+                .onChange(of: filter) { _ in refresh() }
+
+                Divider()
+
+                if reflectors.entries.isEmpty {
+                    emptyState(
+                        "No directory yet",
+                        "astar could not load a reflector list. Try Sync Now in Settings.")
+                } else if results.isEmpty {
+                    emptyState("No matches", "Nothing in the directory matches “\(query)”.")
+                } else {
+                    List(results, id: \.key) { entry in
+                        row(for: entry)
+                            .listRowSeparator(.visible)
+                    }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                }
+
+                Divider()
+                footer
+            }
+        }
+
+        /// Networks the loaded feed actually contains, in the order
+        /// `ReflectorNetwork.known` lists them, with anything this build has
+        /// never heard of after them. Built from the data rather than from the
+        /// enum so the filter cannot offer a network with nothing behind it —
+        /// and cannot hide one hamcall-db added after this build shipped.
+        private var availableNetworks: [ReflectorNetwork] {
+            let present = Set(reflectors.entries.map(\.network))
+            let known = ReflectorNetwork.known.filter(present.contains)
+            let unknown = present.subtracting(known).sorted { $0.rawValue < $1.rawValue }
+            return known + unknown
+        }
+
+        private func refresh() {
+            results = reflectors.search(query, network: filter)
+        }
+
+        @ViewBuilder
+        private func row(for entry: DirectoryEntry) -> some View {
+            let dialable = entry.isDialable
+            Button {
+                select(entry)
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(entry.name)
+                            .font(.callout.weight(.medium))
+                            .lineLimit(1)
+                        // The id only when it is not already the name — for
+                        // D-Star they are the same string and printing it
+                        // twice is noise.
+                        if entry.name.caseInsensitiveCompare(entry.id) != .orderedSame {
+                            Text(entry.id)
+                                .font(.caption.monospaced())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 6)
+                        Text(entry.network.displayName)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(.quaternary, in: Capsule())
+                    }
+                    if let subtitle = subtitle(for: entry) {
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    // Listed but not dialable is a published state astar is
+                    // required to honour: show the entry, say why Connect is
+                    // off, refuse to dial it. Hiding these would make the app
+                    // look wrong rather than honest.
+                    if !dialable {
+                        Text(unavailableReason(for: entry))
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .contentShape(Rectangle())
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .disabled(!dialable)
+            .opacity(dialable ? 1 : 0.55)
+            .accessibilityLabel(entry.name)
+            .accessibilityValue(
+                [entry.network.displayName, subtitle(for: entry)]
+                    .compactMap { $0 }.joined(separator: ", ")
+            )
+            .accessibilityHint(dialable ? "Fills the dial field" : unavailableReason(for: entry))
+        }
+
+        private func subtitle(for entry: DirectoryEntry) -> String? {
+            let parts = [entry.country, entry.plainDescription ?? entry.plainSponsor]
+            let joined = parts.compactMap { $0 }.joined(separator: " · ")
+            return joined.isEmpty ? nil : joined
+        }
+
+        private func unavailableReason(for entry: DirectoryEntry) -> String {
+            guard let dial = entry.dial else { return "Listed with no way to connect" }
+            return "astar can’t dial \(dial.kind) yet"
+        }
+
+        /// Fill the field — or ask for the room first.
+        private func select(_ entry: DirectoryEntry) {
+            guard entry.isDialable else { return }
+            if ReflectorModuleOptions.options(for: entry.dial).isEmpty {
+                onSelect(entry.id)
+                dismiss()
+            } else {
+                choosingModuleFor = entry
+            }
+        }
+
+        // MARK: - Step two: pick the room
+
+        @ViewBuilder
+        private func modulePicker(for entry: DirectoryEntry) -> some View {
+            let options = ReflectorModuleOptions.options(for: entry.dial)
+            let remembered = memory.module(for: entry)
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 8) {
+                    Button {
+                        choosingModuleFor = nil
+                    } label: {
+                        Label("Back", systemImage: "chevron.left")
+                            .labelStyle(.iconOnly)
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .keyboardShortcut(.cancelAction)
+                    .accessibilityLabel("Back to the reflector list")
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(entry.name).font(.headline)
+                        Text("Choose a module").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                Divider()
+
+                ScrollView {
+                    LazyVGrid(
+                        columns: Array(repeating: GridItem(.flexible(), spacing: 6), count: 6),
+                        spacing: 6
+                    ) {
+                        ForEach(options, id: \.self) { letter in
+                            moduleButton(letter, for: entry, remembered: remembered)
+                        }
+                    }
+                    .padding(14)
+                }
+
+                Divider()
+                VStack(alignment: .leading, spacing: 4) {
+                    if let remembered {
+                        Text("You last used module \(String(remembered)) here.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        // Said plainly, because the honest answer is that
+                        // astar does not know. The registry publishes no
+                        // module list, so anything else here would be a guess
+                        // wearing a caption.
+                        Text(
+                            "astar can’t tell which modules are active — ask the reflector’s "
+                                + "sponsor or its dashboard."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                    if let dashboard = entry.dashboard, let url = URL(string: dashboard) {
+                        Link("Open the reflector dashboard", destination: url)
+                            .font(.caption)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+            }
+        }
+
+        private func moduleButton(
+            _ letter: Character, for entry: DirectoryEntry, remembered: Character?
+        ) -> some View {
+            let isRemembered = letter == remembered
+            return Button {
+                // A recollection, written down only because the operator
+                // actually chose it. Nothing reads this at dial time.
+                memory.remember(letter, for: entry)
+                onSelect(ReflectorDialText.applying(module: letter, to: entry.id))
+                dismiss()
+            } label: {
+                Text(String(letter))
+                    .font(.callout.monospaced().weight(isRemembered ? .bold : .regular))
+                    .frame(maxWidth: .infinity, minHeight: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.bordered)
+            .tint(isRemembered ? .accentColor : nil)
+            .accessibilityLabel("Module \(String(letter))")
+            .accessibilityHint(isRemembered ? "Last used here" : "")
+        }
+
+        // MARK: - Chrome
+
+        private func emptyState(_ title: String, _ detail: String) -> some View {
+            VStack(alignment: .center, spacing: 6) {
+                Spacer()
+                Text(title).font(.callout.weight(.medium))
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 24)
+        }
+
+        /// The count, and the credit. CC BY requires the attribution wherever
+        /// the data appears, and this sheet is the place it most obviously
+        /// appears — a credit that lives only in Settings is one refactor from
+        /// being the only copy, and then from being gone.
+        private var footer: some View {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(results.count) of \(reflectors.entries.count) reflectors")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                if let attribution = reflectors.attribution {
+                    // Not line-limited: a truncated credit is a broken one,
+                    // and this is the surface where the data is most visibly
+                    // being used.
+                    Text(attribution)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+        }
+    }
+#endif

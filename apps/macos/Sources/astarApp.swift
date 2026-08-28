@@ -146,7 +146,7 @@ struct AstarApp: App {
             setups.attach(session: session, serial: serial)
             statusController = StatusItemController(
                 session: session, serial: serial, setups: setups, micAnalyzer: micAnalyzer,
-                deviceMonitor: deviceMonitor, navigation: navigation)
+                deviceMonitor: deviceMonitor, navigation: navigation, reflectors: reflectors)
             // Replace SwiftUI's placeholder menu (whose Settings… item opened the
             // empty `Settings { EmptyView() }` scene) with a real one — astar-1f7d.
             MainMenu.install(target: self)
@@ -164,6 +164,20 @@ struct AstarApp: App {
             // together with the menu-bar asterisk rather than ahead of it.
             DockPolicy.apply()
             showWelcomeIfUnconfigured()
+            // The unattended directory refresh (astar-refl-ui). Started and
+            // forgotten on purpose: it must never delay launch, and it has
+            // nothing to report to — a failure lands on
+            // `reflectors.lastSyncError`, which the Settings section shows.
+            // That is why this sync waited for that section to exist.
+            //
+            // Cheap in the common case. `.automatic` returns
+            // `.skipped(.notDue)` without opening a socket until the feed's own
+            // `client_refresh_days` (7) has passed since the last definitive
+            // answer — the cadence is the publisher's number, not astar's, so a
+            // change upstream takes effect without a release. When it does run
+            // it is a conditional GET, and hamcall-db's build is byte-stable,
+            // so most weeks it costs a 304.
+            Task { @MainActor in try? await reflectors.sync(trigger: .automatic) }
         }
 
         /// First launch with no AllStarLink account: raise the window on Settings

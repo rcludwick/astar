@@ -284,4 +284,36 @@ final class ReflectorDialResolutionTests: XCTestCase {
         XCTAssertEqual(target.callsign, "XRF836")
         XCTAssertEqual(target.module, "A")
     }
+
+    // MARK: - The module picker writing back into the field
+
+    /// The picker rewrites the dial field rather than holding a module beside
+    /// it. Two places each holding half a target is how a UI comes to display
+    /// `XLX836 A` and dial `XLX836`.
+    func testApplyingAModuleRewritesTheDialText() {
+        XCTAssertEqual(ReflectorDialText.applying(module: "A", to: "XLX836"), "XLX836 A")
+        XCTAssertEqual(ReflectorDialText.applying(module: "b", to: "XLX836"), "XLX836 B")
+        // An existing module is replaced, not appended to.
+        XCTAssertEqual(ReflectorDialText.applying(module: "C", to: "XLX836 A"), "XLX836 C")
+    }
+
+    /// The separator already on screen is kept, so someone who types slashes
+    /// keeps slashes and the field does not rewrite itself under them.
+    func testApplyingAModuleKeepsTheSeparatorAlreadyTyped() {
+        XCTAssertEqual(ReflectorDialText.applying(module: "B", to: "XLX836/A"), "XLX836/B")
+        XCTAssertEqual(ReflectorDialText.applying(module: "B", to: "XLX836/"), "XLX836/B")
+    }
+
+    /// Clearing the module leaves the reflector named and the target
+    /// incomplete — the `needsModule` state, reached deliberately.
+    func testClearingTheModuleLeavesTheBareName() {
+        XCTAssertEqual(ReflectorDialText.applying(module: nil, to: "XLX836 A"), "XLX836")
+    }
+
+    /// Nothing named, nothing to attach a letter to. Anything else would put a
+    /// module in an empty field.
+    func testApplyingAModuleToEmptyTextChangesNothing() {
+        XCTAssertEqual(ReflectorDialText.applying(module: "A", to: ""), "")
+        XCTAssertEqual(ReflectorDialText.applying(module: "A", to: "  "), "  ")
+    }
 }

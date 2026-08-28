@@ -90,3 +90,63 @@ public struct DirectoryEntry: Hashable, Sendable, Codable {
         dial = (try? c.decodeIfPresent(ReflectorDial.self, forKey: .dial)) ?? nil
     }
 }
+
+extension DirectoryEntry {
+    /// `description` with markup taken out, for a list row.
+    ///
+    /// Several upstream rows carry HTML verbatim — `<br>`, anchors, the
+    /// occasional `<font>` — because the registries that produced them feed
+    /// web dashboards. SwiftUI's `Text` renders that as literal angle
+    /// brackets, so the sponsor of one reflector reads as source code in the
+    /// picker. Stripping is the honest option: astar is not going to render
+    /// someone else's markup, and it is not going to show the tags either.
+    ///
+    /// `nil` when there was nothing, and also when the field held *only*
+    /// markup — an empty caption line is worse than no caption line.
+    public var plainDescription: String? { DirectoryEntry.stripMarkup(description) }
+
+    /// Sponsor, same treatment — it comes from the same fields upstream and
+    /// carries the same markup.
+    public var plainSponsor: String? { DirectoryEntry.stripMarkup(sponsor) }
+
+    /// Tags out, the handful of entities upstream actually emits decoded,
+    /// runs of whitespace collapsed.
+    ///
+    /// Deliberately not `NSAttributedString(html:)`: that spins up WebKit, has
+    /// to run on the main thread, and would be doing it once per visible row
+    /// while someone types in a search field.
+    static func stripMarkup(_ raw: String?) -> String? {
+        guard let raw, !raw.isEmpty else { return nil }
+        var text = ""
+        // What has been swallowed since the last `<`. A stray angle bracket in
+        // prose ("temp < 5C") is not a tag, and treating it as one would eat
+        // the rest of the description — so an unterminated tag is put back.
+        var pending: String?
+        for character in raw {
+            switch character {
+            case "<":
+                if let pending { text.append(pending) }
+                pending = "<"
+            case ">" where pending != nil:
+                // A tag is an element boundary: `<br>` and `</b><b>` separate
+                // words, so the tag leaves a space behind rather than joining
+                // what stood on either side of it. Runs collapse below.
+                pending = nil
+                text.append(" ")
+            default:
+                if pending != nil { pending?.append(character) } else { text.append(character) }
+            }
+        }
+        if let pending { text.append(pending) }
+        // `&amp;` decodes LAST, or `&amp;lt;` would decode twice and come out
+        // as a literal `<` the source never wrote.
+        for (entity, replacement) in [
+            ("&nbsp;", " "), ("&lt;", "<"), ("&gt;", ">"),
+            ("&quot;", "\""), ("&#39;", "'"), ("&apos;", "'"), ("&amp;", "&"),
+        ] {
+            text = text.replacingOccurrences(of: entity, with: replacement)
+        }
+        let collapsed = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return collapsed.isEmpty ? nil : collapsed
+    }
+}

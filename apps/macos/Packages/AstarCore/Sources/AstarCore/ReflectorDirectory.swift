@@ -94,6 +94,14 @@ public final class ReflectorDirectory: ObservableObject {
     /// immutable `Sendable` value, and dialling happens off the main thread
     /// (see `ReflectorIndex`).
     @Published public private(set) var index: ReflectorIndex
+    /// Why the last sync attempt failed, or `nil` if it did not.
+    ///
+    /// Published because the launch-time automatic sync has no caller to
+    /// throw at: it is started and forgotten, on purpose, so a slow or dead
+    /// endpoint never delays the UI. A failure with nowhere to surface is a
+    /// failure nobody can debug — this is where Settings finds it, and it is
+    /// the reason the automatic sync waited for the Settings section to exist.
+    @Published public private(set) var lastSyncError: String?
 
     public enum Origin: Hashable, Sendable {
         /// Nothing loaded — no cache, no bundled snapshot.
@@ -268,30 +276,40 @@ public final class ReflectorDirectory: ObservableObject {
         metadata.lastAttempt = start
         try? storage.writeSyncMetadata(metadata)
 
-        let response = try await fetcher.fetch(
-            ReflectorFeedRequest(
-                url: configuration.feedURL,
-                etag: metadata.etag,
-                lastModified: metadata.lastModified,
-                userAgent: configuration.userAgent))
+        do {
+            let response = try await fetcher.fetch(
+                ReflectorFeedRequest(
+                    url: configuration.feedURL,
+                    etag: metadata.etag,
+                    lastModified: metadata.lastModified,
+                    userAgent: configuration.userAgent))
 
-        switch response {
-        case .notModified:
-            metadata.lastFetched = now()
-            try? storage.writeSyncMetadata(metadata)
-            return .notModified
+            switch response {
+            case .notModified:
+                metadata.lastFetched = now()
+                try? storage.writeSyncMetadata(metadata)
+                lastSyncError = nil
+                return .notModified
 
-        case .payload(let data, let etag, let lastModified):
-            // Parse before writing. A 200 carrying an error page must not
-            // overwrite a directory that works.
-            let parsed = try ReflectorFeed.decode(data)
-            try storage.writeCachedFeed(data)
-            metadata.lastFetched = now()
-            metadata.etag = etag
-            metadata.lastModified = lastModified
-            try? storage.writeSyncMetadata(metadata)
-            adopt(parsed, origin: .cache)
-            return .updated(count: parsed.entries.count, generated: parsed.generated)
+            case .payload(let data, let etag, let lastModified):
+                // Parse before writing. A 200 carrying an error page must not
+                // overwrite a directory that works.
+                let parsed = try ReflectorFeed.decode(data)
+                try storage.writeCachedFeed(data)
+                metadata.lastFetched = now()
+                metadata.etag = etag
+                metadata.lastModified = lastModified
+                try? storage.writeSyncMetadata(metadata)
+                lastSyncError = nil
+                adopt(parsed, origin: .cache)
+                return .updated(count: parsed.entries.count, generated: parsed.generated)
+            }
+        } catch {
+            // Recorded and rethrown, not swallowed: a caller that awaited this
+            // still gets its error, and the fire-and-forget launch sync — which
+            // has no caller — still leaves a trace in Settings.
+            lastSyncError = error.localizedDescription
+            throw error
         }
     }
 }

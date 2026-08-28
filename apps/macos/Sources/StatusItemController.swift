@@ -23,6 +23,11 @@
         /// Which pane the window shows. Shared with the main menu so ⌘, and the
         /// popover's own footer button drive the same settings pane (astar-1f7d).
         private let navigation: AppNavigation
+        /// The cached reflector directory (astar-refl-ui) — the search sheet's
+        /// and Settings section's data. Passed through rather than built here:
+        /// the AppDelegate owns it, because the dial path subscribes to its
+        /// index at launch.
+        private let reflectors: ReflectorDirectory
         private let statusItem: NSStatusItem
         private var cancellables = Set<AnyCancellable>()
         /// The main window — created on first use; the asterisk toggles its visibility.
@@ -32,7 +37,7 @@
         init(
             session: CallSession, serial: SerialController, setups: SetupController,
             micAnalyzer: MicAnalyzerController, deviceMonitor: AudioDeviceMonitor,
-            navigation: AppNavigation
+            navigation: AppNavigation, reflectors: ReflectorDirectory
         ) {
             self.session = session
             self.serial = serial
@@ -40,6 +45,7 @@
             self.micAnalyzer = micAnalyzer
             self.deviceMonitor = deviceMonitor
             self.navigation = navigation
+            self.reflectors = reflectors
             self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
             super.init()
 
@@ -101,6 +107,7 @@
             let hosting = NSHostingController(
                 rootView: MenuPopover()
                     .environmentObject(session)
+                    .environmentObject(reflectors)
                     .environmentObject(serial)
                     .environmentObject(setups)
                     .environmentObject(micAnalyzer)

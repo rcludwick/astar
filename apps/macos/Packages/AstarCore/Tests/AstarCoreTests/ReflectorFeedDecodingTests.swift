@@ -273,4 +273,47 @@ final class ReflectorFeedDecodingTests: XCTestCase {
         let p25 = DirectoryEntry(network: .p25, id: "100", name: "P25 100")
         XCTAssertNotEqual(nxdn.key, p25.key)
     }
+
+    // MARK: - Descriptions that arrive as markup
+
+    /// Several upstream rows carry HTML verbatim, because the registries that
+    /// produced them feed web dashboards. `Text` renders that as literal angle
+    /// brackets, so one reflector's sponsor reads as source code in the
+    /// picker. astar will not render someone else's markup and will not show
+    /// the tags either.
+    func testDescriptionMarkupIsStrippedForDisplay() {
+        let entry = DirectoryEntry(
+            network: .dstar, id: "XLX836", name: "XLX836",
+            description: "<b>Rocky Mountain</b><br>Denver, <i>CO</i>",
+            sponsor: "<a href=\"http://example.invalid\">W0ABC</a>")
+        XCTAssertEqual(entry.plainDescription, "Rocky Mountain Denver, CO")
+        XCTAssertEqual(entry.plainSponsor, "W0ABC")
+    }
+
+    /// `&amp;` decodes last, or `&amp;lt;` would decode twice and come out as
+    /// a literal `<` the source never wrote.
+    func testEntitiesDecodeWithoutDoubleDecoding() {
+        let entry = DirectoryEntry(
+            network: .m17, id: "M17-002", name: "M17-002",
+            description: "Ham &amp; Eggs &amp;lt;net&amp;gt;&nbsp;group")
+        XCTAssertEqual(entry.plainDescription, "Ham & Eggs &lt;net&gt; group")
+    }
+
+    /// A field holding only markup yields no caption at all. An empty caption
+    /// line is worse than no caption line.
+    func testMarkupOnlyDescriptionBecomesNil() {
+        let entry = DirectoryEntry(
+            network: .ysf, id: "1", name: "one", description: "<br><br>")
+        XCTAssertNil(entry.plainDescription)
+        XCTAssertNil(DirectoryEntry(network: .ysf, id: "1", name: "one").plainDescription)
+    }
+
+    /// A stray angle bracket in prose is not a tag. Treating it as one would
+    /// swallow the rest of the description, which is how a stripper turns one
+    /// odd character into a blank row.
+    func testAnUnterminatedAngleBracketIsKeptAsText() {
+        let entry = DirectoryEntry(
+            network: .ysf, id: "1", name: "one", description: "keep RX < 5 dB quieting")
+        XCTAssertEqual(entry.plainDescription, "keep RX < 5 dB quieting")
+    }
 }

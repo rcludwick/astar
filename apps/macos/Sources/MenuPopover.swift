@@ -15,6 +15,11 @@
     struct MenuPopover: View {
         @EnvironmentObject private var session: CallSession
         @EnvironmentObject private var serial: SerialController
+        /// The cached reflector directory (astar-refl-ui), for the search
+        /// sheet and the module picker. The *dial* path does not go through
+        /// this — it holds the directory's frozen `index` value instead, so
+        /// resolution can run off the main thread (see `ReflectorIndex`).
+        @EnvironmentObject private var reflectors: ReflectorDirectory
         /// Which pane to show. Shared (not `@State`) so the main menu's `Settings…`
         /// item can open this same pane — see `AppNavigation`.
         @EnvironmentObject private var navigation: AppNavigation
@@ -23,6 +28,11 @@
         @State private var keyed = false  // PTT currently held
         @State private var keyMonitor: Any?  // spacebar hold-to-talk event monitor
         @State private var showFavoriteEditor = false  // inline "save favorite" popover
+        /// Whether the reflector search sheet is up (astar-refl-ui).
+        @State private var showReflectorSearch = false
+        /// Last module used per reflector, offered pre-selected in the picker.
+        /// A recollection, never a default — nothing reads it at dial time.
+        private let moduleMemory = ReflectorModuleMemory()
         @State private var favoriteLabel = ""  // editable label for the favorite
         /// Local mirror of `session.m17Callsign` while the M17 callsign prompt
         /// (astar-c2e5 Task 9) is showing — see `m17CallsignField`. Only
@@ -270,6 +280,7 @@
                     SetupsView()
                     FavoritesSettingsView(directoryRevision: $directoryRevision)
                     MicProfilesView()
+                    ReflectorSettingsView()
                     SpectrumSettingsView()
                     ConfigTransferView(directoryRevision: $directoryRevision)
                 }
@@ -522,6 +533,7 @@
                                 + "dials that address directly — for a node that isn’t "
                                 + "reachable at its published address (e.g. your own "
                                 + "node on localhost).")
+                    reflectorSearchButton
                     directoryMenu
                     favoriteToggle
                     Button(action: connect) {
@@ -562,17 +574,37 @@
                 // styled as an error: nothing is wrong, the form is
                 // unfinished. The picker and search sheet are a separate item.
                 if let resolvedReflectorLine {
-                    Text(resolvedReflectorLine)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .accessibilityLabel("Resolved reflector")
-                        .accessibilityValue(resolvedReflectorLine)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(resolvedReflectorLine)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("Resolved reflector")
+                            .accessibilityValue(resolvedReflectorLine)
+                        // The letter, offered where the gap is. Without this
+                        // the typed path dead-ends at a correct-but-unfinished
+                        // line: the operator is told a module is missing and
+                        // given nowhere to supply one but the keyboard.
+                        if case .needsModule(let entry) = reflectorResolution {
+                            modulePicker(for: entry)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .popover(isPresented: $showFavoriteEditor, arrowEdge: .bottom) { favoriteEditor }
+            .sheet(isPresented: $showReflectorSearch) {
+                ReflectorSearchSheet(preferredNetwork: selectedNetwork.reflectorNetwork) { text in
+                    // The sheet hands back dial text, not a target: this field
+                    // stays the single source of truth for what Connect will
+                    // dial. Selecting never connects — that is still a
+                    // deliberate second action.
+                    node = text
+                }
+                .environmentObject(reflectors)
+            }
         }
 
         /// Whether an AllStarLink account is required right now (astar-c2e5
@@ -691,6 +723,68 @@
         /// what the status card shows — no separate formatting to drift.
         private func connectedNodeLabel(for node: String) -> String {
             session.connectedTargetLabel(for: node)
+        }
+
+        /// Magnifying glass beside the dial field: opens the reflector search
+        /// sheet (astar-refl-ui).
+        ///
+        /// Shown only for a network that HAS a reflector directory. AllStar
+        /// nodes are not reflectors and never appear in this data, so offering
+        /// to search it there would be an empty promise — the same reasoning
+        /// that keeps the network picker itself hidden until a second network
+        /// exists.
+        @ViewBuilder
+        private var reflectorSearchButton: some View {
+            if selectedNetwork.reflectorNetwork != nil {
+                Button {
+                    showReflectorSearch = true
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                }
+                .buttonStyle(.borderless)
+                .disabled(needsCredentials)
+                .help("Search the reflector directory")
+                // Icon-only: `.help` is a hover tooltip, not the a11y label.
+                .accessibilityLabel("Search the reflector directory")
+            }
+        }
+
+        /// The module letters for a reflector the dial field has resolved but
+        /// not finished — a menu rather than 26 buttons, because it sits
+        /// inline under a field in a 330 pt popover.
+        ///
+        /// Writes back into `node` rather than holding a module of its own:
+        /// two places each holding half a target is how a UI comes to show
+        /// `XLX836 A` and dial `XLX836`.
+        private func modulePicker(for entry: DirectoryEntry) -> some View {
+            let options = ReflectorModuleOptions.options(for: entry.dial)
+            let remembered = moduleMemory.module(for: entry)
+            return Menu {
+                ForEach(options, id: \.self) { letter in
+                    Button {
+                        moduleMemory.remember(letter, for: entry)
+                        node = ReflectorDialText.applying(module: letter, to: node)
+                    } label: {
+                        // The remembered letter is marked, not pre-applied:
+                        // it is a thing the operator did, shown back to them,
+                        // and still their choice to repeat.
+                        if letter == remembered {
+                            Label("Module \(String(letter))", systemImage: "clock.arrow.circlepath")
+                        } else {
+                            Text("Module \(String(letter))")
+                        }
+                    }
+                }
+            } label: {
+                Text("Set module")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .font(.caption)
+            .disabled(options.isEmpty)
+            .accessibilityLabel("Set module")
+            .accessibilityHint(
+                remembered.map { "Last used module \(String($0))" } ?? "No module chosen yet")
         }
 
         /// Compact directory picker next to the node field: Favorites then Recents.
@@ -1288,9 +1382,19 @@
         /// module arrives. `nil` — and so absent — whenever the text names
         /// nothing in the directory, which includes every address and every
         /// launch before the directory has loaded.
-        private var resolvedReflectorLine: String? {
-            guard let network = selectedNetwork.reflectorNetwork else { return nil }
-            return session.resolveReflector(node, network: network).statusLine
+        private var resolvedReflectorLine: String? { reflectorResolution.statusLine }
+
+        /// What the dial field's text resolves to in the directory, for the
+        /// line under the field AND the module picker beside it. One read, so
+        /// the sentence and the control that completes it cannot disagree
+        /// about which reflector is being talked about.
+        ///
+        /// `.notInDirectory` for a network with no directory counterpart
+        /// (AllStar), which is also what it means: nothing here names a
+        /// reflector, so nothing is shown.
+        private var reflectorResolution: ReflectorDialResolution {
+            guard let network = selectedNetwork.reflectorNetwork else { return .notInDirectory }
+            return session.resolveReflector(node, network: network)
         }
 
         private func connect() {
