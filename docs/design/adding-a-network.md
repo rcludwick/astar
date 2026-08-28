@@ -74,7 +74,8 @@ promising it**, rather than assuming the family extends. See
 `p25-network.md`, which makes that verification the gating step and records what
 to do if the answer is no.
 
-Per-network designs: `ysf-network.md`, `nxdn-network.md`, `p25-network.md`.
+Per-network designs: `ysf-network.md`, `nxdn-network.md`, `p25-network.md`,
+`dmr-networks.md`.
 
 > **Licence gate.** A vocoder's terms decide where it may live. Check them before
 > writing code, put the dependency behind a non-default feature, and record the

@@ -74,4 +74,8 @@ As with YSF: **read the reference, do not recall the wire format.** Build
   diverge from the "one callsign, every network" model, and getting it wrong
   means either a wrong ID on the air or a second field nobody needed.
 
+  **Shared with P25 and DMR** — all three address radios numerically. Settle it
+  once for the three of them (`dmr-networks.md` §"What makes DMR different", item
+  1), not three times differently.
+
 * Talker display: reuse D-Star's last-heard treatment.
