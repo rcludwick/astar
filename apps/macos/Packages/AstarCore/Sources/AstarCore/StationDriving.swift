@@ -56,6 +56,13 @@ public protocol StationDriving {
     /// Disconnect the live M17 session, if any. Idempotent — a no-op while idle.
     /// Mirrors `Station.m17Disconnect()` 1:1.
     func m17Disconnect() throws
+
+    /// Set extra directories to search for a runtime `libcodec2`, ahead of the hard-coded
+    /// system paths — e.g. to point at an app bundle's own copy of the library. Call before
+    /// `connectM17`; it does not affect a session already in progress. Mirrors
+    /// `Station.setCodecDirs(_:)` 1:1.
+    func setCodecDirs(_ dirs: [String]) throws
+
     // MARK: D-Star (iax-4c8e)
 
     /// Connect to a D-Star reflector over DExtra and open a full-transceive
@@ -89,12 +96,6 @@ public protocol StationDriving {
     /// Costlier than `readSnapshot()`: it crosses the ABI with a buffer and
     /// parses JSON. Poll the snapshot for meters; call this at UI rate.
     func dstarState() throws -> DStarState?
-
-    /// Set extra directories to search for a runtime `libcodec2`, ahead of the hard-coded
-    /// system paths — e.g. to point at an app bundle's own copy of the library. Call before
-    /// `connectM17`; it does not affect a session already in progress. Mirrors
-    /// `Station.setCodecDirs(_:)` 1:1.
-    func setCodecDirs(_ dirs: [String]) throws
 
     // Audio device selection + gain. Mirrors `Station`'s methods 1:1; a `nil`
     // device selects the system default for that direction.
