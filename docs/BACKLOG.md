@@ -512,12 +512,22 @@ US-XLX458 YSF28054); also the practical bridge into Wires-X rooms (native
 Wires-X is closed — see astar-a3c9, which deliberately has no engine item).
 CodecProvider + capability pattern from iax-f2b8.
 
+**Recipe:** `docs/design/adding-a-network.md` — the fourteen layers a network
+touches, derived from M17 and D-Star. The vocoder is not the expensive layer:
+AMBE+2 is a RATEP word on the ThumbDV astar already drives, and the directory
+already publishes these reflectors with a `dial.kind`.
+
 ### iax-b9c2 — NXDN engine backend: NXDNReflector protocol
 *P4 backlog · feature · labels: nxdn, protocol, cx:4*
 
 Per Rob 2026-08-03 (astar-b8e4). Same AMBE+2 vocoder gate. Protocol:
 NXDNReflector UDP talkgroups (KC-Wide: TG 31313). CodecProvider +
 capability pattern from iax-f2b8.
+
+**Recipe:** `docs/design/adding-a-network.md` — the fourteen layers a network
+touches, derived from M17 and D-Star. The vocoder is not the expensive layer:
+AMBE+2 is a RATEP word on the ThumbDV astar already drives, and the directory
+already publishes these reflectors with a `dial.kind`.
 
 ### iax-c9f4 — Hams Over IP engine backend: SIP/RTP client (G.711)
 *P3 low · feature · labels: hoip, protocol, cx:4*
