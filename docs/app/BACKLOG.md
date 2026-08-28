@@ -113,15 +113,18 @@ that is not codec2 wants its own levels; this is where they would live. Mirror
 `pushM17TxOverrides`/`restoreStandardTxProcessing`, and give it the same
 progressive-disclosure treatment in Quick settings.
 
-**Observed on air, 2026-08-28 (Rob, first live D-Star QSO):** received audio is
-noticeably louder than the other networks at the same output setting. Expected
-rather than surprising — AMBE decode does not come out at the same amplitude as
-codec2 or G.711, and nothing trims it per network — but it makes the RX side the
-first thing to fix here, not the TX side. So this item wants BOTH directions:
-an output/RX trim as well as the TX chain M17 has. Measure before choosing a
-number: compare `rxDB` on a D-Star reflector against an AllStar node and an M17
-reflector carrying comparable speech, rather than picking a constant that
-happens to suit one QSO.
+**The loudness reported on air 2026-08-28 was NOT this item.** It looked like a
+missing per-network level and it was a plain bug: `ConsoleSession`'s three
+listener-side setters each had an IAX2 arm and an M17 arm and no D-Star arm, so
+the operator's volume never reached a D-Star session at all and it played at the
+router's unity default. Fixed in 0.1.8beta and pinned by
+`the_listener_side_preferences_reach_a_dstar_session`.
+
+What remains here is genuinely the TX side: D-Star still has no equivalent of
+M17's `M17AudioOverrides`. If a per-network RX trim turns out to be wanted on
+top of the now-working shared control, measure first — compare `rxDB` on a
+D-Star reflector against an AllStar node and an M17 reflector carrying
+comparable speech, rather than picking a constant that happens to suit one QSO.
 
 ### astar-d4c2 — Accessibility phase 2.5: remaining P2s (focus, menu-bar state, color-only tint, canvas values, contrast)
 *P2 medium · task · labels: a11y, cx:2*

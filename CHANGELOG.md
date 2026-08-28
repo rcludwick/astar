@@ -59,17 +59,16 @@ to D-Star.
   reflectors are no longer published as aliases; the reflector keeps its own
   name, and the wire callsign it needs is unaffected.
 
+- **The volume control had no effect on D-Star.** D-Star was never wired into
+  the audio-preference fan-out, so it played at full scale while every other
+  network sat at whatever you had set — which is why it came out louder than
+  the rest. Output gain and RX levelling now reach a D-Star session, both when
+  you connect and when you change them mid-QSO.
+
 - **D-Star transmissions addressed the destination reflector.** The `RPT1`/`RPT2`
   header fields now carry the reflector being called, derived from its published
   hostname or taken from the directory when it is only reachable by IP — rather
   than going out blank.
-
-### Known issues
-
-- **D-Star receive audio runs louder** than the other networks at the same
-  output setting. AMBE does not decode to the same level as codec2 or G.711 and
-  nothing trims it per network yet; turn the output volume down for now. A
-  per-network D-Star audio profile is the next piece of work on it.
 
 ### Changed
 

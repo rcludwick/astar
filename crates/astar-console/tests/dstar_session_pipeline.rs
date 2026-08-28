@@ -1644,6 +1644,80 @@ fn unkey_terminates_even_when_the_encoder_never_answers() {
     );
 }
 
+// ---- iax-dstaraudio: the listener-side preferences reach a D-Star session ---
+
+/// The operator's volume must reach a live D-Star session.
+///
+/// It did not. `ConsoleSession`'s three listener-side setters — output gain,
+/// RX compression, RX compression level — each had an IAX2 arm and an M17 arm
+/// and no D-Star arm, so a D-Star session played at the router's unity default
+/// while every other network sat at whatever the operator had chosen. Heard on
+/// air as "D-Star is louder than it should be", which is what an ignored
+/// attenuation sounds like.
+///
+/// Two halves, and the bug needed both: a session adopted AFTER the preference
+/// was set has to inherit it, and one already running has to follow a change.
+#[test]
+fn the_listener_side_preferences_reach_a_dstar_session() {
+    use astar_console::ConsoleSession;
+
+    let reflector = Reflector::bind_parrot("127.0.0.1:0".parse().unwrap()).expect("bind reflector");
+    let reflector_addr = reflector.local_addr();
+    let handle = reflector.run();
+
+    let mut console = ConsoleSession::new();
+    // Chosen BEFORE the session exists — the ordering that shipped broken.
+    console.set_output_gain(0.25);
+    console.set_rx_compress(true);
+    console.set_rx_compression_level(0.75);
+
+    let stats = Arc::new(Mutex::new(VocoderStats::default()));
+    let output_tap: OutputTap = Arc::new(Mutex::new(None));
+    let tap_for_backend = Arc::clone(&output_tap);
+    let cfg = DstarConfig {
+        host: reflector_addr.ip().to_string(),
+        port: reflector_addr.port(),
+        module: b'A',
+        callsign: "N0CALL".into(),
+        output: None,
+        input: None,
+        reflector_callsign: None,
+    };
+    let session = DstarSession::connect_with_stream(
+        cfg,
+        &move || {
+            Box::new(OutputOnlyBackend {
+                output_tap: Arc::clone(&tap_for_backend),
+            }) as Box<dyn AudioBackend>
+        },
+        Box::new(FakeVocoder::new(Duration::from_millis(2), &stats)),
+        AmbeBackend::Hardware,
+    )
+    .expect("connect to the loopback reflector");
+    console.dstar_adopt(session).expect("adopt the session");
+
+    let (gain, compress, level) = console
+        .dstar_session_audio_prefs()
+        .expect("a live session reports its preferences");
+    assert!(
+        (gain - 0.25).abs() < 1e-6,
+        "an adopted session inherits the volume already chosen, not unity"
+    );
+    assert!(compress, "and the RX leveling toggle");
+    assert!((level - 0.75).abs() < 1e-6, "and its strength");
+
+    // And a change made mid-QSO follows.
+    console.set_output_gain(2.0);
+    let (gain, _, _) = console.dstar_session_audio_prefs().expect("still live");
+    assert!(
+        (gain - 2.0).abs() < 1e-6,
+        "a later change reaches the live session"
+    );
+
+    console.dstar_disconnect();
+    handle.shutdown();
+}
+
 // ---- iax-4c8e: the ConsoleSession snapshot mirrors D-Star -------------------
 
 /// A `ConsoleState` snapshot must report a live D-Star session the same way it
