@@ -424,6 +424,22 @@ struct SharedState {
     tx_dbfs: AtomicU32,
     rx_dbfs: AtomicU32,
     input_dbfs: AtomicU32,
+    /// Listener-side audio preferences, the same three
+    /// [`crate::ConsoleSession`] fans out to every other network.
+    ///
+    /// D-Star was never wired into that fan-out (iax-dstaraudio): the setters
+    /// had an IAX2 arm and an M17 arm and no D-Star arm, so the operator's
+    /// volume never reached a D-Star session and it played at the router's
+    /// 1.0 default while every other network was at whatever they had chosen.
+    /// Reported as "D-Star is louder than it should be", which is exactly what
+    /// an ignored attenuation sounds like.
+    ///
+    /// Held here rather than on the session because the router and the output
+    /// bus both move into the run-loop thread; this is the cell that thread
+    /// reads. Same shape as [`crate::m17`]'s `Prefs`.
+    output_gain: AtomicU32,
+    rx_compress: AtomicBool,
+    rx_compress_level: AtomicU32,
 }
 
 impl SharedState {
@@ -436,7 +452,34 @@ impl SharedState {
             tx_dbfs: AtomicU32::new((-60.0f32).to_bits()),
             rx_dbfs: AtomicU32::new((-60.0f32).to_bits()),
             input_dbfs: AtomicU32::new((-60.0f32).to_bits()),
+            // Unity and off — the router's own defaults, so a session nobody
+            // has configured sounds exactly as it did before this existed.
+            // `dstar_adopt` overwrites these with the console's real values
+            // before the operator can hear anything.
+            output_gain: AtomicU32::new(1.0f32.to_bits()),
+            rx_compress: AtomicBool::new(false),
+            rx_compress_level: AtomicU32::new(0.5f32.to_bits()),
         }
+    }
+
+    /// Push the listener-side preferences onto the open output bus.
+    ///
+    /// Called once at connect, before the run-loop thread starts, and again on
+    /// every tick — a handful of atomic loads and the router's own atomic
+    /// stores, so it needs no dirty-flag tracking. Mirrors
+    /// [`crate::m17::Prefs::apply`], deliberately: two networks applying the
+    /// same preferences by different mechanisms is how one of them silently
+    /// stops applying them.
+    fn apply_audio(&self, router: &AudioRouter, out: &OutputId) {
+        router.set_output_gain(
+            out,
+            f32::from_bits(self.output_gain.load(Ordering::Relaxed)),
+        );
+        router.set_output_compress(out, self.rx_compress.load(Ordering::Relaxed));
+        router.set_output_compress_level(
+            out,
+            f32::from_bits(self.rx_compress_level.load(Ordering::Relaxed)),
+        );
     }
 
     fn snapshot(&self, backend: AmbeBackend) -> DstarSnapshotState {
@@ -686,6 +729,52 @@ impl DstarSession {
     /// Mirrors [`crate::m17::M17Session::set_ptt`] exactly. Nothing in this
     /// session ever keys on its own — this is the ONLY path that can set the
     /// request true (see the module docs' TX-safety section).
+    /// Set the output (RX/speaker) gain multiplier, 0.0..=4.0 (the router
+    /// clamps). Takes effect on the live session's output bus within a tick.
+    ///
+    /// `&self`, like [`crate::m17::M17Session::set_output_gain`], so
+    /// [`crate::ConsoleSession`] can fan a preference out to whichever
+    /// networks are live without needing a mutable borrow of each.
+    pub fn set_output_gain(&self, gain: f32) {
+        let gain = if gain.is_nan() {
+            1.0
+        } else {
+            gain.clamp(0.0, 4.0)
+        };
+        self.shared
+            .output_gain
+            .store(gain.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Toggle automatic leveling of the RECEIVED audio on this session's
+    /// output bus.
+    pub fn set_rx_compression(&self, on: bool) {
+        self.shared.rx_compress.store(on, Ordering::Relaxed);
+    }
+
+    /// Set the RX/output compression strength (0.0..=1.0, clamped).
+    pub fn set_rx_compression_level(&self, level: f32) {
+        let level = if level.is_nan() {
+            0.5
+        } else {
+            level.clamp(0.0, 1.0)
+        };
+        self.shared
+            .rx_compress_level
+            .store(level.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The listener-side preferences currently in force, for tests and for
+    /// anything that needs to prove the fan-out reached this session.
+    #[must_use]
+    pub fn audio_prefs(&self) -> (f32, bool, f32) {
+        (
+            f32::from_bits(self.shared.output_gain.load(Ordering::Relaxed)),
+            self.shared.rx_compress.load(Ordering::Relaxed),
+            f32::from_bits(self.shared.rx_compress_level.load(Ordering::Relaxed)),
+        )
+    }
+
     pub fn set_ptt(&mut self, on: bool) {
         self.ptt_request.store(on, Ordering::Relaxed);
     }
@@ -1887,6 +1976,11 @@ fn run_loop(p: RunLoopParams) {
             unlink_flushing_eot_if_keyed(&mut ctx, &mut tx, &mut fsm, ptt.is_keyed());
             break;
         }
+
+        // The operator's volume and RX leveling, re-asserted every tick so a
+        // change made mid-QSO is heard on the next one. Cheap: three atomic
+        // loads and the router's own atomic stores.
+        shared.apply_audio(&router, &out);
 
         // Apply a pending PTT edge (set_ptt only requests; this is where it
         // actually takes effect), plus the forced-unkey rules PttGate owns
