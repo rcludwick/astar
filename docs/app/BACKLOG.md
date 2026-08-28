@@ -12,7 +12,7 @@ inline. All 129 issues (107 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (37)
+## Open items (36)
 
 ### astar-menu — MainMenu.install never wins; SwiftUI's default menu ships instead
 *P3 low · bug · labels: macos, ui, cx:2*
@@ -419,39 +419,3 @@ The 'Save changes to <config>' button in Quick settings always shows even when n
 *P3 low · feature · labels: cx:3, gui-rs, phase2*
 
 **Design:** Phase 2 analysis tool, deliberately undesigned for now. Port of the Mac call spectrum; FFT axis math and trace state belong in shared Rust per the fat-core principle. Design when phase 1 operating set ships: docs/superpowers/specs/2026-07-01-gui-rs-parity-roadmap-design.md
-
-### astar-refl-ui — Reflector directory: the picker, the search sheet and Sync Now
-*P2 medium · feature · labels: macos, ui*
-
-Design: `docs/app/design/reflector-directory.md`. The data layer and dialling by
-name are done (astar-refl-ship): `ReflectorFeed` / `DirectoryEntry` /
-`ReflectorDial` / `ReflectorNetwork`, `ReflectorDirectory` with
-`search` / `resolve` / `sync`, `ReflectorIndex.resolveDial` resolving names
-ahead of the address parsers, and a bundled snapshot that ships in
-`astar.app/Contents/Resources/reflectors.json`. What is left is the UI.
-
-**The search sheet.** A magnifying-glass button beside the dial field opening a
-searchable list over the popover — search field, network filter defaulting to
-the selected network, rows of name/country/description. Selecting a row fills
-the dial field and dismisses; it does not connect. `ReflectorDirectory.search`
-already returns un-dialable entries on purpose, and they render disabled with a
-reason rather than being hidden.
-
-**The module picker.** Today a bare `XLX836` resolves and shows
-`XLX836 · module — · 45.56.69.219:30001` under the dial field, with Connect
-off. That is honest but bare: the sheet should offer the letter, and the last
-module used per reflector should be remembered and pre-selected (a
-recollection, not a default — see the design's note on why there is no default).
-
-**Settings section + automatic sync.** Counts, last-synced, a Sync Now button,
-and the CC BY attribution line — which is a licence condition, not decoration,
-and the only reason `ReflectorFeed` keeps the envelope
-(`ReflectorDirectory.attribution`, `feed.counts`). The launch-time automatic
-sync (`sync(trigger: .automatic)`, throttled by the feed's own
-`client_refresh_days`) belongs with it and not before it: a background fetch
-with nowhere to report a failure is a fetch nobody can debug. Until it lands,
-the bundled snapshot is the only data an install ever has.
-
-**Release-time chore this creates:** `just reflectors` refreshes the committed
-snapshot at `apps/macos/Resources/reflectors.json`. Run it with the version
-bump, every release.

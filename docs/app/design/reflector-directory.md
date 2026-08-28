@@ -194,6 +194,41 @@ reason. They are still findable, because "astar can see it but can't dial it" is
 information, and silently omitting them makes the app look wrong rather than
 honest.
 
+### How it is built (astar-refl-ui)
+
+`ReflectorSearchSheet` is the sheet, and it has **two steps, not one**: pick a
+reflector, then pick a room. The second step only appears for the networks that
+address one (`ReflectorModuleOptions.options(for:)` returns empty for YSF, NXDN
+and P25, and those fill the field and dismiss straight away).
+
+The offer is the published `modules` list when there is one — M17 and URF rows
+carry them — and A–Z when there is not, which is every D-Star row. That is not
+a guess at which rooms are live: it is the protocol's range, with the operator
+supplying the knowledge the registry does not publish. The picker says so, in
+those words, rather than leaving a bare grid to imply otherwise.
+
+The sheet hands back **dial text, not a target**. `onSelect` writes a string
+into the same field the keyboard types into, so there is exactly one place
+holding what Connect will dial — two places each holding half of it is how a UI
+comes to display `XLX836 A` and dial `XLX836`.
+
+Descriptions are stripped of markup before display (`DirectoryEntry
+.plainDescription`). Several upstream rows carry HTML verbatim because the
+registries behind them feed web dashboards, and `Text` renders that as literal
+angle brackets — one reflector's sponsor reading as source code in the picker.
+
+The same module picker is offered inline under the dial field whenever typed
+text resolves to `needsModule`, so the typed path does not dead-end at a
+correct-but-unfinished line with nowhere to finish it. The last module used per
+reflector is remembered (`ReflectorModuleMemory`, keyed on `network:id` because
+bare ids collide across networks) and shown *marked* in the menu — never
+pre-applied. A recollection the operator can see and repeat is a different
+thing from a default, and only the first one is compatible with §3.
+
+The magnifying glass appears only for a network that has a directory
+(`Network.reflectorNetwork`). AllStar nodes are not reflectors and never appear
+in this data, so offering to search it there would be an empty promise.
+
 ## 5. Sync
 
 ### The button
@@ -231,6 +266,34 @@ byte-stable — most weeks there is genuinely nothing to send.
 The `User-Agent` identifies astar and its version. hamcall-db's upstreams ask for
 that so a misbehaving client can be contacted rather than blocked, and astar
 should extend the same courtesy to hamcall-db.
+
+### How it is built (astar-refl-ui)
+
+`ReflectorSettingsView` is the section, and the launch-time sync is one line in
+`AppDelegate.applicationDidFinishLaunching` — started and forgotten, so it can
+never delay launch:
+
+```swift
+Task { @MainActor in try? await reflectors.sync(trigger: .automatic) }
+```
+
+Fire-and-forget is why the section had to exist first. That call has nobody to
+throw at, so `ReflectorDirectory.lastSyncError` records the failure and the
+section is the one place it surfaces — quietly, beside a directory that is
+still loaded and still dialable. A background fetch with nowhere to report is a
+fetch nobody can debug.
+
+It is cheap in the common case: `.automatic` returns `.skipped(.notDue)`
+*without opening a socket* until `client_refresh_days` has passed since the last
+definitive answer. The section shows that number back as a sentence — "Checks
+again in 6 days" — computed from `nextAutomaticSync`, which reads the cadence
+off the loaded feed every time it is asked. It is the only place an operator can
+tell that a directory sitting still for a week is policy rather than breakage.
+
+The freshness line has a case of its own for an install that has never reached
+the network: "Bundled with astar — never synced". "Never synced" on its own
+reads as a failure, and it is not one — there is a complete directory loaded,
+and naming which one is the difference between reassurance and alarm.
 
 ## 6. What this gives the other networks
 
