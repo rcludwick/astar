@@ -30,6 +30,15 @@ three platforms.
 
 ### Changed
 
+- **Settings fields have standing labels.** Callsign, DMR Radio ID, Node number
+  and Password each carry a label in their own column instead of relying on
+  placeholder text. A placeholder is not a label: it disappears exactly when
+  the field has content, which is the moment you most want to know what you are
+  looking at. The Operator and Account sections share one label width, so the
+  pane reads as one form rather than two stacked by accident. The password
+  keeps a placeholder for the one thing a label cannot say — "Re-enter to
+  change", because an empty box there means unchanged, not blank.
+
 - **Your callsign is the first thing in Settings.** It used to sit at the
   bottom of the AllStarLink account panel under an "M17" heading, which said
   two wrong things at once: that it belonged to M17, and that it was part of an
