@@ -71,6 +71,22 @@ MARKETING_RE = re.compile(r'^\s*MARKETING_VERSION:\s*"(?P<version>[^"]+)"\s*$', 
 # The version chip inside zensical.toml's `copyright`, which is raw HTML.
 CHIP_RE = re.compile(r'<span class="astar-version">v(?P<version>[^<]+)</span>')
 
+# `version = "0.1.9-beta"` under [workspace.package] in the root Cargo.toml.
+# Scoped to that section on purpose: [workspace.dependencies] is full of
+# `name = { version = "1", ... }` inline tables, and an unanchored search would
+# happily return one of those.
+CARGO_SECTION_RE = re.compile(r"^\[workspace\.package\]\s*$(?P<body>.*?)(?=^\[|\Z)", re.M | re.S)
+CARGO_VERSION_RE = re.compile(r'^version\s*=\s*"(?P<version>[^"]+)"\s*$', re.M)
+
+# An astar-* path dependency's version requirement, e.g.
+# `astar-audio = { path = "../astar-audio", version = "0.1.9-beta", ... }`.
+# Cargo will NOT catch these drifting: `version = "0.1.3-beta"` reads as
+# `^0.1.3-beta`, which a 0.1.9-beta crate still satisfies, so a stale
+# requirement resolves silently and stays wrong until someone reads it.
+PATH_DEP_RE = re.compile(
+    r'^(?P<name>astar-[a-z0-9-]+)\s*=\s*\{[^}]*?version\s*=\s*"(?P<version>[^"]+)"', re.M | re.S
+)
+
 # major.minor.patch, then either the legacy glued suffix (`0.1.9beta`) or
 # SemVer's own pre-release (`0.2.0-beta.1`), or nothing (`0.2.0`).
 VERSION_RE = re.compile(
@@ -191,6 +207,42 @@ def read_marketing_version(path: Path) -> str:
     return m["version"]
 
 
+def read_cargo_version(path: Path) -> str:
+    """The Rust workspace version from the root Cargo.toml.
+
+    This is the one source that must be strict SemVer rather than astar's
+    glued form: Cargo refuses to parse `0.1.9beta`. `normalize` is the
+    translation between the two.
+    """
+    section = CARGO_SECTION_RE.search(path.read_text(encoding="utf-8"))
+    if not section:
+        raise SystemExit(f"FAIL: no [workspace.package] section in {path}")
+    m = CARGO_VERSION_RE.search(section["body"])
+    if not m:
+        raise SystemExit(f"FAIL: no version under [workspace.package] in {path}")
+    return m["version"]
+
+
+def stale_path_deps(root: Path, expected: str) -> list[str]:
+    """Every astar-* path dependency whose version requirement is not `expected`.
+
+    These are the quiet ones. A workspace bump changes the crates' real
+    versions; the requirements written next to each `path = ` do not follow,
+    and Cargo does not complain because the caret range still matches. They
+    only surface when someone reads a manifest and finds it claiming a version
+    six releases old.
+    """
+    stale = []
+    for manifest in sorted(root.glob("crates/*/Cargo.toml")) + sorted(
+        root.glob("apps/*/Cargo.toml")
+    ):
+        for m in PATH_DEP_RE.finditer(manifest.read_text(encoding="utf-8")):
+            if m["version"] != expected:
+                rel = manifest.relative_to(root)
+                stale.append(f"{rel}: {m['name']} wants {m['version']}")
+    return stale
+
+
 def read_site_config(path: Path) -> dict:
     with path.open("rb") as fh:
         project = tomllib.load(fh).get("project", {})
@@ -263,10 +315,16 @@ def check_consistency(root: Path, config: dict | None = None, releases: list | N
 
     Keeping them in step was a manual habit on release day. It is now a gate.
 
-    The Rust workspace `version` in the root Cargo.toml is deliberately NOT in
-    this set — see the design doc; it is a Cargo/SemVer artifact that has
-    already drifted, and folding it in here would fail the build for a
-    pre-existing condition rather than for anything a change did.
+    A fourth home joined them: the Rust workspace `version` in the root
+    Cargo.toml. It is checked in its SemVer spelling (`0.1.9-beta`) because
+    Cargo cannot parse the glued form, so `normalize` is the bridge. It had
+    already drifted six releases behind when the gate was written — that is
+    precisely why it is in here now rather than trusted to a habit.
+
+    The astar-* path-dependency requirements are checked too, and they are the
+    sneaky ones: Cargo reads `version = "0.1.3-beta"` as a caret range that a
+    0.1.9-beta crate still satisfies, so nothing fails and the stale number
+    just sits there.
     """
     config = config or read_site_config(root / "zensical.toml")
     releases = releases or read_changelog(root / "CHANGELOG.md")
@@ -303,7 +361,31 @@ def check_consistency(root: Path, config: dict | None = None, releases: list | N
             f"    found:    {', '.join(versions)}\n"
             f"    expected: {', '.join(expected)}"
         )
-    return releases[0]["version"]
+
+    # The Rust side, in SemVer spelling.
+    version = releases[0]["version"]
+    want_cargo = normalize(version)
+    got_cargo = read_cargo_version(root / "Cargo.toml")
+    if got_cargo != want_cargo:
+        raise SystemExit(
+            "FAIL: the Rust workspace version does not match the release.\n"
+            f"    {got_cargo:<16} Cargo.toml ([workspace.package] version)\n"
+            f"    {want_cargo:<16} expected, from {version} in SemVer spelling\n"
+            "      Cargo cannot parse the glued form, so the two spellings differ\n"
+            "      on purpose — but they must still name the same release."
+        )
+
+    stale = stale_path_deps(root, want_cargo)
+    if stale:
+        listed = "\n".join(f"    {line}" for line in stale)
+        raise SystemExit(
+            "FAIL: astar-* path dependencies still ask for an older version.\n"
+            f"{listed}\n"
+            f"      All of them should say {want_cargo!r}. Cargo will not catch\n"
+            "      this: the old requirement is a caret range the new crate\n"
+            "      still satisfies, so it resolves and stays wrong."
+        )
+    return version
 
 
 def write_manifest(docs_dir: Path, root: Path = ROOT) -> Path:
@@ -350,7 +432,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         version = check_consistency(ROOT)
         count = len(read_changelog(ROOT / "CHANGELOG.md"))
-        print(f"version-manifest: v{version} agrees across 3 sources · {count} releases in order")
+        print(f"version-manifest: v{version} agrees across 4 sources · {count} releases in order")
         return 0
 
     if args.verify_anchors:

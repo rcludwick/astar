@@ -136,7 +136,7 @@ def test_slugify_matches_the_rendered_heading_id() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _fake_tree(marketing: str, chip: str, changelog: str) -> Path:
+def _fake_tree(marketing: str, chip: str, changelog: str, cargo: str | None = None) -> Path:
     root = Path(tempfile.mkdtemp(prefix="astar-version-manifest-"))
     (root / "apps" / "macos").mkdir(parents=True)
     (root / "apps" / "macos" / "project.yml").write_text(
@@ -151,6 +151,18 @@ def _fake_tree(marketing: str, chip: str, changelog: str) -> Path:
         encoding="utf-8",
     )
     (root / "CHANGELOG.md").write_text(changelog, encoding="utf-8")
+    # The fourth home. Defaults to agreeing, so a test that is not about Cargo
+    # does not have to think about it.
+    if cargo is None:
+        newest = changelog.split("## ", 2)[1].split(" ", 1)[0]
+        cargo = vm.normalize(newest)
+    (root / "Cargo.toml").write_text(
+        f'[workspace]\nresolver = "2"\n\n[workspace.package]\nversion = "{cargo}"\n'
+        'edition = "2024"\n\n[workspace.dependencies]\n'
+        # An inline `version =` that the scoped regex must NOT pick up.
+        'serde = { version = "1", features = ["derive"] }\n',
+        encoding="utf-8",
+    )
     return root
 
 
@@ -277,6 +289,68 @@ def test_this_repository_is_consistent() -> None:
     manifest = vm.build_manifest(ROOT)
     assert manifest["current"]["version"] == version
     assert manifest["releases"][-1]["ordinal"] == 1
+
+
+# ---------------------------------------------------------------------------
+# The Rust workspace version, and the path-dep requirements Cargo will not check
+# ---------------------------------------------------------------------------
+
+
+def test_the_cargo_version_is_read_from_workspace_package_not_dependencies() -> None:
+    """[workspace.dependencies] is full of inline `version =`; none may win."""
+    root = _fake_tree("0.1.10beta", "0.1.10beta", TWO_RELEASES)
+    assert vm.read_cargo_version(root / "Cargo.toml") == "0.1.10-beta"
+
+
+def test_a_stale_cargo_workspace_version_fails() -> None:
+    """The exact drift found on 2026-08-29: Cargo six releases behind the app."""
+    root = _fake_tree("0.1.10beta", "0.1.10beta", TWO_RELEASES, cargo="0.1.3-beta")
+    try:
+        vm.check_consistency(root)
+    except SystemExit as exit_:
+        assert "Rust workspace version" in str(exit_), exit_
+        assert "0.1.3-beta" in str(exit_) and "0.1.10-beta" in str(exit_)
+    else:
+        raise AssertionError("a stale Cargo workspace version must fail the check")
+
+
+def test_the_two_spellings_are_allowed_to_differ() -> None:
+    """`0.1.10beta` and `0.1.10-beta` name one release; Cargo cannot parse the first."""
+    root = _fake_tree("0.1.10beta", "0.1.10beta", TWO_RELEASES, cargo="0.1.10-beta")
+    assert vm.check_consistency(root) == "0.1.10beta"
+
+
+def test_a_stale_path_dep_requirement_fails() -> None:
+    """Cargo stays silent here: ^0.1.3-beta still admits 0.1.10-beta."""
+    root = _fake_tree("0.1.10beta", "0.1.10beta", TWO_RELEASES)
+    crate = root / "crates" / "astar-station"
+    crate.mkdir(parents=True)
+    (crate / "Cargo.toml").write_text(
+        '[dependencies]\n'
+        'astar-audio = { path = "../astar-audio", version = "0.1.3-beta" }\n',
+        encoding="utf-8",
+    )
+    try:
+        vm.check_consistency(root)
+    except SystemExit as exit_:
+        assert "path dependencies" in str(exit_), exit_
+        assert "astar-audio" in str(exit_)
+    else:
+        raise AssertionError("a stale path-dep requirement must fail the check")
+
+
+def test_a_current_path_dep_requirement_passes() -> None:
+    root = _fake_tree("0.1.10beta", "0.1.10beta", TWO_RELEASES)
+    crate = root / "crates" / "astar-station"
+    crate.mkdir(parents=True)
+    (crate / "Cargo.toml").write_text(
+        '[dependencies]\n'
+        'astar-audio = { path = "../astar-audio", version = "0.1.10-beta" }\n'
+        '# A third-party dep must not be mistaken for one of ours.\n'
+        'serde = { version = "1" }\n',
+        encoding="utf-8",
+    )
+    assert vm.check_consistency(root) == "0.1.10beta"
 
 
 def main() -> int:
