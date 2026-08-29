@@ -73,3 +73,6 @@ docs/issues-archive.jsonl
 # crate names.
 docs/superpowers/
 docs/app/superpowers/
+
+# Subagent scratch worktrees (Claude Code). Real work lives in .worktrees/.
+.claude/worktrees/
