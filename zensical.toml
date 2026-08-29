@@ -128,6 +128,11 @@ icon = "fontawesome/brands/github"
 link = "https://github.com/rcludwick/astar"
 name = "astar on GitHub"
 
+[[project.extra.social]]
+icon = "fontawesome/brands/discord"
+link = "https://discord.gg/zDz5R8rVAM"
+name = "astar on Discord"
+
 # ----------------------------------------------------------------------------
 # Markdown extensions
 # ----------------------------------------------------------------------------

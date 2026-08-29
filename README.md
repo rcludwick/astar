@@ -360,3 +360,6 @@ per-file headers.
 See [`CONTRIBUTING.md`](CONTRIBUTING.md). The short version: AGPL-3.0-only,
 `just ci` green before anything lands, and nothing goes on the air without a
 human deciding to key it.
+
+Questions, bug reports and on-air testing happen on
+[Discord](https://discord.gg/zDz5R8rVAM).

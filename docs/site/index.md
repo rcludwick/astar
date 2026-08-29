@@ -113,6 +113,13 @@ per-platform native UI.
 The macOS app is the only published binary; everything else is built from
 source. Day-to-day usage documentation is macOS-only for now.
 
+## Community
+
+[**astar on Discord**](https://discord.gg/zDz5R8rVAM) — where questions get
+asked, bugs get reported before they are tickets, and on-air testing gets coordinated. astar is a
+beta client for live amateur radio networks; hearing what broke on someone
+else's setup is how it stops being broken on yours.
+
 ## Licence
 
 **AGPL-3.0-only** for everything in the repository, except the vendored
