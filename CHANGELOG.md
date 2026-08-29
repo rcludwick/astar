@@ -8,7 +8,9 @@ else is still built from source. Versions are `MAJOR.MINOR.PATCHbeta` and will
 stay on `beta` until the client has had a real sit-down-and-use-it pass on all
 three platforms.
 
-## Unreleased
+## 0.1.9beta — 2026-08-29
+
+Who you are, at the top of Settings — and the first bricks of DMR.
 
 ### Added
 
@@ -21,12 +23,14 @@ three platforms.
   behind a consent gate that is shut until the operator opens it. Nothing
   dials DMR yet.
 
-- **A DMR radio ID field**, in its own section below the AllStarLink account. DMR does not put a callsign on the air — it
-  addresses radios by a number registered at radioid.net against a verified
-  licence. That is a different credential from a callsign, so it gets its own
-  field beside it rather than being bolted onto it. Exported configs carry it
-  under the same "Callsign and radio ID" checkbox, so a file you hand to
-  someone else still leaves your identity behind. Nothing dials DMR yet.
+- **A DMR radio ID field**, in its own section below the AllStarLink account.
+  DMR does not put a callsign on the air — it addresses radios by a number
+  registered at radioid.net against a verified licence. That is a different
+  credential from a callsign, so it gets its own field rather than being
+  bolted onto one that means something else. Exported configs carry it under
+  the same "Callsign and radio ID" checkbox, so a file you hand to someone
+  else still leaves your identity behind. Nothing dials DMR yet, and the
+  field says so.
 
 ### Changed
 
@@ -45,9 +49,8 @@ three platforms.
   AllStarLink account. It is neither. M17 sends it in every frame, D-Star puts
   it in every header, YSF carries it in every data packet — and AllStarLink is
   the one network that never transmits it, because there you dial as a node
-  number. It is now an "Operator" section above everything else — callsign,
-  then DMR radio ID — and the AllStarLink account panel below it **no longer
-  has a callsign box at all.** Your allstarlink.org login *is* your callsign;
+  number. It is now an "Operator" section above everything else, and the
+  AllStarLink account panel below it **no longer has a callsign box at all.** Your allstarlink.org login *is* your callsign;
   a second field for the same fact was only ever a way to get the two out of
   step. The account panel says which callsign it signs in as, and changing it
   above updates the saved account without asking anyone to retype a password.
