@@ -27,32 +27,43 @@
         var body: some View {
             Section("Operator") {
                 VStack(alignment: .leading, spacing: 4) {
-                    TextField("Callsign", text: $session.operatorCallsign)
-                        .textFieldStyle(.roundedBorder)
-                        // Callsigns are transmitted upper case; correcting as
-                        // you type beats correcting you afterwards.
-                        .onChange(of: session.operatorCallsign) { value in
-                            let upper = value.uppercased()
-                            if upper != value { session.operatorCallsign = upper }
-                        }
-                        .accessibilityLabel("Your callsign")
+                    SettingsField("Callsign") {
+                        // No placeholder: the label carries the name, and an
+                        // example callsign in grey is one more string to
+                        // mistake for a saved value.
+                        TextField("", text: $session.operatorCallsign)
+                            .textFieldStyle(.roundedBorder)
+                            // Callsigns are transmitted upper case; correcting
+                            // as you type beats correcting you afterwards.
+                            .onChange(of: session.operatorCallsign) { value in
+                                let upper = value.uppercased()
+                                if upper != value { session.operatorCallsign = upper }
+                            }
+                            // The visible label is not wired to the field for
+                            // VoiceOver, so it still needs saying out loud.
+                            .accessibilityLabel("Your callsign")
+                    }
                     Text(
                         "Transmitted by M17, D-Star and YSF. AllStarLink doesn’t use it — "
                             + "there you dial as your node number."
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .settingsCaptionIndent()
                 }
                 .font(.callout)
                 .listRowSeparator(.hidden)
 
                 VStack(alignment: .leading, spacing: 4) {
-                    TextField("DMR Radio ID", text: $session.dmrRadioID)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityLabel("Your DMR radio ID")
+                    SettingsField("DMR Radio ID") {
+                        TextField("", text: $session.dmrRadioID)
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("Your DMR radio ID")
+                    }
                     Text(radioIDCaption)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .settingsCaptionIndent()
                 }
                 .font(.callout)
                 .listRowSeparator(.hidden)

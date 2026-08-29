@@ -104,22 +104,28 @@ struct CredentialsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            TextField("Node number", text: $node)
-                .textFieldStyle(.roundedBorder)
-            SecureField(
-                saved ? "Account password (re-enter to change)" : "Account password",
-                text: $accountPassword
-            )
-            .textFieldStyle(.roundedBorder)
-            // Red outline when the password is missing or the portal rejected it
-            // (astar-4e8a). Drawn as an overlay rather than a background so the
-            // native rounded-border field keeps its focus ring.
-            .overlay(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .stroke(Color.red, lineWidth: passwordStatus.isInvalid ? 1.5 : 0)
-            )
-            .animation(.easeInOut(duration: 0.15), value: passwordStatus)
-            .accessibilityValue(passwordStatus.message ?? "")
+            SettingsField("Node number") {
+                TextField("", text: $node)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Your AllStarLink node number")
+            }
+            SettingsField("Password") {
+                // The placeholder is the one hint a label cannot carry: an
+                // empty box here means "unchanged", not "blank", because astar
+                // never pre-fills a saved password.
+                SecureField(saved ? "Re-enter to change" : "", text: $accountPassword)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Your allstarlink.org account password")
+                    // Red outline when the password is missing or the portal
+                    // rejected it (astar-4e8a). An overlay rather than a
+                    // background so the native field keeps its focus ring.
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .stroke(Color.red, lineWidth: passwordStatus.isInvalid ? 1.5 : 0)
+                    )
+                    .animation(.easeInOut(duration: 0.15), value: passwordStatus)
+                    .accessibilityValue(passwordStatus.message ?? "")
+            }
             // The reason replaces the standing hint while something is wrong —
             // two captions stacked under one field is noise, and the red one is
             // the one that matters.
@@ -129,10 +135,12 @@ struct CredentialsView: View {
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
                     .transition(.opacity)
+                    .settingsCaptionIndent()
             } else {
                 Text("Your allstarlink.org account password — not the node’s IAX secret.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+                    .settingsCaptionIndent()
             }
 
             HStack(spacing: 10) {
