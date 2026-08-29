@@ -36,9 +36,14 @@ three platforms.
   AllStarLink account. It is neither. M17 sends it in every frame, D-Star puts
   it in every header, YSF carries it in every data packet — and AllStarLink is
   the one network that never transmits it, because there you dial as a node
-  number. It is now an "Operator" section above everything else, and the
-  account panel's own callsign box is labelled "Login callsign" so the two
-  cannot be confused.
+  number. It is now an "Operator" section above everything else — callsign,
+  then DMR radio ID — and the AllStarLink account panel below it **no longer
+  has a callsign box at all.** Your allstarlink.org login *is* your callsign;
+  a second field for the same fact was only ever a way to get the two out of
+  step. The account panel says which callsign it signs in as, and changing it
+  above updates the saved account without asking anyone to retype a password.
+  Clearing the account leaves your callsign alone — that is who you are, not
+  an account detail.
 
 - **The reflector directory is a pane of the window, not a sheet.** The
   magnifying glass beside the dial field now swaps the window over to the
