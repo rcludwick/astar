@@ -282,6 +282,10 @@
                 // A List (not a ScrollView) so Saved configs get native drag-to-
                 // reorder via .onMove. Account is its own section on top.
                 List {
+                    // Who you are comes before what you own: the callsign and
+                    // radio ID identify the operator, everything below is
+                    // equipment (astar-c9d2).
+                    StationIdentityView()
                     Section("Account") {
                         CredentialsView()
                             .listRowSeparator(.hidden)

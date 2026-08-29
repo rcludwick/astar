@@ -304,7 +304,7 @@ public final class CallSession: ObservableObject {
     @Published public var m17Callsign: String = "" {
         didSet {
             guard m17Callsign != oldValue else { return }
-            m17Defaults.set(m17Callsign, forKey: Self.m17CallsignKey)
+            prefs.set(m17Callsign, forKey: Self.m17CallsignKey)
         }
     }
     private static let m17CallsignKey = "m17.callsign"
@@ -329,17 +329,48 @@ public final class CallSession: ObservableObject {
     public static func requiresCallsign(_ network: Network) -> Bool {
         network == .m17 || network == .dstar
     }
-    /// Backing store for `m17Callsign`. Injected (defaults to `.standard`) so
-    /// tests can assert persistence without touching real defaults.
-    private let m17Defaults: UserDefaults
+
+    /// The operator's DMR radio ID — the numeric half of the identity model.
+    ///
+    /// DMR does not put a callsign on the air. It addresses radios by a number
+    /// registered at radioid.net against a verified licence, which is a
+    /// different credential from the callsign with its own registration story
+    /// and its own failure mode when absent or wrong. `docs/design/` asks in
+    /// three places (DMR, NXDN, P25) that this be settled once rather than
+    /// three times differently; the answer is one callsign plus one radio ID,
+    /// side by side, neither standing in for the other.
+    ///
+    /// Stored as digits under `dmr.radioId` — see `RadioID` for why the
+    /// validation is deliberately loose. Empty until the operator enters one;
+    /// nothing dials DMR yet, so an empty value costs nothing today.
+    @Published public var dmrRadioID: String = "" {
+        didSet {
+            let clean = RadioID.sanitized(dmrRadioID)
+            // Re-entrancy guard first: the assignment below re-enters `didSet`,
+            // and without the equality check that recurses forever on paste.
+            guard clean == dmrRadioID else {
+                dmrRadioID = clean
+                return
+            }
+            guard dmrRadioID != oldValue else { return }
+            prefs.set(dmrRadioID, forKey: Self.dmrRadioIDKey)
+        }
+    }
+    private static let dmrRadioIDKey = "dmr.radioId"
+
+    /// Backing store for the preferences this session owns outright — the
+    /// callsign, the radio ID, the M17 audio overrides. Injected (defaults to
+    /// `.standard`) so tests can assert persistence without touching real
+    /// defaults.
+    private let prefs: UserDefaults
 
     /// The persisted M17 TX-processing override (astar-5d8e): noise
     /// reduction, compression, compression strength, TX trim, and mic
     /// (input) gain (the last joined at astar-m17defaults), applied to the
     /// station in place of the shared `AudioSettings` values while an M17
     /// call is being dialed/live. `UserDefaults`-backed under the same
-    /// `m17Defaults` instance as `m17Callsign` (so tests share one scratch
-    /// suite for all M17 state); mutated only via the `setM17*` setters below,
+    /// `prefs` instance as `m17Callsign` (so tests share one scratch
+    /// suite for all of it); mutated only via the `setM17*` setters below,
     /// which publish + persist + (edge-triggered) push live.
     @Published public private(set) var m17Overrides: M17AudioOverrides
     private enum M17OverrideKey {
@@ -367,11 +398,11 @@ public final class CallSession: ObservableObject {
                 ? defaults.float(forKey: M17OverrideKey.inputGain) : 0.25)
     }
     private func saveM17Overrides() {
-        m17Defaults.set(m17Overrides.noiseReduction, forKey: M17OverrideKey.noiseReduction)
-        m17Defaults.set(m17Overrides.compression, forKey: M17OverrideKey.compression)
-        m17Defaults.set(m17Overrides.compressionLevel, forKey: M17OverrideKey.compressionLevel)
-        m17Defaults.set(m17Overrides.txTrim, forKey: M17OverrideKey.txTrim)
-        m17Defaults.set(m17Overrides.inputGain, forKey: M17OverrideKey.inputGain)
+        prefs.set(m17Overrides.noiseReduction, forKey: M17OverrideKey.noiseReduction)
+        prefs.set(m17Overrides.compression, forKey: M17OverrideKey.compression)
+        prefs.set(m17Overrides.compressionLevel, forKey: M17OverrideKey.compressionLevel)
+        prefs.set(m17Overrides.txTrim, forKey: M17OverrideKey.txTrim)
+        prefs.set(m17Overrides.inputGain, forKey: M17OverrideKey.inputGain)
     }
 
     private var timer: Timer?
@@ -460,7 +491,7 @@ public final class CallSession: ObservableObject {
         self.micProfileStore = micProfileStore
         self.micProfileID = audioStore.load().micProfileID
         self.micProfiles = micProfileStore.all()
-        self.m17Defaults = userDefaults
+        self.prefs = userDefaults
         self.m17Overrides = CallSession.loadM17Overrides(userDefaults)
         // Load the saved callsign; when nothing's saved yet, prefill from the
         // portal user if it's shaped like a callsign (astar-c2e5).
@@ -469,6 +500,10 @@ public final class CallSession: ObservableObject {
             storedCallsign.isEmpty
             ? (CallSession.callsignPrefill(from: credentials?.portalUser) ?? "")
             : storedCallsign
+        // Sanitised on the way in as well as on the way out: a defaults domain
+        // written by hand (or by an older build) is not a trusted source.
+        self.dmrRadioID = RadioID.sanitized(
+            userDefaults.string(forKey: Self.dmrRadioIDKey) ?? "")
     }
 
     /// The reflector directory's name lookup, as of the last load or sync.

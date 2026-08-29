@@ -78,9 +78,12 @@ session module is largely a transcription.
 
 ## Identity
 
-P25 addresses radios by numeric **radio ID**, not callsign. The same question
-NXDN raises, and probably the same answer — resolve it once, for both, rather
-than twice differently.
+P25 addresses radios by numeric **radio ID**, not callsign.
+
+**Settled (2026-08-29, astar-c9d2)** together with NXDN and DMR: astar carries a
+callsign and a numeric radio ID as two independent fields
+(`CallSession.operatorCallsign`, `CallSession.dmrRadioID`), in an "Operator"
+section at the top of Settings. P25 reads the numeric one.
 
 ## Order of work
 

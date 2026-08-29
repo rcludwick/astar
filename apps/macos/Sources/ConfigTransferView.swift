@@ -270,7 +270,11 @@
             case .settings:
                 return "\(section.title) (\(pending.settings?.count ?? 0) settings)"
             case .callsign:
-                return "\(section.title) (\(pending.callsign ?? ""))"
+                // Name whichever of the two the file actually carries — an
+                // archive exported before the radio ID existed has only one.
+                let identity = [pending.callsign, pending.radioID].compactMap { $0 }
+                    .filter { !$0.isEmpty }
+                return "\(section.title) (\(identity.joined(separator: ", ")))"
             case .interface:
                 return "\(section.title) (\(pending.interface?.count ?? 0) settings)"
             }

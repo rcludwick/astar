@@ -30,14 +30,18 @@ rather than protocols. **The network is part of the target**, not a detail of it
 Four things, and each one costs more than the protocol does.
 
 1. **Identity is a registered numeric ID.** A DMR ID comes from radioid.net,
-   is tied to a verified licence, and is not a callsign. astar has exactly one
-   identity field today — `CallSession.operatorCallsign` — on the honest basis
-   that D-Star and M17 transmit the same string. A DMR ID is a **different
-   credential**, with its own registration story and its own failure mode when
-   absent or wrong. It must not be bolted onto the callsign field.
+   is tied to a verified licence, and is not a callsign. A DMR ID is a
+   **different credential**, with its own registration story and its own
+   failure mode when absent or wrong. It must not be bolted onto the callsign
+   field.
 
-   This is the same question `nxdn-network.md` and `p25-network.md` raise.
-   Resolve it once, for all three, before any of them is built.
+   **Settled (2026-08-29, astar-c9d2).** astar now carries both, side by side,
+   in an "Operator" section at the top of Settings: `operatorCallsign` (stored
+   under `m17.callsign`, the legacy key kept deliberately) and `dmrRadioID`
+   (stored under `dmr.radioId`, digits only, validated by `RadioID`). Neither
+   stands in for the other. This is the answer `nxdn-network.md` and
+   `p25-network.md` asked for as well — one callsign plus one numeric ID, for
+   all three networks, decided once.
 
 2. **Per-network credentials.** Each DMR network wants its own account and a
    hotspot password/security key. That is a *set* of secrets, per network, and

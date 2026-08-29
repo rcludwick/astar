@@ -16,8 +16,13 @@ public enum ConfigSection: String, CaseIterable, Codable, Sendable {
     case directory
     /// Audio, M17 audio overrides, and serial/PTT settings.
     case settings
-    /// The M17 callsign — separated out because it identifies the operator,
-    /// so a shareable export can leave it behind.
+    /// The operator's callsign and DMR radio ID — separated out because they
+    /// identify the operator, so a shareable export can leave them behind.
+    ///
+    /// The raw value stays `callsign` even though the section now carries two
+    /// fields: it is written into every exported file, and renaming it would
+    /// make v1 archives unreadable to buy nothing. See `ConfigVersion` — a
+    /// bump marks translation, not change.
     case callsign
     /// Window and panel state.
     case interface
@@ -28,7 +33,7 @@ public enum ConfigSection: String, CaseIterable, Codable, Sendable {
         case .rigs: return "Saved configs"
         case .directory: return "Node directory"
         case .settings: return "Audio and serial settings"
-        case .callsign: return "Callsign"
+        case .callsign: return "Callsign and radio ID"
         case .interface: return "Window and panel state"
         }
     }
@@ -136,6 +141,10 @@ public struct ConfigArchive: Codable, Equatable {
     public var directory: [NodeEntry]?
     public var settings: [String: SettingValue]?
     public var callsign: String?
+    /// The operator's DMR radio ID. Travels with the callsign because it is
+    /// the same kind of fact — who you are, not what you own — and so is
+    /// withheld by the same checkbox.
+    public var radioID: String?
     public var interface: [String: SettingValue]?
 
     /// Saved configs travel with their mic profiles: a `Setup` references a
@@ -168,11 +177,12 @@ public struct ConfigArchive: Codable, Equatable {
         public var defaultSetupID: String?
         public var directory: [NodeEntry]
         public var callsign: String?
+        public var radioID: String?
 
         public init(
             defaults: [String: Any], setups: [Setup], micProfiles: [MicProfile],
             selectedSetupID: String?, defaultSetupID: String?,
-            directory: [NodeEntry], callsign: String?
+            directory: [NodeEntry], callsign: String?, radioID: String? = nil
         ) {
             self.defaults = defaults
             self.setups = setups
@@ -181,6 +191,7 @@ public struct ConfigArchive: Codable, Equatable {
             self.defaultSetupID = defaultSetupID
             self.directory = directory
             self.callsign = callsign
+            self.radioID = radioID
         }
     }
 
@@ -190,7 +201,7 @@ public struct ConfigArchive: Codable, Equatable {
     /// scalar slice.
     private static let claimedElsewhere: Set<String> = [
         "audio.setups", "audio.micProfiles", "audio.selectedSetup", "audio.defaultSetup",
-        "directory.nodes", "m17.callsign",
+        "directory.nodes", "m17.callsign", "dmr.radioId",
     ]
 
     /// `audio.wideband` is a documented dead key (astar-e542). Exporting cruft
@@ -252,6 +263,7 @@ public struct ConfigArchive: Codable, Equatable {
             directory: sections.contains(.directory) ? sources.directory : nil,
             settings: sections.contains(.settings) ? settingsSlice(from: sources.defaults) : nil,
             callsign: sections.contains(.callsign) ? sources.callsign : nil,
+            radioID: sections.contains(.callsign) ? sources.radioID : nil,
             interface: sections.contains(.interface)
                 ? interfaceSlice(from: sources.defaults) : nil)
     }
@@ -271,6 +283,7 @@ public struct ConfigArchive: Codable, Equatable {
             directory: sections.contains(.directory) ? directory : nil,
             settings: sections.contains(.settings) ? settings : nil,
             callsign: sections.contains(.callsign) ? callsign : nil,
+            radioID: sections.contains(.callsign) ? radioID : nil,
             interface: sections.contains(.interface) ? interface : nil)
     }
 
@@ -280,7 +293,9 @@ public struct ConfigArchive: Codable, Equatable {
         if rigs != nil { out.insert(.rigs) }
         if directory != nil { out.insert(.directory) }
         if settings != nil { out.insert(.settings) }
-        if callsign != nil { out.insert(.callsign) }
+        // Either field alone is enough: an operator with a radio ID and no
+        // callsign (or the reverse) still exported the identity section.
+        if callsign != nil || radioID != nil { out.insert(.callsign) }
         if interface != nil { out.insert(.interface) }
         return out
     }

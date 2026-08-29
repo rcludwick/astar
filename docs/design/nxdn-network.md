@@ -63,19 +63,15 @@ As with YSF: **read the reference, do not recall the wire format.** Build
 
 ## Open questions
 
-* **Is a per-user identity required?** D-Star and M17 both transmit the
-  operator's callsign, and astar already has one field for it
-  (`CallSession.operatorCallsign`). NXDN's radio identity is numeric. If NXDN
-  needs a radio ID rather than a callsign, that is a **new** credential with its
-  own registration story, and it should be designed deliberately — not bolted
-  onto the callsign field, which means something else.
+* ~~**Is a per-user identity required?**~~ **Answered (2026-08-29,
+  astar-c9d2).** A numeric radio ID is a separate credential from a callsign,
+  and astar now stores both: `CallSession.operatorCallsign` and
+  `CallSession.dmrRadioID`. NXDN reads the numeric one. Nothing is bolted onto
+  the callsign field, and there is no second callsign.
 
-  Resolve this before writing the session module. It is the one place NXDN might
-  diverge from the "one callsign, every network" model, and getting it wrong
-  means either a wrong ID on the air or a second field nobody needed.
-
-  **Shared with P25 and DMR** — all three address radios numerically. Settle it
-  once for the three of them (`dmr-networks.md` §"What makes DMR different", item
-  1), not three times differently.
+  The field is named for DMR because DMR is what drove it and DMR is what
+  registers it — radioid.net issues the ID against a licence. If NXDN turns out
+  to need a *differently* registered number rather than the same one, that is a
+  third field and a fresh decision, not a re-argument of this one.
 
 * Talker display: reuse D-Star's last-heard treatment.
