@@ -203,10 +203,18 @@ honest.
 
 ### How it is built (astar-refl-ui)
 
-`ReflectorSearchSheet` is the sheet, and it has **two steps, not one**: pick a
-reflector, then pick a room. The second step only appears for the networks that
-address one (`ReflectorModuleOptions.options(for:)` returns empty for YSF, NXDN
-and P25, and those fill the field and dismiss straight away).
+`ReflectorSearchPane` is a **pane of the main window**, not a sheet
+(astar-5a41): the magnifying glass beside the dial field swaps the window over
+to it, and a Back chevron — the same one Settings uses, on the same ⌘[ — swaps
+back. It began life as a sheet on the reasoning that 3,000 rows should not grow
+a 330 pt popover, but the window is resizable, Settings had already set what a
+full-window pane looks like here, and browsing a directory is not a decision the
+app is blocked on, which is the only thing a sheet is for.
+
+The pane has **two steps, not one**: pick a reflector, then pick a room. The
+second step only appears for the networks that address one
+(`ReflectorModuleOptions.options(for:)` returns empty for YSF, NXDN and P25, and
+those fill the field and leave straight away).
 
 The offer is the published `modules` list when there is one — M17 and URF rows
 carry them — and A–Z when there is not, which is every D-Star row. That is not
@@ -214,7 +222,7 @@ a guess at which rooms are live: it is the protocol's range, with the operator
 supplying the knowledge the registry does not publish. The picker says so, in
 those words, rather than leaving a bare grid to imply otherwise.
 
-The sheet hands back **dial text, not a target**. `onSelect` writes a string
+The pane hands back **dial text, not a target**. `onSelect` writes a string
 into the same field the keyboard types into, so there is exactly one place
 holding what Connect will dial — two places each holding half of it is how a UI
 comes to display `XLX836 A` and dial `XLX836`.
@@ -364,7 +372,7 @@ chain.
 Adding YSF or DMR later needs **no new UI**:
 
 * YSF entries already carry `dial.kind = "ysf"`; implement the case and the
-  picker, the search sheet and the sync button all work unchanged.
+  picker, the search pane and the sync button all work unchanged.
 * DMR entries carry `requires: ["dmr_id", "password"]`. The client reads that and
   prompts, rather than the schema pretending a public file can hold a per-user
   credential. Until the DMR protocol is implemented the entries list as

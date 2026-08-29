@@ -10,7 +10,7 @@ Of the AMBE family it is the cheapest by a distance, and everything that makes
 it cheap is already paid for:
 
 * **1,439 reflectors are already in the directory**, published with
-  `dial.kind: "ysf"`, and already listed in astar's search sheet today. They are
+  `dial.kind: "ysf"`, and already listed in astar's search pane today. They are
   visible and undialable — the exact state the directory was designed to make
   honest, and the exact state this closes.
 * **The vocoder is a RATEP word away.** YSF DN mode is AMBE+2 on the AMBE-3000
@@ -18,7 +18,7 @@ it cheap is already paid for:
   not new hardware, not a new licence.
 * **The client needs nothing.** `dial.kind` is already `ysf`, `addressesModule`
   is already false, the picker segment appears from `Network.available`, and the
-  search sheet, dial-by-name, sync and attribution all work unchanged.
+  search pane, dial-by-name, sync and attribution all work unchanged.
 
 So this is layers 1–11 of the recipe and almost none of 12–14. It is also the
 proving run for the AMBE+2 path that NXDN and DMR then inherit.
