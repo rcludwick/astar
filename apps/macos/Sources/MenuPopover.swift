@@ -290,6 +290,10 @@
                         CredentialsView()
                             .listRowSeparator(.hidden)
                     }
+                    // Below the account, not beside the callsign: a DMR ID is
+                    // one network's credential, and that network is not
+                    // dialable yet (astar-a7c5).
+                    DmrSettingsView()
                     SetupsView()
                     FavoritesSettingsView(directoryRevision: $directoryRevision)
                     MicProfilesView()

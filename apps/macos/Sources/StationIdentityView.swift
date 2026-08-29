@@ -17,10 +17,11 @@
     /// it in every data packet, and AllStarLink is the one network that never
     /// transmits it at all, because there you dial as a node number.
     ///
-    /// The radio ID sits beside it rather than inside it. DMR addresses radios
-    /// numerically, and `docs/design/dmr-networks.md` is explicit that a
-    /// registered ID is a *different* credential from a callsign and must not
-    /// be bolted onto the callsign field.
+    /// The DMR radio ID used to sit beside it here. It moved down below the
+    /// AllStarLink account (`DmrSettingsView`, astar-a7c5): it is one
+    /// network's credential for a network astar cannot dial yet, and at eye
+    /// level it implied otherwise. The callsign is what every network
+    /// transmits, so the callsign is what gets the top of the pane.
     struct StationIdentityView: View {
         @EnvironmentObject private var session: CallSession
 
@@ -53,33 +54,7 @@
                 }
                 .font(.callout)
                 .listRowSeparator(.hidden)
-
-                VStack(alignment: .leading, spacing: 4) {
-                    SettingsField("DMR Radio ID") {
-                        TextField("", text: $session.dmrRadioID)
-                            .textFieldStyle(.roundedBorder)
-                            .accessibilityLabel("Your DMR radio ID")
-                    }
-                    Text(radioIDCaption)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .settingsCaptionIndent()
-                }
-                .font(.callout)
-                .listRowSeparator(.hidden)
             }
-        }
-
-        /// Says what the field is for, and — only once there is something to be
-        /// wrong about — that what is in it is too short to be a registration.
-        /// A hint, never a refusal: radioid.net is the authority on which
-        /// numbers exist, not astar.
-        private var radioIDCaption: String {
-            if !session.dmrRadioID.isEmpty && !RadioID.isPlausible(session.dmrRadioID) {
-                return "A registered ID is at least \(RadioID.minPlausibleDigits) digits."
-            }
-            return "Your registered ID from radioid.net. DMR addresses radios by number, "
-                + "not by callsign."
         }
     }
 #endif
