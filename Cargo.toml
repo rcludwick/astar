@@ -18,6 +18,7 @@ members = [
     "crates/astar-server",
     "crates/astar-wireguard",
     "crates/astar-m17",
+    "crates/astar-dmr",
     "crates/astar-dstar",
     "crates/astar-ysf",
     "apps/gui",

@@ -12,6 +12,15 @@ three platforms.
 
 ### Added
 
+- **The start of DMR: `crates/astar-dmr`.** DMR is not one network — it is a
+  family of independently run ones that share a protocol, and a talkgroup
+  number names nothing on its own (TG 91 exists on several of them and is a
+  different room on each). So the first thing built is the address, not the
+  wire: TGIF, FreeDMR, DMR+, SystemX, AmComm, VKDMR, FreeSTAR and ADN are
+  grouped together as "Independent networks", and BrandMeister stands apart
+  behind a consent gate that is shut until the operator opens it. Nothing
+  dials DMR yet.
+
 - **A DMR radio ID field.** DMR does not put a callsign on the air — it
   addresses radios by a number registered at radioid.net against a verified
   licence. That is a different credential from a callsign, so it gets its own

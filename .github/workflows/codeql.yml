@@ -92,7 +92,7 @@ jobs:
         # The engine only. apps/gui pulls iced/wgpu and a pile of system
         # libraries that are not worth installing on a hosted runner just to
         # analyse them; the protocol, codec, audio and PTT code is what matters.
-        run: cargo build --locked -p astar-station -p astar-iax -p astar-m17 -p astar-dstar -p astar-ysf
+        run: cargo build --locked -p astar-station -p astar-iax -p astar-m17 -p astar-dstar -p astar-ysf -p astar-dmr
 
       - name: Analyze
         uses: github/codeql-action/analyze@v3

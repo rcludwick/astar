@@ -1,7 +1,8 @@
 # DMR — design
 
-**Status:** designed, not built. No engine item, no client item, no directory
-rows. Last of the AMBE family by Rob's call.
+**Status:** started. `crates/astar-dmr` holds the network taxonomy and the
+consent gate; there is no protocol, no vocoder and no dial grammar yet. Still
+last of the AMBE family by Rob's call — see "Where this stands" at the end.
 **Read first:** `docs/design/adding-a-network.md`, then `ysf-network.md` — DMR
 inherits the AMBE+2 vocoder work and almost nothing else.
 
@@ -131,9 +132,46 @@ than one it reaches dishonestly.
 
 ## Open questions
 
-* Does the dial grammar grow a network selector, or does each DMR network get its
-  own `Network` case? The latter is honest but multiplies the picker.
+* ~~Does the dial grammar grow a network selector, or does each DMR network get
+  its own `Network` case?~~ **Settled (2026-08-29): the selector.** One DMR
+  `Network` case, with the network carried alongside the talkgroup as part of
+  the address. A case per operator would be honest and unusable — eight
+  segments in a picker for one protocol. `astar_dmr::DmrNetwork` is that
+  selector, and `NetworkClass` groups the independently run networks together
+  and holds BrandMeister apart, which is the only split that changes
+  behaviour.
 * Where does the timeslot live in `ReflectorDial`? A new kind, almost certainly,
   rather than stretching an existing one.
 * What does BrandMeister's policy actually say about third-party clients today?
   **Check before building, not after.**
+
+## Where this stands
+
+`crates/astar-dmr` exists. It contains `network` and nothing else: no I/O, no
+dependencies beyond `std`, and no ability to connect to anything.
+
+| | |
+|---|---|
+| `DmrNetwork` | TGIF, FreeDMR, DMR+, SystemX, AmComm, VKDMR, FreeSTAR, ADN, BrandMeister — each with a UI `label` and a stable `slug` for dial grammar and saved configuration |
+| `NetworkClass` | `Independent` (label: "Independent networks") and `BrandMeister`. The one distinction with teeth |
+| `dialable(consented)` | The gate, written once so no call site can forget it. BrandMeister is absent unless the operator has opted in |
+| Identity | Settled: callsign and radio ID are two fields, neither standing in for the other |
+
+**What it deliberately does not hold: master hostnames, ports or passwords.** A
+password is a per-network secret and astar's rule is absolute — connect-time
+in-arg only. Endpoints are directory data with their own sourcing problem (see
+"Order of work" item 3) and they move; a hostname compiled into the engine is a
+hostname that goes stale in a shipped binary.
+
+**Why the taxonomy came before the wire.** DMR is the one network where the
+address is the hard part. A talkgroup number names nothing on its own — TG 91
+exists on several of these networks and is a different room on each — so what a
+target *is* had to be settled before any wire code could be written against it.
+
+**Next, in order:** the MMDVM/homebrew login-and-keepalive against TGIF, read
+out of the reference implementations and verified rather than recalled; then
+AMBE+2 frame packing, which YSF's vocoder work pays for; then the talkgroup
+dial grammar and the timeslot, which still has nowhere to live in
+`ReflectorDial`. The BrandMeister policy check in "Open questions" is still
+outstanding and still blocks that network specifically — the gate is built, the
+question of whether the gate should ever open is not answered.

@@ -12,7 +12,7 @@ inline. All 228 issues (164 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (90)
+## Open items (91)
 
 ### astar-uid — Audio devices need a stable identity, not their name
 *P2 medium · bug · labels: audio, macos, migration, cx:5*
@@ -528,6 +528,42 @@ deployed reference implementations rather than recalled; see the design doc's
 frame packing in `astar-codec` — then `astar-console`'s session and the ABI /
 Swift / `Network.ysf` layers. The payload bytes are carried, not decoded:
 nothing yet claims to hear a YSF stream.
+
+### iax-d4f7 — DMR engine backend: MMDVM/homebrew, TGIF first
+*P4 backlog · feature · labels: dmr, protocol, cx:8*
+
+Per Rob 2026-08-29. DMR is a **family** of independently run networks sharing
+one protocol, so the network is part of the address, not a detail of it — a
+talkgroup number names nothing on its own (TG 91 exists on several of them and
+means something different on each).
+
+**Design:** `docs/design/dmr-networks.md`.
+
+**Progress 2026-08-29:** `crates/astar-dmr` exists with `network` only — the
+taxonomy (`DmrNetwork`: TGIF, FreeDMR, DMR+, SystemX, AmComm, VKDMR, FreeSTAR,
+ADN, BrandMeister; label + stable slug each), the `NetworkClass` split that
+groups the independents together and holds BrandMeister apart, and
+`dialable(consented)` — the consent gate written once so no call site can
+forget it. 7 tests, `std` only, no I/O. The identity question that blocked DMR,
+NXDN and P25 alike is settled (astar-c9d2): callsign and radio ID are two
+independent fields.
+
+**Remaining, in order:** (1) the MMDVM/homebrew login-and-keepalive against
+TGIF, read out of the reference implementations and verified, never recalled —
+`MMDVMHost` / `DMRGateway` are GPL-2.0 and astar is AGPL-3.0-only, so
+algorithms get written from their definitions, not transcribed; (2) AMBE+2
+frame packing, which YSF's vocoder work pays for; (3) the talkgroup dial
+grammar and the **timeslot**, which has nowhere to live in `ReflectorDial`
+today; (4) directory rows — hamcall-db publishes no DMR at all, and W0CHP's
+compiled lists are explicitly not reusable; (5) BrandMeister last, and only
+after checking their current position on third-party clients. That check is
+still outstanding: the gate is built, whether it should ever open is not
+answered.
+
+**Not here, deliberately:** master hostnames, ports and passwords. Passwords
+are per-network secrets — connect-time in-args only. Endpoints are directory
+data that moves, and a hostname compiled into the engine goes stale in a
+shipped binary.
 
 ### iax-b9c2 — NXDN engine backend: NXDNReflector protocol
 *P4 backlog · feature · labels: nxdn, protocol, cx:4*
