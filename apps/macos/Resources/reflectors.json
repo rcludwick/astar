@@ -2,17 +2,17 @@
   "api_version": "v1",
   "attribution": "XLX reflector data from the XLX registry maintained by Luc Engelmann, LX1IQ (http://xlxapi.rlx.lu/).\nStandalone XRF reflector data from the Pi-Star DExtra host file (http://www.pistar.uk/downloads/DExtra_Hosts.txt).\nREF and DCS reflector names from the Pi-Star DPlus and DCS host files (http://www.pistar.uk/downloads/).\nReflector data provided by DVRef \u2014 https://dvref.com/",
   "client_refresh_days": 7,
-  "count": 3188,
-  "generated": "2026-08-28",
+  "count": 3199,
+  "generated": "2026-08-29",
   "license": "CC BY 4.0",
   "license_url": "https://creativecommons.org/licenses/by/4.0/",
   "modifications": "Reformatted from the upstream source into hamcall-db's common reflector JSON schema. Field names and structure differ from upstream. Email addresses have been removed from the free-text fields (name, sponsor, description) and replaced with '[email removed]'; values are otherwise unmodified.",
   "networks": {
     "dstar": 943,
     "m17": 105,
-    "nxdn": 296,
-    "p25": 314,
-    "urf": 91,
+    "nxdn": 298,
+    "p25": 321,
+    "urf": 93,
     "ysf": 1439
   },
   "reflectors": [
@@ -1863,7 +1863,7 @@
       ],
       "country": "Hungary",
       "dashboard": "https://vmi2909834.contaboserver.net/xlxd/",
-      "description": "Welcome to Lake Balaton XLX Reflector, G3 Terminal Support",
+      "description": "Welcome to Lake Balaton XLX Reflector / G3 Terminal Support / YSF-01848 auto starts on Module C",
       "dial": {
         "callsign": "XRF099",
         "host": "62.84.187.1",
@@ -3561,7 +3561,7 @@
       "description": "XLX191 Multiprotocol Reflector by LU1DQU, info: [email removed]",
       "dial": {
         "callsign": "XRF191",
-        "host": "181.23.115.161",
+        "host": "181.23.125.20",
         "kind": "dextra",
         "port": 30001
       },
@@ -5246,6 +5246,26 @@
     },
     {
       "aliases": [
+        "XRF283",
+        "REF283",
+        "DCS283"
+      ],
+      "country": "JAPAN",
+      "dashboard": "http://xlx283.mydns.jp",
+      "description": "XLX283 Multiprotocol Reflector by JO2JGS, info: [email removed]",
+      "dial": {
+        "callsign": "XRF283",
+        "host": "92.202.87.97",
+        "kind": "dextra",
+        "port": 30001
+      },
+      "id": "XLX283",
+      "name": "XLX283",
+      "network": "dstar",
+      "source": "xlx"
+    },
+    {
+      "aliases": [
         "REF284",
         "DCS284"
       ],
@@ -5314,7 +5334,7 @@
       "description": "XLX288 / YSF IT-URF288 #22250",
       "dial": {
         "callsign": "XRF288",
-        "host": "79.41.30.217",
+        "host": "79.47.144.113",
         "kind": "dextra",
         "port": 30001
       },
@@ -8441,26 +8461,6 @@
     },
     {
       "aliases": [
-        "XRF478",
-        "REF478",
-        "DCS478"
-      ],
-      "country": "United States",
-      "dashboard": "https://urf.hamvillage.org",
-      "description": "Ham Radio Village",
-      "dial": {
-        "callsign": "XRF478",
-        "host": "35.232.151.255",
-        "kind": "dextra",
-        "port": 30001
-      },
-      "id": "XLX478",
-      "name": "XLX478",
-      "network": "dstar",
-      "source": "xlx"
-    },
-    {
-      "aliases": [
         "XRF479",
         "REF479",
         "DCS479"
@@ -8601,7 +8601,9 @@
     },
     {
       "aliases": [
-        "XRF488"
+        "XRF488",
+        "REF488",
+        "DCS488"
       ],
       "country": "RU",
       "dashboard": "http://77.222.53.249",
@@ -9162,7 +9164,7 @@
         "DCS522"
       ],
       "country": "Malaysia",
-      "dashboard": "https://xlx.lucifernet.com/dashboard/index.php",
+      "dashboard": "https://xlx.lucifernet.com/dashboard3/index.php",
       "description": "Transcoding DMR/DSTAR,BM TG50210/525,Wires-X Malaysia room 24060/MYYSF/SingaporeYSFV2",
       "dial": {
         "callsign": "XRF522",
@@ -12965,8 +12967,8 @@
         "DCS845"
       ],
       "country": "USA",
-      "dashboard": "https://xlx845.pota.review",
-      "description": "Sponsored by POTA News and Review https://pota.review",
+      "dashboard": "https://xlx845.pota.review/dashboard",
+      "description": "Sponsored by POTA News and Reviews https://pota.review",
       "dial": {
         "callsign": "XRF845",
         "host": "71.174.60.28",
@@ -13006,7 +13008,7 @@
       ],
       "country": "Germany",
       "dashboard": "http://xlx850.bm262.de",
-      "description": "MultiMode: BM-TG263<>YSF: DE-Germany<>Wires-X: DL-WIRESX-BM263 <> Tetra",
+      "description": "MultiMode DV: BM-TG263<=>YSF: DE-Germany<=>Wires-X: DL-WIRESX-BM263",
       "dial": {
         "callsign": "XRF850",
         "host": "116.203.56.12",
@@ -14445,7 +14447,7 @@
       "description": "XLX966 for BG5CIA TEST ONLY",
       "dial": {
         "callsign": "XRF966",
-        "host": "115.239.111.230",
+        "host": "125.123.153.41",
         "kind": "dextra",
         "port": 30001
       },
@@ -15553,26 +15555,6 @@
     },
     {
       "aliases": [
-        "XRFDVM",
-        "REFDVM",
-        "DCSDVM"
-      ],
-      "country": "DVMEGA UK",
-      "dashboard": "http://212.237.34.32/ref/",
-      "description": "XLX BY DVMEGA UK",
-      "dial": {
-        "callsign": "XRFDVM",
-        "host": "212.237.34.32",
-        "kind": "dextra",
-        "port": 30001
-      },
-      "id": "XLXDVM",
-      "name": "XLXDVM",
-      "network": "dstar",
-      "source": "xlx"
-    },
-    {
-      "aliases": [
         "XRFE2H",
         "REFE2H",
         "DCSE2H"
@@ -16371,17 +16353,12 @@
       "source": "xlx"
     },
     {
-      "aliases": [
-        "XRFMMG",
-        "REFMMG",
-        "DCSMMG"
-      ],
       "country": "United States",
       "dashboard": "http://xlxmmg.nemmg.club",
       "description": "New England MultiMode Group",
       "dial": {
         "callsign": "XRFMMG",
-        "host": "172.56.198.157",
+        "host": "137.103.112.175",
         "kind": "dextra",
         "port": 30001
       },
@@ -16765,6 +16742,26 @@
       },
       "id": "XLXSAT",
       "name": "XLXSAT",
+      "network": "dstar",
+      "source": "xlx"
+    },
+    {
+      "aliases": [
+        "XRFSCP",
+        "REFSCP",
+        "DCSSCP"
+      ],
+      "country": "Italy",
+      "dashboard": "https://xlxscp.iv3scp.it",
+      "description": "XLX Ari Gorizia",
+      "dial": {
+        "callsign": "XRFSCP",
+        "host": "44.31.102.148",
+        "kind": "dextra",
+        "port": 30001
+      },
+      "id": "XLXSCP",
+      "name": "XLXSCP",
       "network": "dstar",
       "source": "xlx"
     },
@@ -17548,26 +17545,6 @@
     },
     {
       "aliases": [
-        "XRFXME",
-        "REFXME",
-        "DCSXME"
-      ],
-      "country": "USA",
-      "dashboard": "http://deez.vnutz.com",
-      "description": "Go Army! Beat Navy!",
-      "dial": {
-        "callsign": "XRFXME",
-        "host": "159.89.176.136",
-        "kind": "dextra",
-        "port": 30001
-      },
-      "id": "XLXXME",
-      "name": "XLXXME",
-      "network": "dstar",
-      "source": "xlx"
-    },
-    {
-      "aliases": [
         "XRFXXX",
         "REFXXX",
         "DCSXXX"
@@ -17674,10 +17651,10 @@
       ],
       "country": "T\u00dcRK\u0130YE",
       "dashboard": "xlxylv.ta2kw.keenetic.pro",
-      "description": "T\u00dcRK\u0130YE XLX286D Multi-Mode Reflector D-STAR DMR XLX_286 YSF TR-URF28600 NXDN 286 P25-286 M17-286",
+      "description": "T\u00dcRK\u0130YE XLX286D Multi-Mode Reflector D-STAR DMR XLX_286 YSF TR-URF28600 NXDN 286 P25-286",
       "dial": {
         "callsign": "XRFYLV",
-        "host": "85.109.253.122",
+        "host": "81.214.155.218",
         "kind": "dextra",
         "port": 30001
       },
@@ -17769,7 +17746,7 @@
     {
       "dial": {
         "callsign": "XRF014",
-        "host": "172.67.201.108",
+        "host": "104.21.21.239",
         "kind": "dextra",
         "port": 30001
       },
@@ -18012,7 +17989,7 @@
     {
       "dial": {
         "callsign": "XRF321",
-        "host": "104.21.57.126",
+        "host": "172.67.163.225",
         "kind": "dextra",
         "port": 30001
       },
@@ -18302,6 +18279,22 @@
       },
       "id": "XRF988",
       "name": "XRF988",
+      "network": "dstar",
+      "source": "dextra"
+    },
+    {
+      "aliases": [
+        "REFMMG",
+        "DCSMMG"
+      ],
+      "dial": {
+        "callsign": "XRFMMG",
+        "host": "172.56.198.157",
+        "kind": "dextra",
+        "port": 30001
+      },
+      "id": "XRFMMG",
+      "name": "XRFMMG",
       "network": "dstar",
       "source": "dextra"
     },
@@ -23055,6 +23048,21 @@
     },
     {
       "country": "TR",
+      "dashboard": "https://xlxylv.ta2kw.keenetic.pro",
+      "description": "<p><strong>Module A: DMR C4FM YSF XLX286A</strong><br><strong>Module B: D-PRS/RESiM</strong><br><strong>Module C: D-STAR</strong><br><strong>Module D: ECHO TEST&nbsp;</strong><br><strong><br><br><br>NXDN 286 https://nxdn.ta2kw.keenetic.pro<br>P25 286 &nbsp;https://p25.ta2kw.keenetic.pro<br>XLXYLV https://xlxylv.ta2kw.keenetic.pro<br>XLX286 http://xlx286.dmrturkiye.com<br>YSF 28677<br>YSF 28600<br><br>XLXYLV T&Uuml;RK\u0130YE</strong></p>",
+      "dial": {
+        "host": "xlxylv.ta2kw.keenetic.pro",
+        "kind": "nxdn",
+        "port": 41400
+      },
+      "id": "28677",
+      "name": "URFYLV",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "TA2KW"
+    },
+    {
+      "country": "TR",
       "dashboard": "https://dmr.pistar.com.tr:28381",
       "description": "<p>NXDN Duzce Reflector - YM2KG</p>",
       "dial": {
@@ -24945,7 +24953,6 @@
     },
     {
       "country": "ES",
-      "dashboard": "https://qsoforgenxdn.ddns.net",
       "description": "<p>San vicente del raspeig, Alicante</p>",
       "dial": {
         "host": "qsoforgenxdn.ddns.net",
@@ -24955,8 +24962,7 @@
       "id": "7575",
       "name": "ALICANTE",
       "network": "nxdn",
-      "source": "dvref",
-      "sponsor": "Dashboard by EA5IHI"
+      "source": "dvref"
     },
     {
       "country": "US",
@@ -25267,6 +25273,21 @@
       "name": "XLX942",
       "network": "nxdn",
       "source": "dvref"
+    },
+    {
+      "country": "US",
+      "dashboard": "http://www.n6jet.com/urfjet/",
+      "description": "<p>n6jet.com/urfjetpurpose.html</p>",
+      "dial": {
+        "host": "5.161.18.189",
+        "kind": "nxdn",
+        "port": 41400
+      },
+      "id": "9511",
+      "name": "URFJET",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "N6JET"
     },
     {
       "country": "AU",
@@ -26866,6 +26887,21 @@
       "network": "p25",
       "source": "dvref",
       "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+    },
+    {
+      "country": "TR",
+      "dashboard": "https://xlxylv.ta2kw.keenetic.pro",
+      "description": "<p><strong>Module A: DMR C4FM YSF XLX286A</strong><br><strong>Module B: D-PRS/RESiM</strong><br><strong>Module C: D-STAR</strong><br><strong>Module D: ECHO TEST&nbsp;</strong><br><strong><br><br><br>NXDN 286 https://nxdn.ta2kw.keenetic.pro<br>P25 286 &nbsp;https://p25.ta2kw.keenetic.pro<br>XLXYLV https://xlxylv.ta2kw.keenetic.pro<br>XLX286 http://xlx286.dmrturkiye.com<br>YSF 28677<br>YSF 28600<br><br>XLXYLV T&Uuml;RK\u0130YE</strong></p>",
+      "dial": {
+        "host": "xlxylv.ta2kw.keenetic.pro",
+        "kind": "p25",
+        "port": 41000
+      },
+      "id": "28677",
+      "name": "URFYLV",
+      "network": "p25",
+      "source": "dvref",
+      "sponsor": "TA2KW"
     },
     {
       "country": "AU",
@@ -29659,6 +29695,71 @@
     },
     {
       "country": "AU",
+      "dashboard": "http://vk2adf-n1.vk44.net/p25",
+      "dial": {
+        "host": "150.107.73.56",
+        "kind": "p25",
+        "port": 41000
+      },
+      "id": "9101",
+      "name": "VK2ADF Main",
+      "network": "p25",
+      "source": "dvref"
+    },
+    {
+      "country": "AU",
+      "dashboard": "http://vk2adf-n1.vk44.net/p25",
+      "dial": {
+        "host": "150.107.73.56",
+        "kind": "p25",
+        "port": 41001
+      },
+      "id": "9102",
+      "name": "VK2ADF Training 1",
+      "network": "p25",
+      "source": "dvref"
+    },
+    {
+      "country": "AU",
+      "dashboard": "http://vk2adf-n1.vk44.net/p25",
+      "dial": {
+        "host": "150.107.73.56",
+        "kind": "p25",
+        "port": 41002
+      },
+      "id": "9103",
+      "name": "VK2ADF Training 2",
+      "network": "p25",
+      "source": "dvref"
+    },
+    {
+      "country": "AU",
+      "dashboard": "http://vk2adf-n1.vk44.net/p25",
+      "dial": {
+        "host": "150.107.73.56",
+        "kind": "p25",
+        "port": 41003
+      },
+      "id": "9104",
+      "name": "VK2ADF Exercise",
+      "network": "p25",
+      "source": "dvref"
+    },
+    {
+      "country": "AU",
+      "dashboard": "http://vk2adf-n1.vk44.net/p25",
+      "dial": {
+        "host": "150.107.73.56",
+        "kind": "p25",
+        "port": 41004
+      },
+      "id": "9105",
+      "name": "VK2ADF Special",
+      "network": "p25",
+      "source": "dvref"
+    },
+    {
+      "country": "AU",
       "dashboard": "https://vk2adf-n1.vk44.net/p25/",
       "dial": {
         "host": "150.107.73.56",
@@ -29753,6 +29854,21 @@
       "network": "p25",
       "source": "dvref",
       "sponsor": "N6LKA"
+    },
+    {
+      "country": "US",
+      "dashboard": "http://www.n6jet.com/urfjet/",
+      "description": "<p>n6jet.com/urfjetpurpose.html</p>",
+      "dial": {
+        "host": "5.161.18.189",
+        "kind": "p25",
+        "port": 41000
+      },
+      "id": "9511",
+      "name": "URFJET",
+      "network": "p25",
+      "source": "dvref",
+      "sponsor": "N6JET"
     },
     {
       "country": "AU",
@@ -30052,6 +30168,19 @@
       "network": "urf",
       "source": "dvref",
       "sponsor": "DK8RG"
+    },
+    {
+      "country": "TH",
+      "dashboard": "http://44.32.81.27",
+      "dial": {
+        "host": "44.32.81.27",
+        "kind": "urf"
+      },
+      "id": "162",
+      "name": "M17-Thailand-E29SZE",
+      "network": "urf",
+      "source": "dvref",
+      "sponsor": "ham radio"
     },
     {
       "country": "US",
@@ -31241,6 +31370,19 @@
       "network": "urf",
       "source": "dvref",
       "sponsor": "AL8T"
+    },
+    {
+      "country": "IT",
+      "dashboard": "https://urfita.freedmr.it",
+      "dial": {
+        "host": "urfita.freedmr.it",
+        "kind": "urf"
+      },
+      "id": "ITA",
+      "name": "FREEDMR ITALY MULTISTANDARD REFLECTOR",
+      "network": "urf",
+      "source": "dvref",
+      "sponsor": "FreeDMR IT"
     },
     {
       "country": "US",
@@ -38717,30 +38859,15 @@
     },
     {
       "country": "ES",
-      "dashboard": "http://canal19.c4fm.es/",
-      "description": "C4FM-CARRETERA",
-      "dial": {
-        "host": "212.227.87.198",
-        "kind": "ysf",
-        "port": 42319
-      },
-      "id": "21419",
-      "name": "CANAL-19",
-      "network": "ysf",
-      "source": "dvref",
-      "sponsor": "xreflector.es"
-    },
-    {
-      "country": "ES",
-      "dashboard": "http://ronda.c4fm.es/",
-      "description": "SALA-RONDA",
+      "dashboard": "http://malaga.c4fm.es/",
+      "description": "SALA-MALAGA",
       "dial": {
         "host": "57.131.25.19",
         "kind": "ysf",
         "port": 42395
       },
       "id": "21429",
-      "name": "RONDA",
+      "name": "MALAGA",
       "network": "ysf",
       "source": "dvref",
       "sponsor": "xreflector.es"
@@ -44035,7 +44162,7 @@
       "dashboard": "http://fortiga.ddns.net:42180",
       "description": "SCANIA TEAM",
       "dial": {
-        "host": "85.73.210.109",
+        "host": "85.73.213.205",
         "kind": "ysf",
         "port": 42007
       },
@@ -52065,6 +52192,21 @@
       },
       "id": "95111",
       "name": "URFJET",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "N6JET"
+    },
+    {
+      "country": "US",
+      "dashboard": "https://www.n6jet.com/xlxd/",
+      "description": "XLXJET N6JET",
+      "dial": {
+        "host": "5.161.215.224",
+        "kind": "ysf",
+        "port": 42000
+      },
+      "id": "95112",
+      "name": "XLXJET",
       "network": "ysf",
       "source": "dvref",
       "sponsor": "N6JET"
