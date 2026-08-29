@@ -8,6 +8,18 @@ else is still built from source. Versions are `MAJOR.MINOR.PATCHbeta` and will
 stay on `beta` until the client has had a real sit-down-and-use-it pass on all
 three platforms.
 
+## Unreleased
+
+### Changed
+
+- **The reflector directory is a pane of the window, not a sheet.** The
+  magnifying glass beside the dial field now swaps the window over to the
+  reflector list the same way the gear swaps it to Settings, and the same Back
+  chevron — and the same ⌘[ — brings you home. Picking a module is still the
+  second step, with its own Back to the list. Nothing about a directory you are
+  browsing is modal, and a sheet floating over a popover was one layer of chrome
+  more than the job needed.
+
 ## 0.1.8beta — 2026-08-28
 
 The big one: astar can find a reflector it doesn't already know, and it can talk

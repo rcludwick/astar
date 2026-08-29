@@ -270,7 +270,7 @@ choice. `modules` being empty means "not published", never "none".
 The directory work paid for the client side once, for every network:
 
 * **The picker segment** appears from `Network.available` — no view change.
-* **The search sheet** works on any row with a `dial.kind`, filters by network,
+* **The search pane** works on any row with a `dial.kind`, filters by network,
   and shows undialable rows disabled with a reason.
 * **The module picker** offers published modules where they exist and A–Z where
   they do not, and remembers per reflector.

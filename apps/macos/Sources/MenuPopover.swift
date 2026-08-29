@@ -16,7 +16,7 @@
         @EnvironmentObject private var session: CallSession
         @EnvironmentObject private var serial: SerialController
         /// The cached reflector directory (astar-refl-ui), for the search
-        /// sheet and the module picker. The *dial* path does not go through
+        /// pane and the module picker. The *dial* path does not go through
         /// this — it holds the directory's frozen `index` value instead, so
         /// resolution can run off the main thread (see `ReflectorIndex`).
         @EnvironmentObject private var reflectors: ReflectorDirectory
@@ -28,8 +28,6 @@
         @State private var keyed = false  // PTT currently held
         @State private var keyMonitor: Any?  // spacebar hold-to-talk event monitor
         @State private var showFavoriteEditor = false  // inline "save favorite" popover
-        /// Whether the reflector search sheet is up (astar-refl-ui).
-        @State private var showReflectorSearch = false
         /// Last module used per reflector, offered pre-selected in the picker.
         /// A recollection, never a default — nothing reads it at dial time.
         private let moduleMemory = ReflectorModuleMemory()
@@ -109,22 +107,25 @@
 
         var body: some View {
             Group {
-                if navigation.showsSettings { devicesPane } else { mainPane }
+                switch navigation.pane {
+                case .call: mainPane
+                case .settings: devicesPane
+                case .reflectors: reflectorsPane
+                }
             }
             // Flexible sizing so the host window is resizable: a usable minimum, a
-            // comfortable default, and free to grow. (Settings wants a bit more room,
-            // so its ideal is larger — but the user's window size wins.)
+            // comfortable default, and free to grow. (Settings and the reflector
+            // list both want more room than the dial card, so their ideals are
+            // larger — but the user's window size wins.)
             .frame(
-                minWidth: 310, idealWidth: navigation.showsSettings ? 390 : 330,
-                maxWidth: .infinity,
-                minHeight: 450, idealHeight: navigation.showsSettings ? 670 : 550,
-                maxHeight: .infinity
+                minWidth: 310, idealWidth: idealPaneWidth, maxWidth: .infinity,
+                minHeight: 450, idealHeight: idealPaneHeight, maxHeight: .infinity
             )
             // Translucent, blurred backing (the host window is non-opaque/clear).
             .background(VisualEffectView().ignoresSafeArea())
             .onAppear {
                 installKeyMonitor()
-                applyPollState(inSettings: navigation.showsSettings)
+                applyPollState(for: navigation.pane)
             }
             // Popover closed → resume the app's baseline poll (AppDelegate keeps the
             // call live for the menu-bar tint / serial PTT). Don't fully stop it.
@@ -137,13 +138,13 @@
             // keep polling when the serial PTT source is live: the PTT self-test in
             // Settings reads `serial.keyDetected`, which is updated ONLY from the poll
             // loop's `pttSourceTick` — pausing froze the indicator (astar-d00a).
-            .onChange(of: navigation.showsSettings) { showing in
-                applyPollState(inSettings: showing)
+            .onChange(of: navigation.pane) { pane in
+                applyPollState(for: pane)
             }
             // Entering/leaving the live serial state while Settings is open flips
             // whether the self-test needs polling, so re-evaluate.
             .onChange(of: serial.isActive) { _ in
-                applyPollState(inSettings: navigation.showsSettings)
+                applyPollState(for: navigation.pane)
             }
             .onChange(of: session.status) { newStatus in
                 if newStatus != .answered && keyed { setKeyed(false) }  // unkey when the call ends
@@ -263,7 +264,7 @@
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 8) {
                     Button {
-                        navigation.showsSettings = false
+                        navigation.goBack()
                     } label: {
                         Label("Back", systemImage: "chevron.left")
                             .labelStyle(.iconOnly)
@@ -295,6 +296,52 @@
                 .listStyle(.inset)
                 .scrollContentBackground(.hidden)  // let the window's blur show through
                 .environment(\.defaultMinListRowHeight, 4)
+            }
+        }
+
+        /// The reflector directory as a pane of this window (astar-5a41),
+        /// entered from the dial card's magnifying glass and left the same way
+        /// Settings is.
+        private var reflectorsPane: some View {
+            ReflectorSearchPane(
+                preferredNetwork: selectedNetwork.reflectorNetwork,
+                onBack: { navigation.goBack() }
+            ) { text, network in
+                // Switch the picker to the chosen reflector's own network
+                // before filling the field — the pane can browse past the
+                // network the dial is set to, and text resolved against the
+                // wrong one silently finds nothing. Same move the favorites
+                // menu already makes. Unavailable networks cannot appear here:
+                // `Network.resolve` refuses them, so this cannot select a
+                // segment that is not offered.
+                if let appNetwork = Network.matching(network),
+                    availableNetworks.contains(appNetwork)
+                {
+                    networkRaw = appNetwork.rawValue
+                }
+                // The pane hands back dial text, not a target: the dial field
+                // stays the single source of truth for what Connect will dial.
+                // Selecting never connects — that is still a deliberate second
+                // action.
+                node = text
+            }
+        }
+
+        /// Default window width per pane. The user's own window size wins over
+        /// all of these; they only set what a fresh window opens at.
+        private var idealPaneWidth: CGFloat {
+            switch navigation.pane {
+            case .call: return 330
+            case .settings: return 390
+            case .reflectors: return 390
+            }
+        }
+
+        private var idealPaneHeight: CGFloat {
+            switch navigation.pane {
+            case .call: return 550
+            case .settings: return 670
+            case .reflectors: return 620
             }
         }
 
@@ -588,7 +635,7 @@
                 // (astar-refl-ship): what the typed name resolved to, and —
                 // when the module is still blank — what is still missing. Not
                 // styled as an error: nothing is wrong, the form is
-                // unfinished. The picker and search sheet are a separate item.
+                // unfinished. The picker and search pane are a separate item.
                 if let resolvedReflectorLine {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(resolvedReflectorLine)
@@ -611,29 +658,6 @@
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .popover(isPresented: $showFavoriteEditor, arrowEdge: .bottom) { favoriteEditor }
-            .sheet(isPresented: $showReflectorSearch) {
-                ReflectorSearchSheet(preferredNetwork: selectedNetwork.reflectorNetwork) {
-                    text, network in
-                    // Switch the picker to the chosen reflector's own network
-                    // before filling the field — the sheet can browse past the
-                    // network the dial is set to, and text resolved against
-                    // the wrong one silently finds nothing. Same move the
-                    // favorites menu already makes. Unavailable networks
-                    // cannot appear here: `Network.resolve` refuses them, so
-                    // this cannot select a segment that is not offered.
-                    if let appNetwork = Network.matching(network),
-                        availableNetworks.contains(appNetwork)
-                    {
-                        networkRaw = appNetwork.rawValue
-                    }
-                    // The sheet hands back dial text, not a target: this field
-                    // stays the single source of truth for what Connect will
-                    // dial. Selecting never connects — that is still a
-                    // deliberate second action.
-                    node = text
-                }
-                .environmentObject(reflectors)
-            }
         }
 
         /// Whether an AllStarLink account is required right now (astar-c2e5
@@ -763,7 +787,7 @@
         }
 
         /// Magnifying glass beside the dial field: opens the reflector search
-        /// sheet (astar-refl-ui).
+        /// pane (astar-refl-ui, astar-5a41).
         ///
         /// Shown only for a network that HAS a reflector directory. AllStar
         /// nodes are not reflectors and never appear in this data, so offering
@@ -774,7 +798,7 @@
         private var reflectorSearchButton: some View {
             if selectedNetwork.reflectorNetwork != nil {
                 Button {
-                    showReflectorSearch = true
+                    navigation.pane = .reflectors
                 } label: {
                     Image(systemName: "magnifyingglass")
                 }
@@ -1285,8 +1309,11 @@
         /// `serial.keyDetected`, which only advances from the poll loop's
         /// `pttSourceTick` — so polling must stay on there or the indicator never flips
         /// (astar-d00a).
-        private func applyPollState(inSettings: Bool) {
-            if inSettings && !serial.isActive {
+        private func applyPollState(for pane: AppPane) {
+            // Any pane but the call card: no meters on screen, and the 20 Hz
+            // churn re-renders whatever list is there (device pickers in
+            // Settings, 1,400 reflector rows here) on every tick.
+            if pane != .call && !serial.isActive {
                 session.stop()
             } else {
                 session.start()
