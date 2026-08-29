@@ -67,6 +67,14 @@ on:
       - "zensical.toml"
       - "ci/build-docs.sh"
       - ".github/workflows/docs-pages.yml"
+      # docs/site/changelog.md is a SYMLINK to the root CHANGELOG.md, and a
+      # path filter matches the path that actually changed — so without this
+      # line a release that only edits the changelog never republishes the
+      # site, and never republishes api/v1/releases.json either.
+      - "CHANGELOG.md"
+      # The manifest's other two inputs and its generator.
+      - "apps/macos/project.yml"
+      - "ci/version_manifest.py"
   workflow_dispatch:
 
 # Least privilege: read the tree, write a Pages deployment, mint the OIDC token
