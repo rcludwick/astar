@@ -21,7 +21,7 @@ three platforms.
   behind a consent gate that is shut until the operator opens it. Nothing
   dials DMR yet.
 
-- **A DMR radio ID field.** DMR does not put a callsign on the air — it
+- **A DMR radio ID field**, in its own section below the AllStarLink account. DMR does not put a callsign on the air — it
   addresses radios by a number registered at radioid.net against a verified
   licence. That is a different credential from a callsign, so it gets its own
   field beside it rather than being bolted onto it. Exported configs carry it
