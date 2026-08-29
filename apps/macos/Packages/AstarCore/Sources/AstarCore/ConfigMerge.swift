@@ -103,13 +103,14 @@ public enum ConfigMerge {
         public var settingsApplied = 0
         public var interfaceApplied = 0
         public var callsignApplied = false
+        public var radioIDApplied = false
 
         public init(
             setupsAdded: Int = 0, setupsUpdated: Int = 0,
             micProfilesAdded: Int = 0, micProfilesUpdated: Int = 0,
             directoryAdded: Int = 0, directoryUpdated: Int = 0,
             settingsApplied: Int = 0, interfaceApplied: Int = 0,
-            callsignApplied: Bool = false
+            callsignApplied: Bool = false, radioIDApplied: Bool = false
         ) {
             self.setupsAdded = setupsAdded
             self.setupsUpdated = setupsUpdated
@@ -120,6 +121,7 @@ public enum ConfigMerge {
             self.settingsApplied = settingsApplied
             self.interfaceApplied = interfaceApplied
             self.callsignApplied = callsignApplied
+            self.radioIDApplied = radioIDApplied
         }
 
         public var isEmpty: Bool { self == Summary() }
@@ -141,6 +143,7 @@ public enum ConfigMerge {
             phrase(settingsApplied, "setting", "settings", "applied")
             phrase(interfaceApplied, "window setting", "window settings", "applied")
             if callsignApplied { parts.append("callsign set") }
+            if radioIDApplied { parts.append("radio ID set") }
             guard !parts.isEmpty else { return "Nothing to change — already up to date." }
             return parts.joined(separator: ", ") + "."
         }
@@ -170,6 +173,7 @@ public enum ConfigMerge {
         summary.settingsApplied = archive.settings?.count ?? 0
         summary.interfaceApplied = archive.interface?.count ?? 0
         summary.callsignApplied = archive.callsign?.isEmpty == false
+        summary.radioIDApplied = archive.radioID?.isEmpty == false
         return summary
     }
 }

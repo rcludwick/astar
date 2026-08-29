@@ -1,0 +1,6 @@
+# Proper nouns clippy's `doc_markdown` lint mistakes for code because they are
+# CamelCase. They are network and product names — backticking them in prose
+# would render a network's name as a code span, which is worse than the lint.
+#
+# `..` keeps clippy's own default list; without it this would replace it.
+doc-valid-idents = ["BrandMeister", "FreeDMR", "FreeSTAR", "SystemX", "VKDMR", "AmComm", ".."]

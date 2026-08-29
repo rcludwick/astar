@@ -75,7 +75,10 @@ struct CredentialsView: View {
             .font(.caption2)
             .foregroundStyle(.secondary)
 
-            TextField("Callsign", text: $callsign)
+            // "Login callsign", not "Callsign": the on-air callsign is its own
+            // field at the top of Settings now (astar-c9d2), and two boxes
+            // reading "Callsign" on one pane would be a coin toss.
+            TextField("Login callsign", text: $callsign)
                 .textFieldStyle(.roundedBorder)
             TextField("Node number", text: $node)
                 .textFieldStyle(.roundedBorder)
@@ -131,29 +134,6 @@ struct CredentialsView: View {
             // just to test). Flip `tokenTestAvailable` once it lands.
             if saved && !Self.tokenTestAvailable {
                 Text("Token test needs an engine update (iax-6b58, in progress).")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-
-            // M17 callsign (astar-c2e5 Task 9): a separate network from the
-            // AllStarLink account above — M17 transmits this callsign
-            // verbatim in every frame, so it's collected here as well as in
-            // the dial card's own prompt (whichever the user reaches first).
-            // Bound straight to `session.m17Callsign`, which persists itself
-            // (`CallSession`'s `didSet`) — no separate save step needed.
-            // Gated on `session.m17Available` — latent (no new UI at all)
-            // until the engine build actually supports M17, matching the
-            // network picker's own gate.
-            if session.m17Available {
-                Divider()
-                Text("M17").font(.subheadline.weight(.semibold))
-                TextField("Callsign (M17)", text: $session.m17Callsign)
-                    .textFieldStyle(.roundedBorder)
-                    .onChange(of: session.m17Callsign) { value in
-                        let upper = value.uppercased()
-                        if upper != value { session.m17Callsign = upper }
-                    }
-                Text("Your callsign — M17 transmits it with every packet you send.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
