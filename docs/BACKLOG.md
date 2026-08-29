@@ -1228,6 +1228,14 @@ a log line every 24 hours.
 ### astar-semver — Make the version strings real SemVer once beta ends
 *P3 low · chore · labels: build, cx:2, docs, release*
 
+**Decided 2026-08-29 (Rob): SemVer everywhere from the release AFTER
+`0.1.9beta`, the Rust crates included. `0.1.9beta` is not retrofitted** — it is
+shipped, tagged and on the releases page, and rewriting a published version is
+worse than the inconsistency it fixes. So the next version is `0.2.0-beta.1`
+shaped, not `0.1.10beta` shaped. Do the renaming as part of cutting that
+release, not before: a half-migrated tree fails `just ci`'s version-check by
+design, which is the gate working.
+
 astar's released version strings are `0.1.9beta` — the pre-release glued to the
 patch number with no separator, which is not SemVer. SemVer's own pre-release
 syntax (`0.1.9-beta`, or `0.2.0-beta.1`) would have solved the ordering problem
@@ -1248,15 +1256,16 @@ SemVer — `0.2.0`, or `0.2.0-beta.1` if a pre-release is still wanted.
 The first three are enforced in lockstep by `ci/version_manifest.py --check`,
 run by `just ci` and by `ci/build-docs.sh`.
 
-**Finding, worth flagging on its own:** the Rust workspace version is
-`0.1.3-beta` while the app is on `0.1.9beta`. They have drifted by six
-releases, despite the comment in `project.yml` saying "Bump both together." It
-is deliberately not in the lockstep check today, because folding it in would
-fail `just ci` on a pre-existing condition rather than on anything a change
-did. Decide here whether a Cargo crate version and a user-facing marketing
-version should be the same number at all — they answer different questions, and
-SemVer's rules about what a major bump means apply cleanly to only one of them.
-If they should match, fix the drift and add `Cargo.toml` to `--check`.
+**RESOLVED 2026-08-29** (was: the Rust workspace had drifted six releases to
+`0.1.3-beta` while the app was on `0.1.9beta`, despite `project.yml`'s comment
+saying "Bump both together"). Rob's call is that they are one number. The
+workspace version and all 27 `astar-*` path-dependency requirements were synced
+to `0.1.9-beta`, and `Cargo.toml` plus every path-dep requirement joined
+`--check`. The path-deps were the quiet half: Cargo reads a stale
+`version = "0.1.3-beta"` as a caret range that a `0.1.9-beta` crate still
+satisfies, so resolution succeeds and the wrong number simply persists.
+
+What is left of this item is the renaming itself, at the next release.
 
 **The comparison code needs no change.** `normalize()` / `sort_key()` in
 `ci/version_manifest.py` already understand both shapes: `0.1.9beta` is
