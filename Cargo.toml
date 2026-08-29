@@ -19,6 +19,7 @@ members = [
     "crates/astar-wireguard",
     "crates/astar-m17",
     "crates/astar-dstar",
+    "crates/astar-ysf",
     "apps/gui",
 ]
 exclude = [

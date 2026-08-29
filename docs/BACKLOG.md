@@ -519,6 +519,16 @@ already publishes these reflectors with a `dial.kind`.
 
 **Design:** `docs/design/ysf-network.md`.
 
+**Progress 2026-08-29:** `crates/astar-ysf` is built and green — frame and
+FICH coding (Golay 24/12, rate-1/2 K=5 convolutional, interleave, CRC), the
+`YSFReflector` datagrams, a client link FSM, and a loopback reflector with a
+parrot mode, 62 tests, `std` only. The wire numbers were verified against the
+deployed reference implementations rather than recalled; see the design doc's
+"Where this stands". **Remaining:** the AMBE+2 payload — RATEP word and YSF
+frame packing in `astar-codec` — then `astar-console`'s session and the ABI /
+Swift / `Network.ysf` layers. The payload bytes are carried, not decoded:
+nothing yet claims to hear a YSF stream.
+
 ### iax-b9c2 — NXDN engine backend: NXDNReflector protocol
 *P4 backlog · feature · labels: nxdn, protocol, cx:4*
 

@@ -1,6 +1,8 @@
 # YSF — design
 
-**Status:** designed, not built. Engine item `iax-e8a4`, client item `astar-e7b3`.
+**Status:** the protocol crate is built; the vocoder and the session are not.
+Engine item `iax-e8a4`, client item `astar-e7b3`. See "Where this stands"
+at the end.
 **Read first:** `docs/design/adding-a-network.md` — the fourteen layers. This
 document covers only what is YSF-specific.
 
@@ -90,13 +92,50 @@ paint the dial grammar into a corner in the meantime.
 
 ## What is genuinely new
 
-1. `crates/astar-ysf` — framing, FICH, link FSM, loopback reflector.
+1. `crates/astar-ysf` — framing, FICH, link FSM, loopback reflector. **Done.**
 2. AMBE+2 RATEP word(s) + YSF frame packing in `astar-codec`.
 3. `crates/astar-console/src/ysf.rs` — session, run loop, `SharedState`,
    `apply_audio`, and a `connect_with_stream` test seam.
 4. `ConsoleSession` wiring — the §2.4 checklist, **including the audio fan-out**.
 5. `Station::ysf_connect/_disconnect/_available/_state`, feature chain, C ABI,
    `just cbindgen`, Swift binding, `Network.ysf`.
+
+## Where this stands
+
+`crates/astar-ysf` exists and is tested: 62 tests, no dependencies beyond
+`std`, one I/O module.
+
+**The wire, confirmed rather than recalled.** Every number below was read out
+of the deployed reference implementations and then verified locally before it
+was written down as a test:
+
+| | |
+|---|---|
+| Radio frame | 120 bytes: 5 sync (`D4 71 C9 63 4D`) + 25 FICH + 90 payload |
+| `YSFD` | 155 bytes: tag, gateway/source/destination callsigns (10 each), one byte of counter and end-flag, then the frame |
+| `YSFP` / `YSFU` | 14 bytes: tag plus a ten-byte, space-padded callsign |
+| `YSFO` | 50 bytes; `YSFS` and `YSFI` are accepted and ignored |
+| Linking | send three polls, poll every 5 s; the reflector's own poll coming back is the whole acknowledgement |
+| FICH coding | four Golay (24, 12) blocks → rate-1/2 K=5 convolutional code → interleave across the 25-byte field |
+| FICH CRC | poly `0x1021`, init `0x0000`, unreflected, final XOR `0xFFFF` — **not** D-Star's CRC |
+
+Two of those cost real work and were worth writing out longhand rather than
+copying: the Golay code is eight lines of long division that reproduce all
+4,096 entries of the published table, and the interleave is
+`(i / 5) * 2 + (i % 5) * 40`, which is the hundred-entry table every
+implementation prints. A table says what; those say why.
+
+**What the crate deliberately does not do** is decode the ninety payload
+bytes. `Frame::payload` hands them over intact. Without a vocoder there is
+nothing to check a payload parser against, and a decoder nothing calls is
+worse than an honest gap — so `DataType::is_half_rate_voice` is in place as
+the gate the vocoder work will hang off, and nothing pretends to hear
+anything yet.
+
+**Open questions this did not settle.** DN-only versus DN+VW is still open,
+and so is DG-ID: the FICH carries it and `YsfFsm::set_options` can ask a YCS
+reflector for a room, but nothing above decides which. Answering those needs
+the session layer, not more protocol.
 
 ## Open questions
 
