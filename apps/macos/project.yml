@@ -32,13 +32,14 @@ settings:
     # The one declaration of the user-facing version. XcodeGen copies it into
     # the generated Info.plist as CFBundleShortVersionString, which the popover
     # footer reads at runtime (MenuPopover.appVersion) — so there is no second
-    # copy to drift. The Rust workspace spells the same release "0.1.0-beta"
-    # in the root Cargo.toml because Cargo requires SemVer's hyphenated
-    # pre-release form; Apple's MARKETING_VERSION is a free-form string and
-    # takes the human spelling. Bump both together.
+    # copy to drift. From 0.1.10-beta onward this is real SemVer and the
+    # root Cargo.toml carries the identical string — the two spellings
+    # that used to differ (Cargo requires the hyphenated pre-release form,
+    # Apple's MARKETING_VERSION is free-form) have converged. Bump both
+    # together; `just ci` fails if they disagree.
     # (App Store submission would demand a purely numeric n.n.n here; nothing
     # is submitted or notarised today — build-from-source only.)
-    MARKETING_VERSION: "0.1.9beta"
+    MARKETING_VERSION: "0.1.10-beta"
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "5.0"
     GENERATE_INFOPLIST_FILE: "YES"
