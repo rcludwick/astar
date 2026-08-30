@@ -86,24 +86,66 @@ install the driver above.
     transfer surfaces as a *serial device error* and the device is disabled —
     it can never freeze the interface.
 
-## Vocoder dongles
+## Digital voice
 
-A USB vocoder dongle — a ThumbDV or DV3000 — is what makes **D-Star** work. It
-carries the AMBE+2 codec in hardware, and there is no software alternative: no
-freely licensable AMBE vocoder exists. Nothing else astar does needs one.
+**D-Star needs a hardware vocoder dongle.** That is not a recommendation — it
+is the only way astar does D-Star voice at all. The D-Star option appears in
+the network picker while a dongle is attached and disappears when you unplug
+it.
 
-**This client does not offer D-Star yet.** The engine implements it and the
-dongle is what it runs on, so the hardware is worth knowing about if you are
-working from the Rust crates — see
-[A vocoder dongle](../build/prerequisites.md#a-vocoder-dongle-only-for-d-star).
-Detection is hotplug: the capability comes and goes with the hardware rather
-than being latched at launch.
+### Why the hardware is required
 
-If you do have one attached, the rule that governs it is a safety rule rather
-than a convenience: `IAX_THUMBDV_PORT` only ever **narrows** the USB VID/PID
-scan and can never point the opener at an arbitrary serial port. Opening a USB
-radio interface's tty asserts RTS, which keys a transmitter. See
-[On-air safety](../about/safety.md).
+D-Star voice is **AMBE+2**, a proprietary codec licensed by DVSI. astar
+contains no software AMBE implementation and will not gain one: there is
+nothing we can ship and redistribute under the AGPL. A dongle carries a
+licensed implementation on a chip, so the codec runs there instead of in the
+app — in practice you buy the licence along with the hardware.
+
+This is specific to AMBE. **M17** uses Codec 2, which is free software, and
+**AllStarLink** uses G.711 — neither needs a dongle, and neither is affected by
+any of this.
+
+### Where to get one
+
+| Dongle | |
+|---|---|
+| **[DVMEGA DVstick 30](https://www.gigaparts.com/dvmega-dvstick-30.html)** | AMBE+2 on a USB stick, sold by GigaParts. Also on the [manufacturer's page](https://www.dvmega.nl/dvstick30/). |
+| **ThumbDV / DV3000** | The same idea from NW Digital Radio. This is what astar has actually been developed against. |
+
+!!! warning "Check the USB id before you buy"
+
+    astar finds a dongle by scanning for the FTDI id **`0x0403:0x6015`**, and
+    it opens nothing else. A dongle that enumerates under a different id will
+    not be detected, however good it is.
+
+    astar's D-Star path has been verified live on a **ThumbDV**, against the
+    KC-Wide XLX458 reflector. The DVstick 30 is listed here because it is a
+    current, easily bought AMBE+2 dongle — **not** because it has been tested
+    with astar. If you have one and it works, or does not, that is worth
+    reporting.
+
+### Which modes this covers
+
+| Mode | Dongle | Status |
+|---|---|---|
+| **D-Star** | required | Works. XLX/XRF reflectors over DExtra. |
+| **DMR** | would be required | Not yet — astar can classify DMR networks and store a radio ID, but nothing dials. |
+| **YSF** | would be required | Not yet. |
+| **M17** | not needed | Works. Codec 2, built in. |
+| **AllStarLink** | not needed | Works. |
+
+Detection is hotplug rather than latched at launch, so the capability follows
+the hardware. If you are working from the Rust crates rather than the app, see
+[A vocoder dongle](../build/prerequisites.md#a-vocoder-dongle-only-for-d-star)
+for which builds include D-Star at all.
+
+!!! danger "`IAX_THUMBDV_PORT` narrows the scan — it never replaces it"
+
+    The rule governing the dongle is a safety rule rather than a convenience:
+    `IAX_THUMBDV_PORT` only ever **narrows** the USB VID/PID scan and can never
+    point the opener at an arbitrary serial port. Opening a USB radio
+    interface's tty asserts RTS, which keys a transmitter. See
+    [On-air safety](../about/safety.md).
 
 ## Audio devices
 
