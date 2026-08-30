@@ -78,6 +78,31 @@ pub trait InputSink: Send {
     /// amplitude over the original device-rate callback buffer, in
     /// `0.0..=1.0`.
     fn write(&mut self, samples: &[f32], meter: f32);
+
+    /// Optional DSP at the DEVICE's rate, run after the mono downmix and
+    /// **before** the anti-alias resampler
+    /// (`docs/design/noise-suppression.md`).
+    ///
+    /// This is the only place in the capture path that sees full-band
+    /// audio: `open_input` opens cpal at the device's native rate — 48 kHz
+    /// on essentially every Mac and USB radio interface — and decimates to
+    /// the 8 or 16 kHz pipeline rate inside the callback. Anything that
+    /// needs the full band, or that is trained on one specific rate, has to
+    /// run here or not at all. Cleaning broadband noise before decimation
+    /// is also the right order on its own merits.
+    ///
+    /// `samples` is mono at `device_rate` and may be replaced wholesale:
+    /// the hook is **not** length-preserving, because a stage with a fixed
+    /// frame size holds a remainder between callbacks.
+    ///
+    /// Called from cpal's audio thread, on the same thread as
+    /// [`InputSink::write`], so `&mut self` needs no extra synchronisation.
+    /// Implementations must not block or allocate.
+    ///
+    /// The default body does nothing, which is what keeps every existing
+    /// `InputSink` — including the test doubles across `astar-iax`,
+    /// `astar-station` and `astar-inspect` — compiling untouched.
+    fn device_rate_stage(&mut self, _samples: &mut Vec<f32>, _device_rate: u32) {}
 }
 
 /// Source the output callback pulls samples *from*.
@@ -580,6 +605,7 @@ fn spawn_input_stream(
                                     data,
                                     device_channels,
                                     target_channels,
+                                    device_rate,
                                     resampler.as_mut(),
                                     &mut mono,
                                     &mut resampled,
@@ -605,6 +631,7 @@ fn spawn_input_stream(
                                     &m,
                                     device_channels,
                                     target_channels,
+                                    device_rate,
                                     resampler.as_mut(),
                                     &mut mono,
                                     &mut resampled,
@@ -631,6 +658,7 @@ fn spawn_input_stream(
                                     &m,
                                     device_channels,
                                     target_channels,
+                                    device_rate,
                                     resampler.as_mut(),
                                     &mut mono,
                                     &mut resampled,
@@ -784,12 +812,17 @@ impl CaptureGapWatch {
     }
 }
 
-/// Process one cpal input callback: downmix to mono, meter, optionally
-/// resample, and deliver to the sink.
+/// Process one cpal input callback: downmix to mono, meter, run the sink's
+/// device-rate stage, optionally resample, and deliver to the sink.
+// One argument over clippy's threshold, and the alternative — bundling the
+// scratch buffers into a struct — would hide which of them the callback
+// reuses, which is the whole reason they are parameters.
+#[allow(clippy::too_many_arguments)]
 fn process_input(
     data: &[f32],
     device_channels: u16,
     target_channels: u16,
+    device_rate: u32,
     resampler: Option<&mut AntiAliasResampler>,
     mono: &mut Vec<f32>,
     resampled: &mut Vec<f32>,
@@ -811,6 +844,9 @@ fn process_input(
             mono.push(sum / dc as f32);
         }
     }
+
+    // Device-rate DSP, before decimation. May replace `mono` entirely.
+    sink.device_rate_stage(mono, device_rate);
 
     let samples_to_deliver: &[f32] = if let Some(r) = resampler {
         let _ = r.push(mono);
@@ -1336,6 +1372,7 @@ mod tests {
             &device,
             1,
             1,
+            48_000,
             resampler.as_mut(),
             &mut mono,
             &mut resampled,
@@ -1347,6 +1384,115 @@ mod tests {
         assert!(cap.iter().all(|v| v.is_finite()));
         let m = *metered.lock().unwrap();
         assert!(m > 0.4 && m <= 1.0, "meter out of range: {m}");
+    }
+
+    /// The device-rate hook sees the post-downmix, pre-resample buffer at
+    /// the DEVICE's rate — not the pipeline's (milestone 1 of
+    /// `docs/design/noise-suppression.md`).
+    ///
+    /// Two stereo channels in at 48 kHz, an 8 kHz pipeline out: the hook
+    /// must get exactly the mono frame count at full rate, and `write` must
+    /// get the decimated stream. Anything that reads `data.len()` or the
+    /// sink's own rate would pass one of those and fail the other.
+    #[test]
+    fn device_rate_stage_sees_mono_at_device_rate_before_resampling() {
+        #[derive(Default)]
+        struct Probe {
+            hook_len: Arc<Mutex<usize>>,
+            hook_rate: Arc<Mutex<u32>>,
+            hook_first: Arc<Mutex<f32>>,
+            written_len: Arc<Mutex<usize>>,
+        }
+        impl InputSink for Probe {
+            fn write(&mut self, samples: &[f32], _meter: f32) {
+                *self.written_len.lock().unwrap() = samples.len();
+            }
+            fn device_rate_stage(&mut self, samples: &mut Vec<f32>, device_rate: u32) {
+                *self.hook_len.lock().unwrap() = samples.len();
+                *self.hook_rate.lock().unwrap() = device_rate;
+                *self.hook_first.lock().unwrap() = samples[0];
+            }
+        }
+
+        let probe = Probe::default();
+        let (hook_len, hook_rate, hook_first, written_len) = (
+            Arc::clone(&probe.hook_len),
+            Arc::clone(&probe.hook_rate),
+            Arc::clone(&probe.hook_first),
+            Arc::clone(&probe.written_len),
+        );
+        let mut sink: Box<dyn InputSink> = Box::new(probe);
+
+        // 480 stereo frames = 960 interleaved samples. L and R differ so a
+        // downmix that took channel 0 instead of averaging would be caught.
+        let frames = 480;
+        let device: Vec<f32> = (0..frames).flat_map(|_| [0.25_f32, 0.75]).collect();
+
+        let mut resampler = Some(AntiAliasResampler::new(48_000, 8_000).unwrap());
+        let (mut mono, mut resampled) = (Vec::new(), Vec::new());
+        process_input(
+            &device,
+            2,
+            1,
+            48_000,
+            resampler.as_mut(),
+            &mut mono,
+            &mut resampled,
+            sink.as_mut(),
+        );
+
+        assert_eq!(
+            *hook_len.lock().unwrap(),
+            frames,
+            "hook must see device-rate frames, not the interleaved length or the 8 kHz count"
+        );
+        assert_eq!(
+            *hook_rate.lock().unwrap(),
+            48_000,
+            "hook must be told the device rate"
+        );
+        assert!(
+            (*hook_first.lock().unwrap() - 0.5).abs() < 1e-6,
+            "hook must see the averaged downmix, not channel 0"
+        );
+        let written = *written_len.lock().unwrap();
+        assert!(
+            written > 0 && written < frames / 2,
+            "write must see the decimated stream (got {written} for {frames} device frames)"
+        );
+    }
+
+    /// A sink that leaves `device_rate_stage` at its default body still
+    /// works, and the audio reaching `write` is unchanged. This is what
+    /// keeps the twenty-odd existing `InputSink` doubles compiling.
+    #[test]
+    fn default_device_rate_stage_is_a_no_op() {
+        #[derive(Default)]
+        struct Plain(Arc<Mutex<Vec<f32>>>);
+        impl InputSink for Plain {
+            fn write(&mut self, samples: &[f32], _meter: f32) {
+                self.0.lock().unwrap().extend_from_slice(samples);
+            }
+        }
+        let plain = Plain::default();
+        let got = Arc::clone(&plain.0);
+        let mut sink: Box<dyn InputSink> = Box::new(plain);
+
+        let device: Vec<f32> = (0..256).map(|i| (i as f32 * 0.01).sin()).collect();
+        let (mut mono, mut resampled) = (Vec::new(), Vec::new());
+        // No resampler: device rate == pipeline rate, so `write` should see
+        // the input verbatim through the default hook.
+        process_input(
+            &device,
+            1,
+            1,
+            8_000,
+            None,
+            &mut mono,
+            &mut resampled,
+            sink.as_mut(),
+        );
+        assert_eq!(&*got.lock().unwrap(), &device);
     }
 
     /// Verify the output pipeline fills the cpal-side buffer to capacity
