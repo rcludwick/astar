@@ -69,7 +69,7 @@ smallvec = "1"
 thiserror = "2"
 tracing = "0.1"
 zeroize = { version = "1", features = ["derive"] }
-boringtun = "0.6"
+boringtun = "0.7"
 base64 = "0.22"
 
 [profile.release]
