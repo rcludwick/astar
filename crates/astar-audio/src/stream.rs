@@ -276,6 +276,28 @@ pub trait AudioBackend: Send + Sync {
     /// Default output device, if the host reports one.
     fn default_output(&self) -> Option<DeviceInfo>;
 
+    /// The rate a capture stream on `device` would open at, WITHOUT opening
+    /// one — `None` when it cannot be determined.
+    ///
+    /// `device` is a name substring as the rest of the API takes it, or
+    /// `None` for the system default. This exists so a UI can say which
+    /// noise-reduction chain will run before anything is capturing, which is
+    /// when someone configures it; see `DenoiseStatus::predicted`.
+    ///
+    /// It costs a host construction and one enumeration — measured at about
+    /// 1.4 ms for the default device and 0.9 ms for a named one on an
+    /// M-series Mac. That is far too much to pay per snapshot poll (~20 Hz
+    /// would be ~2.8% of a core to redraw a caption), so callers must cache
+    /// it and refresh only when the selected device changes.
+    ///
+    /// Defaults to `None`, which keeps every existing backend — the null
+    /// backend and the test doubles across astar-iax, astar-station and
+    /// astar-inspect — compiling untouched, and reads as "unknown" rather
+    /// than as a wrong answer.
+    fn input_capture_rate(&self, _device: Option<&str>) -> Option<u32> {
+        None
+    }
+
     /// Open an input (capture) stream on `device` with `config`, piping
     /// samples into `sink`. The returned handle keeps the stream alive
     /// until dropped or `stop()`d.
@@ -420,7 +442,8 @@ pub const PREFERRED_CAPTURE_RATE: u32 = 48_000;
 /// A device that cannot offer 48 kHz is not an error. It keeps its default
 /// rate and the 48 kHz-only stage declines to run; see
 /// [`CaptureCapability`].
-fn choose_capture_rate(ranges: &[(u32, u32)], want: u32, fallback: u32) -> u32 {
+#[must_use]
+pub fn choose_capture_rate(ranges: &[(u32, u32)], want: u32, fallback: u32) -> u32 {
     if ranges.iter().any(|&(lo, hi)| (lo..=hi).contains(&want)) {
         want
     } else {
@@ -479,6 +502,41 @@ impl Default for CpalBackend {
 impl AudioBackend for CpalBackend {
     fn devices(&self) -> Result<Vec<DeviceInfo>, AudioError> {
         self.enumerate()
+    }
+
+    fn input_capture_rate(&self, device: Option<&str>) -> Option<u32> {
+        // Same selection the capture path makes, so the prediction cannot
+        // disagree with what `open_input` will actually do: match the
+        // requested name (case-insensitively, as `find_device` does), keep
+        // the default config's channel count and sample format, and prefer
+        // 48 kHz among the ranges that survive.
+        let dev = match device {
+            Some(q) => {
+                let want = q.to_lowercase();
+                self.host
+                    .input_devices()
+                    .ok()?
+                    .find(|d| device_name(d).to_lowercase().contains(&want))?
+            }
+            None => self.host.default_input_device()?,
+        };
+        let supported = dev.default_input_config().ok()?;
+        let ranges: Vec<(u32, u32)> = dev
+            .supported_input_configs()
+            .map(|it| {
+                it.filter(|r| {
+                    r.channels() == supported.channels()
+                        && r.sample_format() == supported.sample_format()
+                })
+                .map(|r| (r.min_sample_rate(), r.max_sample_rate()))
+                .collect()
+            })
+            .unwrap_or_default();
+        Some(choose_capture_rate(
+            &ranges,
+            PREFERRED_CAPTURE_RATE,
+            supported.sample_rate(),
+        ))
     }
 
     fn default_input(&self) -> Option<DeviceInfo> {

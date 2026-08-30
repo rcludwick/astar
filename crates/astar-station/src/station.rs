@@ -136,6 +136,14 @@ pub type SecretResolver = dyn Fn(&str) -> String + Send + Sync;
 ///
 /// Vendor-neutral: [`Station::connect`] is the generic IAX2 path (works against
 /// stock Asterisk); [`Station::connect_wt`] is one `AllStar` convenience method.
+/// A cached capture-rate probe: which input device was asked about, and what
+/// rate it said it would open at (`0` = could not tell).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CaptureProbe {
+    device: Option<String>,
+    rate: u32,
+}
+
 pub struct Station {
     session: Arc<Mutex<ConsoleSession>>,
     make_backend: BackendFactory,
@@ -156,6 +164,22 @@ pub struct Station {
     /// registrar password is resolved on demand and consumed straight into the
     /// registrar — never stored in config/snapshot/event/log.
     secret_resolver: Mutex<Option<Box<SecretResolver>>>,
+    /// Cached answer to "what rate would the selected capture device open
+    /// at", for the idle noise-reduction capability line.
+    ///
+    /// Keyed on the selected input device, and refreshed only when that
+    /// changes. The probe costs a host construction plus one enumeration —
+    /// measured at ~1.4 ms for the default device, ~0.9 ms for a named one —
+    /// and `snapshot()` is polled at roughly 20 Hz, so doing it per poll
+    /// would burn about 2.8% of a core to redraw a caption, inside the
+    /// session lock. Once per device change is enough.
+    ///
+    /// The tradeoff this accepts: a device that changes its own advertised
+    /// rates underneath us (a re-plugged interface reporting differently)
+    /// keeps the cached answer until the selection changes. The line is a
+    /// prediction either way, and the live status supersedes it the moment
+    /// a stream opens.
+    capture_probe: Mutex<Option<CaptureProbe>>,
     /// Mic monitor (iax-2377): opens the input device WITHOUT a call so a
     /// front-end can preview/characterize the mic. `Some` only while monitoring.
     /// Never started while a call is active (the device would be double-opened);
@@ -253,6 +277,7 @@ impl Station {
             node_config: Mutex::new(None),
             secret_resolver: Mutex::new(None),
             monitor: Mutex::new(None),
+            capture_probe: Mutex::new(None),
             link_events_buf: Mutex::new(std::collections::VecDeque::new()),
             reg_supervise: Mutex::new(RegSupervise::default()),
             dtmf_mode: Mutex::new(DtmfMode::default()),
@@ -293,6 +318,7 @@ impl Station {
             node_config: Mutex::new(None),
             secret_resolver: Mutex::new(None),
             monitor: Mutex::new(None),
+            capture_probe: Mutex::new(None),
             link_events_buf: Mutex::new(std::collections::VecDeque::new()),
             reg_supervise: Mutex::new(RegSupervise::default()),
             dtmf_mode: Mutex::new(DtmfMode::default()),
@@ -1233,7 +1259,39 @@ impl Station {
         if let Some(db) = self.monitor_input_dbfs().filter(|_| !call_active) {
             snap.input_level_db = db;
         }
+        // Which noise-reduction chain WOULD run, when none is running to
+        // measure. Idle is when this gets configured, so a capability line
+        // and a strength slider that only appear mid-call are of no use to
+        // anyone. `live` stays false, and the summary says "when you key" —
+        // a prediction must not read like an observation.
+        if !snap.denoise_status.live {
+            snap.denoise_status = astar_audio::DenoiseStatus::predicted(
+                self.session.lock().unwrap().denoise(),
+                astar_audio::DenoiseMode::from_env(),
+                self.capture_rate_cached(),
+            );
+        }
         snap
+    }
+
+    /// The rate the selected capture device would open at, cached per device
+    /// selection. `0` when it cannot be determined.
+    ///
+    /// See `capture_probe` for why this is cached rather than probed per
+    /// poll: `snapshot()` runs ~20 Hz and the probe is ~1.4 ms.
+    fn capture_rate_cached(&self) -> u32 {
+        let device = self.devices.lock().unwrap().0.clone();
+        let mut slot = self.capture_probe.lock().unwrap();
+        if let Some(p) = slot.as_ref()
+            && p.device == device
+        {
+            return p.rate;
+        }
+        let rate = (self.make_backend)()
+            .input_capture_rate(device.as_deref())
+            .unwrap_or(0);
+        *slot = Some(CaptureProbe { device, rate });
+        rate
     }
 
     /// Non-blocking snapshot: returns `None` when the session lock is held

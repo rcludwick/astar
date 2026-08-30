@@ -13,5 +13,7 @@ doc-valid-idents = [
     # Xiph's noise-suppression model. The Rust port is `nnnoiseless`, which is
     # lower case and needs no help; "RNNoise" is the product.
     "RNNoise",
+    # Apple's audio framework — a product name, not a Rust item.
+    "CoreAudio",
     "..",
 ]
