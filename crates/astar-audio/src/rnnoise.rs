@@ -36,6 +36,13 @@
 //! frame is therefore dropped outright, which is what upstream's own
 //! example does.
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    // Sample counts and rates crossing into f32/f64 for signal generation and
+    // timing arithmetic — the same class `resample.rs` allows module-wide.
+)]
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -56,6 +63,76 @@ const I16_SCALE: f32 = 32767.0;
 /// 100 ms at 48 kHz. A host buffer larger than this amortises one realloc
 /// rather than meeting a hard cap that would have to drop audio.
 const RESERVE: usize = (RNNOISE_RATE as usize) / 10;
+
+/// Which mic noise-reduction chain to run, from `ASTAR_MIC_DENOISE`.
+///
+/// A developer A/B override with no UI, following the `IAX_THUMBDV_PORT`
+/// precedent: an environment variable that narrows behaviour for people who
+/// know why they are setting it. It exists so the design's quality
+/// evaluation can be run as a real A/B, and so a user with a mic that
+/// sounds wrong can be asked to try exactly one thing.
+///
+/// It does not override the operator's "Noise reduction" checkbox — with
+/// the checkbox off, nothing runs whatever this says. It chooses which
+/// chain the checkbox turns on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DenoiseMode {
+    /// Unset: neural where the device allows it, filter + gate otherwise.
+    #[default]
+    Auto,
+    /// `neural` — same as `Auto` today; explicit so an A/B run records
+    /// intent rather than relying on a default that may change.
+    Neural,
+    /// `legacy` — the pre-existing `HumFilter` + `NoiseGate` chain, even at
+    /// 48 kHz. The other arm of the A/B.
+    Legacy,
+    /// `off` — no mic noise reduction at all, checkbox notwithstanding. The
+    /// control arm: what the raw mic actually sounds like.
+    Off,
+}
+
+impl DenoiseMode {
+    /// Parse the variable's value. Anything unrecognised is [`Self::Auto`] —
+    /// a typo in a debugging aid must not change what the operator hears.
+    #[must_use]
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+            Some("neural") => Self::Neural,
+            Some("legacy") => Self::Legacy,
+            Some("off") => Self::Off,
+            _ => Self::Auto,
+        }
+    }
+
+    /// Read `ASTAR_MIC_DENOISE` once per process.
+    #[must_use]
+    pub fn from_env() -> Self {
+        static MODE: std::sync::OnceLock<DenoiseMode> = std::sync::OnceLock::new();
+        *MODE.get_or_init(|| {
+            let mode = Self::parse(std::env::var("ASTAR_MIC_DENOISE").ok().as_deref());
+            if mode != Self::Auto {
+                tracing::info!(
+                    target: "astar_audio",
+                    ?mode,
+                    "ASTAR_MIC_DENOISE override in effect"
+                );
+            }
+            mode
+        })
+    }
+
+    /// Whether the neural stage may run under this mode.
+    #[must_use]
+    pub fn allows_neural(self) -> bool {
+        matches!(self, Self::Auto | Self::Neural)
+    }
+
+    /// Whether the classical `HumFilter` + `NoiseGate` chain may run.
+    #[must_use]
+    pub fn allows_legacy(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+}
 
 /// RNNoise in a push/replace shell, sized for the cpal capture callback.
 pub struct RnnoiseStage {
@@ -423,5 +500,30 @@ mod tests {
             RNNOISE_FRAME,
             "the next frame is delivered whole"
         );
+    }
+
+    #[test]
+    fn denoise_mode_parses_its_three_values_and_ignores_the_rest() {
+        assert_eq!(DenoiseMode::parse(Some("neural")), DenoiseMode::Neural);
+        assert_eq!(DenoiseMode::parse(Some("legacy")), DenoiseMode::Legacy);
+        assert_eq!(DenoiseMode::parse(Some("off")), DenoiseMode::Off);
+        // Case and whitespace are forgiven; a typo is not obeyed.
+        assert_eq!(DenoiseMode::parse(Some("  LEGACY ")), DenoiseMode::Legacy);
+        assert_eq!(DenoiseMode::parse(Some("nueral")), DenoiseMode::Auto);
+        assert_eq!(DenoiseMode::parse(Some("")), DenoiseMode::Auto);
+        assert_eq!(DenoiseMode::parse(None), DenoiseMode::Auto);
+    }
+
+    #[test]
+    fn denoise_mode_gates_the_two_chains() {
+        assert!(DenoiseMode::Auto.allows_neural() && DenoiseMode::Auto.allows_legacy());
+        assert!(DenoiseMode::Neural.allows_neural());
+        assert!(
+            !DenoiseMode::Legacy.allows_neural(),
+            "legacy must never run the network"
+        );
+        assert!(DenoiseMode::Legacy.allows_legacy());
+        assert!(!DenoiseMode::Off.allows_neural(), "off means off");
+        assert!(!DenoiseMode::Off.allows_legacy(), "off means off");
     }
 }

@@ -1,7 +1,9 @@
 # Neural noise suppression — design
 
-**Status:** design only. Nothing is built. A timing spike exists and is
-reported below; no astar code has been changed. This supersedes backlog item
+**Status:** milestones 1–5 and 7 are built and on `main`. What is left is the
+part that needs ears and hardware rather than code: the evaluation (6), the
+Pi-class measurement (8), and the two default decisions (9 and the server's).
+The default is still **off**, and stays off until milestone 6 has happened. This supersedes backlog item
 `iax-267f` (hand-rolled spectral subtraction) — see "What this replaces".
 **Read first:** `crates/astar-audio/src/denoise.rs` and
 `crates/astar-audio/src/router.rs:1304` (`MicLane::dsp_quantize`). This document
@@ -601,13 +603,24 @@ Each one is independently testable and each one leaves the tree shippable.
    call it from `process_input`. No dependency, no network, no behaviour change.
    Test: an `InputSink` double that records what the hook sees and asserts it is
    the post-downmix, pre-resample buffer at device rate. Proves the twenty-odd
-   existing test doubles still compile untouched.
+   existing test doubles still compile untouched. **Done.**
 2. **48 kHz preference and the capability line.** Enumerate
    `supported_input_configs()` and prefer 48 kHz; report the device rate and
    which chain is live through the snapshot. Still no dependency. Test: a
    backend double advertising 44.1-only, 48-only, and both, asserting the
    selection and the reported capability. This is also where the "do 44.1
    devices offer 48?" question gets its real answer, from logs on real hardware.
+
+   **Done, with one deliberate deferral.** The preference, the fallback and
+   `CaptureCapability` are built and tested, and `examples/capture_rates.rs`
+   answered the hardware question (see "The 48 kHz guard"). The *snapshot*
+   half — carrying the capability through `astar-station`, the C ABI and the
+   Swift binding to a read-only line under the advanced disclosure — is not
+   built. It is reporting rather than behaviour, it crosses four layers, and
+   until milestone 9 turns the default on it would report a constant to an
+   operator who has not enabled anything. `MicLane::neural_active()` and
+   `CaptureCapability` are the values it needs; it should land with the
+   default change.
 3. **The stage, off.** Add `nnnoiseless` with `default-features = false`. Build
    `RnnoiseStage` — accumulator, scaling, warm-up, VAD store — as a plain type
    with unit tests and no wiring into the lane. Test: a 480-sample frame of
@@ -640,17 +653,35 @@ Each one is independently testable and each one leaves the tree shippable.
    from `write`, still with no denoising in between. Test: the on/off identity
    assertion from the VOX section, which at this milestone is trivially true —
    which is the point. It is true *before* the network is introduced, so when it
-   later fails, the network is why.
+   later fails, the network is why. **Done**, and after milestone 5 the
+   assertion is no longer trivial: it also checks the network ran and changed
+   the audio in the `on` arm, so the identity is tested against something.
+
+   One thing the design did not anticipate: `device_rate_stage` runs only on the
+   capture path, so moving the store there outright silently un-meters every
+   other driver of `write` — the null backend, the router's own tests, anything
+   delivering pipeline-rate audio with no capture callback in front of it. A
+   flag set by the hook and cleared by `write` keeps those metered as before.
 5. **Wire it up.** `MicLane` runs the stage when the flag is set and the device
    is at 48 kHz; `NoiseReducer` drops its gate in that case. Add
    `ASTAR_MIC_DENOISE`. Test: the VOX identity assertion now with denoising
    live; a lane-level test that the gate is absent when the stage is active and
-   present when it is not.
+   present when it is not. **Done.** The gate test walks all four states — off,
+   on at 48 kHz, on at 44.1 kHz (the guard), and off again — because the
+   interesting one is the third: the flag is set and the gate must still be
+   there.
 6. **Evaluate.** Parrot A/B first (fastest), then the offline WAV harness, then
    the vocoder round trip. Record the results here.
 7. **Licence and docs.** README row, `docs/site/about/license.md` row,
    `LICENSE-EXCEPTIONS.md` section. Could be done at step 3; must not be later
-   than the first release that carries the dependency.
+   than the first release that carries the dependency. **Done** — all three,
+   with the five copyright lines and the full BSD-3 text. The guards needed no
+   change, as predicted: this adds no first-party file, so
+   `guard-spdx-headers.sh` has nothing to check, and BSD-3 imposes no relink
+   obligation for `guard-codec2-licensing.sh` to mirror. Worth considering
+   later: that guard's *shape* — `cargo tree` asserting a licence-relevant
+   invariant — would suit the `default-features = false` on `nnnoiseless`,
+   which is the difference between five new crates and sixty-one.
 8. **Measure on Pi-class hardware**, then decide `astar-server`'s default.
 9. **Decide the client default**, on the strength of milestone 6 and nothing
    else.

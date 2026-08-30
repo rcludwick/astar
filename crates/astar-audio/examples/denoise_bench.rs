@@ -15,6 +15,13 @@
 //! of magnitude. The budget is 10 ms per frame, because that is how much
 //! audio a frame is.
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    // Sample counts and rates crossing into f32/f64 for signal generation and
+    // timing arithmetic — the same class `resample.rs` allows module-wide.
+)]
+
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use std::time::Instant;

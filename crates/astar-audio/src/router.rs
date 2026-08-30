@@ -18,8 +18,9 @@ use crate::meter::peak;
 use crate::mixer::Mixer;
 use crate::spectrum::SpectrumAnalyzer;
 use crate::{
-    AudioBackend, AudioError, Compressor, CompressorParams, DeviceInfo, Direction, InputSink,
-    MicProfile, NoiseReducer, OutputSource, StreamConfig, StreamHandle,
+    AudioBackend, AudioError, Compressor, CompressorParams, DenoiseMode, DeviceInfo, Direction,
+    InputSink, MicProfile, NoiseReducer, OutputSource, RNNOISE_RATE, RnnoiseStage, StreamConfig,
+    StreamHandle,
 };
 
 /// Identifies a capture device within the router (mics are 1:1, never shared).
@@ -1119,6 +1120,23 @@ pub(crate) struct Inject {
 /// Shared current announcement on a mic lane (`None` = none playing).
 pub(crate) type InjectCell = Arc<Mutex<Option<Inject>>>;
 
+/// What the device-rate stage decided on a callback, carried forward to
+/// `write` on the same thread.
+///
+/// These three travel together — the hook sets them and `write` consumes
+/// them, in that order, every callback — so they are one value rather than
+/// three loose flags on the lane.
+#[derive(Debug, Clone, Copy, Default)]
+struct DeviceRateState {
+    /// The hook published the VOX peak this callback, so `write` must not
+    /// publish it again from pipeline-rate audio. See the tap comment there.
+    peak_published: bool,
+    /// The neural stage ran on the most recent callback.
+    neural_active: bool,
+    /// What `nr` was last built for, so a change of chain rebuilds it.
+    nr_built_neural: bool,
+}
+
 /// One capture device's DSP + framing path. Runs on the cpal input thread.
 ///
 /// Chain: gain → `NoiseReducer` → `Compressor` → f32→i16 PCM → 20 ms
@@ -1164,9 +1182,19 @@ pub struct MicLane {
     /// callback regardless of the gate, so VOX can key from silence
     /// (iax-5c30). Published from `device_rate_stage` on the capture path.
     mic_input_peak: Arc<AtomicU32>,
-    /// Set by `device_rate_stage` when it published the VOX peak this
-    /// callback; cleared by `write`. See the tap comment in `write`.
-    peak_taken_at_device_rate: bool,
+    /// The neural stage. Allocated at lane construction (on the control
+    /// thread) whatever the flag says, because the device rate that decides
+    /// whether it may run is only known once the stream opens — and by then
+    /// we are on the audio thread, where allocating is not allowed.
+    rnnoise: RnnoiseStage,
+    /// `ASTAR_MIC_DENOISE`, read once per process.
+    denoise_mode: DenoiseMode,
+    /// What `device_rate_stage` decided this callback, read by `write`.
+    stage: DeviceRateState,
+    /// Latest voice-activity probability from the network, f32 bits.
+    /// Telemetry only — deliberately not wired to VOX, which needs its own
+    /// design and a migration for the saved threshold.
+    voice_probability: Arc<AtomicU32>,
     /// Calibrated per-mic profile, swapped off-thread; the audio thread rebuilds
     /// `nr` from it when `profile_gen` advances past `seen_gen`.
     profile: Arc<Mutex<Option<MicProfile>>>,
@@ -1211,6 +1239,9 @@ impl MicLane {
             Some(p) => NoiseReducer::from_profile(sample_rate, p),
             None => NoiseReducer::new(sample_rate),
         };
+        // Shared with the stage so the probability is readable without
+        // reaching through the lane from another thread.
+        let vad_cell = Arc::new(AtomicU32::new(0));
         Self {
             dest,
             gate,
@@ -1230,7 +1261,10 @@ impl MicLane {
             tx_peak: Arc::new(AtomicU32::new(0)),
             tx_spectrum: Arc::new(Mutex::new(SpectrumAnalyzer::new(sample_rate))),
             mic_input_peak: Arc::new(AtomicU32::new(0)),
-            peak_taken_at_device_rate: false,
+            rnnoise: RnnoiseStage::new(Arc::clone(&vad_cell)),
+            denoise_mode: DenoiseMode::from_env(),
+            stage: DeviceRateState::default(),
+            voice_probability: vad_cell,
             profile,
             profile_gen,
             seen_gen: 0,
@@ -1259,6 +1293,21 @@ impl MicLane {
     pub fn mic_input_peak(&self) -> Arc<AtomicU32> {
         Arc::clone(&self.mic_input_peak)
     }
+    /// Latest voice-activity probability from the neural stage (f32 bits,
+    /// `0.0..=1.0`). Telemetry: published so the question "would VAD-driven
+    /// VOX beat peak-driven VOX?" can be answered from real recordings
+    /// rather than argued. It drives nothing.
+    #[must_use]
+    pub fn voice_probability_cell(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.voice_probability)
+    }
+
+    /// Whether the neural stage ran on the most recent callback.
+    #[must_use]
+    pub fn neural_active(&self) -> bool {
+        self.stage.neural_active
+    }
+
     /// Toggle cell for the noise reducer (control side).
     #[must_use]
     pub fn denoise_flag(&self) -> Arc<AtomicBool> {
@@ -1380,12 +1429,26 @@ impl InputSink for MicLane {
     /// The gain is a scalar, so `g × peak` before the resampler and after it
     /// agree to within resampler ripple: the tap changes rate without
     /// changing meaning.
-    fn device_rate_stage(&mut self, samples: &mut Vec<f32>, _device_rate: u32) {
+    fn device_rate_stage(&mut self, samples: &mut Vec<f32>, device_rate: u32) {
+        // The VOX tap FIRST, before anything touches the samples. This
+        // ordering is the whole reason the tap moved here.
         let g = f32::from_bits(self.gain.load(Ordering::Relaxed));
         let input_peak = (g * peak(samples)).min(1.0);
         self.mic_input_peak
             .store(input_peak.to_bits(), Ordering::Relaxed);
-        self.peak_taken_at_device_rate = true;
+        self.stage.peak_published = true;
+
+        // The network runs when the operator asked for noise reduction, the
+        // mode allows it, and the device gave us the one rate RNNoise is
+        // defined at. A device that could not offer 48 kHz falls back to the
+        // classical chain rather than being fed audio at a rate the network
+        // was never trained on.
+        self.stage.neural_active = self.denoise_mode.allows_neural()
+            && device_rate == RNNOISE_RATE
+            && self.denoise.load(Ordering::Relaxed);
+        if self.stage.neural_active {
+            self.rnnoise.process(samples);
+        }
     }
 
     #[allow(clippy::too_many_lines)] // iax-e30d inject block added; extract helper in follow-on
@@ -1393,13 +1456,21 @@ impl InputSink for MicLane {
         // Cheap atomic load on the hot path; only locks + rebuilds the NR when
         // the control side pushed a new profile (generation advanced).
         let cur_gen = self.profile_gen.load(Ordering::Relaxed);
-        if cur_gen != self.seen_gen {
+        if cur_gen != self.seen_gen || self.stage.neural_active != self.stage.nr_built_neural {
             let p = self.profile.lock().expect("profile mutex");
-            self.nr = match p.as_ref() {
-                Some(p) => NoiseReducer::from_profile(self.sample_rate, p),
-                None => NoiseReducer::new(self.sample_rate),
+            // The hum filter always. The gate only when the network is NOT
+            // running: downstream of a denoiser its thresholds are
+            // calibrated against a noise floor that has moved, and its
+            // characteristic failure — chopping a soft onset — would be paid
+            // for nothing. See `docs/design/noise-suppression.md`.
+            self.nr = match (p.as_ref(), self.stage.neural_active) {
+                (Some(p), true) => NoiseReducer::hum_only_from_profile(self.sample_rate, p),
+                (Some(p), false) => NoiseReducer::from_profile(self.sample_rate, p),
+                (None, true) => NoiseReducer::hum_only(self.sample_rate),
+                (None, false) => NoiseReducer::new(self.sample_rate),
             };
             self.seen_gen = cur_gen;
+            self.stage.nr_built_neural = self.stage.neural_active;
         }
         // Meter the mic INPUT level CONTINUOUSLY — post-gain, pre-NoiseReducer,
         // and BEFORE the unkeyed early-return — so a consumer's VOX can key from
@@ -1414,8 +1485,8 @@ impl InputSink for MicLane {
         // backend, the router's own tests, and anything delivering
         // pipeline-rate audio with no capture callback in front of it.
         let g = f32::from_bits(self.gain.load(Ordering::Relaxed));
-        if self.peak_taken_at_device_rate {
-            self.peak_taken_at_device_rate = false;
+        if self.stage.peak_published {
+            self.stage.peak_published = false;
         } else {
             let input_peak = (g * peak(samples)).min(1.0);
             self.mic_input_peak
@@ -1935,10 +2006,12 @@ mod tests {
     /// CLAUDE.md's config-version rule says owes a translation, and a
     /// noise-reduction feature should not be spending a config version.
     ///
-    /// Right now this passes trivially, because nothing denoises yet. That
-    /// is the point of asserting it here: it is true BEFORE the network
-    /// exists, so if it ever fails, the network is why.
+    /// This assertion landed one milestone before the network, while it was
+    /// trivially true. It is not trivial any more: the sub-assertion below
+    /// proves the network really ran in the `on` arm, so the peak identity
+    /// is being tested against something rather than against nothing.
     #[test]
+    #[allow(clippy::cast_precision_loss)] // sample indices into f32, test signal only
     fn vox_input_peak_is_identical_with_denoise_on_and_off() {
         use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
         use std::sync::{Arc, Mutex};
@@ -1952,7 +2025,9 @@ mod tests {
             })
             .collect();
 
-        let peak_with = |denoise: bool| -> f32 {
+        // (peak published to VOX, samples the network handed onward, whether
+        // the neural stage claimed this callback)
+        let run = |denoise: bool| -> (f32, Vec<f32>, bool) {
             let lane_dest = Arc::new(Mutex::new(None));
             let mut lane = MicLane::new(
                 8_000,
@@ -1966,16 +2041,116 @@ mod tests {
             let cell = lane.mic_input_peak();
             let mut buf = onset.clone();
             crate::InputSink::device_rate_stage(&mut lane, &mut buf, 48_000);
+            let active = lane.neural_active();
             crate::InputSink::write(&mut lane, &buf, 0.0);
-            f32::from_bits(cell.load(Ordering::Relaxed))
+            (f32::from_bits(cell.load(Ordering::Relaxed)), buf, active)
         };
 
-        let on = peak_with(true);
-        let off = peak_with(false);
+        let (on, on_audio, on_active) = run(true);
+        let (off, off_audio, off_active) = run(false);
+
+        // The test is only meaningful if the network actually ran.
+        assert!(
+            on_active,
+            "the neural stage should be live at 48 kHz with the flag set"
+        );
+        assert!(!off_active, "and idle with the flag clear");
+        assert_ne!(
+            on_audio, off_audio,
+            "the network ran but changed nothing — the identity below would be vacuous"
+        );
+
         assert!(on > 0.0, "the tap must publish something for a real onset");
         assert!(
             (on - off).abs() < f32::EPSILON,
             "VOX input peak moved when noise reduction was toggled: {on} vs {off}"
+        );
+    }
+
+    /// The gate steps aside for the network, and comes back when it stops.
+    #[test]
+    fn the_gate_is_dropped_only_while_the_neural_stage_runs() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        let mut lane = MicLane::new(
+            8_000,
+            Arc::new(Mutex::new(None)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(None)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(Mutex::new(None)),
+        );
+        let audio = vec![0.2_f32; 480];
+
+        // Noise reduction off: classical chain, gate present.
+        crate::InputSink::device_rate_stage(&mut lane, &mut audio.clone(), 48_000);
+        crate::InputSink::write(&mut lane, &audio, 0.0);
+        assert!(
+            lane.nr.has_gate(),
+            "gate must be present with the network idle"
+        );
+
+        // On, at 48 kHz: network runs, gate stands down.
+        lane.denoise_flag().store(true, Ordering::Relaxed);
+        crate::InputSink::device_rate_stage(&mut lane, &mut audio.clone(), 48_000);
+        crate::InputSink::write(&mut lane, &audio, 0.0);
+        assert!(lane.neural_active(), "network should be live");
+        assert!(
+            !lane.nr.has_gate(),
+            "gate must stand down while the network runs"
+        );
+
+        // On, but the device could not give us 48 kHz: fall back to the
+        // classical chain, gate and all. This is the 48 kHz guard.
+        crate::InputSink::device_rate_stage(&mut lane, &mut audio.clone(), 44_100);
+        crate::InputSink::write(&mut lane, &audio, 0.0);
+        assert!(
+            !lane.neural_active(),
+            "the network must not run at 44.1 kHz"
+        );
+        assert!(lane.nr.has_gate(), "the fallback chain keeps its gate");
+
+        // And back off entirely.
+        lane.denoise_flag().store(false, Ordering::Relaxed);
+        crate::InputSink::device_rate_stage(&mut lane, &mut audio.clone(), 48_000);
+        crate::InputSink::write(&mut lane, &audio, 0.0);
+        assert!(lane.nr.has_gate());
+    }
+
+    /// The VAD probability is published as telemetry when the network runs.
+    #[test]
+    #[allow(clippy::cast_precision_loss)] // sample indices into f32, test signal only
+    fn voice_probability_is_published_while_the_network_runs() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::sync::{Arc, Mutex};
+        let mut lane = MicLane::new(
+            8_000,
+            Arc::new(Mutex::new(None)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(None)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(Mutex::new(None)),
+        );
+        lane.denoise_flag().store(true, Ordering::Relaxed);
+        let cell = lane.voice_probability_cell();
+
+        let speechy: Vec<f32> = (0..480 * 6)
+            .map(|i| {
+                let t = i as f32 / 48_000.0;
+                (0..4)
+                    .map(|h| {
+                        (std::f32::consts::TAU * 200.0 * (h + 1) as f32 * t).sin() / (h + 1) as f32
+                    })
+                    .sum::<f32>()
+                    * 0.2
+            })
+            .collect();
+        crate::InputSink::device_rate_stage(&mut lane, &mut speechy.clone(), 48_000);
+        let p = f32::from_bits(cell.load(Ordering::Relaxed));
+        assert!(
+            (0.0..=1.0).contains(&p),
+            "voice probability {p} out of range"
         );
     }
 

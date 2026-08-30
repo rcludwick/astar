@@ -332,14 +332,16 @@ notices and the written offer that goes with static linking.
 
 ### Third-party components
 
-These keep their own terms and are **not** covered by the AGPL:
+These keep their own terms and are **not** covered by the AGPL. The first three
+rows are paths in this repository; the last two are upstream dependencies:
 
-| Path | Component | Licence |
+| Path or crate | Component | Licence |
 |---|---|---|
 | `vendor/ambe-thumbdv` | ThumbDV / DV3000 AMBE driver (Rob's own, vendored in) | MIT **OR** Apache-2.0 — see its `LICENSE-MIT`, `LICENSE-APACHE`, and `VENDORED.md` |
 | `apps/gui/assets/fonts` | Inter typeface | SIL Open Font License 1.1 |
 | `harness/asterisk_parity/c_iaxclient/vendored/libiax2` | The historical C libiax2, used only as a parity reference by the test harness — never linked into a shipped binary | GPL / LGPL, see its `COPYING` and `COPYING.LIB` |
 | `codec2` crate / system `libcodec2` | Codec 2 — the M17 voice codec. Opt-in features only, never in a default feature set | `LGPL-2.1-only AND MIT` / LGPL-2.1 — notices and relink offer in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) |
+| `nnnoiseless` crate (dependency, not vendored) | RNNoise — mic noise reduction. Compiled into every build; the model is a const array in the crate | BSD-3-Clause — five copyright lines reproduced in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) |
 
 Everything else — every `astar-*` crate, both applications, the bindings, the
 scripts and the docs — is AGPL-3.0-only. Every first-party `.rs`, `.swift`,

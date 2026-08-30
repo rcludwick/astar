@@ -3,4 +3,15 @@
 # would render a network's name as a code span, which is worse than the lint.
 #
 # `..` keeps clippy's own default list; without it this would replace it.
-doc-valid-idents = ["BrandMeister", "FreeDMR", "FreeSTAR", "SystemX", "VKDMR", "AmComm", ".."]
+doc-valid-idents = [
+    "BrandMeister",
+    "FreeDMR",
+    "FreeSTAR",
+    "SystemX",
+    "VKDMR",
+    "AmComm",
+    # Xiph's noise-suppression model. The Rust port is `nnnoiseless`, which is
+    # lower case and needs no help; "RNNoise" is the product.
+    "RNNoise",
+    "..",
+]
