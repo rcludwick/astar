@@ -1265,10 +1265,19 @@ impl Station {
         // anyone. `live` stays false, and the summary says "when you key" —
         // a prediction must not read like an observation.
         if !snap.denoise_status.live {
+            // Both operands in locals, deliberately. A temporary `MutexGuard`
+            // lives to the end of the enclosing statement, so passing
+            // `self.session.lock().unwrap().denoise()` and
+            // `self.capture_rate_cached()` as sibling arguments would hold the
+            // session lock across the probe — ~1.4 ms on a cache miss, during
+            // which `try_snapshot` returns `None` and an event loop drops a
+            // frame. The lock is released before the probe runs.
+            let denoise_on = self.session.lock().unwrap().denoise();
+            let device_rate = self.capture_rate_cached();
             snap.denoise_status = astar_audio::DenoiseStatus::predicted(
-                self.session.lock().unwrap().denoise(),
+                denoise_on,
                 astar_audio::DenoiseMode::from_env(),
-                self.capture_rate_cached(),
+                device_rate,
             );
         }
         snap
