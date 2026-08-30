@@ -1992,17 +1992,13 @@ public func connectFailureMessage(for error: Error, node: String) -> String {
         // the account side, not the node.
         return "Couldn’t sign in to AllStarLink — check your AllStarLink "
             + "account in Settings."
-    case -7:  // IAX_ERR_AUDIO — a device problem. The code alone covers a
-        // device that vanished, a config the device will not accept, and a
-        // stream that failed to build, so the engine's detail is the whole
-        // value here: "device not found: KT USB Audio" tells the operator
-        // what to go and fix, "audio error" does not.
-        let what = engineDetail(stationError)
-        if what.isEmpty {
-            return "Couldn’t open the audio device — check it’s still "
-                + "connected and not in use by another app."
-        }
-        return "Audio device problem: \(what)."
+    case -7:  // IAX_ERR_AUDIO — a device problem. One sentence, deliberately
+        // (Rob's wording): every cause the engine distinguishes here —
+        // missing, busy, unplugged, config refused — has the same two
+        // remedies, so naming which one it was buys the operator nothing they
+        // can act on. The engine's detail is still carried on
+        // `StationError.detail` for anyone debugging.
+        return "Couldn’t open audio device, is it busy or unplugged?"
     case -19:  // IAX_ERR_DSTAR — every D-Star connect failure, and the most
         // likely one by far is the dongle. The engine DOES classify these
         // precisely ("ThumbDV at /dev/cu.usbserial-… is busy — another
