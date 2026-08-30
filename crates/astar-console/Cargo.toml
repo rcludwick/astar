@@ -17,6 +17,7 @@ astar-m17 = { path = "../astar-m17", optional = true }
 # link FSM, no extra deps of its own. Optional + gated behind the `dstar`
 # feature (OFF by default — see that feature's doc below) below.
 astar-dstar = { path = "../astar-dstar", optional = true }
+astar-ysf = { path = "../astar-ysf", optional = true }
 # Underlay socket for applying a deferred `WireGuard` link transport when the
 # engine is first built (iax-5bbd); config/status types come via `astar-iax`.
 astar-wireguard = { path = "../astar-wireguard" }
@@ -82,6 +83,13 @@ codec2-static = ["astar-codec/codec2-static"]
 # `cargo tree -p astar-console --features dstar` (`ambe-thumbdv`
 # present).
 dstar = ["dep:astar-dstar", "astar-codec/ambe-hw"]
+# System Fusion (iax-e8a4). `astar-ysf` is pure protocol — no I/O beyond its
+# own loopback reflector, no deps past `std` — so this feature costs nothing
+# but the code. It does NOT pull `astar-codec/ambe-hw` the way `dstar` does,
+# because the link layer carries the ninety payload bytes without decoding
+# them: YSF voice is AMBE+2 and there is no vocoder path yet. When one lands
+# this gains `astar-codec/ambe-hw` and the feature stops being audio-free.
+ysf = ["dep:astar-ysf"]
 
 [lints]
 workspace = true

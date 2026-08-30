@@ -156,6 +156,10 @@ pub enum ConsoleError {
     /// session is full-transceive and keys/unkeys exactly like the M17
     /// branch above it (see `crate::dstar`'s module docs).
     Dstar(String),
+    /// A YSF error (iax-e8a4) — secret-free, human-readable. Returned when
+    /// the `ysf` feature isn't compiled in, or by [`crate::ysf::YsfLink`]
+    /// classifying a bind, resolve or callsign failure.
+    Ysf(String),
 }
 
 impl std::fmt::Display for ConsoleError {
@@ -170,6 +174,7 @@ impl std::fmt::Display for ConsoleError {
             Self::Link(msg) => write!(f, "link: {msg}"),
             Self::M17(msg) => write!(f, "m17: {msg}"),
             Self::Dstar(msg) => write!(f, "dstar: {msg}"),
+            Self::Ysf(msg) => write!(f, "ysf: {msg}"),
         }
     }
 }

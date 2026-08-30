@@ -2065,6 +2065,7 @@ fn map_console_err(e: astar_console::ConsoleError) -> StationError {
         C::Link(m) => StationError::Link(m),
         C::M17(m) => StationError::M17(m),
         C::Dstar(m) => StationError::Dstar(m),
+        C::Ysf(m) => StationError::Ysf(m),
     }
 }
 

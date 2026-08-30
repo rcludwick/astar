@@ -69,6 +69,16 @@ dstar-test:
     cargo test -p astar-station --features dstar
     cargo test -p astar-cli --features dstar
 
+# System Fusion (iax-e8a4). Unlike `dstar-test` this needs no hardware at
+# all: `astar-ysf` ships its own loopback reflector, so the link tests bind
+# 127.0.0.1, start a reflector, and link to it. Kept as its own recipe to
+# match the `dstar` convention — but note it COULD join `ci`, because
+# nothing here is gated on a dongle and the whole thing runs in well under a
+# second. If the `ysf` feature ever rots unnoticed, that is the fix.
+ysf-test:
+    cargo test -p astar-ysf
+    cargo test -p astar-console --features ysf
+
 dstar-test-hw:
     IAX_THUMBDV_TESTS=1 cargo test -p astar-codec --features ambe-hw
     IAX_THUMBDV_TESTS=1 cargo test -p astar-console --features dstar
