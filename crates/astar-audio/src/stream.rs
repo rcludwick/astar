@@ -39,7 +39,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{BufferSize, SampleFormat, SampleRate, StreamConfig as CpalConfig};
+use cpal::{BufferSize, SampleFormat, StreamConfig as CpalConfig};
 
 use crate::device::{DeviceId, DeviceInfo, Direction};
 use crate::error::AudioError;
@@ -303,9 +303,9 @@ impl CpalBackend {
             .input_devices()
             .map_err(|e| AudioError::Enumeration(e.to_string()))?;
         for dev in inputs {
-            let name = dev.name().unwrap_or_else(|_| "<unknown>".into());
+            let name = device_name(&dev);
             let (channels, rates) = match dev.default_input_config() {
-                Ok(cfg) => (cfg.channels(), vec![cfg.sample_rate().0]),
+                Ok(cfg) => (cfg.channels(), vec![cfg.sample_rate()]),
                 Err(_) => (1, Vec::new()),
             };
             out.push(DeviceInfo {
@@ -323,9 +323,9 @@ impl CpalBackend {
             .output_devices()
             .map_err(|e| AudioError::Enumeration(e.to_string()))?;
         for dev in outputs {
-            let name = dev.name().unwrap_or_else(|_| "<unknown>".into());
+            let name = device_name(&dev);
             let (channels, rates) = match dev.default_output_config() {
-                Ok(cfg) => (cfg.channels(), vec![cfg.sample_rate().0]),
+                Ok(cfg) => (cfg.channels(), vec![cfg.sample_rate()]),
                 Err(_) => (2, Vec::new()),
             };
             out.push(DeviceInfo {
@@ -366,12 +366,30 @@ impl CpalBackend {
             )
         };
         for dev in iter {
-            if dev.name().as_deref().unwrap_or("") == name {
+            if device_name(&dev) == name {
                 return Ok((dev, is_input));
             }
         }
         Err(AudioError::DeviceNotFound(name))
     }
+}
+
+/// A device's human-readable name, or a placeholder when the host won't say.
+///
+/// cpal 0.18 dropped `Device::name()` for `description()`, which returns a
+/// whole `DeviceDescription` — manufacturer, driver, bus type, direction.
+/// astar identifies devices by name, because that is what the app persists
+/// in its `audio.input` / `audio.output` defaults, so the name is still all
+/// this wants; the rest of the description is there to be used the day the
+/// device list wants to show more than a string.
+///
+/// The `<unknown>` fallback matches what `enumerate` records for a device
+/// whose description fails, which is what makes `find_device` able to find
+/// one again. The old code compared against `""` there and so could never
+/// match a device it had itself listed as `<unknown>`.
+fn device_name(dev: &cpal::Device) -> String {
+    dev.description()
+        .map_or_else(|_| "<unknown>".to_string(), |d| d.name().to_string())
 }
 
 impl Default for CpalBackend {
@@ -387,7 +405,7 @@ impl AudioBackend for CpalBackend {
 
     fn default_input(&self) -> Option<DeviceInfo> {
         let dev = self.host.default_input_device()?;
-        let name = dev.name().unwrap_or_else(|_| "<unknown>".into());
+        let name = device_name(&dev);
         let cfg = dev.default_input_config().ok();
         Some(DeviceInfo {
             id: DeviceId::new(format!("in:{name}")),
@@ -396,13 +414,13 @@ impl AudioBackend for CpalBackend {
             channels: cfg
                 .as_ref()
                 .map_or(1, cpal::SupportedStreamConfig::channels),
-            native_sample_rates: cfg.map(|c| vec![c.sample_rate().0]).unwrap_or_default(),
+            native_sample_rates: cfg.map(|c| vec![c.sample_rate()]).unwrap_or_default(),
         })
     }
 
     fn default_output(&self) -> Option<DeviceInfo> {
         let dev = self.host.default_output_device()?;
-        let name = dev.name().unwrap_or_else(|_| "<unknown>".into());
+        let name = device_name(&dev);
         let cfg = dev.default_output_config().ok();
         Some(DeviceInfo {
             id: DeviceId::new(format!("out:{name}")),
@@ -411,7 +429,7 @@ impl AudioBackend for CpalBackend {
             channels: cfg
                 .as_ref()
                 .map_or(2, cpal::SupportedStreamConfig::channels),
-            native_sample_rates: cfg.map(|c| vec![c.sample_rate().0]).unwrap_or_default(),
+            native_sample_rates: cfg.map(|c| vec![c.sample_rate()]).unwrap_or_default(),
         })
     }
 
@@ -433,7 +451,7 @@ impl AudioBackend for CpalBackend {
         let supported = dev
             .default_input_config()
             .map_err(|e| AudioError::BuildStream(e.to_string()))?;
-        let device_rate = supported.sample_rate().0;
+        let device_rate = supported.sample_rate();
         let device_channels = supported.channels();
         let sample_format = supported.sample_format();
 
@@ -444,7 +462,7 @@ impl AudioBackend for CpalBackend {
         // inside the callback if needed.
         let cpal_cfg = CpalConfig {
             channels: device_channels,
-            sample_rate: SampleRate(device_rate),
+            sample_rate: device_rate,
             buffer_size: BufferSize::Default,
         };
 
@@ -477,7 +495,7 @@ impl AudioBackend for CpalBackend {
         let supported = dev
             .default_output_config()
             .map_err(|e| AudioError::BuildStream(e.to_string()))?;
-        let device_rate = supported.sample_rate().0;
+        let device_rate = supported.sample_rate();
         let device_channels = supported.channels();
         let sample_format = supported.sample_format();
 
@@ -486,7 +504,7 @@ impl AudioBackend for CpalBackend {
 
         let cpal_cfg = CpalConfig {
             channels: device_channels,
-            sample_rate: SampleRate(device_rate),
+            sample_rate: device_rate,
             buffer_size: BufferSize::Default,
         };
 
@@ -555,7 +573,7 @@ fn spawn_input_stream(
                 match sample_format {
                     SampleFormat::F32 => dev
                         .build_input_stream(
-                            &cpal_cfg,
+                            cpal_cfg,
                             move |data: &[f32], info: &cpal::InputCallbackInfo| {
                                 gap_watch.check(info, data.len() / device_channels.max(1) as usize);
                                 process_input(
@@ -574,7 +592,7 @@ fn spawn_input_stream(
                         .map_err(|e| AudioError::BuildStream(e.to_string())),
                     SampleFormat::I16 => dev
                         .build_input_stream(
-                            &cpal_cfg,
+                            cpal_cfg,
                             move |data: &[i16], info: &cpal::InputCallbackInfo| {
                                 gap_watch.check(info, data.len() / device_channels.max(1) as usize);
                                 // Convert i16 -> f32 into a scratch then process.
@@ -599,7 +617,7 @@ fn spawn_input_stream(
                         .map_err(|e| AudioError::BuildStream(e.to_string())),
                     SampleFormat::U16 => dev
                         .build_input_stream(
-                            &cpal_cfg,
+                            cpal_cfg,
                             move |data: &[u16], info: &cpal::InputCallbackInfo| {
                                 gap_watch.check(info, data.len() / device_channels.max(1) as usize);
                                 mono.clear();
@@ -743,7 +761,11 @@ impl CaptureGapWatch {
         if prev_frames == 0 {
             return;
         }
-        let Some(gap) = cap.duration_since(&prev) else {
+        // 0.18's `duration_since` saturates to zero on a non-monotonic
+        // timestamp; `checked_duration_since` is the one that still reports
+        // it, and a zero gap here would read as "no overrun" rather than
+        // "don't know".
+        let Some(gap) = cap.checked_duration_since(prev) else {
             return;
         };
         // Expected gap = the previous buffer's duration; excess ⇒ dropped buffers.
@@ -865,7 +887,7 @@ fn spawn_output_stream(
                 match sample_format {
                     SampleFormat::F32 => dev
                         .build_output_stream(
-                            &cpal_cfg,
+                            cpal_cfg,
                             move |data: &mut [f32], _| {
                                 fill_output(
                                     data,
@@ -886,7 +908,7 @@ fn spawn_output_stream(
                         .map_err(|e| AudioError::BuildStream(e.to_string())),
                     SampleFormat::I16 => dev
                         .build_output_stream(
-                            &cpal_cfg,
+                            cpal_cfg,
                             move |data: &mut [i16], _| {
                                 let mut tmp = vec![0.0_f32; data.len()];
                                 fill_output(
