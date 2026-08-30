@@ -27,6 +27,16 @@ public final class CallSession: ObservableObject {
     /// negotiating (astar-eb6c). The status card names it via `badge` whenever
     /// set — green-tinted when `.slin16` (wideband) is live (astar-ef35).
     @Published public private(set) var negotiatedFormat: VoiceFormat?
+    /// Which mic noise-reduction chain is actually running, as a short line
+    /// — `"Neural (48 kHz)"`, `"Filter + gate (device 44.1 kHz)"`, `"Off"`.
+    /// Empty when no mic lane is open, so the UI hides the row rather than
+    /// telling someone "not capturing".
+    ///
+    /// Read-only, and reported rather than inferred. The neural stage needs
+    /// a 48 kHz capture device; one that cannot offer 48 kHz silently falls
+    /// back to the classical chain, which without this line is
+    /// indistinguishable from a bug.
+    @Published public private(set) var denoiseSummary: String = ""
     /// Digits already sent of the active `sendDTMF(sequence:)` command
     /// (astar-7d21); `0` when no sequence is playing. The dialpad dims the
     /// played prefix from this.
@@ -619,6 +629,9 @@ public final class CallSession: ObservableObject {
             if remotePTT != snap.remotePTT { remotePTT = snap.remotePTT }
             if negotiatedFormat != snap.negotiatedFormat {
                 negotiatedFormat = snap.negotiatedFormat
+            }
+            if denoiseSummary != snap.denoiseSummary {
+                denoiseSummary = snap.denoiseSummary
             }
             if dtmfPlayed != snap.dtmfPlayed { dtmfPlayed = snap.dtmfPlayed }
             if dtmfTotal != snap.dtmfTotal { dtmfTotal = snap.dtmfTotal }

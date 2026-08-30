@@ -2220,6 +2220,8 @@ impl ConsoleSession {
             // cpal capture overruns on the active call / its routed mic.
             self.state.tx_reanchors = mgr.tx_reanchors(id).unwrap_or(0);
             self.state.tx_capture_overruns = mgr.tx_capture_overruns(id).unwrap_or(0);
+            // Which noise-reduction chain the routed mic is actually running.
+            self.state.denoise_status = mgr.denoise_status(id).unwrap_or_default();
         } else {
             self.state.tx_level_db = -60.0;
             self.state.rx_level_db = -60.0;
@@ -2227,6 +2229,7 @@ impl ConsoleSession {
             self.state.rtt_ms = None;
             self.state.tx_reanchors = 0;
             self.state.tx_capture_overruns = 0;
+            self.state.denoise_status = astar_audio::DenoiseStatus::default();
         }
         // Populate the full concurrent-call list (iax-a1fb P5). Secret-free:
         // CallSnapshot fields are node ids, device names, and health counters only.

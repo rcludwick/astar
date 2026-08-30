@@ -92,6 +92,36 @@ public enum AuthPolicy: Int32, Sendable {
     case off = 2
 }
 
+/// Which mic noise-reduction chain is live, as reported by
+/// `Snapshot.denoiseChain`. Mirrors the C-ABI `IaxDenoiseChain` and
+/// `astar_audio::DenoiseChain`; the raw values are part of the published
+/// interface, so add cases at the end.
+///
+/// This is read-only and reported rather than inferred. The neural stage
+/// needs a 48 kHz capture device, and a device that cannot offer one
+/// silently falls back to `.filterGate` — which without this is
+/// indistinguishable from a bug.
+public enum DenoiseChain: UInt32, Sendable, CustomStringConvertible {
+    /// No mic lane is open, so no chain is running.
+    case notCapturing = 0
+    /// Capturing, but noise reduction is switched off.
+    case off = 1
+    /// Neural (RNNoise) at device rate, hum filter after it, no gate.
+    case neural = 2
+    /// The classical hum filter + noise gate. Either the device could not
+    /// give 48 kHz, or `ASTAR_MIC_DENOISE=legacy` asked for it.
+    case filterGate = 3
+
+    public var description: String {
+        switch self {
+        case .notCapturing: return "Not capturing"
+        case .off: return "Off"
+        case .neural: return "Neural"
+        case .filterGate: return "Filter + gate"
+        }
+    }
+}
+
 /// Negotiated voice codec of the active call, as reported by
 /// `Snapshot.negotiatedFormat`. Raw values are the IAX2 format bits carried
 /// across the C-ABI (`IaxState.negotiated_format`); `0` = none/unknown, which
@@ -150,6 +180,31 @@ public struct Snapshot: Sendable, Equatable {
     /// captured mic PCM) on the active call's routed mic. The lead suspect for
     /// choppy TX; `0` when monitor-only. A plain health counter, credential-free.
     public let txCaptureOverruns: UInt64
+    /// Which mic noise-reduction chain is live. A plain enum,
+    /// credential-free.
+    public let denoiseChain: DenoiseChain
+    /// The rate the capture stream opened at, in Hz, or `0` when no mic lane
+    /// is open. Pair it with `denoiseChain`: at 48000 the neural stage can
+    /// run; below that it cannot, and `.filterGate` is why.
+    public let denoiseDeviceRate: UInt32
+    /// A short line naming the live chain, and the rate where the rate is
+    /// the explanation — `"Neural (48 kHz)"`, `"Filter + gate (device
+    /// 44.1 kHz)"`, `"Off"`. Empty when nothing is capturing, so a caller
+    /// can hide the row rather than print "not capturing" at someone.
+    public var denoiseSummary: String {
+        let kHz: (UInt32) -> String = { r in
+            r % 1000 == 0
+                ? "\(r / 1000) kHz"
+                : String(format: "%.1f kHz", Double(r) / 1000.0)
+        }
+        switch denoiseChain {
+        case .notCapturing: return ""
+        case .off: return "Off"
+        case .neural: return "Neural (\(kHz(denoiseDeviceRate)))"
+        case .filterGate where denoiseDeviceRate == 48000: return "Filter + gate"
+        case .filterGate: return "Filter + gate (device \(kHz(denoiseDeviceRate)))"
+        }
+    }
     /// Negotiated voice codec of the active call, or `nil` while idle or still
     /// negotiating (iax-3e53). Shows `.slin16` when wideband is live. A plain
     /// codec id, credential-free.
@@ -1372,6 +1427,8 @@ public final class Station {
             mode: Mode(rawValue: Int32(out.mode.rawValue)) ?? .wt,
             txReanchors: out.tx_reanchors,
             txCaptureOverruns: out.tx_capture_overruns,
+            denoiseChain: DenoiseChain(rawValue: out.denoise_chain.rawValue) ?? .notCapturing,
+            denoiseDeviceRate: out.denoise_device_rate,
             // 0 (none) and any unknown bit both land as nil.
             negotiatedFormat: VoiceFormat(rawValue: out.negotiated_format),
             dtmfPlayed: Int(out.dtmf_played),

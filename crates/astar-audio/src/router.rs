@@ -18,9 +18,9 @@ use crate::meter::peak;
 use crate::mixer::Mixer;
 use crate::spectrum::SpectrumAnalyzer;
 use crate::{
-    AudioBackend, AudioError, Compressor, CompressorParams, DenoiseMode, DeviceInfo, Direction,
-    InputSink, MicProfile, NoiseReducer, OutputSource, RNNOISE_RATE, RnnoiseStage, StreamConfig,
-    StreamHandle,
+    AudioBackend, AudioError, Compressor, CompressorParams, DenoiseChain, DenoiseMode,
+    DenoiseStatus, DeviceInfo, Direction, InputSink, MicProfile, NoiseReducer, OutputSource,
+    RNNOISE_RATE, RnnoiseStage, StreamConfig, StreamHandle,
 };
 
 /// Identifies a capture device within the router (mics are 1:1, never shared).
@@ -110,6 +110,9 @@ struct MicSlot {
     /// choppy TX. Bumped on the capture thread by `CaptureGapWatch`; read via
     /// [`AudioRouter::mic_capture_overruns`]. A plain `u64` health counter.
     overruns: Arc<AtomicU64>,
+    /// Which noise-reduction chain the lane is running, packed by
+    /// `DenoiseStatus::to_bits` — the read-only capability line.
+    denoise_status: Arc<AtomicU64>,
     /// Active TX announcement injected ahead of the mic (iax-e30d).
     inject: InjectCell,
 }
@@ -556,6 +559,7 @@ impl AudioRouter {
         let tx_spectrum = lane.tx_spectrum();
         let mic_input_peak = lane.mic_input_peak();
         let preroll_ms = lane.preroll_ms_cell();
+        let denoise_status = lane.denoise_status_cell();
         let overruns = Arc::new(AtomicU64::new(0));
         let handle =
             self.backend
@@ -578,6 +582,7 @@ impl AudioRouter {
                 mic_input_peak,
                 preroll_ms,
                 overruns,
+                denoise_status,
                 inject,
             },
         );
@@ -626,6 +631,10 @@ impl AudioRouter {
                 mic_input_peak: Arc::new(AtomicU32::new(0)),
                 preroll_ms: Arc::new(AtomicU32::new(0)),
                 overruns,
+                // No `MicLane` on this path — the monitor and loopback sinks
+                // are pure observers with no DSP chain — so this cell stays
+                // at zero and reads back as `NotCapturing`. Nothing writes it.
+                denoise_status: Arc::new(AtomicU64::new(0)),
                 inject: Arc::new(Mutex::new(None)),
             },
         );
@@ -693,6 +702,10 @@ impl AudioRouter {
                 mic_input_peak,
                 preroll_ms: Arc::new(AtomicU32::new(0)),
                 overruns,
+                // No `MicLane` on this path — the monitor and loopback sinks
+                // are pure observers with no DSP chain — so this cell stays
+                // at zero and reads back as `NotCapturing`. Nothing writes it.
+                denoise_status: Arc::new(AtomicU64::new(0)),
                 inject: Arc::new(Mutex::new(None)),
             },
         );
@@ -846,6 +859,20 @@ impl AudioRouter {
         self.mics
             .get(mic)
             .map(|s| crate::peak_to_dbfs(f32::from_bits(s.mic_input_peak.load(Ordering::Relaxed))))
+    }
+
+    /// Which mic noise-reduction chain is live on `mic`, and at what device
+    /// rate (`docs/design/noise-suppression.md`). `None` when the mic is not
+    /// open.
+    ///
+    /// Read-only and reported rather than inferred: the 48 kHz guard is
+    /// otherwise invisible, and a mic that silently fell back to the
+    /// classical chain is indistinguishable from a bug.
+    #[must_use]
+    pub fn mic_denoise_status(&self, mic: &MicId) -> Option<DenoiseStatus> {
+        self.mics
+            .get(mic)
+            .map(|s| DenoiseStatus::from_bits(s.denoise_status.load(Ordering::Relaxed)))
     }
 
     // --- per-output controls (None if the bus isn't open) ---
@@ -1135,6 +1162,11 @@ struct DeviceRateState {
     neural_active: bool,
     /// What `nr` was last built for, so a change of chain rebuilds it.
     nr_built_neural: bool,
+    /// The rate the capture stream is delivering at, learned from the hook.
+    /// `0` until the first capture callback — a lane driven straight through
+    /// `write` (the null backend, tests) never learns one, and reports
+    /// `NotCapturing` rather than guessing.
+    device_rate: u32,
 }
 
 /// One capture device's DSP + framing path. Runs on the cpal input thread.
@@ -1195,6 +1227,10 @@ pub struct MicLane {
     /// Telemetry only — deliberately not wired to VOX, which needs its own
     /// design and a migration for the saved threshold.
     voice_probability: Arc<AtomicU32>,
+    /// Which chain is live, packed by `DenoiseStatus::to_bits`. Shared,
+    /// because the router hands the lane to `open_input` and only keeps
+    /// cells — the same arrangement as `mic_input_peak`.
+    denoise_status: Arc<AtomicU64>,
     /// Calibrated per-mic profile, swapped off-thread; the audio thread rebuilds
     /// `nr` from it when `profile_gen` advances past `seen_gen`.
     profile: Arc<Mutex<Option<MicProfile>>>,
@@ -1265,6 +1301,7 @@ impl MicLane {
             denoise_mode: DenoiseMode::from_env(),
             stage: DeviceRateState::default(),
             voice_probability: vad_cell,
+            denoise_status: Arc::new(AtomicU64::new(0)),
             profile,
             profile_gen,
             seen_gen: 0,
@@ -1306,6 +1343,32 @@ impl MicLane {
     #[must_use]
     pub fn neural_active(&self) -> bool {
         self.stage.neural_active
+    }
+
+    /// Shared capability cell, packed by `DenoiseStatus::to_bits`.
+    #[must_use]
+    pub fn denoise_status_cell(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.denoise_status)
+    }
+
+    /// Which noise-reduction chain is live on this lane, and at what device
+    /// rate — the read-only capability line
+    /// (`docs/design/noise-suppression.md`).
+    #[must_use]
+    pub fn denoise_status(&self) -> DenoiseStatus {
+        let chain = if self.stage.device_rate == 0 {
+            DenoiseChain::NotCapturing
+        } else if self.stage.neural_active {
+            DenoiseChain::Neural
+        } else if self.denoise.load(Ordering::Relaxed) && self.denoise_mode.allows_legacy() {
+            DenoiseChain::FilterGate
+        } else {
+            DenoiseChain::Off
+        };
+        DenoiseStatus {
+            device_rate: self.stage.device_rate,
+            chain,
+        }
     }
 
     /// Toggle cell for the noise reducer (control side).
@@ -1437,6 +1500,7 @@ impl InputSink for MicLane {
         self.mic_input_peak
             .store(input_peak.to_bits(), Ordering::Relaxed);
         self.stage.peak_published = true;
+        self.stage.device_rate = device_rate;
 
         // The network runs when the operator asked for noise reduction, the
         // mode allows it, and the device gave us the one rate RNNoise is
@@ -1449,6 +1513,8 @@ impl InputSink for MicLane {
         if self.stage.neural_active {
             self.rnnoise.process(samples);
         }
+        self.denoise_status
+            .store(self.denoise_status().to_bits(), Ordering::Relaxed);
     }
 
     #[allow(clippy::too_many_lines)] // iax-e30d inject block added; extract helper in follow-on

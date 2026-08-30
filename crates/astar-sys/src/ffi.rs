@@ -94,6 +94,28 @@ pub enum IaxMode {
     Node = 1,
 }
 
+/// Which mic noise-reduction chain is live. Mirrors
+/// `astar_audio::DenoiseChain` (`docs/design/noise-suppression.md`).
+///
+/// Read-only. It exists because the 48 kHz guard is otherwise invisible: a
+/// capture device that cannot offer 48 kHz silently gets the classical
+/// chain, and that is indistinguishable from a bug without being told.
+/// Discriminants are stable and mirrored on the Rust and Swift sides; add
+/// variants at the end.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum IaxDenoiseChain {
+    /// No mic lane is open, so no chain is running.
+    NotCapturing = 0,
+    /// Capturing, but noise reduction is switched off.
+    Off = 1,
+    /// Neural (RNNoise) at device rate, hum filter after it, no gate.
+    Neural = 2,
+    /// The classical hum filter + noise gate. Either the device could not
+    /// give 48 kHz, or `ASTAR_MIC_DENOISE=legacy` asked for it.
+    FilterGate = 3,
+}
+
 /// How [`iax_station_send_dtmf`] emits digits on the active call. Mirrors
 /// `astar_station::DtmfMode` (iax-7fff).
 #[repr(C)]
@@ -222,6 +244,14 @@ pub struct IaxState {
     /// suspect for choppy TX; `0` when monitor-only. A plain `u64` health
     /// counter, credential-free.
     pub tx_capture_overruns: u64,
+    /// Which mic noise-reduction chain is live (`IaxDenoiseChain`). A plain
+    /// enum, credential-free.
+    pub denoise_chain: IaxDenoiseChain,
+    /// The rate the capture stream opened at, in Hz, or `0` when no mic lane
+    /// is open. Pair it with `denoise_chain`: at 48000 the neural stage can
+    /// run, below that it cannot and the classical chain is used instead. A
+    /// plain sample rate, credential-free.
+    pub denoise_device_rate: c_uint,
     /// Negotiated voice codec of the active call as its IAX2 format bit
     /// (iax-3e53): `0` = none (idle or still negotiating), `4` = G.711 µ-law,
     /// `8` = G.711 A-law, `64` = slin (8 kHz linear), `32768` = slin16
@@ -426,6 +456,13 @@ fn fill_state(s: &astar_station::ConsoleState) -> IaxState {
         mode: mode_to_ffi(s.mode),
         tx_reanchors: s.tx_reanchors,
         tx_capture_overruns: s.tx_capture_overruns,
+        denoise_chain: match s.denoise_status.chain {
+            astar_station::DenoiseChain::Off => IaxDenoiseChain::Off,
+            astar_station::DenoiseChain::Neural => IaxDenoiseChain::Neural,
+            astar_station::DenoiseChain::FilterGate => IaxDenoiseChain::FilterGate,
+            astar_station::DenoiseChain::NotCapturing => IaxDenoiseChain::NotCapturing,
+        },
+        denoise_device_rate: s.denoise_status.device_rate,
         negotiated_format: s.negotiated_format.map_or(0, VoiceFormat::as_u32),
         dtmf_played: s.dtmf_played,
         dtmf_total: s.dtmf_total,

@@ -134,6 +134,106 @@ impl DenoiseMode {
     }
 }
 
+/// Which mic noise-reduction chain is actually live, and at what rate.
+///
+/// Read-only, reported rather than inferred. The 48 kHz guard is otherwise
+/// invisible: a device that could not offer 48 kHz silently gets the
+/// classical chain, and an operator whose mic sounds different from everyone
+/// else's has no way to find out why. astar installs no `tracing`
+/// subscriber, so a log line is not a substitute — this is the only place
+/// the answer surfaces.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DenoiseStatus {
+    /// The rate the capture stream opened at, or `0` when nothing is
+    /// capturing (or when the sink is driven without a capture callback).
+    pub device_rate: u32,
+    /// The chain running on that stream.
+    pub chain: DenoiseChain,
+}
+
+impl DenoiseStatus {
+    /// Pack into one `u64` so the lane can publish it with a single relaxed
+    /// store and a reader can never see a torn rate/chain pair.
+    #[must_use]
+    pub fn to_bits(self) -> u64 {
+        (u64::from(self.chain as u32) << 32) | u64::from(self.device_rate)
+    }
+
+    /// Unpack [`Self::to_bits`].
+    #[must_use]
+    pub fn from_bits(bits: u64) -> Self {
+        Self {
+            device_rate: (bits & 0xFFFF_FFFF) as u32,
+            #[allow(clippy::cast_possible_truncation)]
+            chain: DenoiseChain::from_u32((bits >> 32) as u32),
+        }
+    }
+
+    /// A short line for a UI: `"neural (48 kHz)"`,
+    /// `"filter + gate (device 44.1 kHz)"`, `"off"`.
+    ///
+    /// The rate is named only when it explains something. On the neural line
+    /// it confirms the guard passed; on the fallback line it is the reason.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let khz = |r: u32| {
+            if r % 1000 == 0 {
+                format!("{} kHz", r / 1000)
+            } else {
+                format!("{:.1} kHz", f64::from(r) / 1000.0)
+            }
+        };
+        match self.chain {
+            DenoiseChain::NotCapturing => "not capturing".to_string(),
+            DenoiseChain::Off => "off".to_string(),
+            DenoiseChain::Neural => format!("neural ({})", khz(self.device_rate)),
+            DenoiseChain::FilterGate if self.device_rate == RNNOISE_RATE => {
+                "filter + gate".to_string()
+            }
+            DenoiseChain::FilterGate => {
+                format!("filter + gate (device {})", khz(self.device_rate))
+            }
+        }
+    }
+}
+
+/// The mic noise-reduction chain in effect.
+///
+/// The discriminants are explicit and load-bearing: they cross the C ABI as
+/// integers and are mirrored by `IaxDenoiseChain` and the Swift enum, so
+/// they are part of the published interface. Add variants at the end.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u32)]
+pub enum DenoiseChain {
+    /// No capture stream is open, so no chain is running.
+    #[default]
+    NotCapturing = 0,
+    /// Capturing, but noise reduction is switched off.
+    Off = 1,
+    /// RNNoise at device rate, with the hum filter after it and no gate.
+    Neural = 2,
+    /// The classical `HumFilter` + `NoiseGate`. Either the device could not
+    /// give us 48 kHz, or `ASTAR_MIC_DENOISE=legacy` asked for it.
+    FilterGate = 3,
+}
+
+impl DenoiseChain {
+    /// Recover a chain from its discriminant; anything unknown reads as
+    /// [`Self::NotCapturing`], which is the honest answer to "a value this
+    /// build does not understand".
+    #[must_use]
+    pub fn from_u32(v: u32) -> Self {
+        match v {
+            1 => Self::Off,
+            2 => Self::Neural,
+            3 => Self::FilterGate,
+            _ => Self::NotCapturing,
+        }
+    }
+}
+
 /// RNNoise in a push/replace shell, sized for the cpal capture callback.
 pub struct RnnoiseStage {
     state: Box<DenoiseState<'static>>,
@@ -525,5 +625,48 @@ mod tests {
         assert!(DenoiseMode::Legacy.allows_legacy());
         assert!(!DenoiseMode::Off.allows_neural(), "off means off");
         assert!(!DenoiseMode::Off.allows_legacy(), "off means off");
+    }
+
+    #[test]
+    fn denoise_status_summary_names_the_rate_only_where_it_explains_something() {
+        let st = |chain, device_rate| DenoiseStatus { device_rate, chain }.summary();
+        assert_eq!(st(DenoiseChain::Neural, 48_000), "neural (48 kHz)");
+        // The fallback line at a non-48 rate: the rate IS the reason.
+        assert_eq!(
+            st(DenoiseChain::FilterGate, 44_100),
+            "filter + gate (device 44.1 kHz)"
+        );
+        // The fallback at 48 kHz means the mode asked for it, not the guard —
+        // naming the rate there would suggest a fault that isn't there.
+        assert_eq!(st(DenoiseChain::FilterGate, 48_000), "filter + gate");
+        assert_eq!(st(DenoiseChain::Off, 48_000), "off");
+        assert_eq!(st(DenoiseChain::NotCapturing, 0), "not capturing");
+    }
+
+    #[test]
+    fn denoise_status_survives_the_round_trip_through_one_u64() {
+        for chain in [
+            DenoiseChain::NotCapturing,
+            DenoiseChain::Off,
+            DenoiseChain::Neural,
+            DenoiseChain::FilterGate,
+        ] {
+            for device_rate in [0_u32, 8_000, 44_100, 48_000, 768_000] {
+                let st = DenoiseStatus { device_rate, chain };
+                assert_eq!(DenoiseStatus::from_bits(st.to_bits()), st);
+            }
+        }
+    }
+
+    /// The discriminants cross the C ABI, so they are pinned here rather
+    /// than left to declaration order.
+    #[test]
+    fn denoise_chain_discriminants_are_stable() {
+        assert_eq!(DenoiseChain::NotCapturing as u32, 0);
+        assert_eq!(DenoiseChain::Off as u32, 1);
+        assert_eq!(DenoiseChain::Neural as u32, 2);
+        assert_eq!(DenoiseChain::FilterGate as u32, 3);
+        // A value from a newer build reads as "unknown", not as a wrong chain.
+        assert_eq!(DenoiseChain::from_u32(99), DenoiseChain::NotCapturing);
     }
 }

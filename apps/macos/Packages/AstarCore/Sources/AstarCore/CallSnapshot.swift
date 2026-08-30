@@ -24,6 +24,11 @@ public struct CallSnapshot: Equatable {
     /// negotiating (astar-eb6c). `.slin16` = wideband is live. Defaults `nil`
     /// so pre-existing fixtures (and `NullStation`) need no change.
     public var negotiatedFormat: VoiceFormat?
+    /// Which mic noise-reduction chain is actually running, as a short line
+    /// — `"Neural (48 kHz)"`, `"Filter + gate (device 44.1 kHz)"`, `"Off"`.
+    /// Empty when no mic lane is open. Defaults empty so pre-existing
+    /// fixtures (and `NullStation`) need no change.
+    public var denoiseSummary: String
     /// Digits already sent of the active `sendDTMF(sequence:)` command
     /// (astar-7d21); `0` when no sequence is playing. Defaults 0 so
     /// pre-existing fixtures need no change.
@@ -55,6 +60,7 @@ public struct CallSnapshot: Equatable {
         status: IaxStatus, ptt: Bool, remotePTT: Bool,
         txDB: Float, rxDB: Float, inputDB: Float = -60, rttMS: Int?,
         negotiatedFormat: VoiceFormat? = nil,
+        denoiseSummary: String = "",
         dtmfPlayed: Int = 0, dtmfTotal: Int = 0,
         m17Available: Bool = false, m17Active: Bool = false,
         dstarAvailable: Bool = false, dstarActive: Bool = false
@@ -67,6 +73,7 @@ public struct CallSnapshot: Equatable {
         self.inputDB = inputDB
         self.rttMS = rttMS
         self.negotiatedFormat = negotiatedFormat
+        self.denoiseSummary = denoiseSummary
         self.dtmfPlayed = dtmfPlayed
         self.dtmfTotal = dtmfTotal
         self.m17Available = m17Available

@@ -16,6 +16,7 @@ extension Station: StationDriving {
             status: s.status, ptt: s.ptt, remotePTT: s.remotePTT,
             txDB: s.txDB, rxDB: s.rxDB, inputDB: s.inputDB, rttMS: s.rttMS,
             negotiatedFormat: s.negotiatedFormat,
+            denoiseSummary: s.denoiseSummary,
             dtmfPlayed: s.dtmfPlayed, dtmfTotal: s.dtmfTotal,
             m17Available: s.m17Available, m17Active: s.m17Active,
             dstarAvailable: s.dstarAvailable, dstarActive: s.dstarActive

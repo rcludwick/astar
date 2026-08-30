@@ -105,7 +105,29 @@
                     micProfileRow
                         .padding(.bottom, 8)
                     switchRow("Noise reduction", isOn: noiseReductionBinding)
+                        .padding(.bottom, denoiseSummary.isEmpty ? 4 : 0)
+                    // Which chain is actually running. Shown only while a mic
+                    // lane is open, because until then there is nothing to
+                    // report and a permanent "not capturing" would be noise.
+                    //
+                    // It earns its place: the neural stage needs a 48 kHz
+                    // capture device, and one that cannot offer 48 kHz falls
+                    // back to the classical chain silently. Without this, a
+                    // mic that sounds unlike everyone else's is
+                    // indistinguishable from a bug — and astar installs no
+                    // log subscriber, so there is nowhere else to look.
+                    if !denoiseSummary.isEmpty {
+                        HStack(spacing: 4) {
+                            Text(denoiseSummary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer(minLength: 0)
+                        }
                         .padding(.bottom, 4)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("Noise reduction in use")
+                        .accessibilityValue(denoiseSummary)
+                    }
                     switchRow("Voice compression", isOn: compressionBinding)
                     if compressionOn {
                         HStack(spacing: 8) {
@@ -536,6 +558,11 @@
                     }
                 })
         }
+
+        /// The live chain, or empty while nothing is capturing. The M17
+        /// pane shows the same engine-wide fact: there is one mic lane, and
+        /// the per-network override chooses whether it denoises, not how.
+        private var denoiseSummary: String { session.denoiseSummary }
 
         private var noiseReductionBinding: Binding<Bool> {
             Binding(

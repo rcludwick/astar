@@ -2098,6 +2098,19 @@ impl Manager {
         self.router.mic_input_dbfs(mic)
     }
 
+    /// Which mic noise-reduction chain is live on `call`'s routed mic, and
+    /// at what device rate (`docs/design/noise-suppression.md`). `None` when
+    /// the call is unknown or unrouted.
+    ///
+    /// Read-only. It exists because the 48 kHz guard is otherwise invisible:
+    /// a device that could not offer 48 kHz silently gets the classical
+    /// chain, and that is indistinguishable from a bug without being told.
+    #[must_use]
+    pub fn denoise_status(&self, call: CallId) -> Option<astar_audio::DenoiseStatus> {
+        let mic = self.calls.get(&call)?.mic.as_ref()?;
+        self.router.mic_denoise_status(mic)
+    }
+
     /// Smoothed RX level (dBFS) of `call`'s output bus (`None` = unknown call).
     #[must_use]
     pub fn rx_dbfs(&self, call: CallId) -> Option<f32> {
