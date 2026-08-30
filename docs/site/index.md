@@ -22,7 +22,8 @@ native front-end over it rather than a shared web shell.
 
     astar is beta and moves quickly. AllStarLink is the primary target and takes
     the most testing. M17 needs nothing installed — Codec 2 is linked into the
-    app as of `0.1.4beta`. D-Star exists in the engine but has no client UI yet.
+    app as of `0.1.4beta`. D-Star works, but only with a hardware vocoder
+    dongle attached — see [Digital voice](macos/hardware.md#digital-voice).
     Other protocols are in the tree at various stages and are not claimed as
     working.
 
@@ -47,14 +48,15 @@ native front-end over it rather than a shared web shell.
 |---|---|---|---|---|
 | AllStarLink | IAX2 (RFC 5456), UDP 4569 | µ-law / GSM / signed-linear, negotiated | Node numbers | Node number, via the allstarlink.org portal |
 | M17 | UDP 17000 | Codec 2 3200 | Reflector + module | Callsign |
-| D-Star *(engine only)* | DExtra, UDP 30001 | AMBE+2, on the dongle | XLX/XRF reflector + module | Callsign |
+| D-Star *(needs a dongle)* | DExtra, UDP 30001 | AMBE+2, on the dongle | XLX/XRF reflector + module | Callsign |
 
 M17 transmits your callsign on the air; AllStarLink identifies by node number
 instead, and authenticates against the portal rather than a per-node secret.
 
-The D-Star row describes the engine implementation. The macOS client does not
-offer D-Star yet — [Building the engine](build/engine.md) covers reaching it
-from the crates.
+D-Star voice is AMBE+2, which has no software implementation in astar: it runs
+on a hardware vocoder dongle, and the network appears in the client's picker
+only while one is attached. [Digital voice](macos/hardware.md#digital-voice)
+covers why, and what to buy.
 
 ## Where to start
 

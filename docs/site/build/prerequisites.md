@@ -173,10 +173,14 @@ export IAX_CODEC2_PATH=/path/to/libcodec2.dylib
 
 ### A vocoder dongle — only for D-Star
 
-D-Star voice is AMBE+2. There is no software vocoder in astar and there will
-not be one: no freely licensable AMBE implementation exists. The codec runs on
-a **ThumbDV or DV3000** USB dongle, so D-Star is hardware-only in a way M17 is
-not — Codec 2 you can install, AMBE you have to own.
+D-Star voice is **AMBE+2**, a proprietary codec licensed by DVSI. astar ships
+no software AMBE implementation and will not gain one — there is nothing we can
+include and redistribute under the AGPL. The codec runs on a **ThumbDV or
+DV3000** USB dongle instead, which carries a licensed implementation on a chip.
+
+So D-Star is hardware-only in a way M17 is not: Codec 2 you can install, AMBE
+you have to own. See [Digital voice](../macos/hardware.md#digital-voice) for
+where to buy one.
 
 Nothing needs installing on macOS. The dongle is an FTDI part
 (`0x0403:0x6015`) and enumerates as a `/dev/cu.usbserial-*` port on its own.
@@ -185,7 +189,7 @@ Which builds include D-Star at all:
 
 | Building | D-Star | Why |
 |---|---|---|
-| **The macOS app** | linked in, no UI | `astar-sys` has `dstar` in its default features, so `just xcframework` picks it up — but the client does not offer D-Star in its network picker yet. |
+| **The macOS app** | linked in | `astar-sys` has `dstar` in its default features, so `just xcframework` picks it up. The client offers D-Star in its network picker whenever a dongle is attached. |
 | **Engine crates** | off | `astar-codec`'s `ambe-hw` feature is off by default. Enable it per crate, e.g. `cargo test -p astar-codec --features ambe-hw`. |
 | **`astar-server`** | off in its own manifest | It takes default features only — but see the warning below. |
 
