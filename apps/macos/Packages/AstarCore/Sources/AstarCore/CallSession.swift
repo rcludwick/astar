@@ -1986,6 +1986,17 @@ public func connectFailureMessage(for error: Error, node: String) -> String {
         // the account side, not the node.
         return "Couldn’t sign in to AllStarLink — check your AllStarLink "
             + "account in Settings."
+    case -7:  // IAX_ERR_AUDIO — a device problem. The code alone covers a
+        // device that vanished, a config the device will not accept, and a
+        // stream that failed to build, so the engine's detail is the whole
+        // value here: "device not found: KT USB Audio" tells the operator
+        // what to go and fix, "audio error" does not.
+        let what = engineDetail(stationError)
+        if what.isEmpty {
+            return "Couldn’t open the audio device — check it’s still "
+                + "connected and not in use by another app."
+        }
+        return "Audio device problem: \(what)."
     case -19:  // IAX_ERR_DSTAR — every D-Star connect failure, and the most
         // likely one by far is the dongle. The engine DOES classify these
         // precisely ("ThumbDV at /dev/cu.usbserial-… is busy — another
@@ -1996,11 +2007,43 @@ public func connectFailureMessage(for error: Error, node: String) -> String {
         // nothing. Naming the three real causes is more use than that, and
         // more honest than picking one we cannot distinguish from here.
         //
-        // The fix that would beat this is an engine-side last-error accessor
-        // on the C-ABI; until then, this.
+        // The engine-side last-error accessor now exists, so prefer the real
+        // reason when the engine gave one and keep naming the three likely
+        // causes only when it did not.
+        let what = engineDetail(stationError)
+        if !what.isEmpty {
+            return "Couldn’t connect to \(node): \(what)."
+        }
         return "Couldn’t connect to \(node) — check the ThumbDV is plugged in "
             + "and not in use by another app."
     default:
-        return stationError.description
+        // `message` rather than `description`: the operator should not be
+        // shown "astarstation error -8: iax error".
+        return stationError.message
     }
+}
+
+/// The engine's detail with its family labels and trailing full stop removed.
+///
+/// The engine stacks labels as an error crosses layers: a missing capture
+/// device arrives as `"audio error: audio device: no device matched \"x\" for
+/// Input"` — `StationError.Audio` adding the first and `ConsoleError.Device`
+/// the second. Both repeat what the surrounding sentence already says.
+///
+/// The rule is deliberately narrow rather than "strip any `label: ` prefix",
+/// because that over-trims: `"device not found: KT USB Audio"` would collapse
+/// to a bare device name and lose the only word that says what went wrong.
+/// So it strips only labels ending in "error", plus the one bare-label case
+/// the console layer produces.
+private func engineDetail(_ error: StationError) -> String {
+    var detail = error.detail
+    while let colon = detail.range(of: ": ") {
+        let label = detail[..<colon.lowerBound]
+        guard label.hasSuffix("error") || label == "audio device" else { break }
+        detail = String(detail[colon.upperBound...])
+    }
+    return
+        detail
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .trimmingCharacters(in: CharacterSet(charactersIn: "."))
 }
