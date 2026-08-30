@@ -59,42 +59,35 @@ final class ConnectFailureMessageTests: XCTestCase {
         XCTAssertFalse(message.contains("-4"), "an error code is not a diagnosis")
     }
 
-    /// IAX_ERR_AUDIO (-7) with the engine's detail: the code alone covers a
-    /// device that vanished, a config the device will not accept, and a
-    /// stream that failed to build. The detail is what tells the operator
-    /// which, and what to go and fix.
-    func testAudioFailureShowsTheEngineDetail() {
+    /// IAX_ERR_AUDIO (-7): one plain sentence, whatever the engine's detail
+    /// said. Every cause the engine distinguishes — missing, busy, unplugged,
+    /// a config the device refused — has the same two remedies, so naming
+    /// which one it was gives the operator nothing more to act on.
+    func testAudioFailureIsOnePlainSentence() {
+        let expected = "Couldn’t open audio device, is it busy or unplugged?"
+        // With a detail...
+        XCTAssertEqual(
+            connectFailureMessage(
+                for: StationError(
+                    code: -7, text: "audio error",
+                    detail: "audio error: audio device: no device matched \"in:gone\" for Input"),
+                node: "61057"),
+            expected)
+        // ...and without one.
+        XCTAssertEqual(
+            connectFailureMessage(
+                for: StationError(code: -7, text: "audio error"), node: "61057"),
+            expected)
+    }
+
+    /// The detail is still carried on the error for anyone debugging — it is
+    /// the message that drops it, not the channel.
+    func testTheEngineDetailSurvivesOnTheErrorEvenWhenUnused() {
         let error = StationError(
             code: -7, text: "audio error",
             detail: "audio error: device not found: KT USB Audio")
-        let message = connectFailureMessage(for: error, node: "61057")
-        XCTAssertEqual(message, "Audio device problem: device not found: KT USB Audio.")
-        // The family prefix is stripped: the sentence already says "Audio".
-        XCTAssertFalse(message.contains("audio error:"), message)
-        XCTAssertFalse(message.contains("-7"), "an error code is not a diagnosis")
-        // But "device not found" survives — stripping every `label: ` prefix
-        // would leave a bare device name and lose what went wrong.
-        XCTAssertTrue(message.contains("device not found"), message)
-    }
-
-    /// The real shape a missing device produces, measured through the C ABI:
-    /// two stacked labels, `StationError.Audio` over `ConsoleError.Device`.
-    func testStackedEngineLabelsAreBothStripped() {
-        let error = StationError(
-            code: -7, text: "audio error",
-            detail: "audio error: audio device: no device matched \"in:gone\" for Input")
-        XCTAssertEqual(
-            connectFailureMessage(for: error, node: "61057"),
-            "Audio device problem: no device matched \"in:gone\" for Input.")
-    }
-
-    /// IAX_ERR_AUDIO with no detail — an older engine, or a path that did not
-    /// record one. Say something actionable rather than "audio error".
-    func testAudioFailureWithoutDetailStillSaysSomethingUseful() {
-        let message = connectFailureMessage(
-            for: StationError(code: -7, text: "audio error"), node: "61057")
-        XCTAssertTrue(message.contains("audio device"), message)
-        XCTAssertFalse(message.contains("-7"), message)
+        XCTAssertTrue(error.detail.contains("KT USB Audio"))
+        XCTAssertEqual(error.message, "audio error: device not found: KT USB Audio")
     }
 
     /// A D-Star failure now prefers the engine's real reason over the
