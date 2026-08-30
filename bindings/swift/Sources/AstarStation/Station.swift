@@ -397,21 +397,42 @@ public enum Event: Sendable, Equatable {
 public struct StationError: Error, CustomStringConvertible, Equatable {
     /// The `IAX_ERR_*` code (always negative).
     public let code: Int32
-    /// The generic, secret-free text from `iax_error_text`.
+    /// The generic, secret-free text from `iax_error_text` — the error
+    /// FAMILY, e.g. "audio error".
     public let text: String
+    /// What actually went wrong, from the station's `iax_station_last_error`,
+    /// when the failing call came from a station. Empty otherwise.
+    ///
+    /// The codes are coarse on purpose: `IAX_ERR_AUDIO` alone covers a device
+    /// that vanished, a config the device will not accept, and a stream that
+    /// failed to build. `text` says which family; this says which one.
+    /// Secret-free — see the C-ABI's documentation on that accessor.
+    public let detail: String
 
-    public var description: String { "astarstation error \(code): \(text)" }
+    /// `text`, plus `detail` when there is one. What a UI should show.
+    public var message: String { detail.isEmpty ? text : detail }
+
+    /// `detail` defaults to empty so a caller constructing an error directly
+    /// — and every existing call site — need not supply one.
+    public init(code: Int32, text: String, detail: String = "") {
+        self.code = code
+        self.text = text
+        self.detail = detail
+    }
+
+    public var description: String { "astarstation error \(code): \(message)" }
 
     /// Build a `StationError` from a negative C code, resolving its text via the
     /// C-ABI's `iax_error_text` (owned by the library; never freed here).
-    static func from(_ code: Int32) -> StationError {
+    /// `detail` comes from the station when one is available.
+    static func from(_ code: Int32, detail: String = "") -> StationError {
         let text: String
         if let raw = iax_error_text(code) {
             text = String(cString: raw)
         } else {
             text = "unknown error"
         }
-        return StationError(code: code, text: text)
+        return StationError(code: code, text: text, detail: detail)
     }
 }
 
@@ -906,14 +927,14 @@ public final class Station {
     /// per device and feed it back via `setMicProfile(_:)`.
     public func characterize(harmonicComb: Bool = false) throws -> String {
         let needed = iax_station_characterize(handle, harmonicComb, nil, 0)
-        if needed < 0 { throw StationError.from(needed) }
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
         if needed == 0 { return "" }
         // +1 for the NUL the C-ABI writes.
         var buf = [CChar](repeating: 0, count: Int(needed) + 1)
         let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
             iax_station_characterize(handle, harmonicComb, ptr.baseAddress, UInt(ptr.count))
         }
-        if rc < 0 { throw StationError.from(rc) }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
         return String(cString: buf)
     }
 
@@ -1107,14 +1128,14 @@ public final class Station {
     /// is a node identifier — secret-free.
     public func incomingFrom() throws -> String {
         let needed = iax_station_incoming_from(handle, nil, 0)
-        if needed < 0 { throw StationError.from(needed) }
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
         if needed == 0 { return "" }
         // +1 for the NUL the C-ABI writes.
         var buf = [CChar](repeating: 0, count: Int(needed) + 1)
         let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
             iax_station_incoming_from(handle, ptr.baseAddress, UInt(ptr.count))
         }
-        if rc < 0 { throw StationError.from(rc) }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
         return String(cString: buf)
     }
 
@@ -1192,17 +1213,17 @@ public final class Station {
     /// Live link roster, decoded from the C-ABI's JSON snapshot.
     public func linkRoster() throws -> LinkRoster {
         let needed = iax_station_link_roster_json(handle, nil, 0)
-        if needed < 0 { throw StationError.from(needed) }
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
         var buf = [CChar](repeating: 0, count: Int(needed) + 1)
         let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
             iax_station_link_roster_json(handle, ptr.baseAddress, UInt(ptr.count))
         }
-        if rc < 0 { throw StationError.from(rc) }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
         let json = String(cString: buf)
         guard let data = json.data(using: .utf8),
             let roster = try? JSONDecoder().decode(LinkRoster.self, from: data)
         else {
-            throw StationError(code: -1, text: "undecodable link roster json")
+            throw StationError(code: -1, text: "undecodable link roster json", detail: "")
         }
         return roster
     }
@@ -1211,7 +1232,7 @@ public final class Station {
     public func nextLinkEvent() throws -> LinkEvent? {
         var out = IaxLinkEvent(kind: IaxLinkEventKind_None, call: 0, keyed: false)
         let rc = iax_station_link_next_event(handle, &out)
-        if rc < 0 { throw StationError.from(rc) }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
         if rc == 0 { return nil }
         let node = try linkEventNode()
         switch out.kind {
@@ -1225,13 +1246,13 @@ public final class Station {
     /// Node label of the most recently drained link event.
     private func linkEventNode() throws -> String {
         let needed = iax_station_link_event_node(handle, nil, 0)
-        if needed < 0 { throw StationError.from(needed) }
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
         if needed == 0 { return "" }
         var buf = [CChar](repeating: 0, count: Int(needed) + 1)
         let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
             iax_station_link_event_node(handle, ptr.baseAddress, UInt(ptr.count))
         }
-        if rc < 0 { throw StationError.from(rc) }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
         return String(cString: buf)
     }
 
@@ -1411,14 +1432,14 @@ public final class Station {
     /// this at UI rate for the talker and link.
     public func dstarState() throws -> DStarState? {
         let needed = iax_station_dstar_state(handle, nil, 0)
-        if needed < 0 { throw StationError.from(needed) }
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
         if needed == 0 { return nil }
         // +1 for the NUL the C-ABI writes.
         var buf = [CChar](repeating: 0, count: Int(needed) + 1)
         let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
             iax_station_dstar_state(handle, ptr.baseAddress, UInt(ptr.count))
         }
-        if rc < 0 { throw StationError.from(rc) }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
         return DStarState(json: String(cString: buf))
     }
 
@@ -1506,9 +1527,23 @@ public final class Station {
     @discardableResult
     private func check(_ code: Int32) throws -> Int32 {
         if code < 0 {
-            throw StationError.from(code)
+            throw StationError.from(code, detail: lastErrorDetail())
         }
         return code
+    }
+
+    /// The station's detail text for the most recent failure. Best-effort:
+    /// an empty string when the station has nothing to say, and never a
+    /// reason to fail the call that is already failing.
+    private func lastErrorDetail() -> String {
+        let needed = iax_station_last_error(handle, nil, 0)
+        guard needed > 0 else { return "" }
+        var buf = [CChar](repeating: 0, count: Int(needed) + 1)
+        let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+            iax_station_last_error(handle, ptr.baseAddress, UInt(ptr.count))
+        }
+        guard rc >= 0 else { return "" }
+        return String(cString: buf)
     }
 
     /// Query the required size (`len == 0`), then fill the buffer. Splits the
@@ -1517,14 +1552,14 @@ public final class Station {
         _ fn: (OpaquePointer?, UnsafeMutablePointer<CChar>?, UInt) -> Int32
     ) throws -> [String] {
         let needed = fn(handle, nil, 0)
-        if needed < 0 { throw StationError.from(needed) }
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
         if needed == 0 { return [] }
         // +1 for the NUL the C-ABI writes.
         var buf = [CChar](repeating: 0, count: Int(needed) + 1)
         let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
             fn(handle, ptr.baseAddress, UInt(ptr.count))
         }
-        if rc < 0 { throw StationError.from(rc) }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
         let joined = String(cString: buf)
         return joined.split(separator: "\n").map(String.init)
     }

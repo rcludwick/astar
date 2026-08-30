@@ -1197,6 +1197,27 @@ int iax_station_link_next_event(IaxStation *st, IaxLinkEvent *out);
 int iax_station_link_event_node(IaxStation *st, char *buf, uintptr_t len);
 
 /**
+ * Detail text of the most recent failed call on this station (NUL-terminated
+ * into the caller buffer; same query-then-fill contract as
+ * [`iax_station_list_inputs`] — pass `len == 0` to learn the required size).
+ *
+ * `IAX_ERR_*` codes are coarse on purpose: [`IAX_ERR_AUDIO`] alone covers a
+ * device that vanished, a config the device will not accept, and a cpal
+ * stream that failed to build. The code says which family failed; this says
+ * what happened — "device not found: KT USB Audio", "stream build failed:
+ * The requested device is no longer available", and so on.
+ *
+ * Empty when no call has failed yet. It is not cleared on success, so read
+ * it immediately after a negative return rather than treating it as current
+ * state.
+ *
+ * Secret-free: it is `StationError`'s own `Display`, which renders portal
+ * and resolve failures as generic text with no underlying source precisely
+ * so a credential embedded in one can never reach a caller.
+ */
+int iax_station_last_error(IaxStation *st, char *buf, uintptr_t len);
+
+/**
  * Route the whole engine — outgoing dials, the inbound listener, and outbound
  * registration — through one shared userspace `WireGuard` tunnel (iax-912e).
  * Call BEFORE connect/enable-inbound: the transport is immutable while a

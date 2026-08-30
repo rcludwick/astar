@@ -230,7 +230,13 @@
                         if let errorText {
                             Text(errorText)
                                 .font(.caption)
-                                .foregroundStyle(.red)
+                                // Orange, not red: this is the app's warning
+                                // colour everywhere else — the credentials
+                                // prompt, the config-transfer notice, the
+                                // serial warnings, the mic analyzer's own
+                                // error line. A dial that failed is something
+                                // to fix, not a fault in the app.
+                                .foregroundStyle(.orange)
                                 .padding(.horizontal, 6)
                         }
 

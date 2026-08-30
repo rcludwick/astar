@@ -48,13 +48,64 @@ final class ConnectFailureMessageTests: XCTestCase {
             "portal failures should point at Settings: \(message)")
     }
 
-    /// Any other `StationError` falls back to its `description`, which carries
-    /// the code and the library's generic text — never `localizedDescription`.
-    func testOtherStationErrorFallsBackToDescription() {
+    /// Any other `StationError` falls back to its `message` — the engine's
+    /// detail when there is one, the generic family text otherwise. Never
+    /// `description`, which prefixes an error code: a number is not a
+    /// diagnosis and an operator should not be shown one.
+    func testOtherStationErrorFallsBackToTheMessageWithoutTheCode() {
         let error = StationError(code: -4, text: "a call is already in progress")
+        let message = connectFailureMessage(for: error, node: "61057")
+        XCTAssertEqual(message, "a call is already in progress")
+        XCTAssertFalse(message.contains("-4"), "an error code is not a diagnosis")
+    }
+
+    /// IAX_ERR_AUDIO (-7) with the engine's detail: the code alone covers a
+    /// device that vanished, a config the device will not accept, and a
+    /// stream that failed to build. The detail is what tells the operator
+    /// which, and what to go and fix.
+    func testAudioFailureShowsTheEngineDetail() {
+        let error = StationError(
+            code: -7, text: "audio error",
+            detail: "audio error: device not found: KT USB Audio")
+        let message = connectFailureMessage(for: error, node: "61057")
+        XCTAssertEqual(message, "Audio device problem: device not found: KT USB Audio.")
+        // The family prefix is stripped: the sentence already says "Audio".
+        XCTAssertFalse(message.contains("audio error:"), message)
+        XCTAssertFalse(message.contains("-7"), "an error code is not a diagnosis")
+        // But "device not found" survives — stripping every `label: ` prefix
+        // would leave a bare device name and lose what went wrong.
+        XCTAssertTrue(message.contains("device not found"), message)
+    }
+
+    /// The real shape a missing device produces, measured through the C ABI:
+    /// two stacked labels, `StationError.Audio` over `ConsoleError.Device`.
+    func testStackedEngineLabelsAreBothStripped() {
+        let error = StationError(
+            code: -7, text: "audio error",
+            detail: "audio error: audio device: no device matched \"in:gone\" for Input")
         XCTAssertEqual(
             connectFailureMessage(for: error, node: "61057"),
-            "astarstation error -4: a call is already in progress")
+            "Audio device problem: no device matched \"in:gone\" for Input.")
+    }
+
+    /// IAX_ERR_AUDIO with no detail — an older engine, or a path that did not
+    /// record one. Say something actionable rather than "audio error".
+    func testAudioFailureWithoutDetailStillSaysSomethingUseful() {
+        let message = connectFailureMessage(
+            for: StationError(code: -7, text: "audio error"), node: "61057")
+        XCTAssertTrue(message.contains("audio device"), message)
+        XCTAssertFalse(message.contains("-7"), message)
+    }
+
+    /// A D-Star failure now prefers the engine's real reason over the
+    /// three-causes guess, because the last-error accessor exists.
+    func testADStarFailureWithDetailNamesTheRealReason() {
+        let error = StationError(
+            code: -19, text: "dstar error",
+            detail: "dstar error: ThumbDV at /dev/cu.usbserial-A1 is busy")
+        let message = connectFailureMessage(for: error, node: "XLX836 A")
+        XCTAssertEqual(
+            message, "Couldn’t connect to XLX836 A: ThumbDV at /dev/cu.usbserial-A1 is busy.")
     }
 
     /// Non-StationError errors keep the existing `localizedDescription`
@@ -83,6 +134,7 @@ final class ConnectFailureMessageTests: XCTestCase {
     /// error". Left alone the operator would read "astarstation error -19:
     /// dstar error", which says nothing about the one thing that is almost
     /// always wrong: the dongle.
+    /// With NO detail — the guess is still better than the code.
     func testADStarFailureNamesTheDongleRatherThanTheErrorCode() {
         let message = connectFailureMessage(
             for: StationError(code: -19, text: "dstar error"), node: "XLX836 A")
