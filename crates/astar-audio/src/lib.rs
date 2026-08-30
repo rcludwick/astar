@@ -54,6 +54,7 @@ pub mod monitor;
 #[cfg(any(test, feature = "test-backend"))]
 pub mod null_backend;
 pub mod resample;
+pub mod rnnoise;
 pub mod router;
 mod signal_report;
 pub mod spectrum;
@@ -74,6 +75,7 @@ pub use monitor::MicMonitor;
 #[cfg(any(test, feature = "test-backend"))]
 pub use null_backend::NullBackend;
 pub use resample::{AntiAliasResampler, Resampler1, resample_offline};
+pub use rnnoise::{RNNOISE_FRAME, RNNOISE_RATE, RnnoiseStage};
 pub use router::{AudioRouter, CallAudio, MicId, OutputId};
 pub use signal_report::{Grade, SignalReport, analyze_signal, render_report, signal_report_text};
 pub use spectrum::{SPECTRUM_BINS, SpectrumAnalyzer};

@@ -1,0 +1,427 @@
+// astar — Copyright (c) 2026 Rob Ludwick.
+// SPDX-License-Identifier: AGPL-3.0-only
+// Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
+//! Neural mic noise suppression at device rate
+//! (`docs/design/noise-suppression.md`).
+//!
+//! [`RnnoiseStage`] wraps `nnnoiseless` — a pure-Rust port of Xiph's RNNoise
+//! — in the shape the capture callback needs. The network itself is not the
+//! interesting part here; the three things around it are.
+//!
+//! **Framing.** RNNoise consumes exactly 480 samples, which is 10 ms at
+//! 48 kHz and nothing at any other rate. cpal delivers whatever the host
+//! feels like — 64, 128, 512, 1024 — and can change it mid-stream. So this
+//! is an accumulator, not a filter: it holds a remainder of at most 479
+//! samples between callbacks, which is why the hook it serves takes
+//! `&mut Vec<f32>` rather than `&[f32]`.
+//!
+//! **Scaling.** astar's pipeline is `[-1, 1]` everywhere. `process_frame`
+//! wants f32 in *i16* range. Getting that wrong in one direction is a silent
+//! 90 dB error, so both conversions live here and are pinned by a test.
+//!
+//! **Warm-up, and what it does not do.** Two separate first-call problems
+//! get conflated easily, and only one of them a silence frame solves.
+//!
+//! `easyfft`'s FFT planner and scratch caches are thread-local and built on
+//! first use, so the first `process_frame` on a given thread allocates. One
+//! frame of silence pays that on the first callback after the stream opens
+//! — once per stream, before the operator has keyed anything.
+//!
+//! It does **not** absorb the fade-in artefact the crate tells you to throw
+//! away. Measured: with the silence frame and without it, the first real
+//! output frame is identical and sits 25 dB down. The artefact is the
+//! overlap-add of the first frame against an all-zero history, and a frame
+//! of silence *is* an all-zero history — so warming with silence reproduces
+//! the starting condition rather than consuming it. The first real output
+//! frame is therefore dropped outright, which is what upstream's own
+//! example does.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use nnnoiseless::DenoiseState;
+
+/// Samples per RNNoise frame — 10 ms at [`RNNOISE_RATE`].
+pub const RNNOISE_FRAME: usize = DenoiseState::FRAME_SIZE;
+
+/// The only sample rate RNNoise is defined at. Not resamplable: the frame
+/// size is a duration only at this rate, the band table is in Hz, and the
+/// pitch search periods are in samples.
+pub const RNNOISE_RATE: u32 = 48_000;
+
+/// `[-1, 1]` ↔ i16-range conversion factor.
+const I16_SCALE: f32 = 32767.0;
+
+/// Steady-state headroom for the input and output buffers, in samples:
+/// 100 ms at 48 kHz. A host buffer larger than this amortises one realloc
+/// rather than meeting a hard cap that would have to drop audio.
+const RESERVE: usize = (RNNOISE_RATE as usize) / 10;
+
+/// RNNoise in a push/replace shell, sized for the cpal capture callback.
+pub struct RnnoiseStage {
+    state: Box<DenoiseState<'static>>,
+    /// Device-rate samples not yet forming a whole frame. Never ≥ 480 once
+    /// [`RnnoiseStage::process`] returns.
+    pending: Vec<f32>,
+    /// Denoised samples for this callback. Swapped out rather than copied.
+    out: Vec<f32>,
+    frame_in: [f32; RNNOISE_FRAME],
+    frame_out: [f32; RNNOISE_FRAME],
+    /// Most recent voice-activity probability, `f32` bits. Published as
+    /// telemetry, deliberately NOT used to drive anything — see the design's
+    /// "surface the VAD, do not substitute it".
+    vad: Arc<AtomicU32>,
+    /// Cleared by the first [`RnnoiseStage::process`], on the audio thread.
+    needs_warmup: bool,
+    /// The first real output frame is the fade-in artefact; drop it. Costs
+    /// 10 ms of audio, once, at stream open.
+    drop_next_output: bool,
+}
+
+impl RnnoiseStage {
+    /// Allocate the network and both buffers. Call from the control thread:
+    /// `DenoiseState::new()` allocates, and so does the reserve.
+    #[must_use]
+    pub fn new(vad: Arc<AtomicU32>) -> Self {
+        let mut pending = Vec::new();
+        let mut out = Vec::new();
+        // One host buffer plus a frame of slack, so neither grows in steady
+        // state however the host sizes its callbacks.
+        pending.reserve(RESERVE + RNNOISE_FRAME);
+        out.reserve(RESERVE + RNNOISE_FRAME);
+        Self {
+            state: DenoiseState::new(),
+            pending,
+            out,
+            frame_in: [0.0; RNNOISE_FRAME],
+            frame_out: [0.0; RNNOISE_FRAME],
+            vad,
+            needs_warmup: true,
+            drop_next_output: true,
+        }
+    }
+
+    /// The latest voice-activity probability in `0.0..=1.0`.
+    #[must_use]
+    pub fn voice_probability(&self) -> f32 {
+        f32::from_bits(self.vad.load(Ordering::Relaxed))
+    }
+
+    /// Denoise `samples` in place. Not length-preserving: output lags input
+    /// by whatever does not fill a frame, so a callback can come back short
+    /// (or, after a short one, long).
+    ///
+    /// `samples` must be mono at [`RNNOISE_RATE`]; the caller enforces that
+    /// via `CaptureCapability`.
+    pub fn process(&mut self, samples: &mut Vec<f32>) {
+        // First call on this thread: build the FFT planner and the
+        // thread-local scratch caches, and burn the documented fade-in
+        // frame, before any of the operator's audio is at stake.
+        if self.needs_warmup {
+            self.needs_warmup = false;
+            self.frame_in = [0.0; RNNOISE_FRAME];
+            self.state
+                .process_frame(&mut self.frame_out, &self.frame_in);
+        }
+
+        self.pending.extend_from_slice(samples);
+        self.out.clear();
+
+        let frames = self.pending.len() / RNNOISE_FRAME;
+        for f in 0..frames {
+            let src = &self.pending[f * RNNOISE_FRAME..(f + 1) * RNNOISE_FRAME];
+            for (dst, &s) in self.frame_in.iter_mut().zip(src) {
+                *dst = s * I16_SCALE;
+            }
+            let p = self
+                .state
+                .process_frame(&mut self.frame_out, &self.frame_in);
+            self.vad.store(p.to_bits(), Ordering::Relaxed);
+            if self.drop_next_output {
+                // The fade-in frame. Everything else about it — the VAD
+                // store above, the network's advanced state — is kept; only
+                // the samples are withheld.
+                self.drop_next_output = false;
+                continue;
+            }
+            self.out
+                .extend(self.frame_out.iter().map(|&s| s / I16_SCALE));
+        }
+        self.pending.drain(..frames * RNNOISE_FRAME);
+
+        // Copy back rather than swap. A swap avoids this memcpy, but it
+        // hands `out` to the caller and adopts the caller's buffer — which
+        // is sized for the host's callback, not for this stage's output.
+        // Those differ: with 512-sample callbacks the remainder grows 32
+        // samples each time, so roughly every fifteenth callback completes
+        // two frames and emits 960 samples into a buffer sized 512. That
+        // reallocates, on the audio thread, forever. Keeping `out` means the
+        // reserve in `new` stays where it was put; the copy is at most
+        // ~4 KB against a 36 µs-per-frame network.
+        samples.clear();
+        samples.extend_from_slice(&self.out);
+    }
+
+    /// Samples held back, waiting to complete a frame. Always < 480.
+    #[must_use]
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+}
+
+impl std::fmt::Debug for RnnoiseStage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RnnoiseStage")
+            .field("pending", &self.pending.len())
+            .field("needs_warmup", &self.needs_warmup)
+            .field("vad", &self.voice_probability())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f32::consts::TAU;
+
+    fn stage() -> RnnoiseStage {
+        RnnoiseStage::new(Arc::new(AtomicU32::new(0)))
+    }
+
+    /// 1 kHz at 48 kHz, `[-1, 1]`.
+    fn tone(n: usize, amp: f32) -> Vec<f32> {
+        (0..n)
+            .map(|i| (TAU * 1_000.0 * i as f32 / RNNOISE_RATE as f32).sin() * amp)
+            .collect()
+    }
+
+    fn peak(v: &[f32]) -> f32 {
+        v.iter().fold(0.0_f32, |a, b| a.max(b.abs()))
+    }
+
+    /// The frame is 10 ms at 48 kHz, and both of those are load-bearing
+    /// constants rather than arbitrary ones.
+    #[test]
+    fn frame_is_ten_milliseconds_at_forty_eight_k() {
+        assert_eq!(RNNOISE_FRAME, 480);
+        assert_eq!(RNNOISE_FRAME * 100, RNNOISE_RATE as usize);
+    }
+
+    /// The scaling is right in BOTH directions.
+    ///
+    /// This is the test the design asks for by name: the pipeline is
+    /// `[-1, 1]` and `process_frame` wants i16-range floats, so a stage that
+    /// scaled in but not out — or neither — would be a silent ~90 dB error.
+    /// A loud tone must come back at roughly the amplitude it went in at,
+    /// which is true only when both conversions are present and inverse.
+    #[test]
+    fn output_stays_in_unit_range_so_both_conversions_are_present() {
+        let mut st = stage();
+        // Ten frames of a loud, clean tone: RNNoise keeps voiced-looking
+        // periodic content, so the level should survive.
+        let mut buf = tone(RNNOISE_FRAME * 10, 0.5);
+        st.process(&mut buf);
+
+        assert!(!buf.is_empty(), "produced nothing");
+        assert!(buf.iter().all(|v| v.is_finite()), "non-finite sample");
+        let p = peak(&buf);
+        assert!(
+            p > 0.05 && p <= 1.0,
+            "peak {p} is outside unit range — one of the two i16 conversions is missing \
+             (no scaling out gives ~32767, no scaling in gives ~1e-5)"
+        );
+    }
+
+    /// Pushing in odd, host-shaped chunks yields exactly the same samples as
+    /// one big push. This is the accumulator's whole contract: cpal changes
+    /// its buffer size whenever it likes.
+    #[test]
+    fn chunked_pushes_equal_one_big_push() {
+        let input = tone(RNNOISE_FRAME * 8, 0.4);
+
+        let mut a = stage();
+        let mut one = input.clone();
+        a.process(&mut one);
+
+        let mut b = stage();
+        let mut many = Vec::new();
+        // 64, 128, 512, 1024 are all real cpal buffer sizes; 97 is not, and
+        // is there because a prime stride crosses frame boundaries in every
+        // possible phase.
+        let mut i = 0;
+        for &n in [64_usize, 128, 97, 512, 1024, 97].iter().cycle() {
+            if i >= input.len() {
+                break;
+            }
+            let end = (i + n).min(input.len());
+            let mut chunk = input[i..end].to_vec();
+            b.process(&mut chunk);
+            many.extend_from_slice(&chunk);
+            i = end;
+        }
+
+        assert_eq!(
+            one.len(),
+            many.len(),
+            "same total output regardless of push sizing"
+        );
+        for (k, (x, y)) in one.iter().zip(&many).enumerate() {
+            assert!(
+                (x - y).abs() < 1e-6,
+                "sample {k} differs between chunked and single push: {x} vs {y}"
+            );
+        }
+    }
+
+    /// The remainder is bounded by one frame, always — that bound is what
+    /// makes the added TX latency "under 10 ms" rather than unbounded.
+    #[test]
+    fn remainder_never_reaches_a_whole_frame() {
+        let mut st = stage();
+        for n in [1_usize, 479, 480, 481, 959, 960, 1, 1023] {
+            let mut buf = tone(n, 0.3);
+            st.process(&mut buf);
+            assert!(
+                st.pending_len() < RNNOISE_FRAME,
+                "held {} samples after a {n}-sample push; must stay under one frame",
+                st.pending_len()
+            );
+        }
+    }
+
+    /// Nothing allocates once the stage is warm.
+    ///
+    /// Modelled on the real caller: `process_input` owns one `mono` buffer
+    /// and reuses it every callback. That matters because `process` swaps
+    /// buffers with the caller, so the two ping-pong — a test that handed
+    /// over a freshly allocated `Vec` each time would be measuring the
+    /// test's own allocation, not the stage's.
+    #[test]
+    fn steady_state_does_not_allocate() {
+        let mut st = stage();
+        let mut mono: Vec<f32> = Vec::new();
+        let src = tone(512, 0.3);
+
+        // Long enough to include a two-frame callback: with 512-sample
+        // pushes the remainder gains 32 each time, so every ~15th callback
+        // emits 960 samples instead of 480. A shorter settle would never
+        // see the case that actually reallocates.
+        for _ in 0..64 {
+            mono.clear();
+            mono.extend_from_slice(&src);
+            st.process(&mut mono);
+        }
+        let (pending_cap, out_cap, mono_cap) =
+            (st.pending.capacity(), st.out.capacity(), mono.capacity());
+
+        for _ in 0..500 {
+            mono.clear();
+            mono.extend_from_slice(&src);
+            st.process(&mut mono);
+        }
+        assert_eq!(
+            st.pending.capacity(),
+            pending_cap,
+            "pending grew on the audio thread"
+        );
+        assert_eq!(st.out.capacity(), out_cap, "out grew on the audio thread");
+        assert_eq!(
+            mono.capacity(),
+            mono_cap,
+            "the caller's buffer grew on the audio thread"
+        );
+    }
+
+    /// The fade-in artefact never reaches the caller.
+    ///
+    /// Measured behaviour, not assumed: a cold `DenoiseState` fed a steady
+    /// 0.5-amplitude tone emits 0.028 for its first output frame and 0.51
+    /// from the second onward — 25 dB down, because that frame is the
+    /// overlap-add against an all-zero history. Warming with a frame of
+    /// silence does NOT change this (silence *is* the all-zero history), so
+    /// the first real output frame is dropped instead.
+    ///
+    /// The assertion is on the first frame the CALLER sees. It is allowed to
+    /// be a little below the second — the network still settles — but not
+    /// the 25 dB the artefact would show.
+    #[test]
+    fn the_fade_in_artefact_never_reaches_the_caller() {
+        let mut st = stage();
+        // Two frames in; one comes back, because the first was dropped.
+        let mut first = tone(RNNOISE_FRAME * 2, 0.5);
+        st.process(&mut first);
+        assert_eq!(
+            first.len(),
+            RNNOISE_FRAME,
+            "exactly one frame should be withheld at stream open"
+        );
+
+        let mut second = tone(RNNOISE_FRAME, 0.5);
+        st.process(&mut second);
+
+        let (p1, p2) = (peak(&first), peak(&second));
+        let ratio_db = 20.0 * (p1 / p2).log10();
+        assert!(
+            ratio_db > -6.0,
+            "first delivered frame is {ratio_db:.1} dB below the next — the fade-in \
+             frame looks like it reached the caller (peaks {p1:.4} vs {p2:.4})"
+        );
+    }
+
+    /// The drop costs exactly one frame, once — not one per callback.
+    #[test]
+    fn only_the_very_first_frame_is_dropped() {
+        let mut st = stage();
+        let mut a = tone(RNNOISE_FRAME * 3, 0.5);
+        st.process(&mut a);
+        assert_eq!(a.len(), RNNOISE_FRAME * 2, "three frames in, two out, once");
+
+        let mut b = tone(RNNOISE_FRAME * 3, 0.5);
+        st.process(&mut b);
+        assert_eq!(
+            b.len(),
+            RNNOISE_FRAME * 3,
+            "and nothing is withheld thereafter"
+        );
+    }
+
+    /// The VAD probability is published, in range, and is telemetry only.
+    #[test]
+    fn voice_probability_is_published_in_range() {
+        let mut st = stage();
+        let mut buf = tone(RNNOISE_FRAME * 4, 0.5);
+        st.process(&mut buf);
+        let p = st.voice_probability();
+        assert!(
+            (0.0..=1.0).contains(&p),
+            "voice probability {p} out of range"
+        );
+    }
+
+    /// A push too short to complete a frame produces nothing and loses
+    /// nothing — the samples come back on a later call.
+    #[test]
+    fn a_short_push_returns_empty_and_keeps_the_samples() {
+        let mut st = stage();
+        let mut buf = tone(100, 0.5);
+        st.process(&mut buf);
+        assert!(buf.is_empty(), "a sub-frame push cannot produce output yet");
+        assert_eq!(st.pending_len(), 100, "and must not drop the samples");
+
+        // Completing the frame processes it — and it is the fade-in frame,
+        // so it is withheld. The frame after that is delivered whole.
+        let mut rest = tone(RNNOISE_FRAME - 100, 0.5);
+        st.process(&mut rest);
+        assert!(
+            rest.is_empty(),
+            "the first completed frame is the dropped one"
+        );
+        let mut next = tone(RNNOISE_FRAME, 0.5);
+        st.process(&mut next);
+        assert_eq!(
+            next.len(),
+            RNNOISE_FRAME,
+            "the next frame is delivered whole"
+        );
+    }
+}

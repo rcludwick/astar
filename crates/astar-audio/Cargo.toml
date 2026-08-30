@@ -24,6 +24,7 @@ astar-iax-core = { path = "../astar-iax-core", version = "0.1.10-beta" }
 mio = { workspace = true }
 rubato.workspace = true
 rustfft = "6"
+nnnoiseless.workspace = true
 serde = { workspace = true, optional = true }
 thiserror.workspace = true
 tracing.workspace = true

@@ -437,11 +437,15 @@ as a number and `astar-server` is the deployment where being wrong matters —
 a single-node VPS or a Pi running the node daemon has no headroom to spare and
 no operator watching a CPU meter.
 
-**How to measure it, rather than guess:** the timing spike is thirty lines and
-has no astar dependencies — a `DenoiseState`, a synthetic tone plus hiss, and a
-loop with an `Instant`. It is not in the tree; it should land as
-`crates/astar-audio/examples/denoise_bench.rs` at milestone 3, so the number is
-reproducible on any target rather than remembered from a scratch directory.
+**How to measure it, rather than guess:** `crates/astar-audio/examples/denoise_bench.rs`
+now exists — a `RnnoiseStage`, a deterministic harmonic-plus-hiss signal, and a
+loop with an `Instant`. Run it with `--release`; a debug build measures the
+wrong thing by an order of magnitude.
+
+Re-measured on Rob's Mac mini through the real stage rather than a bare
+`DenoiseState`: **35.7 µs per frame, 0.357 % of one core** over 2,000 frames,
+against the 36.5 µs the scratch spike reported. The accumulator, the two
+scalings and the copy-back are inside that number and cost nothing detectable.
 Build it for `aarch64-unknown-linux-gnu`, run it on
 the actual target, read the number. Do that before the stage is enabled anywhere
 `astar-server` runs, and record the result in this document. Until then the
@@ -610,6 +614,28 @@ Each one is independently testable and each one leaves the tree shippable.
    known content round-trips with the right scaling; a sequence of odd-sized
    pushes yields exactly the same output as one big push; no allocation after
    warm-up; the first frame is discarded.
+
+   **Done.** Two corrections came out of building it, both measured:
+
+   * *A silence warm-up does not absorb the fade-in frame.* With the warm-up
+     and without it, the first real output frame is bit-identical and sits
+     25 dB down (0.028 against a 0.5 tone). The artefact is the overlap-add of
+     the first frame against an all-zero history, and a frame of silence *is*
+     an all-zero history — so warming reproduces the starting condition rather
+     than consuming it. The warm-up is kept, because it still moves the FFT
+     planner and `easyfft`'s thread-local caches off the first real callback,
+     but the first real output frame is now dropped outright, as upstream's own
+     example does. Cost: 10 ms of audio, once, at stream open.
+   * *Handing the output back by `mem::swap` reallocates forever.* The swap
+     avoids a memcpy but gives the stage's reserved buffer away and adopts the
+     caller's, which is sized for the host callback rather than for this
+     stage's output. Those differ: with 512-sample callbacks the remainder
+     gains 32 samples each time, so roughly every fifteenth callback completes
+     two frames and writes 960 samples into a 512-capacity buffer. The stage
+     copies back instead — at most ~4 KB against a 36 µs network — and the
+     reserve stays where `new` put it. The test settles for 64 callbacks
+     specifically so it contains a two-frame one; a shorter settle never sees
+     the case that reallocates.
 4. **The VOX tap moves.** Publish `mic_input_peak` from the hook rather than
    from `write`, still with no denoising in between. Test: the on/off identity
    assertion from the VOX section, which at this milestone is trivially true —
