@@ -1161,8 +1161,12 @@ pub struct MicLane {
     /// never alters the TX stream.
     tx_spectrum: Arc<Mutex<SpectrumAnalyzer>>,
     /// Mic INPUT peak (f32 bits): post-gain, pre-NoiseReducer, metered every
-    /// `write` regardless of the gate, so VOX can key from silence (iax-5c30).
+    /// callback regardless of the gate, so VOX can key from silence
+    /// (iax-5c30). Published from `device_rate_stage` on the capture path.
     mic_input_peak: Arc<AtomicU32>,
+    /// Set by `device_rate_stage` when it published the VOX peak this
+    /// callback; cleared by `write`. See the tap comment in `write`.
+    peak_taken_at_device_rate: bool,
     /// Calibrated per-mic profile, swapped off-thread; the audio thread rebuilds
     /// `nr` from it when `profile_gen` advances past `seen_gen`.
     profile: Arc<Mutex<Option<MicProfile>>>,
@@ -1226,6 +1230,7 @@ impl MicLane {
             tx_peak: Arc::new(AtomicU32::new(0)),
             tx_spectrum: Arc::new(Mutex::new(SpectrumAnalyzer::new(sample_rate))),
             mic_input_peak: Arc::new(AtomicU32::new(0)),
+            peak_taken_at_device_rate: false,
             profile,
             profile_gen,
             seen_gen: 0,
@@ -1357,6 +1362,32 @@ impl MicLane {
 }
 
 impl InputSink for MicLane {
+    /// Device-rate stage (`docs/design/noise-suppression.md`).
+    ///
+    /// Today it does one thing: publish the VOX input peak from here rather
+    /// than from `write`. That is deliberately done BEFORE any denoiser is
+    /// wired in, so the "peak is identical with denoise on and off"
+    /// assertion is established while it is trivially true — and when it
+    /// later breaks, the network is unambiguously why.
+    ///
+    /// Keeping VOX on raw audio is the decision the design argues at length.
+    /// `voxThresholdDBFS` is persisted and calibrated against the raw noise
+    /// floor, and `VoxBackgroundCheck` measures that floor from this same
+    /// tap. Denoising upstream of it would silently change what a saved
+    /// threshold means — and only while an unrelated checkbox happened to be
+    /// ticked.
+    ///
+    /// The gain is a scalar, so `g × peak` before the resampler and after it
+    /// agree to within resampler ripple: the tap changes rate without
+    /// changing meaning.
+    fn device_rate_stage(&mut self, samples: &mut Vec<f32>, _device_rate: u32) {
+        let g = f32::from_bits(self.gain.load(Ordering::Relaxed));
+        let input_peak = (g * peak(samples)).min(1.0);
+        self.mic_input_peak
+            .store(input_peak.to_bits(), Ordering::Relaxed);
+        self.peak_taken_at_device_rate = true;
+    }
+
     #[allow(clippy::too_many_lines)] // iax-e30d inject block added; extract helper in follow-on
     fn write(&mut self, samples: &[f32], _meter: f32) {
         // Cheap atomic load on the hot path; only locks + rebuilds the NR when
@@ -1375,10 +1406,21 @@ impl InputSink for MicLane {
         // silence (iax-5c30). Tap point rides the input-gain slider (VOX
         // sensitivity) and precedes the NR noise-gate (which would otherwise
         // suppress the soft speech onset VOX must detect).
+        //
+        // On the capture path `device_rate_stage` has already published it,
+        // from audio upstream of any device-rate denoiser as well — see the
+        // tap discussion in `docs/design/noise-suppression.md`. This arm is
+        // what keeps every other driver of `write` metered: the null
+        // backend, the router's own tests, and anything delivering
+        // pipeline-rate audio with no capture callback in front of it.
         let g = f32::from_bits(self.gain.load(Ordering::Relaxed));
-        let input_peak = (g * peak(samples)).min(1.0);
-        self.mic_input_peak
-            .store(input_peak.to_bits(), Ordering::Relaxed);
+        if self.peak_taken_at_device_rate {
+            self.peak_taken_at_device_rate = false;
+        } else {
+            let input_peak = (g * peak(samples)).min(1.0);
+            self.mic_input_peak
+                .store(input_peak.to_bits(), Ordering::Relaxed);
+        }
 
         let keyed = self.gate.load(Ordering::Relaxed);
         // Pre-roll length (frames). 0 = disabled → keep today's cheap path.
@@ -1881,6 +1923,85 @@ mod tests {
         gate.store(true, std::sync::atomic::Ordering::Relaxed);
         crate::InputSink::write(&mut lane, &[0.5_f32; 160], 0.5);
         assert_eq!(rx.recv().unwrap().len(), 160);
+    }
+
+    /// The VOX invariant (milestone 4 of `docs/design/noise-suppression.md`).
+    ///
+    /// `mic_input_peak` is what VOX keys from, what `VoxBackgroundCheck`
+    /// calibrates against, and what the persisted `voxThresholdDBFS` is
+    /// measured in. It must not move when noise reduction is toggled — a
+    /// saved threshold that means one thing on Monday and another on Tuesday
+    /// because an unrelated checkbox was ticked is exactly the situation
+    /// CLAUDE.md's config-version rule says owes a translation, and a
+    /// noise-reduction feature should not be spending a config version.
+    ///
+    /// Right now this passes trivially, because nothing denoises yet. That
+    /// is the point of asserting it here: it is true BEFORE the network
+    /// exists, so if it ever fails, the network is why.
+    #[test]
+    fn vox_input_peak_is_identical_with_denoise_on_and_off() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        // A soft onset — the case iax-5c30 moved the tap for in the first
+        // place, and the one a gate or a network would attenuate most.
+        let onset: Vec<f32> = (0..480)
+            .map(|i| {
+                let env = (i as f32 / 480.0).powi(2);
+                (std::f32::consts::TAU * 300.0 * i as f32 / 48_000.0).sin() * 0.08 * env
+            })
+            .collect();
+
+        let peak_with = |denoise: bool| -> f32 {
+            let lane_dest = Arc::new(Mutex::new(None));
+            let mut lane = MicLane::new(
+                8_000,
+                lane_dest,
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(Mutex::new(None)),
+                Arc::new(AtomicU32::new(0)),
+                Arc::new(Mutex::new(None)),
+            );
+            lane.denoise_flag().store(denoise, Ordering::Relaxed);
+            let cell = lane.mic_input_peak();
+            let mut buf = onset.clone();
+            crate::InputSink::device_rate_stage(&mut lane, &mut buf, 48_000);
+            crate::InputSink::write(&mut lane, &buf, 0.0);
+            f32::from_bits(cell.load(Ordering::Relaxed))
+        };
+
+        let on = peak_with(true);
+        let off = peak_with(false);
+        assert!(on > 0.0, "the tap must publish something for a real onset");
+        assert!(
+            (on - off).abs() < f32::EPSILON,
+            "VOX input peak moved when noise reduction was toggled: {on} vs {off}"
+        );
+    }
+
+    /// Every other driver of `write` stays metered. `device_rate_stage` runs
+    /// only on the capture path; the null backend and the router's own tests
+    /// deliver pipeline-rate audio straight to `write`, and VOX must still
+    /// see a level there.
+    #[test]
+    fn write_alone_still_publishes_the_vox_peak() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::sync::{Arc, Mutex};
+        let mut lane = MicLane::new(
+            8_000,
+            Arc::new(Mutex::new(None)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(None)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(Mutex::new(None)),
+        );
+        let cell = lane.mic_input_peak();
+        crate::InputSink::write(&mut lane, &[0.5_f32; 160], 0.0);
+        let p = f32::from_bits(cell.load(Ordering::Relaxed));
+        assert!(
+            (p - 0.5).abs() < 1e-6,
+            "expected 0.5 from a direct write, got {p}"
+        );
     }
 
     #[test]
