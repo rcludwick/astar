@@ -116,20 +116,24 @@ It is a summary of the public record, not legal advice, and says so.
 
 | Dongle | |
 |---|---|
-| **[DVMEGA DVstick 30](https://www.gigaparts.com/dvmega-dvstick-30.html)** | AMBE+2 on a USB stick, sold by GigaParts. Also on the [manufacturer's page](https://www.dvmega.nl/dvstick30/). |
-| **ThumbDV / DV3000** | The same idea from NW Digital Radio. This is what astar has actually been developed against. |
+| **[DVMEGA DVstick 30](https://www.gigaparts.com/dvmega-dvstick-30.html)** | AMBE+2 on a USB stick, sold by GigaParts. Also on the [manufacturer's page](https://www.dvmega.nl/dvstick30/). Used with astar. |
+| **ThumbDV / DV3000** | The same idea from NW Digital Radio. Used with astar. |
 
-!!! warning "Check the USB id before you buy"
+Both are known to work. astar's D-Star path was first verified live on a
+ThumbDV against the KC-Wide XLX458 reflector, and the DVstick 30 is what it is
+developed against day to day.
 
-    astar finds a dongle by scanning for the FTDI id **`0x0403:0x6015`**, and
-    it opens nothing else. A dongle that enumerates under a different id will
-    not be detected, however good it is.
+!!! note "Why both work, and what would not"
 
-    astar's D-Star path has been verified live on a **ThumbDV**, against the
-    KC-Wide XLX458 reflector. The DVstick 30 is listed here because it is a
-    current, easily bought AMBE+2 dongle — **not** because it has been tested
-    with astar. If you have one and it works, or does not, that is worth
-    reporting.
+    astar finds a dongle by scanning for the FTDI id **`0x0403:0x6015`** — an
+    FT230X — and it opens nothing else. Both dongles above present that id, so
+    both are found. A dongle built around a different USB-serial chip would
+    not be, however good the vocoder inside it is.
+
+    That narrowness is deliberate rather than lazy. See the safety note at the
+    end of this section: a scan that would open any serial port could be
+    pointed at a radio interface, and opening one of those keys a
+    transmitter.
 
 ### Which modes this covers
 
@@ -142,7 +146,8 @@ It is a summary of the public record, not legal advice, and says so.
 | **AllStarLink** | not needed | Works. |
 
 Detection is hotplug rather than latched at launch, so the capability follows
-the hardware. If you are working from the Rust crates rather than the app, see
+the hardware — unplug the dongle mid-session and the D-Star option leaves the
+network picker. If you are working from the Rust crates rather than the app, see
 [A vocoder dongle](../build/prerequisites.md#a-vocoder-dongle-only-for-d-star)
 for which builds include D-Star at all.
 
