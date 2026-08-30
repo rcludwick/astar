@@ -83,7 +83,10 @@
                 // chain actually improved his M17 audio over the raw mic —
                 // the per-network override mechanism below stays as-is.
                 groupCard("Mic") {
-                    devicePicker("In", devices: deviceMonitor.inputs, selection: $selectedInput) {
+                    devicePicker(
+                        "In", devices: deviceMonitor.inputs, selection: $selectedInput,
+                        readiness: deviceMonitor.inputReadiness
+                    ) {
                         pairOutputToInput()
                         applyDevices()
                     }
@@ -192,8 +195,10 @@
                 // still writes 0 straight through the API, unaffected by this
                 // floor.
                 groupCard("Speaker") {
-                    devicePicker("Out", devices: deviceMonitor.outputs, selection: $selectedOutput)
-                    {
+                    devicePicker(
+                        "Out", devices: deviceMonitor.outputs, selection: $selectedOutput,
+                        readiness: deviceMonitor.outputReadiness
+                    ) {
                         applyDevices()
                     }
                     gainSlider("Vol", tint: .green, range: 1...4, value: $outputGain) {
@@ -249,7 +254,16 @@
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .onAppear(perform: load)
+            .onAppear {
+                load()
+                trackDeviceReadiness()
+            }
+            .onDisappear { deviceMonitor.stopTrackingReadiness() }
+            // Probing during a call would be waste: the engine holds the
+            // devices, so the answer is both known and unchanging.
+            .onChange(of: isInCall) { _ in trackDeviceReadiness() }
+            .onChange(of: selectedInput) { _ in trackDeviceReadiness() }
+            .onChange(of: selectedOutput) { _ in trackDeviceReadiness() }
             // A Setup applied elsewhere (right-click menu) swaps the devices — keep the
             // pickers in sync while this view is on screen.
             .onReceive(setups.$selectedID) { _ in syncFromStore() }
@@ -387,6 +401,7 @@
         private func devicePicker(
             _ title: String, devices: [String],
             selection: Binding<String?>,
+            readiness: DeviceReadiness?,
             onChange: @escaping () -> Void
         ) -> some View {
             // astar-9d41 — names shared by more than one device. Coloured
@@ -416,6 +431,13 @@
                         }
                     }
                     .labelsHidden()
+                    // Locked during a call. The engine opened these devices at
+                    // connect and holds them for its duration, so a change here
+                    // would not take effect until the next call — a control
+                    // that silently does nothing is worse than one that is
+                    // visibly unavailable.
+                    .disabled(isInCall)
+                    .help(isInCall ? "Devices can't be changed during a call." : "")
                     // Red outline + triangle when the CHOSEN device is one of
                     // the ambiguous ones — the state that actually affects this
                     // rig, as opposed to a clash sitting unselected in the list.
@@ -424,7 +446,18 @@
                             .strokeBorder(Color.red, lineWidth: flagged ? 1.5 : 0)
                     )
                     .onChange(of: selection.wrappedValue) { _ in onChange() }
-                    if flagged {
+                    // One glyph, in this order. A device that cannot be opened
+                    // is the more urgent problem than an ambiguous name — and
+                    // both at once would be two triangles saying different
+                    // things in the same six points of space.
+                    if let readiness, readiness != .ready {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                            .font(.caption)
+                            .help(readiness.note(for: selection.wrappedValue) ?? "")
+                            .accessibilityLabel(
+                                readiness == .notFound ? "Device not connected" : "Device in use")
+                    } else if flagged {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(.red)
                             .font(.caption)
@@ -433,11 +466,28 @@
                                     + "the first — rename one in Audio MIDI Setup to pick either."
                             )
                             .accessibilityLabel("Ambiguous device")
+                    } else if readiness == .ready {
+                        // The quiet half of the same signal: confirmation that
+                        // the thing you are about to dial with is actually
+                        // there. Only shown once a probe has answered, so it
+                        // never claims readiness it has not checked.
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                            .font(.caption)
+                            .help("Connected and available")
+                            .accessibilityLabel("Device ready")
                     }
                 }
                 // The fact, under the control it applies to. The how-to-fix
                 // lives in the banner under the dial card, which has room.
-                if let note = AudioDeviceList.ambiguityNote(
+                // Same precedence as the glyph above, and the same slot, so at
+                // most one line ever appears here.
+                if let note = readiness?.note(for: selection.wrappedValue) {
+                    Text(note)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if let note = AudioDeviceList.ambiguityNote(
                     for: selection.wrappedValue, in: devices)
                 {
                     Text(note)
@@ -725,6 +775,17 @@
         }
 
         // MARK: - Actions
+
+        /// Whether a call is up — the probe stops for its duration.
+        private var isInCall: Bool {
+            session.status == .dialing || session.status == .answered
+        }
+
+        /// Point the readiness probe at whatever the pickers currently hold.
+        private func trackDeviceReadiness() {
+            deviceMonitor.trackReadiness(
+                input: selectedInput, output: selectedOutput, inCall: isInCall)
+        }
 
         private func load() {
             // Devices come from `deviceMonitor` (already populated, off-main) — no
