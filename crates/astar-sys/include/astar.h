@@ -122,6 +122,12 @@
 #define IAX_ERR_DSTAR -19
 
 /**
+ * YSF error (iax-e8a4): a link that could not be made, or the `ysf` feature
+ * not being compiled in. Read `iax_station_last_error` for which.
+ */
+#define IAX_ERR_YSF -20
+
+/**
  * Number of log-spaced dBFS bins [`iax_station_mic_spectrum`] writes when
  * monitoring (iax-e73e). Size the `out` array to (at least) this; a larger
  * buffer is fine (the extra entries are left untouched). A literal here so

@@ -414,6 +414,10 @@ pub const IAX_ERR_M17: c_int = -18;
 /// [`iax_station_connect_dstar`].
 pub const IAX_ERR_DSTAR: c_int = -19;
 
+/// YSF error (iax-e8a4): a link that could not be made, or the `ysf` feature
+/// not being compiled in. Read `iax_station_last_error` for which.
+pub const IAX_ERR_YSF: c_int = -20;
+
 /// Number of log-spaced dBFS bins [`iax_station_mic_spectrum`] writes when
 /// monitoring (iax-e73e). Size the `out` array to (at least) this; a larger
 /// buffer is fine (the extra entries are left untouched). A literal here so
@@ -467,6 +471,7 @@ fn err_code(e: &StationError) -> c_int {
         StationError::DtmfBusy => IAX_ERR_DTMF_BUSY,
         StationError::M17(_) => IAX_ERR_M17,
         StationError::Dstar(_) => IAX_ERR_DSTAR,
+        StationError::Ysf(_) => IAX_ERR_YSF,
     }
 }
 
@@ -1909,6 +1914,7 @@ pub unsafe extern "C" fn iax_error_text(code: c_int) -> *const c_char {
         IAX_ERR_PORTAL => b"portal authentication error\0",
         IAX_ERR_RESOLVE => b"node resolution failed\0",
         IAX_ERR_AUDIO => b"audio error\0",
+        IAX_ERR_YSF => b"ysf error\0",
         IAX_ERR_IAX => b"iax error\0",
         IAX_ERR_SERIAL => b"serial error\0",
         IAX_ERR_UTF8 => b"argument was not valid utf-8\0",

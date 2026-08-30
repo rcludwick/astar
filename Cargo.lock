@@ -239,6 +239,7 @@ dependencies = [
  "astar-m17",
  "astar-ptt",
  "astar-wireguard",
+ "astar-ysf",
  "rand 0.10.2",
  "serde",
  "serde_json",

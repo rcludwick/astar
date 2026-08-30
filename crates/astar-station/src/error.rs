@@ -46,6 +46,12 @@ pub enum StationError {
     /// longer refuses D-Star: a live D-Star session is full-transceive and
     /// keys/unkeys exactly like an M17/IAX2 call.
     Dstar(String),
+    /// A YSF error (iax-e8a4) — secret-free, human-readable. Returned when
+    /// the `ysf` feature isn't compiled in, or by the link layer classifying
+    /// a callsign, resolve or bind failure. There is no YSF audio yet: the
+    /// link carries frames and reports who is talking, and the vocoder is
+    /// the missing half.
+    Ysf(String),
 }
 
 impl std::fmt::Display for StationError {
@@ -71,6 +77,7 @@ impl std::fmt::Display for StationError {
             Self::DtmfBusy => write!(f, "a DTMF sequence is already playing"),
             Self::M17(msg) => write!(f, "m17 error: {msg}"),
             Self::Dstar(msg) => write!(f, "dstar error: {msg}"),
+            Self::Ysf(msg) => write!(f, "ysf error: {msg}"),
         }
     }
 }

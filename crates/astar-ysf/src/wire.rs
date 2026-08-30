@@ -50,6 +50,19 @@ pub enum CallsignError {
     NotPrintableAscii,
 }
 
+impl std::fmt::Display for CallsignError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLong => {
+                write!(f, "longer than {CALLSIGN_LEN} characters")
+            }
+            Self::NotPrintableAscii => write!(f, "contains a non-printable or non-ASCII character"),
+        }
+    }
+}
+
+impl std::error::Error for CallsignError {}
+
 impl Callsign {
     /// Builds a callsign field, space padding to ten bytes.
     ///

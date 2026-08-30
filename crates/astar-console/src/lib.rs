@@ -16,6 +16,8 @@ pub mod parrot;
 pub mod session;
 pub mod state;
 pub mod tracer;
+#[cfg(feature = "ysf")]
+pub mod ysf;
 
 pub use astar_audio::{MicProfile, NotchSpec};
 pub use astar_iax::{Direction, TracedFrame};
