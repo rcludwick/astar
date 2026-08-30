@@ -1274,7 +1274,34 @@ simply persists.
 ### iax-267f — astar-audio: spectral noise suppression (clean under speech)
 *P3 low · feature · labels: audio, cx:5, dsp*
 
-**Design:** Follow-up to the gate-based noise reduction (iax-a9d7): FFT-based spectral suppression that attenuates the estimated noise floor across the spectrum INCLUDING under speech (the gate only helps in pauses). Overlap-add windowing, noise estimation (minimum-statistics or gate-gated), spectral gain with a floor to limit musical noise. Likely needs an FFT (hand-rolled radix-2 or a small dep). Slots into the NoiseReducer chain ahead of / replacing the gate behind the same checkbox.
+**SUPERSEDED 2026-08-29 by `docs/design/noise-suppression.md`**, which solves the
+same problem with a trained network (`nnnoiseless`, a pure-Rust RNNoise port)
+instead of a hand-rolled spectral subtractor. Milestones 1–5 and 7 are built;
+the evaluation (6) and the two default decisions (8, 9) are open and belong to
+that document, not here.
+
+The problem statement was right and is unchanged: the gate only helps in the
+pauses, and something has to clean *under* speech. Three things about the
+proposed solution were not:
+
+* It is the same problem with a worse tool. Spectral subtraction with a
+  minimum-statistics estimator is roughly what RNNoise's ancestors did, and
+  RNNoise exists because hand-tuned spectral gain produces musical noise that is
+  hard to suppress without also dulling speech. This item names that risk ("a
+  floor to limit musical noise") without solving it.
+* The tuning burden was the real cost — window length, overshoot factor, gain
+  floor, estimator time constants, a dozen judgement calls each needing listening
+  tests. RNNoise's equivalents were settled by training on hundreds of hours.
+* "Slots into the NoiseReducer chain" is `dsp_quantize`, which runs at 8 kHz.
+  Nine of RNNoise's twenty-two band energies sit at or above 4 kHz, so from an
+  8 kHz pipeline they measure interpolator output. The stage had to go in the
+  capture callback at device rate instead — which is a mistake spectral
+  subtraction would have made too, just less catastrophically.
+
+What it was right about and the design keeps: the checkbox does not change, and
+the new stage supersedes the gate rather than sitting beside it.
+
+**Original design:** Follow-up to the gate-based noise reduction (iax-a9d7): FFT-based spectral suppression that attenuates the estimated noise floor across the spectrum INCLUDING under speech (the gate only helps in pauses). Overlap-add windowing, noise estimation (minimum-statistics or gate-gated), spectral gain with a floor to limit musical noise. Likely needs an FFT (hand-rolled radix-2 or a small dep). Slots into the NoiseReducer chain ahead of / replacing the gate behind the same checkbox.
 
 ### iax-2768 — slin_probe: send full WT NEW (empty CALLTOKEN) first
 *P3 low · task · labels: cx:1*

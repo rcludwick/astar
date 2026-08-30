@@ -1,7 +1,9 @@
 # Neural noise suppression — design
 
-**Status:** design only. Nothing is built. A timing spike exists and is
-reported below; no astar code has been changed. This supersedes backlog item
+**Status:** milestones 1–5 and 7 are built and on `main`. What is left is the
+part that needs ears and hardware rather than code: the evaluation (6), the
+Pi-class measurement (8), and the two default decisions (9 and the server's).
+The default is still **off**, and stays off until milestone 6 has happened. This supersedes backlog item
 `iax-267f` (hand-rolled spectral subtraction) — see "What this replaces".
 **Read first:** `crates/astar-audio/src/denoise.rs` and
 `crates/astar-audio/src/router.rs:1304` (`MicLane::dsp_quantize`). This document
@@ -206,6 +208,21 @@ speculation.
 The honest gap: the claim "most 44.1 kHz-default devices also support 48 kHz" is
 an expectation, not a measurement. Milestone 2 below settles it by logging
 `supported_input_configs()` for every device on the machines we have.
+
+**First measurement (2026-08-29, Rob's Mac mini, `cargo run -p astar-audio
+--example capture_rates`).** Five input devices, **all five already default to
+48 kHz**: two USB radio interfaces (`USB Audio Device`, `KT USB Audio`) and
+three virtual devices (BlackHole and two aggregate devices). Nothing was
+rescued and nothing was stuck, so on this machine the preference is a no-op.
+
+That is a weak result, and it should be read as one. It does *not* confirm that
+44.1-default devices can be rescued — no such device was present to rescue. What
+it does establish is the thing that actually matters for the design: the
+hardware astar targets is 48 kHz native, so the guard's fallback path is the
+rare case rather than the common one. `USB Audio Device` advertises
+`[(44100, 44100), (48000, 48000)]` and picks 48 kHz itself, which is at least
+consistent with the expectation. The question stays open until a 44.1-default
+device is actually seen.
 
 ## The frame accumulator
 
@@ -422,11 +439,15 @@ as a number and `astar-server` is the deployment where being wrong matters —
 a single-node VPS or a Pi running the node daemon has no headroom to spare and
 no operator watching a CPU meter.
 
-**How to measure it, rather than guess:** the timing spike is thirty lines and
-has no astar dependencies — a `DenoiseState`, a synthetic tone plus hiss, and a
-loop with an `Instant`. It is not in the tree; it should land as
-`crates/astar-audio/examples/denoise_bench.rs` at milestone 3, so the number is
-reproducible on any target rather than remembered from a scratch directory.
+**How to measure it, rather than guess:** `crates/astar-audio/examples/denoise_bench.rs`
+now exists — a `RnnoiseStage`, a deterministic harmonic-plus-hiss signal, and a
+loop with an `Instant`. Run it with `--release`; a debug build measures the
+wrong thing by an order of magnitude.
+
+Re-measured on Rob's Mac mini through the real stage rather than a bare
+`DenoiseState`: **35.7 µs per frame, 0.357 % of one core** over 2,000 frames,
+against the 36.5 µs the scratch spike reported. The accumulator, the two
+scalings and the copy-back are inside that number and cost nothing detectable.
 Build it for `aarch64-unknown-linux-gnu`, run it on
 the actual target, read the number. Do that before the stage is enabled anywhere
 `astar-server` runs, and record the result in this document. Until then the
@@ -582,45 +603,100 @@ Each one is independently testable and each one leaves the tree shippable.
    call it from `process_input`. No dependency, no network, no behaviour change.
    Test: an `InputSink` double that records what the hook sees and asserts it is
    the post-downmix, pre-resample buffer at device rate. Proves the twenty-odd
-   existing test doubles still compile untouched.
+   existing test doubles still compile untouched. **Done.**
 2. **48 kHz preference and the capability line.** Enumerate
    `supported_input_configs()` and prefer 48 kHz; report the device rate and
    which chain is live through the snapshot. Still no dependency. Test: a
    backend double advertising 44.1-only, 48-only, and both, asserting the
    selection and the reported capability. This is also where the "do 44.1
    devices offer 48?" question gets its real answer, from logs on real hardware.
+
+   **Done, with one deliberate deferral.** The preference, the fallback and
+   `CaptureCapability` are built and tested, and `examples/capture_rates.rs`
+   answered the hardware question (see "The 48 kHz guard"). The *snapshot*
+   half — carrying the capability through `astar-station`, the C ABI and the
+   Swift binding to a read-only line under the advanced disclosure — is not
+   built. It is reporting rather than behaviour, it crosses four layers, and
+   until milestone 9 turns the default on it would report a constant to an
+   operator who has not enabled anything. `MicLane::neural_active()` and
+   `CaptureCapability` are the values it needs; it should land with the
+   default change.
 3. **The stage, off.** Add `nnnoiseless` with `default-features = false`. Build
    `RnnoiseStage` — accumulator, scaling, warm-up, VAD store — as a plain type
    with unit tests and no wiring into the lane. Test: a 480-sample frame of
    known content round-trips with the right scaling; a sequence of odd-sized
    pushes yields exactly the same output as one big push; no allocation after
    warm-up; the first frame is discarded.
+
+   **Done.** Two corrections came out of building it, both measured:
+
+   * *A silence warm-up does not absorb the fade-in frame.* With the warm-up
+     and without it, the first real output frame is bit-identical and sits
+     25 dB down (0.028 against a 0.5 tone). The artefact is the overlap-add of
+     the first frame against an all-zero history, and a frame of silence *is*
+     an all-zero history — so warming reproduces the starting condition rather
+     than consuming it. The warm-up is kept, because it still moves the FFT
+     planner and `easyfft`'s thread-local caches off the first real callback,
+     but the first real output frame is now dropped outright, as upstream's own
+     example does. Cost: 10 ms of audio, once, at stream open.
+   * *Handing the output back by `mem::swap` reallocates forever.* The swap
+     avoids a memcpy but gives the stage's reserved buffer away and adopts the
+     caller's, which is sized for the host callback rather than for this
+     stage's output. Those differ: with 512-sample callbacks the remainder
+     gains 32 samples each time, so roughly every fifteenth callback completes
+     two frames and writes 960 samples into a 512-capacity buffer. The stage
+     copies back instead — at most ~4 KB against a 36 µs network — and the
+     reserve stays where `new` put it. The test settles for 64 callbacks
+     specifically so it contains a two-frame one; a shorter settle never sees
+     the case that reallocates.
 4. **The VOX tap moves.** Publish `mic_input_peak` from the hook rather than
    from `write`, still with no denoising in between. Test: the on/off identity
    assertion from the VOX section, which at this milestone is trivially true —
    which is the point. It is true *before* the network is introduced, so when it
-   later fails, the network is why.
+   later fails, the network is why. **Done**, and after milestone 5 the
+   assertion is no longer trivial: it also checks the network ran and changed
+   the audio in the `on` arm, so the identity is tested against something.
+
+   One thing the design did not anticipate: `device_rate_stage` runs only on the
+   capture path, so moving the store there outright silently un-meters every
+   other driver of `write` — the null backend, the router's own tests, anything
+   delivering pipeline-rate audio with no capture callback in front of it. A
+   flag set by the hook and cleared by `write` keeps those metered as before.
 5. **Wire it up.** `MicLane` runs the stage when the flag is set and the device
    is at 48 kHz; `NoiseReducer` drops its gate in that case. Add
    `ASTAR_MIC_DENOISE`. Test: the VOX identity assertion now with denoising
    live; a lane-level test that the gate is absent when the stage is active and
-   present when it is not.
+   present when it is not. **Done.** The gate test walks all four states — off,
+   on at 48 kHz, on at 44.1 kHz (the guard), and off again — because the
+   interesting one is the third: the flag is set and the gate must still be
+   there.
 6. **Evaluate.** Parrot A/B first (fastest), then the offline WAV harness, then
    the vocoder round trip. Record the results here.
 7. **Licence and docs.** README row, `docs/site/about/license.md` row,
    `LICENSE-EXCEPTIONS.md` section. Could be done at step 3; must not be later
-   than the first release that carries the dependency.
+   than the first release that carries the dependency. **Done** — all three,
+   with the five copyright lines and the full BSD-3 text. The guards needed no
+   change, as predicted: this adds no first-party file, so
+   `guard-spdx-headers.sh` has nothing to check, and BSD-3 imposes no relink
+   obligation for `guard-codec2-licensing.sh` to mirror. Worth considering
+   later: that guard's *shape* — `cargo tree` asserting a licence-relevant
+   invariant — would suit the `default-features = false` on `nnnoiseless`,
+   which is the difference between five new crates and sixty-one.
 8. **Measure on Pi-class hardware**, then decide `astar-server`'s default.
 9. **Decide the client default**, on the strength of milestone 6 and nothing
    else.
 
 ## Open questions
 
-* **Does the 48 kHz preference actually rescue 44.1 kHz devices?** Unknown until
-  milestone 2 logs `supported_input_configs()` on real hardware. If it turns out
-  a meaningful share of devices are 44.1-only, the rejected double-resample
-  comes back onto the table and this section needs rewriting rather than
-  patching.
+* **Does the 48 kHz preference actually rescue 44.1 kHz devices?** Still open,
+  and now open for a specific reason: the first measurement (see "The 48 kHz
+  guard") found five devices on Rob's Mac and all five already default to
+  48 kHz, so the preference had nothing to rescue and the fallback path went
+  unexercised. `crates/astar-audio/examples/capture_rates.rs` exists to be run
+  on any other machine — a Windows box, a Pi, a laptop's built-in mic — and it
+  prints the verdict per device. If a meaningful share turn out to be 44.1-only,
+  the rejected double-resample comes back onto the table and that section needs
+  rewriting rather than patching.
 * **Does RNNoise leave the characterized whine alone?** The argument for keeping
   the hum filter assumes it does. It is testable directly in milestone 6 — run a
   recording of the whining mic through the network with the notches disabled and

@@ -78,6 +78,31 @@ pub trait InputSink: Send {
     /// amplitude over the original device-rate callback buffer, in
     /// `0.0..=1.0`.
     fn write(&mut self, samples: &[f32], meter: f32);
+
+    /// Optional DSP at the DEVICE's rate, run after the mono downmix and
+    /// **before** the anti-alias resampler
+    /// (`docs/design/noise-suppression.md`).
+    ///
+    /// This is the only place in the capture path that sees full-band
+    /// audio: `open_input` opens cpal at the device's native rate — 48 kHz
+    /// on essentially every Mac and USB radio interface — and decimates to
+    /// the 8 or 16 kHz pipeline rate inside the callback. Anything that
+    /// needs the full band, or that is trained on one specific rate, has to
+    /// run here or not at all. Cleaning broadband noise before decimation
+    /// is also the right order on its own merits.
+    ///
+    /// `samples` is mono at `device_rate` and may be replaced wholesale:
+    /// the hook is **not** length-preserving, because a stage with a fixed
+    /// frame size holds a remainder between callbacks.
+    ///
+    /// Called from cpal's audio thread, on the same thread as
+    /// [`InputSink::write`], so `&mut self` needs no extra synchronisation.
+    /// Implementations must not block or allocate.
+    ///
+    /// The default body does nothing, which is what keeps every existing
+    /// `InputSink` — including the test doubles across `astar-iax`,
+    /// `astar-station` and `astar-inspect` — compiling untouched.
+    fn device_rate_stage(&mut self, _samples: &mut Vec<f32>, _device_rate: u32) {}
 }
 
 /// Source the output callback pulls samples *from*.
@@ -374,6 +399,59 @@ impl CpalBackend {
     }
 }
 
+/// The capture rate to ask a device for when it offers a choice
+/// (`docs/design/noise-suppression.md`).
+///
+/// 48 kHz is what any 48 kHz-trained device-rate stage requires — RNNoise's
+/// 480-sample frame *is* 10 ms only at this rate, its band table is in Hz
+/// and its pitch periods are in samples, so it is not resamplable. It is
+/// also the better decimation on its own: 48 → 8 kHz is a clean 6:1 where
+/// 44.1 → 8 kHz is 5.5125:1.
+pub const PREFERRED_CAPTURE_RATE: u32 = 48_000;
+
+/// Pick the capture rate: `want` if any advertised range covers it, else
+/// `fallback` (the device's own default).
+///
+/// `ranges` is `(min, max)` per advertised format, already narrowed to those
+/// matching the default config's channel count and sample format — asking
+/// for 48 kHz is not worth silently changing either of those, because the
+/// callback's downmix and its `SampleFormat` match arm are built from them.
+///
+/// A device that cannot offer 48 kHz is not an error. It keeps its default
+/// rate and the 48 kHz-only stage declines to run; see
+/// [`CaptureCapability`].
+fn choose_capture_rate(ranges: &[(u32, u32)], want: u32, fallback: u32) -> u32 {
+    if ranges.iter().any(|&(lo, hi)| (lo..=hi).contains(&want)) {
+        want
+    } else {
+        fallback
+    }
+}
+
+/// What the capture path can offer a device-rate DSP stage, as opened.
+///
+/// Read-only, and reported rather than inferred: without it the 48 kHz
+/// guard is invisible, and a mic that sounds different from everyone
+/// else's is indistinguishable from a bug.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureCapability {
+    /// The rate the stream was actually opened at.
+    pub device_rate: u32,
+    /// Whether that rate can drive a 48 kHz-only stage.
+    pub full_band: bool,
+}
+
+impl CaptureCapability {
+    /// Classify an opened stream's rate.
+    #[must_use]
+    pub fn at(device_rate: u32) -> Self {
+        Self {
+            device_rate,
+            full_band: device_rate == PREFERRED_CAPTURE_RATE,
+        }
+    }
+}
+
 /// A device's human-readable name, or a placeholder when the host won't say.
 ///
 /// cpal 0.18 dropped `Device::name()` for `description()`, which returns a
@@ -451,9 +529,33 @@ impl AudioBackend for CpalBackend {
         let supported = dev
             .default_input_config()
             .map_err(|e| AudioError::BuildStream(e.to_string()))?;
-        let device_rate = supported.sample_rate();
         let device_channels = supported.channels();
         let sample_format = supported.sample_format();
+
+        // Prefer 48 kHz over whatever the device calls its default: many
+        // devices default to 44.1 and support 48 anyway, and the choice is
+        // free — one enumeration at open, nothing per callback. Only ranges
+        // that keep the default's channel count and sample format count,
+        // since the callback is built around both.
+        let ranges: Vec<(u32, u32)> = dev
+            .supported_input_configs()
+            .map(|it| {
+                it.filter(|r| r.channels() == device_channels && r.sample_format() == sample_format)
+                    .map(|r| (r.min_sample_rate(), r.max_sample_rate()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let device_rate =
+            choose_capture_rate(&ranges, PREFERRED_CAPTURE_RATE, supported.sample_rate());
+        let capability = CaptureCapability::at(device_rate);
+        if !capability.full_band {
+            tracing::info!(
+                target: "astar_audio",
+                device = %device.name,
+                device_rate,
+                "capture device does not offer 48 kHz; full-band stages will not run"
+            );
+        }
 
         let target_rate = config.sample_rate;
         let target_channels = config.channels;
@@ -580,6 +682,7 @@ fn spawn_input_stream(
                                     data,
                                     device_channels,
                                     target_channels,
+                                    device_rate,
                                     resampler.as_mut(),
                                     &mut mono,
                                     &mut resampled,
@@ -605,6 +708,7 @@ fn spawn_input_stream(
                                     &m,
                                     device_channels,
                                     target_channels,
+                                    device_rate,
                                     resampler.as_mut(),
                                     &mut mono,
                                     &mut resampled,
@@ -631,6 +735,7 @@ fn spawn_input_stream(
                                     &m,
                                     device_channels,
                                     target_channels,
+                                    device_rate,
                                     resampler.as_mut(),
                                     &mut mono,
                                     &mut resampled,
@@ -784,12 +889,17 @@ impl CaptureGapWatch {
     }
 }
 
-/// Process one cpal input callback: downmix to mono, meter, optionally
-/// resample, and deliver to the sink.
+/// Process one cpal input callback: downmix to mono, meter, run the sink's
+/// device-rate stage, optionally resample, and deliver to the sink.
+// One argument over clippy's threshold, and the alternative — bundling the
+// scratch buffers into a struct — would hide which of them the callback
+// reuses, which is the whole reason they are parameters.
+#[allow(clippy::too_many_arguments)]
 fn process_input(
     data: &[f32],
     device_channels: u16,
     target_channels: u16,
+    device_rate: u32,
     resampler: Option<&mut AntiAliasResampler>,
     mono: &mut Vec<f32>,
     resampled: &mut Vec<f32>,
@@ -811,6 +921,9 @@ fn process_input(
             mono.push(sum / dc as f32);
         }
     }
+
+    // Device-rate DSP, before decimation. May replace `mono` entirely.
+    sink.device_rate_stage(mono, device_rate);
 
     let samples_to_deliver: &[f32] = if let Some(r) = resampler {
         let _ = r.push(mono);
@@ -1336,6 +1449,7 @@ mod tests {
             &device,
             1,
             1,
+            48_000,
             resampler.as_mut(),
             &mut mono,
             &mut resampled,
@@ -1347,6 +1461,173 @@ mod tests {
         assert!(cap.iter().all(|v| v.is_finite()));
         let m = *metered.lock().unwrap();
         assert!(m > 0.4 && m <= 1.0, "meter out of range: {m}");
+    }
+
+    /// The device-rate hook sees the post-downmix, pre-resample buffer at
+    /// the DEVICE's rate — not the pipeline's (milestone 1 of
+    /// `docs/design/noise-suppression.md`).
+    ///
+    /// Two stereo channels in at 48 kHz, an 8 kHz pipeline out: the hook
+    /// must get exactly the mono frame count at full rate, and `write` must
+    /// get the decimated stream. Anything that reads `data.len()` or the
+    /// sink's own rate would pass one of those and fail the other.
+    #[test]
+    fn device_rate_stage_sees_mono_at_device_rate_before_resampling() {
+        #[derive(Default)]
+        struct Probe {
+            hook_len: Arc<Mutex<usize>>,
+            hook_rate: Arc<Mutex<u32>>,
+            hook_first: Arc<Mutex<f32>>,
+            written_len: Arc<Mutex<usize>>,
+        }
+        impl InputSink for Probe {
+            fn write(&mut self, samples: &[f32], _meter: f32) {
+                *self.written_len.lock().unwrap() = samples.len();
+            }
+            fn device_rate_stage(&mut self, samples: &mut Vec<f32>, device_rate: u32) {
+                *self.hook_len.lock().unwrap() = samples.len();
+                *self.hook_rate.lock().unwrap() = device_rate;
+                *self.hook_first.lock().unwrap() = samples[0];
+            }
+        }
+
+        let probe = Probe::default();
+        let (hook_len, hook_rate, hook_first, written_len) = (
+            Arc::clone(&probe.hook_len),
+            Arc::clone(&probe.hook_rate),
+            Arc::clone(&probe.hook_first),
+            Arc::clone(&probe.written_len),
+        );
+        let mut sink: Box<dyn InputSink> = Box::new(probe);
+
+        // 480 stereo frames = 960 interleaved samples. L and R differ so a
+        // downmix that took channel 0 instead of averaging would be caught.
+        let frames = 480;
+        let device: Vec<f32> = (0..frames).flat_map(|_| [0.25_f32, 0.75]).collect();
+
+        let mut resampler = Some(AntiAliasResampler::new(48_000, 8_000).unwrap());
+        let (mut mono, mut resampled) = (Vec::new(), Vec::new());
+        process_input(
+            &device,
+            2,
+            1,
+            48_000,
+            resampler.as_mut(),
+            &mut mono,
+            &mut resampled,
+            sink.as_mut(),
+        );
+
+        assert_eq!(
+            *hook_len.lock().unwrap(),
+            frames,
+            "hook must see device-rate frames, not the interleaved length or the 8 kHz count"
+        );
+        assert_eq!(
+            *hook_rate.lock().unwrap(),
+            48_000,
+            "hook must be told the device rate"
+        );
+        assert!(
+            (*hook_first.lock().unwrap() - 0.5).abs() < 1e-6,
+            "hook must see the averaged downmix, not channel 0"
+        );
+        let written = *written_len.lock().unwrap();
+        assert!(
+            written > 0 && written < frames / 2,
+            "write must see the decimated stream (got {written} for {frames} device frames)"
+        );
+    }
+
+    /// The 48 kHz preference (milestone 2 of
+    /// `docs/design/noise-suppression.md`), across the three device classes
+    /// that matter. Pure over advertised ranges, so it needs no hardware.
+    #[test]
+    fn capture_rate_prefers_48k_when_the_device_offers_it() {
+        // 48-only: already there, nothing to choose.
+        assert_eq!(
+            choose_capture_rate(&[(48_000, 48_000)], 48_000, 48_000),
+            48_000
+        );
+
+        // 44.1 default but 48 also advertised as a discrete range — the case
+        // the preference exists for.
+        assert_eq!(
+            choose_capture_rate(&[(44_100, 44_100), (48_000, 48_000)], 48_000, 44_100),
+            48_000,
+            "must take 48 kHz over the device's 44.1 default"
+        );
+
+        // A continuous range spanning 48 kHz counts too; ALSA advertises
+        // capture formats this way rather than as discrete points.
+        assert_eq!(
+            choose_capture_rate(&[(8_000, 96_000)], 48_000, 44_100),
+            48_000,
+            "a range covering 48 kHz offers 48 kHz"
+        );
+
+        // 44.1-only: keep the default, do not invent a rate the device
+        // cannot produce.
+        assert_eq!(
+            choose_capture_rate(&[(44_100, 44_100)], 48_000, 44_100),
+            44_100,
+            "a 44.1-only device keeps 44.1"
+        );
+
+        // A host that reports nothing is the same case: fall back, silently
+        // and correctly, rather than treating an empty list as permission.
+        assert_eq!(choose_capture_rate(&[], 48_000, 44_100), 44_100);
+    }
+
+    /// The capability line is derived from the rate actually opened, not
+    /// from what was asked for.
+    #[test]
+    fn capture_capability_reports_full_band_only_at_48k() {
+        let ok = CaptureCapability::at(48_000);
+        assert!(ok.full_band);
+        assert_eq!(ok.device_rate, 48_000);
+
+        for rate in [8_000, 16_000, 44_100, 96_000] {
+            let cap = CaptureCapability::at(rate);
+            assert!(
+                !cap.full_band,
+                "{rate} Hz is not full band for a 48 kHz stage"
+            );
+            assert_eq!(cap.device_rate, rate);
+        }
+    }
+
+    /// A sink that leaves `device_rate_stage` at its default body still
+    /// works, and the audio reaching `write` is unchanged. This is what
+    /// keeps the twenty-odd existing `InputSink` doubles compiling.
+    #[test]
+    fn default_device_rate_stage_is_a_no_op() {
+        #[derive(Default)]
+        struct Plain(Arc<Mutex<Vec<f32>>>);
+        impl InputSink for Plain {
+            fn write(&mut self, samples: &[f32], _meter: f32) {
+                self.0.lock().unwrap().extend_from_slice(samples);
+            }
+        }
+        let plain = Plain::default();
+        let got = Arc::clone(&plain.0);
+        let mut sink: Box<dyn InputSink> = Box::new(plain);
+
+        let device: Vec<f32> = (0..256).map(|i| (i as f32 * 0.01).sin()).collect();
+        let (mut mono, mut resampled) = (Vec::new(), Vec::new());
+        // No resampler: device rate == pipeline rate, so `write` should see
+        // the input verbatim through the default hook.
+        process_input(
+            &device,
+            1,
+            1,
+            8_000,
+            None,
+            &mut mono,
+            &mut resampled,
+            sink.as_mut(),
+        );
+        assert_eq!(&*got.lock().unwrap(), &device);
     }
 
     /// Verify the output pipeline fills the cpal-side buffer to capacity

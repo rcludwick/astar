@@ -9,6 +9,15 @@
 //! [`NoiseReducer::new`] uses a fixed 60 Hz hum comb + default gate;
 //! [`NoiseReducer::from_profile`] builds a per-mic version from a measured
 //! [`MicProfile`] (its notch list + gate threshold).
+//!
+//! **The gate is optional, and it is dropped when the neural stage is
+//! running** (`docs/design/noise-suppression.md`). The two are the same job
+//! done twice and the gate is the worse of them: it can only act in the
+//! pauses, its thresholds are calibrated against a raw noise floor that a
+//! denoiser has already moved, and its characteristic failure is chopping a
+//! soft onset. The hum filter stays either way — a measured notch removes a
+//! device's narrowband whine deterministically, and a network has no reason
+//! to call a stable in-band tone noise.
 
 use crate::characterize::MicProfile;
 use crate::dynamics::{NoiseGate, NoiseGateParams};
@@ -18,7 +27,9 @@ use crate::filter::HumFilter;
 #[derive(Debug, Clone)]
 pub struct NoiseReducer {
     hum: HumFilter,
-    gate: NoiseGate,
+    /// `None` when a neural stage upstream has already done this job — see
+    /// the module docs.
+    gate: Option<NoiseGate>,
 }
 
 impl NoiseReducer {
@@ -32,15 +43,46 @@ impl NoiseReducer {
     /// characterized notch set).
     #[must_use]
     pub fn from_parts(hum: HumFilter, gate: NoiseGate) -> Self {
-        Self { hum, gate }
+        Self {
+            hum,
+            gate: Some(gate),
+        }
+    }
+
+    /// Hum filter only, no gate: for use downstream of a neural stage.
+    #[must_use]
+    pub fn hum_only(sample_rate: u32) -> Self {
+        Self {
+            hum: HumFilter::new(sample_rate),
+            gate: None,
+        }
+    }
+
+    /// A per-mic reducer from `profile`'s notches, with no gate.
+    #[must_use]
+    pub fn hum_only_from_profile(sample_rate: u32, profile: &MicProfile) -> Self {
+        Self {
+            hum: Self::hum_from_profile(sample_rate, profile),
+            gate: None,
+        }
+    }
+
+    /// Whether a gate is present. The lane rebuilds when this must change.
+    #[must_use]
+    pub fn has_gate(&self) -> bool {
+        self.gate.is_some()
+    }
+
+    fn hum_from_profile(sample_rate: u32, profile: &MicProfile) -> HumFilter {
+        let notches: Vec<(f32, f32)> = profile.notches.iter().map(|n| (n.freq_hz, n.q)).collect();
+        HumFilter::from_notches(sample_rate, profile.highpass_hz, &notches)
     }
 
     /// Build a per-mic reducer from a measured [`MicProfile`]: its narrowband
     /// notches + high-pass, and a gate at the profile's derived threshold.
     #[must_use]
     pub fn from_profile(sample_rate: u32, profile: &MicProfile) -> Self {
-        let notches: Vec<(f32, f32)> = profile.notches.iter().map(|n| (n.freq_hz, n.q)).collect();
-        let hum = HumFilter::from_notches(sample_rate, profile.highpass_hz, &notches);
+        let hum = Self::hum_from_profile(sample_rate, profile);
         let gate = NoiseGate::with_params(
             sample_rate,
             NoiseGateParams {
@@ -51,10 +93,13 @@ impl NoiseReducer {
         Self::from_parts(hum, gate)
     }
 
-    /// Process one sample: hum filter, then gate.
+    /// Process one sample: hum filter, then the gate if there is one.
     pub fn process_sample(&mut self, x: f32) -> f32 {
         let filtered = self.hum.process_sample(x);
-        self.gate.process_sample(filtered)
+        match self.gate.as_mut() {
+            Some(g) => g.process_sample(filtered),
+            None => filtered,
+        }
     }
 
     /// Process a buffer in place.
@@ -67,7 +112,9 @@ impl NoiseReducer {
     /// Reset all stage state.
     pub fn reset(&mut self) {
         self.hum.reset();
-        self.gate.reset();
+        if let Some(g) = self.gate.as_mut() {
+            g.reset();
+        }
     }
 }
 
