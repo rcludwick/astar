@@ -8,9 +8,13 @@
 
     /// Browse and search the cached reflector directory (astar-refl-ui).
     ///
-    /// A sheet over the popover rather than an expansion of it: the popover is
-    /// already tight, and a list of 3,000 reflectors is not something to grow a
-    /// 330 pt window into.
+    /// A pane of the main window, reached and left the same way Settings is: a
+    /// Back chevron in a header, ⌘[ to leave (astar-5a41). It began as a sheet,
+    /// on the reasoning that a list of 3,000 reflectors should not grow a 330 pt
+    /// popover — but the window is resizable, Settings had already established
+    /// what a full-window pane looks like here, and a sheet over a popover is a
+    /// second layer of chrome for something that is not modal. Searching the
+    /// directory is browsing, not a decision the app is blocked on.
     ///
     /// **Selecting a row fills the dial field and dismisses — it never
     /// connects.** Dialling stays a deliberate second action, the same as
@@ -21,13 +25,13 @@
     /// room, the registry publishes none of them, and a picker that quietly
     /// filled in "A" would put an operator into someone else's conversation
     /// keyed up under their own callsign. The letter is asked for, out loud.
-    struct ReflectorSearchSheet: View {
+    struct ReflectorSearchPane: View {
         /// Pre-selects the network filter — whatever the dial field is set to
         /// dial right now. `nil` means the app network has no directory
-        /// counterpart (AllStar), and the sheet opens showing everything.
+        /// counterpart (AllStar), and the pane opens showing everything.
         let preferredNetwork: ReflectorNetwork?
         /// Hands back the finished dial text **and the network it belongs
-        /// to**. The sheet writes a string, not a target: the dial field stays
+        /// to**. The pane writes a string, not a target: the dial field stays
         /// the single source of truth for what will be dialled, so there is no
         /// second place holding half of it.
         ///
@@ -37,10 +41,12 @@
         /// nothing, and falls through to an address parser that fails. Handing
         /// the network back lets the caller switch to it, the same way the
         /// favorites menu already switches to a favorite's own network.
+        /// Leave the pane. Declared before `onSelect` so `onSelect` can stay
+        /// the trailing closure at the call site.
+        let onBack: () -> Void
         let onSelect: (String, ReflectorNetwork) -> Void
 
         @EnvironmentObject private var reflectors: ReflectorDirectory
-        @Environment(\.dismiss) private var dismiss
 
         @State private var query = ""
         @State private var filter: ReflectorNetwork?
@@ -60,7 +66,6 @@
                     browser
                 }
             }
-            .frame(minWidth: 330, idealWidth: 380, minHeight: 420, idealHeight: 480)
             .onAppear {
                 filter = preferredNetwork
                 refresh()
@@ -73,14 +78,12 @@
         private var browser: some View {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 8) {
+                    backButton("Back to the call", action: onBack)
                     Text("Reflectors").font(.headline)
                     Spacer()
-                    Button("Done") { dismiss() }
-                        .keyboardShortcut(.cancelAction)
                 }
                 .padding(.horizontal, 14)
-                .padding(.top, 12)
-                .padding(.bottom, 8)
+                .padding(.vertical, 10)
 
                 HStack(spacing: 8) {
                     HStack(spacing: 5) {
@@ -236,7 +239,7 @@
             guard entry.isDialable else { return }
             if ReflectorModuleOptions.options(for: entry.dial).isEmpty {
                 onSelect(entry.id, entry.network)
-                dismiss()
+                onBack()
             } else {
                 choosingModuleFor = entry
             }
@@ -250,17 +253,7 @@
             let remembered = memory.module(for: entry)
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 8) {
-                    Button {
-                        choosingModuleFor = nil
-                    } label: {
-                        Label("Back", systemImage: "chevron.left")
-                            .labelStyle(.iconOnly)
-                            .frame(width: 22, height: 22)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.borderless)
-                    .keyboardShortcut(.cancelAction)
-                    .accessibilityLabel("Back to the reflector list")
+                    backButton("Back to the reflector list") { choosingModuleFor = nil }
                     VStack(alignment: .leading, spacing: 1) {
                         Text(entry.name).font(.headline)
                         Text("Choose a module").font(.caption).foregroundStyle(.secondary)
@@ -320,7 +313,7 @@
                 // actually chose it. Nothing reads this at dial time.
                 memory.remember(letter, for: entry)
                 onSelect(ReflectorDialText.applying(module: letter, to: entry.id), entry.network)
-                dismiss()
+                onBack()
             } label: {
                 Text(String(letter))
                     .font(.callout.monospaced().weight(isRemembered ? .bold : .regular))
@@ -334,6 +327,23 @@
         }
 
         // MARK: - Chrome
+
+        /// The same chevron Settings uses, with the same ⌘[ — both levels of
+        /// this pane go back, and "back" should mean one keystroke everywhere
+        /// in this window rather than one per surface.
+        private func backButton(
+            _ label: String, action: @escaping () -> Void
+        ) -> some View {
+            Button(action: action) {
+                Label("Back", systemImage: "chevron.left")
+                    .labelStyle(.iconOnly)
+                    .frame(width: 22, height: 22)  // full hit area, no clip
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .keyboardShortcut("[", modifiers: .command)
+            .accessibilityLabel(label)
+        }
 
         private func emptyState(_ title: String, _ detail: String) -> some View {
             VStack(alignment: .center, spacing: 6) {
@@ -350,7 +360,7 @@
         }
 
         /// The count, and the credit. CC BY requires the attribution wherever
-        /// the data appears, and this sheet is the place it most obviously
+        /// the data appears, and this pane is the place it most obviously
         /// appears — a credit that lives only in Settings is one refactor from
         /// being the only copy, and then from being gone.
         private var footer: some View {

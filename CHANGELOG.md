@@ -8,6 +8,63 @@ else is still built from source. Versions are `MAJOR.MINOR.PATCHbeta` and will
 stay on `beta` until the client has had a real sit-down-and-use-it pass on all
 three platforms.
 
+## 0.1.9beta — 2026-08-29
+
+Who you are, at the top of Settings — and the first bricks of DMR.
+
+### Added
+
+- **The start of DMR: `crates/astar-dmr`.** DMR is not one network — it is a
+  family of independently run ones that share a protocol, and a talkgroup
+  number names nothing on its own (TG 91 exists on several of them and is a
+  different room on each). So the first thing built is the address, not the
+  wire: TGIF, FreeDMR, DMR+, SystemX, AmComm, VKDMR, FreeSTAR and ADN are
+  grouped together as "Independent networks", and BrandMeister stands apart
+  behind a consent gate that is shut until the operator opens it. Nothing
+  dials DMR yet.
+
+- **A DMR radio ID field**, in its own section below the AllStarLink account.
+  DMR does not put a callsign on the air — it addresses radios by a number
+  registered at radioid.net against a verified licence. That is a different
+  credential from a callsign, so it gets its own field rather than being
+  bolted onto one that means something else. Exported configs carry it under
+  the same "Callsign and radio ID" checkbox, so a file you hand to someone
+  else still leaves your identity behind. Nothing dials DMR yet, and the
+  field says so.
+
+### Changed
+
+- **Settings fields have standing labels.** Callsign, DMR Radio ID, Node number
+  and Password each carry a label in their own column instead of relying on
+  placeholder text. A placeholder is not a label: it disappears exactly when
+  the field has content, which is the moment you most want to know what you are
+  looking at. The Operator and Account sections share one label width, so the
+  pane reads as one form rather than two stacked by accident. The password
+  keeps a placeholder for the one thing a label cannot say — "Re-enter to
+  change", because an empty box there means unchanged, not blank.
+
+- **Your callsign is the first thing in Settings.** It used to sit at the
+  bottom of the AllStarLink account panel under an "M17" heading, which said
+  two wrong things at once: that it belonged to M17, and that it was part of an
+  AllStarLink account. It is neither. M17 sends it in every frame, D-Star puts
+  it in every header, YSF carries it in every data packet — and AllStarLink is
+  the one network that never transmits it, because there you dial as a node
+  number. It is now an "Operator" section above everything else, and the
+  AllStarLink account panel below it **no longer has a callsign box at all.** Your allstarlink.org login *is* your callsign;
+  a second field for the same fact was only ever a way to get the two out of
+  step. The account panel says which callsign it signs in as, and changing it
+  above updates the saved account without asking anyone to retype a password.
+  Clearing the account leaves your callsign alone — that is who you are, not
+  an account detail.
+
+- **The reflector directory is a pane of the window, not a sheet.** The
+  magnifying glass beside the dial field now swaps the window over to the
+  reflector list the same way the gear swaps it to Settings, and the same Back
+  chevron — and the same ⌘[ — brings you home. Picking a module is still the
+  second step, with its own Back to the list. Nothing about a directory you are
+  browsing is modal, and a sheet floating over a popover was one layer of chrome
+  more than the job needed.
+
 ## 0.1.8beta — 2026-08-28
 
 The big one: astar can find a reflector it doesn't already know, and it can talk

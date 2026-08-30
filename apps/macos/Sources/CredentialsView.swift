@@ -10,15 +10,24 @@ import SwiftUI
 /// The WT token mint logs into the **AllStarLink web portal** (`login.php`) with
 /// your callsign + **account password**, then fetches a transceiver token for a
 /// node your account owns. Per astar `PortalCredentials`, the password is
-/// the *portal ACCOUNT password — NOT the node's IAX secret*. The three fields
-/// map to `Credentials` as: Callsign → portalUser, Account password → portalPass,
-/// Node number → portalNode. The password lives only in the Keychain, is consumed
-/// into `StationConfig` at station build, and is never pre-filled or logged.
+/// the *portal ACCOUNT password — NOT the node's IAX secret*.
+///
+/// **There is no callsign field here (astar-d3e6).** Your allstarlink.org login
+/// *is* your callsign, and astar already has one — the Operator section at the
+/// top of Settings. A second box for the same fact is a way to get them out of
+/// step, not a feature. So this panel owns two fields: Node number → portalNode
+/// and Account password → portalPass. `portalUser` is written from
+/// `session.operatorCallsign`, and kept in step when that changes.
+///
+/// The password lives only in the Keychain, is consumed into `StationConfig` at
+/// station build, and is never pre-filled or logged. It is read back out only to
+/// write it straight in again when the callsign or node changes — asking someone
+/// to retype a password because they fixed a typo in their callsign would be
+/// theatre, not security.
 struct CredentialsView: View {
     @EnvironmentObject private var session: CallSession
     private let store = KeychainCredentialStore()
 
-    @State private var callsign = ""
     @State private var node = ""
     @State private var accountPassword = ""
     @State private var saved = false
@@ -75,24 +84,48 @@ struct CredentialsView: View {
             .font(.caption2)
             .foregroundStyle(.secondary)
 
-            TextField("Callsign", text: $callsign)
-                .textFieldStyle(.roundedBorder)
-            TextField("Node number", text: $node)
-                .textFieldStyle(.roundedBorder)
-            SecureField(
-                saved ? "Account password (re-enter to change)" : "Account password",
-                text: $accountPassword
-            )
-            .textFieldStyle(.roundedBorder)
-            // Red outline when the password is missing or the portal rejected it
-            // (astar-4e8a). Drawn as an overlay rather than a background so the
-            // native rounded-border field keeps its focus ring.
-            .overlay(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .stroke(Color.red, lineWidth: passwordStatus.isInvalid ? 1.5 : 0)
-            )
-            .animation(.easeInOut(duration: 0.15), value: passwordStatus)
-            .accessibilityValue(passwordStatus.message ?? "")
+            // Which callsign this signs in as, since the field is no longer
+            // here to answer that (astar-d3e6). Silent coupling is the failure
+            // mode to avoid: an account quietly logging in under a callsign the
+            // operator can't see is worse than one more line of caption.
+            if loginCallsign.isEmpty {
+                Label(
+                    "Set your callsign in Operator above — it is your "
+                        + "allstarlink.org login.",
+                    systemImage: "arrow.up"
+                )
+                .font(.caption2)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("Signs in as \(loginCallsign), the callsign in Operator above.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            SettingsField("Node number") {
+                TextField("", text: $node)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Your AllStarLink node number")
+            }
+            SettingsField("Password") {
+                // The placeholder is the one hint a label cannot carry: an
+                // empty box here means "unchanged", not "blank", because astar
+                // never pre-fills a saved password.
+                SecureField(saved ? "Re-enter to change" : "", text: $accountPassword)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Your allstarlink.org account password")
+                    // Red outline when the password is missing or the portal
+                    // rejected it (astar-4e8a). An overlay rather than a
+                    // background so the native field keeps its focus ring.
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .stroke(Color.red, lineWidth: passwordStatus.isInvalid ? 1.5 : 0)
+                    )
+                    .animation(.easeInOut(duration: 0.15), value: passwordStatus)
+                    .accessibilityValue(passwordStatus.message ?? "")
+            }
             // The reason replaces the standing hint while something is wrong —
             // two captions stacked under one field is noise, and the red one is
             // the one that matters.
@@ -102,10 +135,12 @@ struct CredentialsView: View {
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
                     .transition(.opacity)
+                    .settingsCaptionIndent()
             } else {
                 Text("Your allstarlink.org account password — not the node’s IAX secret.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+                    .settingsCaptionIndent()
             }
 
             HStack(spacing: 10) {
@@ -134,32 +169,13 @@ struct CredentialsView: View {
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
-
-            // M17 callsign (astar-c2e5 Task 9): a separate network from the
-            // AllStarLink account above — M17 transmits this callsign
-            // verbatim in every frame, so it's collected here as well as in
-            // the dial card's own prompt (whichever the user reaches first).
-            // Bound straight to `session.m17Callsign`, which persists itself
-            // (`CallSession`'s `didSet`) — no separate save step needed.
-            // Gated on `session.m17Available` — latent (no new UI at all)
-            // until the engine build actually supports M17, matching the
-            // network picker's own gate.
-            if session.m17Available {
-                Divider()
-                Text("M17").font(.subheadline.weight(.semibold))
-                TextField("Callsign (M17)", text: $session.m17Callsign)
-                    .textFieldStyle(.roundedBorder)
-                    .onChange(of: session.m17Callsign) { value in
-                        let upper = value.uppercased()
-                        if upper != value { session.m17Callsign = upper }
-                    }
-                Text("Your callsign — M17 transmits it with every packet you send.")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
         }
         .onAppear(perform: loadExisting)
-        .onChange(of: callsign) { _ in scheduleSave() }
+        // The callsign lives in another view on this same pane, so editing it
+        // there has to reach the Keychain copy here — otherwise a saved account
+        // keeps signing in under the old one for as long as nobody retypes a
+        // password. `scheduleSave` debounces, so this is not per-keystroke.
+        .onChange(of: session.operatorCallsign) { _ in scheduleSave() }
         .onChange(of: node) { _ in scheduleSave() }
         .onChange(of: accountPassword) { _ in scheduleSave() }
         // Don't keep the secret in memory once you leave the panel; it's already
@@ -177,7 +193,7 @@ struct CredentialsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(
-                "This deletes your saved callsign, node, and password from the Keychain. You can re-enter them anytime."
+                "This deletes your saved node and password from the Keychain. Your callsign stays — it is not part of this account."
             )
         }
     }
@@ -192,15 +208,23 @@ struct CredentialsView: View {
             portalRejected: testResult == .failure)
     }
 
+    /// The callsign this account signs in with — the one and only one astar
+    /// holds, from the Operator section above.
+    private var loginCallsign: String {
+        session.operatorCallsign.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// A new account needs all three. An existing one needs only what changed:
+    /// the stored password stands in for itself, so correcting a callsign or a
+    /// node number does not send anyone hunting for their password.
     private var canSave: Bool {
-        !callsign.trimmingCharacters(in: .whitespaces).isEmpty
+        !loginCallsign.isEmpty
             && !node.trimmingCharacters(in: .whitespaces).isEmpty
-            && !accountPassword.isEmpty
+            && (!accountPassword.isEmpty || saved)
     }
 
     private func loadExisting() {
         if let c = store.load() {
-            callsign = c.portalUser
             node = c.portalNode
             saved = true
         }
@@ -220,9 +244,14 @@ struct CredentialsView: View {
     }
 
     private func persist() {
+        // An empty box means "unchanged", not "blank" — the password is never
+        // pre-filled, so it is read back out of the Keychain and written
+        // straight in again. It reaches no view state on the way through.
+        let password = accountPassword.isEmpty ? (store.load()?.portalPass ?? "") : accountPassword
+        guard !password.isEmpty else { return }
         let creds = Credentials(
-            portalUser: callsign.trimmingCharacters(in: .whitespaces),
-            portalPass: accountPassword,
+            portalUser: loginCallsign,
+            portalPass: password,
             portalNode: node.trimmingCharacters(in: .whitespaces)
         )
         do {
@@ -284,7 +313,9 @@ struct CredentialsView: View {
         let (station, hasCredentials) = CallSession.makeStation(
             credentials: nil, audio: UserDefaultsAudioSettingsStore().load())
         session.reconfigure(station: station, hasCredentials: hasCredentials)
-        callsign = ""
+        // Not `operatorCallsign`: that is who you are, not an account detail,
+        // and clearing an AllStarLink account must not take your M17 and
+        // D-Star identity with it.
         node = ""
         accountPassword = ""
         saved = false

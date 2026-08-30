@@ -6,6 +6,20 @@
     import Combine
     import Foundation
 
+    /// The panes the main window can show (astar-1f7d, astar-5a41).
+    ///
+    /// Not a navigation stack: astar's window is one level deep everywhere, so
+    /// a flat enum says exactly what a stack would and cannot get out of step
+    /// with itself. Every pane's Back returns to `.call`.
+    enum AppPane: Equatable {
+        /// The dial card, status and meters — astar's actual job.
+        case call
+        /// Devices, account, favorites, directory.
+        case settings
+        /// Browse and search the cached reflector directory.
+        case reflectors
+    }
+
     /// Which pane the main window is showing (astar-1f7d).
     ///
     /// `MenuPopover` used to own this as private `@State`, which was fine while the
@@ -18,7 +32,20 @@
     /// opening a second, competing settings window.
     @MainActor
     final class AppNavigation: ObservableObject {
+        /// The pane on screen. Everything else here is a view onto this.
+        @Published var pane: AppPane = .call
+
         /// True while the main window shows Settings instead of the call UI.
-        @Published var showsSettings = false
+        ///
+        /// Derived rather than stored — the menu bar and the footer button both
+        /// speak in these terms, and a second stored flag is a second thing that
+        /// can disagree with `pane`.
+        var showsSettings: Bool {
+            get { pane == .settings }
+            set { pane = newValue ? .settings : .call }
+        }
+
+        /// Back out of whatever pane is up. One level, because there is only one.
+        func goBack() { pane = .call }
     }
 #endif

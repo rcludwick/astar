@@ -1,0 +1,14 @@
+[package]
+name = "astar-ysf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "System Fusion (C4FM) YSF protocol primitives — frame/FICH coding and YSFReflector linking — plus a loopback reflector."
+
+[lints]
+workspace = true
+
+[dependencies]
