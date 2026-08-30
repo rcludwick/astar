@@ -141,17 +141,23 @@ Surface audio/PTT config layered: sensible defaults and common controls up
 front, advanced device/serial tuning under progressive disclosure. Don't hide
 capability the station offers.
 
-## Versions — SemVer from the next release onward
+## Versions — SemVer, since `0.1.10-beta`
 
-**Decided 2026-08-29 (Rob): every version string becomes real SemVer starting
-with the release after `0.1.9beta`.** That includes the Rust crates.
-`0.1.9beta` itself is NOT retrofitted — it is shipped, tagged and published,
-and rewriting a released version is worse than the inconsistency it fixes.
+**Decided 2026-08-29 (Rob), and done in `0.1.10-beta`: every version string is
+real SemVer.** That includes the Rust crates. Releases up to and including
+`0.1.9beta` are NOT retrofitted — they are shipped, tagged and published, and
+rewriting a released version is worse than the inconsistency it fixes.
 
-So the next release is `0.2.0-beta.1` shaped, not `0.1.10beta` shaped. The
-glued form (`0.1.9beta`, pre-release stuck to the patch number) is not SemVer
-and orders wrongly: `0.1.10beta` is newer than `0.1.9beta` and string
-comparison says the opposite.
+The glued form (`0.1.9beta`, pre-release stuck to the patch number) is not
+SemVer and orders wrongly: `0.1.10beta` is newer than `0.1.9beta` and string
+comparison says the opposite. `0.1.10-beta` is the hyphenated pre-release form
+and sorts correctly against everything before it.
+
+**The two spellings have converged.** Cargo could never parse the glued form,
+so the Rust side spelled `0.1.9beta` as `0.1.9-beta` while the app spelled it
+`0.1.9beta`; from `0.1.10-beta` all five homes carry one identical string.
+`normalize()` in `ci/version_manifest.py` still bridges the old shape and must
+keep doing so — published manifests contain `0.1.9beta`-shaped strings forever.
 
 **One number, five homes, enforced.** `just ci` runs
 `ci/version_manifest.py --check`, which fails when they disagree:
@@ -164,16 +170,12 @@ comparison says the opposite.
 | root `Cargo.toml` | `workspace.package.version` — strict SemVer, always |
 | `crates/*/Cargo.toml`, `apps/*/Cargo.toml` | every `astar-*` path dep's `version =` |
 
-Cargo cannot parse the glued form, so the Rust side already spells it
-`0.1.9-beta` while the app spells it `0.1.9beta`. `normalize()` in
-`ci/version_manifest.py` is the bridge, and it already understands both shapes
-— **the transition needs no code change**, only new strings. The path-dep
-requirements are the ones to watch: Cargo reads a stale `version = "0.1.3-beta"`
-as a caret range the new crate still satisfies, so it never complains.
+The path-dep requirements are the ones to watch: Cargo reads a stale
+`version = "0.1.3-beta"` as a caret range the new crate still satisfies, so it
+never complains — which is how the workspace drifted six releases behind before
+`--check` started reading it.
 
 `vendor/ambe-thumbdv` is outside all of this and stays at its own `0.1.0`.
-
-Backlog item: `astar-semver`.
 
 ## Config version — bump it for translation, not for change
 

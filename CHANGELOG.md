@@ -4,9 +4,67 @@ Notable changes to astar. Newest first.
 
 Since `0.1.1beta` there is a signed, notarized macOS `astar.dmg` on the
 [releases page](https://github.com/rcludwick/astar/releases/latest); everything
-else is still built from source. Versions are `MAJOR.MINOR.PATCHbeta` and will
-stay on `beta` until the client has had a real sit-down-and-use-it pass on all
-three platforms.
+else is still built from source. Versions stay on `beta` until the client has
+had a real sit-down-and-use-it pass on all three platforms.
+
+From `0.1.10-beta` onward the version is real SemVer — `MAJOR.MINOR.PATCH-beta`,
+with a hyphen. Everything up to and including `0.1.9beta` glued the
+pre-release to the patch number, which sorts wrongly: `0.1.10beta` is newer
+than `0.1.9beta` and a string comparison says the opposite. Shipped versions
+are left as they were spelled.
+
+## 0.1.10-beta — 2026-08-29
+
+Real SemVer, a full dependency refresh, and the release list goes live.
+
+### Added
+
+- **A published release list**, at
+  [`/api/v1/releases.json`](https://rcludwick.github.io/astar/api/v1/releases.json),
+  built with the docs from the app's own `MARKETING_VERSION` so it cannot
+  describe a version that was never built. Every release carries both the
+  display `version` and a strict-SemVer `semver`, so a client written against
+  either one keeps working across the spelling change below.
+
+- **A Discord server**, linked from the site header, the front page and the
+  README.
+
+### Changed
+
+- **Versions are real SemVer from here on**, this one included. `0.1.9beta`
+  glued the pre-release to the patch number, which is not SemVer and orders
+  wrongly — `0.1.10beta` is newer than `0.1.9beta` and string comparison says
+  the reverse. The app and the Rust workspace had also been spelling the same
+  release two different ways because Cargo demands the hyphen; they now carry
+  one identical string, and `just ci` fails if any of the five places that
+  record it disagree. Released versions are not retrofitted.
+
+- **Every dependency a major version behind was brought forward**: cpal
+  0.15 → 0.18, rubato 0.16 → 5.0, rand 0.8 → 0.10, base64 0.22 → 0.23,
+  libloading 0.8 → 0.9, md-5 0.10 → 0.11, and toml 0.8 → 1.1 in the Iced
+  client, alongside 52 packages moved to their latest compatible versions.
+  Device names are unchanged across the cpal upgrade, so saved input and
+  output selections still resolve; cpal 0.18 also finds output devices 0.15
+  did not enumerate.
+
+### Fixed
+
+- **Switching networks clears the dial field.** A node number typed for
+  AllStar is not an M17 or D-Star target and never was, but it used to stay
+  in the box after the switch, looking like one. Picking a favorite, a recent
+  or a reflector still fills the field as before — those set the target and
+  the network together.
+
+- **Two security advisories** in the WireGuard transport's dependencies,
+  both inherited from boringtun 0.6: a timing-variability finding in
+  curve25519-dalek (RUSTSEC-2024-0344) and a panic in ring's AES with
+  overflow checks on (RUSTSEC-2025-0009). boringtun 0.7 clears both, and
+  the dependency audit is now clean.
+
+- **The docs site republishes on a changelog-only edit.** Its path filter
+  never matched `CHANGELOG.md` — the file the site renders is a symlink to
+  it — so a release that touched nothing else would not have rebuilt the
+  page announcing it.
 
 ## 0.1.9beta — 2026-08-29
 

@@ -154,7 +154,7 @@ dependencies = [
 
 [[package]]
 name = "astar-asl3"
-version = "0.1.9-beta"
+version = "0.1.10-beta"
 dependencies = [
  "tiny_http",
  "ureq",
@@ -162,7 +162,7 @@ dependencies = [
 
 [[package]]
 name = "astar-audio"
-version = "0.1.9-beta"
+version = "0.1.10-beta"
 dependencies = [
  "astar-audio",
  "astar-iax-core",
@@ -178,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "astar-cli"
-version = "0.1.9-beta"
+version = "0.1.10-beta"
 dependencies = [
  "astar-asl3",
  "astar-audio",
@@ -193,7 +193,7 @@ dependencies = [
 
 [[package]]
 name = "astar-codec"
-version = "0.1.9-beta"
+version = "0.1.10-beta"
 dependencies = [
  "ambe-thumbdv",
  "codec2",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "astar-conformance"
-version = "0.1.9-beta"
+version = "0.1.10-beta"
 dependencies = [
  "astar-iax-core",
  "pcap-parser",
@@ -215,7 +215,7 @@ dependencies = [
 
 [[package]]
 name = "astar-console"
-version = "0.1.9-beta"
+version = "0.1.10-beta"
 dependencies = [
  "astar-asl3",
  "astar-audio",
@@ -234,15 +234,15 @@ dependencies = [
 
 [[package]]
 name = "astar-dmr"
-version = "0.1.9-beta"
+version = "0.1.10-beta"
 
 [[package]]
 name = "astar-dstar"
-version = "0.1.9-beta"
+version = "0.1.10-beta"
 
 [[package]]
 name = "astar-gui"
-version = "0.1.9-beta"
+version = "0.1.10-beta"
 dependencies = [
  "astar-station",
  "directories",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "astar-iax"
-version = "0.1.9-beta"
+version = "0.1.10-beta"
 dependencies = [
  "astar-audio",
  "astar-codec",
@@ -275,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "astar-iax-core"
-version = "0.1.9-beta"
+version = "0.1.10-beta"
 dependencies = [
  "bitflags 2.13.1",
  "bytes",
@@ -291,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "astar-inspect"
-version = "0.1.9-beta"
+version = "0.1.10-beta"
 dependencies = [
  "astar-asl3",
  "astar-audio",
@@ -308,14 +308,14 @@ dependencies = [
 
 [[package]]
 name = "astar-m17"
-version = "0.1.9-beta"
+version = "0.1.10-beta"
 dependencies = [
  "rand 0.10.2",
 ]
 
 [[package]]
 name = "astar-ptt"
-version = "0.1.9-beta"
+version = "0.1.10-beta"
 dependencies = [
  "nusb",
  "serialport",
@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "astar-serial-sys"
-version = "0.1.9-beta"
+version = "0.1.10-beta"
 dependencies = [
  "astar-ptt",
  "futures-lite",
@@ -332,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "astar-server"
-version = "0.1.9-beta"
+version = "0.1.10-beta"
 dependencies = [
  "astar-audio",
  "astar-iax",
@@ -349,7 +349,7 @@ dependencies = [
 
 [[package]]
 name = "astar-station"
-version = "0.1.9-beta"
+version = "0.1.10-beta"
 dependencies = [
  "astar-asl3",
  "astar-audio",
@@ -364,7 +364,7 @@ dependencies = [
 
 [[package]]
 name = "astar-sys"
-version = "0.1.9-beta"
+version = "0.1.10-beta"
 dependencies = [
  "astar-audio",
  "astar-station",
@@ -374,7 +374,7 @@ dependencies = [
 
 [[package]]
 name = "astar-wireguard"
-version = "0.1.9-beta"
+version = "0.1.10-beta"
 dependencies = [
  "base64 0.23.1",
  "boringtun",
@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "astar-ysf"
-version = "0.1.9-beta"
+version = "0.1.10-beta"
 
 [[package]]
 name = "async-broadcast"
