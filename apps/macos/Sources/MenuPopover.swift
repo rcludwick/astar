@@ -64,6 +64,33 @@
         private var selectedNetwork: Network {
             Network.resolve(networkRaw, m17: session.m17Available, dstar: session.dstarAvailable)
         }
+
+        /// The network picker's binding, and the one place a network change
+        /// clears the dial field.
+        ///
+        /// The three networks do not share an address space: `45192` is an
+        /// AllStarLink node number and means nothing to M17 or D-Star, and a
+        /// reflector name means nothing to AllStar. Text left behind by a
+        /// hand-made switch is never a target on the network now selected —
+        /// it just sits there looking dialable, and `admitsDialCharacter`
+        /// won't remove it either, because that filter only runs on what is
+        /// typed, not on what a switch stranded.
+        ///
+        /// Scoped to the picker deliberately. Favorites, recents and the
+        /// reflector search pane also switch networks, but each sets the
+        /// matching dial text in the same breath — they assign `networkRaw`
+        /// directly, so they never come through here and never lose the
+        /// target they just filled in.
+        private var networkSelection: Binding<String> {
+            Binding(
+                get: { networkRaw },
+                set: { raw in
+                    guard raw != networkRaw else { return }
+                    networkRaw = raw
+                    node = ""
+                }
+            )
+        }
         /// Whether the "Quick settings" box is expanded (remembered across launches).
         @AppStorage("ui.quickSettingsExpanded") private var quickSettingsExpanded = false
         /// Global talk-timer default for nodes without a per-node override: the
@@ -549,7 +576,7 @@
                 // available — hidden entirely today so the dial form is
                 // pixel-identical to pre-9b3e.
                 if availableNetworks.count > 1 {
-                    Picker("Network", selection: $networkRaw) {
+                    Picker("Network", selection: networkSelection) {
                         ForEach(availableNetworks, id: \.rawValue) {
                             network in
                             Label(network.displayName, systemImage: network.symbol)
