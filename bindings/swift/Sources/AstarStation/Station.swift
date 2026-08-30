@@ -798,6 +798,18 @@ public final class Station {
         try check(iax_station_set_compression_level(handle, level))
     }
 
+    /// Set the neural mic noise-reduction strength (`0.0...1.0`, clamped):
+    /// `1.0` = full denoise (default), `0.0` = bypass. Takes effect
+    /// immediately.
+    ///
+    /// RNNoise has no strength parameter of its own, so this drives a
+    /// delay-compensated dry/wet mix. It has **no effect while the classical
+    /// hum-filter-plus-gate chain is running** — there is no wet path to mix
+    /// against. Read `Snapshot.denoiseChain` to see which is live.
+    public func setDenoiseStrength(_ level: Float) throws {
+        try check(iax_station_set_denoise_strength(handle, level))
+    }
+
     /// Set the TX trim gain (`0.0...2.0`, clamped; default `1.0` = unity): the
     /// always-on final TX gain stage after compression. Attenuates a hot mic
     /// that compression makeup gain would otherwise keep loud; values above

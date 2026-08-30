@@ -268,6 +268,9 @@ pub struct ConsoleSession {
     /// Compressor strength 0.0..=1.0 (f32 bits, default 0.90), persisted across
     /// reconnects and pushed to the router on connect / on change (iax-d9bb).
     compress_level: Arc<AtomicU32>,
+    /// Neural denoise strength (f32 bits, `0.0..=1.0`; `1.0` = full). Held
+    /// here so it survives across calls, like `compress_level`.
+    denoise_strength: Arc<AtomicU32>,
     /// TX trim 0.0..=2.0 (f32 bits, default 1.0 = unity): the always-on final
     /// TX gain stage after the compressor (iax-750a). Persisted across
     /// reconnects and pushed to the router on connect / on change.
@@ -399,6 +402,7 @@ impl ConsoleSession {
             denoise: Arc::new(AtomicBool::new(false)),
             compress: Arc::new(AtomicBool::new(false)),
             compress_level: Arc::new(AtomicU32::new(0.90_f32.to_bits())),
+            denoise_strength: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
             tx_trim: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
             rx_compress: Arc::new(AtomicBool::new(false)),
             rx_compress_level: Arc::new(AtomicU32::new(0.90_f32.to_bits())),
@@ -578,6 +582,23 @@ impl ConsoleSession {
         }
     }
 
+    /// Set the neural denoise strength (`0.0..=1.0`, clamped) on the
+    /// live/next call. `1.0` = full denoise, `0.0` = bypass.
+    ///
+    /// RNNoise has no strength parameter of its own, so this drives a
+    /// delay-compensated dry/wet mix inside the stage
+    /// (`docs/design/noise-suppression.md`). It does nothing while the
+    /// classical hum-filter-plus-gate chain is running: there is no wet
+    /// path to mix against.
+    pub fn set_denoise_strength(&self, level: f32) {
+        let level = level.clamp(0.0, 1.0);
+        self.denoise_strength
+            .store(level.to_bits(), Ordering::Relaxed);
+        if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
+            mgr.set_denoise_strength(id, level);
+        }
+    }
+
     /// Toggle RX/output compression on the next/current network call
     /// (iax-a4e7 PHASE 1): automatic leveling of the received audio, reusing
     /// the mic-path compressor on the output bus. Shared across networks
@@ -693,6 +714,7 @@ impl ConsoleSession {
         let denoise = self.denoise.load(Ordering::Relaxed);
         let compress = self.compress.load(Ordering::Relaxed);
         let compress_level = f32::from_bits(self.compress_level.load(Ordering::Relaxed));
+        let denoise_strength = f32::from_bits(self.denoise_strength.load(Ordering::Relaxed));
         let tx_trim = f32::from_bits(self.tx_trim.load(Ordering::Relaxed));
         let rx_compress = self.rx_compress.load(Ordering::Relaxed);
         let rx_compress_level = f32::from_bits(self.rx_compress_level.load(Ordering::Relaxed));
@@ -767,6 +789,7 @@ impl ConsoleSession {
         manager.set_denoise(id, denoise);
         manager.set_compress(id, compress);
         manager.set_compression_level(id, compress_level);
+        manager.set_denoise_strength(id, denoise_strength);
         manager.set_tx_trim(id, tx_trim);
         manager.set_output_compress(id, rx_compress);
         manager.set_output_compress_level(id, rx_compress_level);

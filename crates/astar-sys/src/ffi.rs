@@ -1317,6 +1317,31 @@ pub unsafe extern "C" fn iax_station_set_compression(st: *mut IaxStation, on: bo
     .unwrap_or(IAX_ERR_PANIC)
 }
 
+/// Set the neural mic noise-reduction strength (`level` clamped to
+/// `0.0..=1.0`): `1.0` = full denoise (default), `0.0` = bypass. Takes effect
+/// immediately.
+///
+/// RNNoise has no strength parameter of its own, so this drives a
+/// delay-compensated dry/wet mix. It has no effect while the classical
+/// hum-filter-plus-gate chain is running — read `IaxState::denoise_chain` to
+/// see which is live. Returns [`IAX_OK`], [`IAX_ERR_NULL`] (NULL `st`), or
+/// [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_set_denoise_strength(
+    st: *mut IaxStation,
+    level: c_float,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        station.inner.set_denoise_strength(level);
+        IAX_OK
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
 /// Set the mic voice-compression strength (`level` clamped to `0.0..=1.0`):
 /// `0.0` = light, `1.0` = most aggressive, default `0.90`. Takes effect
 /// immediately when compression is enabled. Returns [`IAX_OK`], [`IAX_ERR_NULL`]

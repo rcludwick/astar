@@ -81,6 +81,7 @@ public struct NullStation: StationDriving {
     public func setCompressionLevel(_ level: Float) throws {}
     public func setTxTrim(_ gain: Float) throws {}
     public func setNoiseReduction(_ on: Bool) throws {}
+    public func setDenoiseStrength(_ level: Float) throws {}
     public func setRxCompression(_ on: Bool) throws {}
     public func setRxCompressionLevel(_ level: Float) throws {}
     public func setSpectrumDecay(dbPerSecond: Float) throws {}

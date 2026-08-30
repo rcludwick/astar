@@ -102,6 +102,12 @@ public final class CallSession: ObservableObject {
     /// Compression strength (0…1) applied when `compression` is on. Default 0.90
     /// reproduces today's feel. Persisted via the audio store.
     @Published public private(set) var compressionLevel: Float = 0.90
+    /// Neural noise-reduction strength (0…1; `1.0` = full, `0.0` = bypass).
+    /// RNNoise has no strength parameter of its own, so this drives a
+    /// delay-compensated dry/wet mix in the engine — and it does nothing
+    /// while the classical filter+gate chain is running, which
+    /// `denoiseSummary` names.
+    @Published public private(set) var denoiseStrength: Float = 1.0
     /// TX trim (0…2, 1.0 = unity): the always-on final TX gain stage after
     /// compression.
     @Published public private(set) var txTrim: Float = 1.0
@@ -1397,6 +1403,14 @@ public final class CallSession: ObservableObject {
         compressionLevel = level
         try? station.setCompressionLevel(level)
         persistAudio { $0.compressionLevel = level }
+    }
+
+    /// Set the neural noise-reduction strength (0…1): publish, push to the
+    /// station, and persist (preserving the other audio prefs).
+    public func setDenoiseStrength(_ level: Float) {
+        denoiseStrength = level
+        try? station.setDenoiseStrength(level)
+        persistAudio { $0.denoiseStrength = level }
     }
 
     /// Set the TX trim gain (0…2, 1.0 = unity; the engine clamps): publish, push

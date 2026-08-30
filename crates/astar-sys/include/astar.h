@@ -937,6 +937,19 @@ int iax_station_set_rx_compression_level(IaxStation *st, float level);
 int iax_station_set_compression(IaxStation *st, bool on);
 
 /**
+ * Set the neural mic noise-reduction strength (`level` clamped to
+ * `0.0..=1.0`): `1.0` = full denoise (default), `0.0` = bypass. Takes effect
+ * immediately.
+ *
+ * RNNoise has no strength parameter of its own, so this drives a
+ * delay-compensated dry/wet mix. It has no effect while the classical
+ * hum-filter-plus-gate chain is running — read `IaxState::denoise_chain` to
+ * see which is live. Returns [`IAX_OK`], [`IAX_ERR_NULL`] (NULL `st`), or
+ * [`IAX_ERR_PANIC`].
+ */
+int iax_station_set_denoise_strength(IaxStation *st, float level);
+
+/**
  * Set the mic voice-compression strength (`level` clamped to `0.0..=1.0`):
  * `0.0` = light, `1.0` = most aggressive, default `0.90`. Takes effect
  * immediately when compression is enabled. Returns [`IAX_OK`], [`IAX_ERR_NULL`]

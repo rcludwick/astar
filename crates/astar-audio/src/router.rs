@@ -113,6 +113,8 @@ struct MicSlot {
     /// Which noise-reduction chain the lane is running, packed by
     /// `DenoiseStatus::to_bits` — the read-only capability line.
     denoise_status: Arc<AtomicU64>,
+    /// Neural denoise strength (f32 bits, `0.0..=1.0`; `1.0` = full).
+    denoise_strength: Arc<AtomicU32>,
     /// Active TX announcement injected ahead of the mic (iax-e30d).
     inject: InjectCell,
 }
@@ -160,6 +162,13 @@ impl InputSink for MeteredInput {
         self.peak
             .store(crate::peak(samples).min(1.0).to_bits(), Ordering::Relaxed);
         self.inner.write(samples, meter);
+    }
+
+    /// Forward the device-rate hook. A decorator that leaves this at its
+    /// default body silently swallows the stage for whatever it wraps, and
+    /// the symptom is "noise reduction does nothing" with nothing to see.
+    fn device_rate_stage(&mut self, samples: &mut Vec<f32>, device_rate: u32) {
+        self.inner.device_rate_stage(samples, device_rate);
     }
 }
 
@@ -560,6 +569,7 @@ impl AudioRouter {
         let mic_input_peak = lane.mic_input_peak();
         let preroll_ms = lane.preroll_ms_cell();
         let denoise_status = lane.denoise_status_cell();
+        let denoise_strength = lane.denoise_strength_cell();
         let overruns = Arc::new(AtomicU64::new(0));
         let handle =
             self.backend
@@ -583,6 +593,7 @@ impl AudioRouter {
                 preroll_ms,
                 overruns,
                 denoise_status,
+                denoise_strength,
                 inject,
             },
         );
@@ -635,6 +646,7 @@ impl AudioRouter {
                 // are pure observers with no DSP chain — so this cell stays
                 // at zero and reads back as `NotCapturing`. Nothing writes it.
                 denoise_status: Arc::new(AtomicU64::new(0)),
+                denoise_strength: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
                 inject: Arc::new(Mutex::new(None)),
             },
         );
@@ -706,6 +718,7 @@ impl AudioRouter {
                 // are pure observers with no DSP chain — so this cell stays
                 // at zero and reads back as `NotCapturing`. Nothing writes it.
                 denoise_status: Arc::new(AtomicU64::new(0)),
+                denoise_strength: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
                 inject: Arc::new(Mutex::new(None)),
             },
         );
@@ -765,6 +778,29 @@ impl AudioRouter {
                 .store(level.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
         }
     }
+    /// Set the neural denoise strength (0.0..=1.0, clamped) on an open mic
+    /// lane. `1.0` = full denoise, `0.0` = bypass. No-op if the mic isn't
+    /// open.
+    ///
+    /// RNNoise has no strength parameter of its own, so this drives a
+    /// delay-compensated dry/wet mix inside the stage — see
+    /// `docs/design/noise-suppression.md`. It has no effect while the
+    /// classical chain is running: there is no wet path to mix.
+    pub fn set_mic_denoise_strength(&self, mic: &MicId, level: f32) {
+        if let Some(s) = self.mics.get(mic) {
+            s.denoise_strength
+                .store(level.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// Current neural denoise strength on an open mic lane.
+    #[must_use]
+    pub fn mic_denoise_strength(&self, mic: &MicId) -> Option<f32> {
+        self.mics
+            .get(mic)
+            .map(|s| f32::from_bits(s.denoise_strength.load(Ordering::Relaxed)))
+    }
+
     /// Set the TX trim (0.0..=2.0, clamped; 1.0 = unity) on an open mic lane:
     /// the always-on final gain stage after the compressor (iax-750a). No-op if
     /// the mic isn't open.
@@ -1231,6 +1267,10 @@ pub struct MicLane {
     /// because the router hands the lane to `open_input` and only keeps
     /// cells — the same arrangement as `mic_input_peak`.
     denoise_status: Arc<AtomicU64>,
+    /// Neural denoise strength (f32 bits, `0.0..=1.0`). `1.0` = full,
+    /// `0.0` = bypass. RNNoise has no strength parameter of its own, so this
+    /// is a delay-compensated dry/wet mix inside the stage.
+    denoise_strength: Arc<AtomicU32>,
     /// Calibrated per-mic profile, swapped off-thread; the audio thread rebuilds
     /// `nr` from it when `profile_gen` advances past `seen_gen`.
     profile: Arc<Mutex<Option<MicProfile>>>,
@@ -1278,6 +1318,9 @@ impl MicLane {
         // Shared with the stage so the probability is readable without
         // reaching through the lane from another thread.
         let vad_cell = Arc::new(AtomicU32::new(0));
+        // Full strength by default: the checkbox means "clean up my mic",
+        // and someone who wants less says so.
+        let strength_cell = Arc::new(AtomicU32::new(1.0_f32.to_bits()));
         Self {
             dest,
             gate,
@@ -1297,11 +1340,12 @@ impl MicLane {
             tx_peak: Arc::new(AtomicU32::new(0)),
             tx_spectrum: Arc::new(Mutex::new(SpectrumAnalyzer::new(sample_rate))),
             mic_input_peak: Arc::new(AtomicU32::new(0)),
-            rnnoise: RnnoiseStage::new(Arc::clone(&vad_cell)),
+            rnnoise: RnnoiseStage::with_strength(Arc::clone(&vad_cell), Arc::clone(&strength_cell)),
             denoise_mode: DenoiseMode::from_env(),
             stage: DeviceRateState::default(),
             voice_probability: vad_cell,
             denoise_status: Arc::new(AtomicU64::new(0)),
+            denoise_strength: strength_cell,
             profile,
             profile_gen,
             seen_gen: 0,
@@ -1343,6 +1387,12 @@ impl MicLane {
     #[must_use]
     pub fn neural_active(&self) -> bool {
         self.stage.neural_active
+    }
+
+    /// Neural denoise strength cell (f32 bits, `0.0..=1.0`; control side).
+    #[must_use]
+    pub fn denoise_strength_cell(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.denoise_strength)
     }
 
     /// Shared capability cell, packed by `DenoiseStatus::to_bits`.

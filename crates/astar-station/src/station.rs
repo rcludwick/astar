@@ -1638,6 +1638,16 @@ impl Station {
         self.session.lock().unwrap().set_compression_level(level);
     }
 
+    /// Set the neural denoise strength (`0.0..=1.0`, clamped; default
+    /// `1.0` = full) on the live/next call. `0.0` is a bypass.
+    ///
+    /// RNNoise has no strength parameter, so this is a delay-compensated
+    /// dry/wet mix inside the stage. It does nothing while the classical
+    /// chain is running — see `docs/design/noise-suppression.md`.
+    pub fn set_denoise_strength(&self, level: f32) {
+        self.session.lock().unwrap().set_denoise_strength(level);
+    }
+
     /// Set the TX trim gain (`0.0..=2.0`, clamped; default `1.0` = unity) on
     /// the live/next call: the always-on FINAL TX gain stage, applied after the
     /// compressor so it attenuates a hot mic that compression makeup gain would

@@ -2008,6 +2008,16 @@ impl Manager {
         }
     }
 
+    /// Set the neural denoise strength (0.0..=1.0, clamped) on `call`'s
+    /// routed mic. `1.0` = full denoise, `0.0` = bypass. No-op if
+    /// unrouted/unknown, and no effect while the classical chain is running
+    /// — there is no wet path to mix.
+    pub fn set_denoise_strength(&self, call: CallId, level: f32) {
+        if let Some(mic) = self.calls.get(&call).and_then(|c| c.mic.as_ref()) {
+            self.router.set_mic_denoise_strength(mic, level);
+        }
+    }
+
     /// Toggle RX/output compression on `call`'s output bus (iax-a4e7 PHASE 1):
     /// automatic leveling of the received audio, reusing the mic-path
     /// compressor. No-op if the call is unknown.
