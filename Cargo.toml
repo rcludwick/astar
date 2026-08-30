@@ -56,13 +56,13 @@ missing_panics_doc = "allow"
 bitflags = "2"
 bytes = "1"
 codec2 = "0.3"
-cpal = "0.15"
-libloading = "0.8"
-md-5 = "0.10"
+cpal = "0.18"
+libloading = "0.9"
+md-5 = "0.11"
 mio = { version = "1", features = ["net", "os-poll"] }
 pcap-parser = "0.17"
-rand = "0.8"
-rubato = "0.16"
+rand = "0.10"
+rubato = "5.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smallvec = "1"
@@ -70,7 +70,7 @@ thiserror = "2"
 tracing = "0.1"
 zeroize = { version = "1", features = ["derive"] }
 boringtun = "0.7"
-base64 = "0.22"
+base64 = "0.23"
 
 [profile.release]
 lto = "thin"

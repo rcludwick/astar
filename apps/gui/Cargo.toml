@@ -22,7 +22,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 astar-station = { path = "../../crates/astar-station", version = "0.1.9-beta" }
 # Settings persistence (astar-de0a): TOML on disk under the platform config dir.
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1.1"
 directories = "6"
 
 # Tray backends (astar-22cf). Windows/macOS use `tray-icon` (native Shell/
