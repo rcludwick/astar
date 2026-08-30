@@ -105,6 +105,13 @@ This is specific to AMBE. **M17** uses Codec 2, which is free software, and
 **AllStarLink** uses G.711 — neither needs a dongle, and neither is affected by
 any of this.
 
+If you want the record rather than the folklore, the patent position is written
+up separately in **[The patent landscape](https://rcludwick.github.io/how-ambe-works/16-patents/)**
+— part of [How AMBE Works](https://rcludwick.github.io/how-ambe-works/), which
+walks through the codec itself from sinusoids to the D-Star frame. It sets out
+which patents cover what, which have expired, and which two are still in force.
+It is a summary of the public record, not legal advice, and says so.
+
 ### Where to get one
 
 | Dongle | |
