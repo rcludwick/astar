@@ -154,7 +154,7 @@ impl DenoiseMode {
     }
 }
 
-/// Which mic noise-reduction chain is actually live, and at what rate.
+/// Which mic noise-reduction chain is running, or would run, and at what rate.
 ///
 /// Read-only, reported rather than inferred. The 48 kHz guard is otherwise
 /// invisible: a device that could not offer 48 kHz silently gets the
@@ -162,6 +162,13 @@ impl DenoiseMode {
 /// else's has no way to find out why. astar installs no `tracing`
 /// subscriber, so a log line is not a substitute — this is the only place
 /// the answer surfaces.
+///
+/// It answers while idle too, because idle is when someone configures this.
+/// A status with [`Self::live`] clear is a PREDICTION from the current
+/// settings and the selected device's advertised rates, not a measurement of
+/// a running stream — and it says so, because a control surface that claims
+/// to observe something it only guessed is worse than one that admits the
+/// difference.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DenoiseStatus {
@@ -170,14 +177,24 @@ pub struct DenoiseStatus {
     pub device_rate: u32,
     /// The chain running on that stream.
     pub chain: DenoiseChain,
+    /// `true` when this was measured from a running capture stream; `false`
+    /// when it is a prediction of what the next one will do.
+    pub live: bool,
 }
 
 impl DenoiseStatus {
+    /// Bit position of [`Self::live`] in [`Self::to_bits`]. The rate needs 20
+    /// bits (768 kHz is the widest a host has offered here) and the chain 2,
+    /// so the word has room to spare.
+    const LIVE_BIT: u64 = 1 << 40;
+
     /// Pack into one `u64` so the lane can publish it with a single relaxed
-    /// store and a reader can never see a torn rate/chain pair.
+    /// store and a reader can never see a torn rate/chain/live triple.
     #[must_use]
     pub fn to_bits(self) -> u64 {
-        (u64::from(self.chain as u32) << 32) | u64::from(self.device_rate)
+        (u64::from(self.chain as u32) << 32)
+            | u64::from(self.device_rate)
+            | if self.live { Self::LIVE_BIT } else { 0 }
     }
 
     /// Unpack [`Self::to_bits`].
@@ -186,7 +203,34 @@ impl DenoiseStatus {
         Self {
             device_rate: (bits & 0xFFFF_FFFF) as u32,
             #[allow(clippy::cast_possible_truncation)]
-            chain: DenoiseChain::from_u32((bits >> 32) as u32),
+            chain: DenoiseChain::from_u32(((bits >> 32) & 0xFF) as u32),
+            live: bits & Self::LIVE_BIT != 0,
+        }
+    }
+
+    /// What the chain WOULD be, from the settings and a device rate, without
+    /// opening anything.
+    ///
+    /// The same three conditions `MicLane::device_rate_stage` applies, in the
+    /// same order — kept beside them deliberately, because a prediction that
+    /// disagrees with the thing it predicts is worse than no prediction.
+    /// `device_rate` is `0` when the device's rates could not be determined,
+    /// which yields [`DenoiseChain::NotCapturing`]: unknown, not a guess.
+    #[must_use]
+    pub fn predicted(denoise_on: bool, mode: DenoiseMode, device_rate: u32) -> Self {
+        let chain = if device_rate == 0 {
+            DenoiseChain::NotCapturing
+        } else if !denoise_on || !mode.allows_legacy() {
+            DenoiseChain::Off
+        } else if mode.allows_neural() && device_rate == RNNOISE_RATE {
+            DenoiseChain::Neural
+        } else {
+            DenoiseChain::FilterGate
+        };
+        Self {
+            device_rate,
+            chain,
+            live: false,
         }
     }
 
@@ -195,6 +239,9 @@ impl DenoiseStatus {
     ///
     /// The rate is named only when it explains something. On the neural line
     /// it confirms the guard passed; on the fallback line it is the reason.
+    ///
+    /// A predicted status ([`Self::live`] clear) is suffixed "when you key",
+    /// so the line never claims to have observed a stream that is not open.
     #[must_use]
     pub fn summary(&self) -> String {
         let khz = |r: u32| {
@@ -204,8 +251,8 @@ impl DenoiseStatus {
                 format!("{:.1} kHz", f64::from(r) / 1000.0)
             }
         };
-        match self.chain {
-            DenoiseChain::NotCapturing => "not capturing".to_string(),
+        let base = match self.chain {
+            DenoiseChain::NotCapturing => return "not capturing".to_string(),
             DenoiseChain::Off => "off".to_string(),
             DenoiseChain::Neural => format!("neural ({})", khz(self.device_rate)),
             DenoiseChain::FilterGate if self.device_rate == RNNOISE_RATE => {
@@ -214,6 +261,11 @@ impl DenoiseStatus {
             DenoiseChain::FilterGate => {
                 format!("filter + gate (device {})", khz(self.device_rate))
             }
+        };
+        if self.live {
+            base
+        } else {
+            format!("{base} when you key")
         }
     }
 }
@@ -697,7 +749,14 @@ mod tests {
 
     #[test]
     fn denoise_status_summary_names_the_rate_only_where_it_explains_something() {
-        let st = |chain, device_rate| DenoiseStatus { device_rate, chain }.summary();
+        let st = |chain, device_rate| {
+            DenoiseStatus {
+                device_rate,
+                chain,
+                live: true,
+            }
+            .summary()
+        };
         assert_eq!(st(DenoiseChain::Neural, 48_000), "neural (48 kHz)");
         // The fallback line at a non-48 rate: the rate IS the reason.
         assert_eq!(
@@ -711,6 +770,60 @@ mod tests {
         assert_eq!(st(DenoiseChain::NotCapturing, 0), "not capturing");
     }
 
+    /// A prediction must never read like a measurement. Same chain, same
+    /// rate, different claim.
+    #[test]
+    fn a_predicted_summary_says_it_has_not_happened_yet() {
+        let predicted = DenoiseStatus {
+            device_rate: 48_000,
+            chain: DenoiseChain::Neural,
+            live: false,
+        };
+        let live = DenoiseStatus {
+            live: true,
+            ..predicted
+        };
+        assert_eq!(live.summary(), "neural (48 kHz)");
+        assert_eq!(predicted.summary(), "neural (48 kHz) when you key");
+
+        // "not capturing" is already about the absence of a stream, so the
+        // suffix would be nonsense on top of it.
+        let nothing = DenoiseStatus::default();
+        assert!(!nothing.live);
+        assert_eq!(nothing.summary(), "not capturing");
+    }
+
+    /// The prediction agrees with what the lane actually does.
+    ///
+    /// These are the same three conditions `MicLane::device_rate_stage`
+    /// applies; a predictor that disagreed with the thing it predicts would
+    /// be worse than none.
+    #[test]
+    fn predicted_matches_the_conditions_the_lane_applies() {
+        use DenoiseChain as C;
+        let p = |on, mode, rate| DenoiseStatus::predicted(on, mode, rate).chain;
+
+        // Flag on, 48 kHz, mode permits: the network runs.
+        assert_eq!(p(true, DenoiseMode::Auto, 48_000), C::Neural);
+        assert_eq!(p(true, DenoiseMode::Neural, 48_000), C::Neural);
+
+        // The 48 kHz guard: the device cannot, so the classical chain does.
+        assert_eq!(p(true, DenoiseMode::Auto, 44_100), C::FilterGate);
+
+        // `legacy` declines the network at any rate.
+        assert_eq!(p(true, DenoiseMode::Legacy, 48_000), C::FilterGate);
+
+        // Flag off, or `off`, means nothing runs.
+        assert_eq!(p(false, DenoiseMode::Auto, 48_000), C::Off);
+        assert_eq!(p(true, DenoiseMode::Off, 48_000), C::Off);
+
+        // An unknown device rate is unknown, not a guess.
+        assert_eq!(p(true, DenoiseMode::Auto, 0), C::NotCapturing);
+
+        // And a prediction is never marked live.
+        assert!(!DenoiseStatus::predicted(true, DenoiseMode::Auto, 48_000).live);
+    }
+
     #[test]
     fn denoise_status_survives_the_round_trip_through_one_u64() {
         for chain in [
@@ -720,8 +833,14 @@ mod tests {
             DenoiseChain::FilterGate,
         ] {
             for device_rate in [0_u32, 8_000, 44_100, 48_000, 768_000] {
-                let st = DenoiseStatus { device_rate, chain };
-                assert_eq!(DenoiseStatus::from_bits(st.to_bits()), st);
+                for live in [false, true] {
+                    let st = DenoiseStatus {
+                        device_rate,
+                        chain,
+                        live,
+                    };
+                    assert_eq!(DenoiseStatus::from_bits(st.to_bits()), st);
+                }
             }
         }
     }

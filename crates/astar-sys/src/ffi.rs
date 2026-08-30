@@ -278,6 +278,14 @@ pub struct IaxState {
     /// run, below that it cannot and the classical chain is used instead. A
     /// plain sample rate, credential-free.
     pub denoise_device_rate: c_uint,
+    /// `true` when `denoise_chain` was MEASURED from a running capture
+    /// stream; `false` when it is a prediction of what the next one will do,
+    /// from the current settings and the selected device's advertised rates.
+    ///
+    /// The idle prediction is why a UI can show this before anything is
+    /// capturing, which is when it gets configured — but a prediction must
+    /// not be presented as an observation, so render it differently.
+    pub denoise_live: bool,
     /// Negotiated voice codec of the active call as its IAX2 format bit
     /// (iax-3e53): `0` = none (idle or still negotiating), `4` = G.711 µ-law,
     /// `8` = G.711 A-law, `64` = slin (8 kHz linear), `32768` = slin16
@@ -489,6 +497,7 @@ fn fill_state(s: &astar_station::ConsoleState) -> IaxState {
             astar_station::DenoiseChain::NotCapturing => IaxDenoiseChain::NotCapturing,
         },
         denoise_device_rate: s.denoise_status.device_rate,
+        denoise_live: s.denoise_status.live,
         negotiated_format: s.negotiated_format.map_or(0, VoiceFormat::as_u32),
         dtmf_played: s.dtmf_played,
         dtmf_total: s.dtmf_total,

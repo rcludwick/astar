@@ -37,6 +37,11 @@ public final class CallSession: ObservableObject {
     /// back to the classical chain, which without this line is
     /// indistinguishable from a bug.
     @Published public private(set) var denoiseSummary: String = ""
+    /// The live (or predicted) mic noise-reduction chain. UI branches on
+    /// this; `denoiseSummary` is for display only. The neural strength mix
+    /// exists only on `.neural`, because there is no wet path to mix against
+    /// on the classical chain.
+    @Published public private(set) var denoiseChain: DenoiseChain = .notCapturing
     /// Digits already sent of the active `sendDTMF(sequence:)` command
     /// (astar-7d21); `0` when no sequence is playing. The dialpad dims the
     /// played prefix from this.
@@ -639,6 +644,7 @@ public final class CallSession: ObservableObject {
             if denoiseSummary != snap.denoiseSummary {
                 denoiseSummary = snap.denoiseSummary
             }
+            if denoiseChain != snap.denoiseChain { denoiseChain = snap.denoiseChain }
             if dtmfPlayed != snap.dtmfPlayed { dtmfPlayed = snap.dtmfPlayed }
             if dtmfTotal != snap.dtmfTotal { dtmfTotal = snap.dtmfTotal }
             if m17Available != snap.m17Available { m17Available = snap.m17Available }

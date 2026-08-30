@@ -511,6 +511,16 @@ typedef struct {
    */
   unsigned int denoise_device_rate;
   /**
+   * `true` when `denoise_chain` was MEASURED from a running capture
+   * stream; `false` when it is a prediction of what the next one will do,
+   * from the current settings and the selected device's advertised rates.
+   *
+   * The idle prediction is why a UI can show this before anything is
+   * capturing, which is when it gets configured — but a prediction must
+   * not be presented as an observation, so render it differently.
+   */
+  bool denoise_live;
+  /**
    * Negotiated voice codec of the active call as its IAX2 format bit
    * (iax-3e53): `0` = none (idle or still negotiating), `4` = G.711 µ-law,
    * `8` = G.711 A-law, `64` = slin (8 kHz linear), `32768` = slin16

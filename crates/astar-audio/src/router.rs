@@ -1418,6 +1418,8 @@ impl MicLane {
         DenoiseStatus {
             device_rate: self.stage.device_rate,
             chain,
+            // Measured: this lane has a stream and just processed a callback.
+            live: true,
         }
     }
 

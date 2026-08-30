@@ -187,23 +187,35 @@ public struct Snapshot: Sendable, Equatable {
     /// is open. Pair it with `denoiseChain`: at 48000 the neural stage can
     /// run; below that it cannot, and `.filterGate` is why.
     public let denoiseDeviceRate: UInt32
-    /// A short line naming the live chain, and the rate where the rate is
-    /// the explanation — `"Neural (48 kHz)"`, `"Filter + gate (device
-    /// 44.1 kHz)"`, `"Off"`. Empty when nothing is capturing, so a caller
-    /// can hide the row rather than print "not capturing" at someone.
+    /// `true` when `denoiseChain` was measured from a running capture
+    /// stream; `false` when it is a prediction of what the next one will do.
+    /// A prediction is rendered differently — see `denoiseSummary`.
+    public let denoiseLive: Bool
+    /// A short line naming the chain, and the rate where the rate is the
+    /// explanation — `"Neural (48 kHz)"`, `"Filter + gate (device
+    /// 44.1 kHz)"`, `"Off"`. Empty when the chain cannot be determined at
+    /// all, so a caller can hide the row rather than print "not capturing"
+    /// at someone.
+    ///
+    /// A prediction (`denoiseLive == false`) is suffixed "when you key", so
+    /// the line never claims to have observed a stream that is not open.
+    /// This must stay in step with `DenoiseStatus::summary()` on the Rust
+    /// side, which words it the same way.
     public var denoiseSummary: String {
         let kHz: (UInt32) -> String = { r in
             r % 1000 == 0
                 ? "\(r / 1000) kHz"
                 : String(format: "%.1f kHz", Double(r) / 1000.0)
         }
+        let base: String
         switch denoiseChain {
         case .notCapturing: return ""
-        case .off: return "Off"
-        case .neural: return "Neural (\(kHz(denoiseDeviceRate)))"
-        case .filterGate where denoiseDeviceRate == 48000: return "Filter + gate"
-        case .filterGate: return "Filter + gate (device \(kHz(denoiseDeviceRate)))"
+        case .off: base = "Off"
+        case .neural: base = "Neural (\(kHz(denoiseDeviceRate)))"
+        case .filterGate where denoiseDeviceRate == 48000: base = "Filter + gate"
+        case .filterGate: base = "Filter + gate (device \(kHz(denoiseDeviceRate)))"
         }
+        return denoiseLive ? base : "\(base) when you key"
     }
     /// Negotiated voice codec of the active call, or `nil` while idle or still
     /// negotiating (iax-3e53). Shows `.slin16` when wideband is live. A plain
@@ -1462,6 +1474,7 @@ public final class Station {
             txCaptureOverruns: out.tx_capture_overruns,
             denoiseChain: DenoiseChain(rawValue: out.denoise_chain.rawValue) ?? .notCapturing,
             denoiseDeviceRate: out.denoise_device_rate,
+            denoiseLive: out.denoise_live,
             // 0 (none) and any unknown bit both land as nil.
             negotiatedFormat: VoiceFormat(rawValue: out.negotiated_format),
             dtmfPlayed: Int(out.dtmf_played),

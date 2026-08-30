@@ -592,9 +592,14 @@
             m17Context ? session.m17Overrides.noiseReduction : session.noiseReduction
         }
 
-        /// Whether the NEURAL chain is the one actually running. The strength
-        /// mix exists only there.
-        private var neuralIsLive: Bool { session.denoiseSummary.hasPrefix("Neural") }
+        /// Whether the NEURAL chain is the one running, or the one that will
+        /// run on the next key. The strength mix exists only there.
+        ///
+        /// Branches on the enum that crosses the ABI, not on the summary's
+        /// wording — the wording is display text and changes (it gained a
+        /// "when you key" suffix for predictions), and a UI gate that breaks
+        /// when a caption is reworded is a trap.
+        private var neuralIsLive: Bool { session.denoiseChain == .neural }
 
         /// Strength is engine-wide rather than per-network: there is one mic
         /// lane, and the M17 override chooses whether it denoises, not how

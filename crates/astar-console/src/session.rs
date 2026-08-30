@@ -543,6 +543,14 @@ impl ConsoleSession {
     }
 
     /// Toggle capture noise-reduction on the next/current network call.
+    /// Whether mic noise reduction is switched on for the live/next call.
+    /// Read by the idle capability prediction, which has to answer before a
+    /// lane exists to ask.
+    #[must_use]
+    pub fn denoise(&self) -> bool {
+        self.denoise.load(Ordering::Relaxed)
+    }
+
     pub fn set_denoise(&self, on: bool) {
         self.denoise.store(on, Ordering::Relaxed);
         if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
