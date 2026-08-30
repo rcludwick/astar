@@ -50,7 +50,8 @@ pub use astar_asl3::{Asl3Error, PortalCredentials};
 // Policy types referenced by `NodeConfig::policy`, so a consumer can tune
 // inbound auth without depending on `astar-iax` directly.
 pub use astar_audio::{
-    CharacterizeOpts, CpalBackend, DeviceInfo, MicProfile, NotchSpec, SPECTRUM_BINS,
+    CharacterizeOpts, CpalBackend, DenoiseChain, DenoiseStatus, DeviceInfo, MicProfile, NotchSpec,
+    SPECTRUM_BINS,
 };
 pub use astar_console::{
     CallStatus, ConsoleConfig, ConsoleSession, ConsoleState, OperatingMode, VoiceFormat,

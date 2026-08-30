@@ -223,6 +223,36 @@ typedef enum {
 } IaxStatus;
 
 /**
+ * Which mic noise-reduction chain is live. Mirrors
+ * `astar_audio::DenoiseChain` (`docs/design/noise-suppression.md`).
+ *
+ * Read-only. It exists because the 48 kHz guard is otherwise invisible: a
+ * capture device that cannot offer 48 kHz silently gets the classical
+ * chain, and that is indistinguishable from a bug without being told.
+ * Discriminants are stable and mirrored on the Rust and Swift sides; add
+ * variants at the end.
+ */
+typedef enum {
+  /**
+   * No mic lane is open, so no chain is running.
+   */
+  IaxDenoiseChain_NotCapturing = 0,
+  /**
+   * Capturing, but noise reduction is switched off.
+   */
+  IaxDenoiseChain_Off = 1,
+  /**
+   * Neural (RNNoise) at device rate, hum filter after it, no gate.
+   */
+  IaxDenoiseChain_Neural = 2,
+  /**
+   * The classical hum filter + noise gate. Either the device could not
+   * give 48 kHz, or `ASTAR_MIC_DENOISE=legacy` asked for it.
+   */
+  IaxDenoiseChain_FilterGate = 3,
+} IaxDenoiseChain;
+
+/**
  * The kind of a drained lifecycle event (see [`iax_station_next_event`]).
  */
 typedef enum {
@@ -468,6 +498,18 @@ typedef struct {
    * counter, credential-free.
    */
   uint64_t tx_capture_overruns;
+  /**
+   * Which mic noise-reduction chain is live (`IaxDenoiseChain`). A plain
+   * enum, credential-free.
+   */
+  IaxDenoiseChain denoise_chain;
+  /**
+   * The rate the capture stream opened at, in Hz, or `0` when no mic lane
+   * is open. Pair it with `denoise_chain`: at 48000 the neural stage can
+   * run, below that it cannot and the classical chain is used instead. A
+   * plain sample rate, credential-free.
+   */
+  unsigned int denoise_device_rate;
   /**
    * Negotiated voice codec of the active call as its IAX2 format bit
    * (iax-3e53): `0` = none (idle or still negotiating), `4` = G.711 µ-law,
@@ -893,6 +935,19 @@ int iax_station_set_rx_compression_level(IaxStation *st, float level);
  * `st`), or [`IAX_ERR_PANIC`].
  */
 int iax_station_set_compression(IaxStation *st, bool on);
+
+/**
+ * Set the neural mic noise-reduction strength (`level` clamped to
+ * `0.0..=1.0`): `1.0` = full denoise (default), `0.0` = bypass. Takes effect
+ * immediately.
+ *
+ * RNNoise has no strength parameter of its own, so this drives a
+ * delay-compensated dry/wet mix. It has no effect while the classical
+ * hum-filter-plus-gate chain is running — read `IaxState::denoise_chain` to
+ * see which is live. Returns [`IAX_OK`], [`IAX_ERR_NULL`] (NULL `st`), or
+ * [`IAX_ERR_PANIC`].
+ */
+int iax_station_set_denoise_strength(IaxStation *st, float level);
 
 /**
  * Set the mic voice-compression strength (`level` clamped to `0.0..=1.0`):

@@ -1597,6 +1597,56 @@ mod tests {
         }
     }
 
+    /// Every `InputSink` DECORATOR must forward `device_rate_stage`.
+    ///
+    /// The default body does nothing, which is what makes the hook additive
+    /// for leaf sinks — and a trap for wrappers: a decorator that inherits
+    /// it silently swallows the stage for whatever it wraps, and the symptom
+    /// is a noise-reduction toggle that does nothing, with nothing to see.
+    /// Both wrappers in the tree (`MeteredInput` here, `MeteringSink` in
+    /// astar-console) forward it; this pins the contract for the next one.
+    #[test]
+    fn an_input_sink_decorator_must_forward_the_device_rate_hook() {
+        #[derive(Default)]
+        struct Leaf(Arc<Mutex<u32>>);
+        impl InputSink for Leaf {
+            fn write(&mut self, _samples: &[f32], _meter: f32) {}
+            fn device_rate_stage(&mut self, _samples: &mut Vec<f32>, device_rate: u32) {
+                *self.0.lock().unwrap() = device_rate;
+            }
+        }
+        /// Shaped exactly like `MeteredInput` / `MeteringSink`.
+        struct Decorator(Box<dyn InputSink>);
+        impl InputSink for Decorator {
+            fn write(&mut self, samples: &[f32], meter: f32) {
+                self.0.write(samples, meter);
+            }
+            fn device_rate_stage(&mut self, samples: &mut Vec<f32>, device_rate: u32) {
+                self.0.device_rate_stage(samples, device_rate);
+            }
+        }
+
+        let leaf = Leaf::default();
+        let seen = Arc::clone(&leaf.0);
+        let mut sink: Box<dyn InputSink> = Box::new(Decorator(Box::new(leaf)));
+        let (mut mono, mut resampled) = (Vec::new(), Vec::new());
+        process_input(
+            &[0.1_f32; 64],
+            1,
+            1,
+            48_000,
+            None,
+            &mut mono,
+            &mut resampled,
+            sink.as_mut(),
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            48_000,
+            "the hook did not reach the wrapped sink — the decorator swallowed it"
+        );
+    }
+
     /// A sink that leaves `device_rate_stage` at its default body still
     /// works, and the audio reaching `write` is unchanged. This is what
     /// keeps the twenty-odd existing `InputSink` doubles compiling.

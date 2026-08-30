@@ -16,6 +16,7 @@ extension Station: StationDriving {
             status: s.status, ptt: s.ptt, remotePTT: s.remotePTT,
             txDB: s.txDB, rxDB: s.rxDB, inputDB: s.inputDB, rttMS: s.rttMS,
             negotiatedFormat: s.negotiatedFormat,
+            denoiseSummary: s.denoiseSummary,
             dtmfPlayed: s.dtmfPlayed, dtmfTotal: s.dtmfTotal,
             m17Available: s.m17Available, m17Active: s.m17Active,
             dstarAvailable: s.dstarAvailable, dstarActive: s.dstarActive
@@ -80,6 +81,7 @@ public struct NullStation: StationDriving {
     public func setCompressionLevel(_ level: Float) throws {}
     public func setTxTrim(_ gain: Float) throws {}
     public func setNoiseReduction(_ on: Bool) throws {}
+    public func setDenoiseStrength(_ level: Float) throws {}
     public func setRxCompression(_ on: Bool) throws {}
     public func setRxCompressionLevel(_ level: Float) throws {}
     public func setSpectrumDecay(dbPerSecond: Float) throws {}

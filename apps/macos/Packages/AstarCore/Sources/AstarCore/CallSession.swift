@@ -27,6 +27,16 @@ public final class CallSession: ObservableObject {
     /// negotiating (astar-eb6c). The status card names it via `badge` whenever
     /// set — green-tinted when `.slin16` (wideband) is live (astar-ef35).
     @Published public private(set) var negotiatedFormat: VoiceFormat?
+    /// Which mic noise-reduction chain is actually running, as a short line
+    /// — `"Neural (48 kHz)"`, `"Filter + gate (device 44.1 kHz)"`, `"Off"`.
+    /// Empty when no mic lane is open, so the UI hides the row rather than
+    /// telling someone "not capturing".
+    ///
+    /// Read-only, and reported rather than inferred. The neural stage needs
+    /// a 48 kHz capture device; one that cannot offer 48 kHz silently falls
+    /// back to the classical chain, which without this line is
+    /// indistinguishable from a bug.
+    @Published public private(set) var denoiseSummary: String = ""
     /// Digits already sent of the active `sendDTMF(sequence:)` command
     /// (astar-7d21); `0` when no sequence is playing. The dialpad dims the
     /// played prefix from this.
@@ -92,6 +102,12 @@ public final class CallSession: ObservableObject {
     /// Compression strength (0…1) applied when `compression` is on. Default 0.90
     /// reproduces today's feel. Persisted via the audio store.
     @Published public private(set) var compressionLevel: Float = 0.90
+    /// Neural noise-reduction strength (0…1; `1.0` = full, `0.0` = bypass).
+    /// RNNoise has no strength parameter of its own, so this drives a
+    /// delay-compensated dry/wet mix in the engine — and it does nothing
+    /// while the classical filter+gate chain is running, which
+    /// `denoiseSummary` names.
+    @Published public private(set) var denoiseStrength: Float = 1.0
     /// TX trim (0…2, 1.0 = unity): the always-on final TX gain stage after
     /// compression.
     @Published public private(set) var txTrim: Float = 1.0
@@ -619,6 +635,9 @@ public final class CallSession: ObservableObject {
             if remotePTT != snap.remotePTT { remotePTT = snap.remotePTT }
             if negotiatedFormat != snap.negotiatedFormat {
                 negotiatedFormat = snap.negotiatedFormat
+            }
+            if denoiseSummary != snap.denoiseSummary {
+                denoiseSummary = snap.denoiseSummary
             }
             if dtmfPlayed != snap.dtmfPlayed { dtmfPlayed = snap.dtmfPlayed }
             if dtmfTotal != snap.dtmfTotal { dtmfTotal = snap.dtmfTotal }
@@ -1384,6 +1403,14 @@ public final class CallSession: ObservableObject {
         compressionLevel = level
         try? station.setCompressionLevel(level)
         persistAudio { $0.compressionLevel = level }
+    }
+
+    /// Set the neural noise-reduction strength (0…1): publish, push to the
+    /// station, and persist (preserving the other audio prefs).
+    public func setDenoiseStrength(_ level: Float) {
+        denoiseStrength = level
+        try? station.setDenoiseStrength(level)
+        persistAudio { $0.denoiseStrength = level }
     }
 
     /// Set the TX trim gain (0…2, 1.0 = unity; the engine clamps): publish, push

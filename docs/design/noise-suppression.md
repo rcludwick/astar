@@ -256,14 +256,27 @@ That builds the planner, allocates the caches, and discards the documented
 fade-in frame in one step. It happens once per stream open, before the operator
 has keyed anything.
 
-**Latency: +10 ms on TX, worst case.** Up to 479 samples are held; the average
-is about 5 ms and the maximum just under 10 ms. It applies to TX only — RX is
-untouched — and it does not delay PTT keying, only the audio behind it.
+**Latency: up to ~20 ms on TX, ~15 ms typical.** *(Corrected 2026-08-29; this
+section originally said 10 ms worst case, counting only the accumulator.)*
 
-**Is that acceptable?** Yes, and the reason is not "10 ms is small", which is an
-argument that can be made about anything. It is that the TX path already
-quantises to 20 ms voice frames (`VOICE_FRAME_MS`), so an added delay under one
-frame time is within the granularity the path already has; there is no sidetone
+There are two costs, not one. The accumulator holds up to 479 samples, so 0 to
+just under 10 ms. On top of that **the network itself adds exactly one frame**:
+`process_frame` returns the *previous* frame's completed overlap-add, so output
+sample *j* carries input sample *j*−480. Measured against an aperiodic chirp,
+correlation is 0.9364 at a lag of exactly −480 samples and 0.0118 at lag 0.
+
+So the total is up to about 20 ms, averaging around 15. It applies to TX only —
+RX is untouched — and it does not delay PTT keying, only the audio behind it.
+
+Measure this with an **aperiodic** probe. A harmonic test signal is periodic, so
+a correlation search cannot resolve a lag beyond one period; two attempts here
+returned confident wrong answers (−238 and −478 samples) before the chirp
+settled it.
+
+**Is that acceptable?** Yes, though the corrected figure makes the argument
+tighter than it was. The TX path already quantises to 20 ms voice frames
+(`VOICE_FRAME_MS`), so the added delay is about one frame time rather than
+comfortably under it; there is no sidetone
 through the mic lane, so the operator never hears their own voice through this
 delay; and half-duplex PTT over a network leg already carries well over 100 ms
 end to end. The one genuinely affected thing is the pre-roll ring (`iax-2733`),
@@ -384,6 +397,32 @@ peak-driven VOX?" can be answered from real recordings instead of argued. If the
 answer is yes, that is its own change, with its own control and its own
 migration for the saved threshold. It is not something to slip in under a
 checkbox labelled "Noise reduction".
+
+## Strength
+
+RNNoise has **no strength parameter**. It emits per-band gains from a trained
+model; there is no knob inside it. The control is a dry/wet mix,
+`(1-s)·dry + s·wet`, which limits the maximum attenuation — which is the useful
+thing, because over-suppression dulling speech is the failure mode to dial back
+from, and it is the same shape as the compressor's existing strength slider.
+
+**The mix must be delay-compensated, and this is the trap.** The wet path lags
+the dry by exactly one frame (see "The frame accumulator"), so mixing them
+as-is combines two essentially uncorrelated signals — correlation 0.0118 at
+lag 0 against 0.9364 at −480. That is a 10 ms slapback with severe comb
+filtering, not a strength control. The stage therefore runs the dry path
+through a one-frame delay line before mixing: 480 floats, and no added latency,
+because the wet path already pays those 10 ms.
+
+The test that pins it is `strength_zero_returns_the_input_unchanged`: at `s = 0`
+the output must equal the input sample for sample, which is only true when the
+compensation is exactly right. Note that the withheld fade-in frame and the
+one-frame lag cancel, so bypass output starts at input sample 0.
+
+A caveat for whoever evaluates this: on synthetic xorshift white noise RNNoise
+only takes about 0.9 dB off (1.4 dB over four seconds). It is trained on
+real-world noise and a uniform PRNG is not that, so **synthetic signals are not
+a proxy for how much this helps**. That has to come from real recordings.
 
 ## Control surface
 

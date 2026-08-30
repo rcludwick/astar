@@ -139,6 +139,8 @@ final class FakeStation: StationDriving {
     func setCompressionLevel(_ level: Float) throws { compressionLevelCalls.append(level) }
     func setTxTrim(_ gain: Float) throws { txTrimCalls.append(gain) }
     func setNoiseReduction(_ on: Bool) throws { noiseReductionCalls.append(on) }
+    var denoiseStrengthCalls: [Float] = []
+    func setDenoiseStrength(_ level: Float) throws { denoiseStrengthCalls.append(level) }
     func setRxCompression(_ on: Bool) throws { rxCompressionCalls.append(on) }
     func setRxCompressionLevel(_ level: Float) throws { rxCompressionLevelCalls.append(level) }
     func monitorStart(input: String?) throws { monitorStartCount += 1 }
@@ -225,6 +227,7 @@ private struct ThrowingStation: StationDriving {
     func setCompressionLevel(_ level: Float) throws { throw Boom() }
     func setTxTrim(_ gain: Float) throws { throw Boom() }
     func setNoiseReduction(_ on: Bool) throws { throw Boom() }
+    func setDenoiseStrength(_ level: Float) throws { throw Boom() }
     func setRxCompression(_ on: Bool) throws { throw Boom() }
     func setRxCompressionLevel(_ level: Float) throws { throw Boom() }
     func monitorStart(input: String?) throws { throw Boom() }

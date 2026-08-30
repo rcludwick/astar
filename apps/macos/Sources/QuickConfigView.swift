@@ -105,7 +105,51 @@
                     micProfileRow
                         .padding(.bottom, 8)
                     switchRow("Noise reduction", isOn: noiseReductionBinding)
+                        .padding(.bottom, denoiseSummary.isEmpty ? 4 : 0)
+                    // Strength, only where it does something. RNNoise has no
+                    // strength parameter of its own, so this is a
+                    // delay-compensated dry/wet mix — and there is no wet
+                    // path to mix against on the classical chain, so the
+                    // slider would be inert there. Showing an inert control
+                    // is worse than showing none.
+                    if noiseReductionOn && neuralIsLive {
+                        HStack(spacing: 8) {
+                            sublabel("Strength")
+                            Slider(value: denoiseStrengthBinding, in: 0...1)
+                                .tint(.blue)
+                                .accessibilityLabel("Noise reduction strength")
+                                .accessibilityValue(
+                                    AccessibilityValueFormatter.percent(
+                                        Double(session.denoiseStrength)))
+                            Text("\(Int((session.denoiseStrength * 100).rounded()))%")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .frame(width: 40, alignment: .trailing)
+                        }
                         .padding(.bottom, 4)
+                    }
+                    // Which chain is actually running. Shown only while a mic
+                    // lane is open, because until then there is nothing to
+                    // report and a permanent "not capturing" would be noise.
+                    //
+                    // It earns its place: the neural stage needs a 48 kHz
+                    // capture device, and one that cannot offer 48 kHz falls
+                    // back to the classical chain silently. Without this, a
+                    // mic that sounds unlike everyone else's is
+                    // indistinguishable from a bug — and astar installs no
+                    // log subscriber, so there is nowhere else to look.
+                    if !denoiseSummary.isEmpty {
+                        HStack(spacing: 4) {
+                            Text(denoiseSummary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.bottom, 4)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("Noise reduction in use")
+                        .accessibilityValue(denoiseSummary)
+                    }
                     switchRow("Voice compression", isOn: compressionBinding)
                     if compressionOn {
                         HStack(spacing: 8) {
@@ -535,6 +579,30 @@
                         inputGain = newValue
                     }
                 })
+        }
+
+        /// The live chain, or empty while nothing is capturing. The M17
+        /// pane shows the same engine-wide fact: there is one mic lane, and
+        /// the per-network override chooses whether it denoises, not how.
+        private var denoiseSummary: String { session.denoiseSummary }
+
+        /// Whether noise reduction is switched on for whichever profile is
+        /// bound.
+        private var noiseReductionOn: Bool {
+            m17Context ? session.m17Overrides.noiseReduction : session.noiseReduction
+        }
+
+        /// Whether the NEURAL chain is the one actually running. The strength
+        /// mix exists only there.
+        private var neuralIsLive: Bool { session.denoiseSummary.hasPrefix("Neural") }
+
+        /// Strength is engine-wide rather than per-network: there is one mic
+        /// lane, and the M17 override chooses whether it denoises, not how
+        /// hard.
+        private var denoiseStrengthBinding: Binding<Double> {
+            Binding(
+                get: { Double(session.denoiseStrength) },
+                set: { session.setDenoiseStrength(Float($0)) })
         }
 
         private var noiseReductionBinding: Binding<Bool> {

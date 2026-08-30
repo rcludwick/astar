@@ -19,6 +19,26 @@
 //! wants f32 in *i16* range. Getting that wrong in one direction is a silent
 //! 90 dB error, so both conversions live here and are pinned by a test.
 //!
+//! **Strength.** RNNoise has no strength parameter — it emits per-band
+//! gains from a trained model and there is no knob inside it. The control
+//! is a dry/wet mix, `(1-s)·dry + s·wet`, which limits the maximum
+//! attenuation and is how over-suppression gets dialled back.
+//!
+//! That mix must be delay-compensated, and this is the part that is easy to
+//! get wrong. **The wet path lags the dry by exactly one frame.**
+//! `process_frame` returns the *previous* frame's completed overlap-add, so
+//! output sample j carries input sample j-480. Measured against an
+//! aperiodic chirp: correlation 0.9364 at a lag of exactly -480 samples,
+//! against 0.0118 at lag 0. Mixing without compensating would combine two
+//! essentially uncorrelated signals — a 10 ms slapback with severe comb
+//! filtering, not a strength control. So the dry path runs through a
+//! one-frame delay line before the mix. It costs 480 floats and no extra
+//! latency, because the wet path already pays those 10 ms.
+//!
+//! (Use an aperiodic probe if you ever re-measure this. A harmonic test
+//! signal is periodic, so correlation cannot resolve a lag beyond one
+//! period, and it will return a confident wrong answer.)
+//!
 //! **Warm-up, and what it does not do.** Two separate first-call problems
 //! get conflated easily, and only one of them a silence frame solves.
 //!
@@ -134,6 +154,106 @@ impl DenoiseMode {
     }
 }
 
+/// Which mic noise-reduction chain is actually live, and at what rate.
+///
+/// Read-only, reported rather than inferred. The 48 kHz guard is otherwise
+/// invisible: a device that could not offer 48 kHz silently gets the
+/// classical chain, and an operator whose mic sounds different from everyone
+/// else's has no way to find out why. astar installs no `tracing`
+/// subscriber, so a log line is not a substitute — this is the only place
+/// the answer surfaces.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DenoiseStatus {
+    /// The rate the capture stream opened at, or `0` when nothing is
+    /// capturing (or when the sink is driven without a capture callback).
+    pub device_rate: u32,
+    /// The chain running on that stream.
+    pub chain: DenoiseChain,
+}
+
+impl DenoiseStatus {
+    /// Pack into one `u64` so the lane can publish it with a single relaxed
+    /// store and a reader can never see a torn rate/chain pair.
+    #[must_use]
+    pub fn to_bits(self) -> u64 {
+        (u64::from(self.chain as u32) << 32) | u64::from(self.device_rate)
+    }
+
+    /// Unpack [`Self::to_bits`].
+    #[must_use]
+    pub fn from_bits(bits: u64) -> Self {
+        Self {
+            device_rate: (bits & 0xFFFF_FFFF) as u32,
+            #[allow(clippy::cast_possible_truncation)]
+            chain: DenoiseChain::from_u32((bits >> 32) as u32),
+        }
+    }
+
+    /// A short line for a UI: `"neural (48 kHz)"`,
+    /// `"filter + gate (device 44.1 kHz)"`, `"off"`.
+    ///
+    /// The rate is named only when it explains something. On the neural line
+    /// it confirms the guard passed; on the fallback line it is the reason.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let khz = |r: u32| {
+            if r.is_multiple_of(1000) {
+                format!("{} kHz", r / 1000)
+            } else {
+                format!("{:.1} kHz", f64::from(r) / 1000.0)
+            }
+        };
+        match self.chain {
+            DenoiseChain::NotCapturing => "not capturing".to_string(),
+            DenoiseChain::Off => "off".to_string(),
+            DenoiseChain::Neural => format!("neural ({})", khz(self.device_rate)),
+            DenoiseChain::FilterGate if self.device_rate == RNNOISE_RATE => {
+                "filter + gate".to_string()
+            }
+            DenoiseChain::FilterGate => {
+                format!("filter + gate (device {})", khz(self.device_rate))
+            }
+        }
+    }
+}
+
+/// The mic noise-reduction chain in effect.
+///
+/// The discriminants are explicit and load-bearing: they cross the C ABI as
+/// integers and are mirrored by `IaxDenoiseChain` and the Swift enum, so
+/// they are part of the published interface. Add variants at the end.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u32)]
+pub enum DenoiseChain {
+    /// No capture stream is open, so no chain is running.
+    #[default]
+    NotCapturing = 0,
+    /// Capturing, but noise reduction is switched off.
+    Off = 1,
+    /// RNNoise at device rate, with the hum filter after it and no gate.
+    Neural = 2,
+    /// The classical `HumFilter` + `NoiseGate`. Either the device could not
+    /// give us 48 kHz, or `ASTAR_MIC_DENOISE=legacy` asked for it.
+    FilterGate = 3,
+}
+
+impl DenoiseChain {
+    /// Recover a chain from its discriminant; anything unknown reads as
+    /// [`Self::NotCapturing`], which is the honest answer to "a value this
+    /// build does not understand".
+    #[must_use]
+    pub fn from_u32(v: u32) -> Self {
+        match v {
+            1 => Self::Off,
+            2 => Self::Neural,
+            3 => Self::FilterGate,
+            _ => Self::NotCapturing,
+        }
+    }
+}
+
 /// RNNoise in a push/replace shell, sized for the cpal capture callback.
 pub struct RnnoiseStage {
     state: Box<DenoiseState<'static>>,
@@ -153,6 +273,10 @@ pub struct RnnoiseStage {
     /// The first real output frame is the fade-in artefact; drop it. Costs
     /// 10 ms of audio, once, at stream open.
     drop_next_output: bool,
+    /// Strength, `0.0..=1.0`, f32 bits. `1.0` = full denoise; `0.0` = bypass.
+    strength: Arc<AtomicU32>,
+    /// One frame of dry signal, held so the mix lines up with the wet path.
+    dry_delay: Box<[f32; RNNOISE_FRAME]>,
 }
 
 impl RnnoiseStage {
@@ -160,6 +284,13 @@ impl RnnoiseStage {
     /// `DenoiseState::new()` allocates, and so does the reserve.
     #[must_use]
     pub fn new(vad: Arc<AtomicU32>) -> Self {
+        Self::with_strength(vad, Arc::new(AtomicU32::new(1.0_f32.to_bits())))
+    }
+
+    /// As [`Self::new`], with a caller-owned strength cell so the control
+    /// side can move it live.
+    #[must_use]
+    pub fn with_strength(vad: Arc<AtomicU32>, strength: Arc<AtomicU32>) -> Self {
         let mut pending = Vec::new();
         let mut out = Vec::new();
         // One host buffer plus a frame of slack, so neither grows in steady
@@ -175,7 +306,15 @@ impl RnnoiseStage {
             vad,
             needs_warmup: true,
             drop_next_output: true,
+            strength,
+            dry_delay: Box::new([0.0; RNNOISE_FRAME]),
         }
+    }
+
+    /// Strength cell (f32 bits, `0.0..=1.0`) for the control side.
+    #[must_use]
+    pub fn strength_cell(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.strength)
     }
 
     /// The latest voice-activity probability in `0.0..=1.0`.
@@ -214,15 +353,44 @@ impl RnnoiseStage {
                 .state
                 .process_frame(&mut self.frame_out, &self.frame_in);
             self.vad.store(p.to_bits(), Ordering::Relaxed);
+            // Swap this frame's dry samples into the delay line, taking out
+            // the previous frame's — which is the one the wet output now
+            // carries. Done before the drop check so the line stays in step
+            // whether or not the frame is delivered.
+            let mut dry = [0.0_f32; RNNOISE_FRAME];
+            dry.copy_from_slice(&self.dry_delay[..]);
+            self.dry_delay.copy_from_slice(src);
+
             if self.drop_next_output {
                 // The fade-in frame. Everything else about it — the VAD
-                // store above, the network's advanced state — is kept; only
-                // the samples are withheld.
+                // store above, the network's advanced state, the delay line
+                // — is kept; only the samples are withheld.
                 self.drop_next_output = false;
                 continue;
             }
-            self.out
-                .extend(self.frame_out.iter().map(|&s| s / I16_SCALE));
+
+            // `clamp` propagates NaN, so a non-finite cell would poison the
+            // mix. Fall back to full strength: a corrupt value must not
+            // silently turn noise reduction off.
+            let raw = f32::from_bits(self.strength.load(Ordering::Relaxed));
+            let s = if raw.is_finite() {
+                raw.clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            if s >= 1.0 {
+                self.out
+                    .extend(self.frame_out.iter().map(|&v| v / I16_SCALE));
+            } else {
+                // `dry` is already time-aligned with `frame_out`: both carry
+                // the frame before this one.
+                self.out.extend(
+                    self.frame_out
+                        .iter()
+                        .zip(dry.iter())
+                        .map(|(&wet, &d)| s * (wet / I16_SCALE) + (1.0 - s) * d),
+                );
+            }
         }
         self.pending.drain(..frames * RNNOISE_FRAME);
 
@@ -525,5 +693,155 @@ mod tests {
         assert!(DenoiseMode::Legacy.allows_legacy());
         assert!(!DenoiseMode::Off.allows_neural(), "off means off");
         assert!(!DenoiseMode::Off.allows_legacy(), "off means off");
+    }
+
+    #[test]
+    fn denoise_status_summary_names_the_rate_only_where_it_explains_something() {
+        let st = |chain, device_rate| DenoiseStatus { device_rate, chain }.summary();
+        assert_eq!(st(DenoiseChain::Neural, 48_000), "neural (48 kHz)");
+        // The fallback line at a non-48 rate: the rate IS the reason.
+        assert_eq!(
+            st(DenoiseChain::FilterGate, 44_100),
+            "filter + gate (device 44.1 kHz)"
+        );
+        // The fallback at 48 kHz means the mode asked for it, not the guard —
+        // naming the rate there would suggest a fault that isn't there.
+        assert_eq!(st(DenoiseChain::FilterGate, 48_000), "filter + gate");
+        assert_eq!(st(DenoiseChain::Off, 48_000), "off");
+        assert_eq!(st(DenoiseChain::NotCapturing, 0), "not capturing");
+    }
+
+    #[test]
+    fn denoise_status_survives_the_round_trip_through_one_u64() {
+        for chain in [
+            DenoiseChain::NotCapturing,
+            DenoiseChain::Off,
+            DenoiseChain::Neural,
+            DenoiseChain::FilterGate,
+        ] {
+            for device_rate in [0_u32, 8_000, 44_100, 48_000, 768_000] {
+                let st = DenoiseStatus { device_rate, chain };
+                assert_eq!(DenoiseStatus::from_bits(st.to_bits()), st);
+            }
+        }
+    }
+
+    /// The discriminants cross the C ABI, so they are pinned here rather
+    /// than left to declaration order.
+    #[test]
+    fn denoise_chain_discriminants_are_stable() {
+        assert_eq!(DenoiseChain::NotCapturing as u32, 0);
+        assert_eq!(DenoiseChain::Off as u32, 1);
+        assert_eq!(DenoiseChain::Neural as u32, 2);
+        assert_eq!(DenoiseChain::FilterGate as u32, 3);
+        // A value from a newer build reads as "unknown", not as a wrong chain.
+        assert_eq!(DenoiseChain::from_u32(99), DenoiseChain::NotCapturing);
+    }
+
+    /// Strength 0 is a true bypass: the samples come back as they went in,
+    /// which is only possible if the dry path is delay-compensated. Without
+    /// the delay line this returns the previous frame and the assertion
+    /// fails by a whole frame.
+    #[test]
+    fn strength_zero_returns_the_input_unchanged() {
+        let strength = Arc::new(AtomicU32::new(0.0_f32.to_bits()));
+        let mut st = RnnoiseStage::with_strength(Arc::new(AtomicU32::new(0)), strength);
+
+        let input = tone(RNNOISE_FRAME * 6, 0.4);
+        let mut got = Vec::new();
+        for c in input.chunks(RNNOISE_FRAME) {
+            let mut b = c.to_vec();
+            st.process(&mut b);
+            got.extend_from_slice(&b);
+        }
+        // The withheld frame and the wet path's one-frame lag cancel: the
+        // frame that gets dropped is precisely the one whose dry partner was
+        // still the empty delay line, so delivered output starts at input
+        // sample 0.
+        let skip = 0;
+        assert!(
+            got.len() >= RNNOISE_FRAME * 3,
+            "not enough output: {}",
+            got.len()
+        );
+        for (k, (&g, &want)) in got
+            .iter()
+            .zip(&input[skip..])
+            .enumerate()
+            .take(RNNOISE_FRAME * 3)
+        {
+            assert!(
+                (g - want).abs() < 1e-6,
+                "sample {k}: bypass returned {g}, input was {want} — the dry path is not \
+                 delay-compensated"
+            );
+        }
+    }
+
+    /// Strength scales between bypass and full denoise rather than jumping.
+    ///
+    /// This tests the MIX, not the network. Note the modest threshold: on
+    /// synthetic xorshift white noise RNNoise only takes about 0.9 dB off
+    /// (1.4 dB over four seconds) — it is trained on real-world noise and a
+    /// uniform PRNG is not that. Real suppression has to be judged on real
+    /// recordings, which is what the design's evaluation is for. What is
+    /// asserted here is that the wet path differs from the dry and that
+    /// strength moves smoothly between them.
+    #[test]
+    fn strength_interpolates_monotonically_between_bypass_and_full() {
+        // Deterministic broadband hiss — the thing a denoiser attenuates.
+        let mut seed = 0x1234_5678_9abc_def0_u64;
+        let noise: Vec<f32> = (0..RNNOISE_FRAME * 20)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                ((seed >> 40) as f32 / 8_388_608.0 - 1.0) * 0.2
+            })
+            .collect();
+
+        let rms_at = |s: f32| -> f32 {
+            let strength = Arc::new(AtomicU32::new(s.to_bits()));
+            let mut st = RnnoiseStage::with_strength(Arc::new(AtomicU32::new(0)), strength);
+            let mut out = Vec::new();
+            for c in noise.chunks(RNNOISE_FRAME) {
+                let mut b = c.to_vec();
+                st.process(&mut b);
+                out.extend_from_slice(&b);
+            }
+            // Skip the settling frames.
+            let tail = &out[RNNOISE_FRAME * 4..];
+            (tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt()
+        };
+
+        let levels: Vec<f32> = [0.0, 0.25, 0.5, 0.75, 1.0]
+            .iter()
+            .map(|&s| rms_at(s))
+            .collect();
+        assert!(
+            levels[4] < levels[0] * 0.97,
+            "the wet path must differ from the dry (measured ~0.9 dB on this signal): {levels:?}"
+        );
+        for w in levels.windows(2) {
+            assert!(
+                w[1] <= w[0] + 1e-4,
+                "level must not rise as strength rises: {levels:?}"
+            );
+        }
+    }
+
+    /// Out-of-range strengths are clamped, not trusted.
+    #[test]
+    fn strength_is_clamped() {
+        for raw in [-3.0_f32, 7.0, f32::NAN] {
+            let strength = Arc::new(AtomicU32::new(raw.to_bits()));
+            let mut st = RnnoiseStage::with_strength(Arc::new(AtomicU32::new(0)), strength);
+            let mut b = tone(RNNOISE_FRAME * 3, 0.4);
+            st.process(&mut b);
+            assert!(
+                b.iter().all(|v| v.is_finite() && v.abs() <= 1.5),
+                "strength {raw} produced out-of-range output"
+            );
+        }
     }
 }

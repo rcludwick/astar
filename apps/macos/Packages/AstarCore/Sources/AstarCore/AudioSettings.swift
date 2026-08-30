@@ -22,6 +22,10 @@ public struct AudioSettings: Equatable {
     /// Compression strength (0…1), passed to the engine when `compression` is on.
     /// Default 0.90 reproduces today's feel (the old mic-gain proxy).
     public var compressionLevel: Float
+    /// Neural noise-reduction strength (0…1; `1.0` = full, `0.0` = bypass).
+    /// Adding a field does NOT bump `ConfigVersion`: an older reader ignores
+    /// it, a newer one treats it as unset and gets the default.
+    public var denoiseStrength: Float
     /// TX trim (0…2, linear): the always-on final TX gain stage after
     /// compression. Attenuates a hot mic that compression makeup gain would
     /// otherwise keep loud; above 1.0 boosts (engine clamps at full scale).
@@ -70,6 +74,7 @@ public struct AudioSettings: Equatable {
         input: String? = nil, output: String? = nil,
         inputGain: Float = 0.90, outputGain: Float = 1.0,
         compression: Bool = false, compressionLevel: Float = 0.90,
+        denoiseStrength: Float = 1.0,
         txTrim: Float = 1.0,
         noiseReduction: Bool = false,
         rxCompression: Bool = false, rxCompressionLevel: Float = 0.90,
@@ -83,6 +88,7 @@ public struct AudioSettings: Equatable {
         self.outputGain = outputGain
         self.compression = compression
         self.compressionLevel = compressionLevel
+        self.denoiseStrength = denoiseStrength
         self.txTrim = txTrim
         self.noiseReduction = noiseReduction
         self.rxCompression = rxCompression
@@ -111,6 +117,7 @@ public final class UserDefaultsAudioSettingsStore: AudioSettingsStore {
         static let outputGain = "audio.outputGain"
         static let compression = "audio.compression"
         static let compressionLevel = "audio.compressionLevel"
+        static let denoiseStrength = "audio.denoiseStrength"
         static let txTrim = "audio.txTrim"
         static let noiseReduction = "audio.noiseReduction"
         static let rxCompression = "audio.rxCompression"
@@ -142,6 +149,8 @@ public final class UserDefaultsAudioSettingsStore: AudioSettingsStore {
             compression: defaults.bool(forKey: Key.compression),
             compressionLevel: defaults.object(forKey: Key.compressionLevel) != nil
                 ? defaults.float(forKey: Key.compressionLevel) : 0.90,
+            denoiseStrength: defaults.object(forKey: Key.denoiseStrength) != nil
+                ? defaults.float(forKey: Key.denoiseStrength) : 1.0,
             txTrim: defaults.object(forKey: Key.txTrim) != nil
                 ? defaults.float(forKey: Key.txTrim) : 1.0,
             noiseReduction: defaults.bool(forKey: Key.noiseReduction),
@@ -166,6 +175,7 @@ public final class UserDefaultsAudioSettingsStore: AudioSettingsStore {
         defaults.set(settings.outputGain, forKey: Key.outputGain)
         defaults.set(settings.compression, forKey: Key.compression)
         defaults.set(settings.compressionLevel, forKey: Key.compressionLevel)
+        defaults.set(settings.denoiseStrength, forKey: Key.denoiseStrength)
         defaults.set(settings.txTrim, forKey: Key.txTrim)
         defaults.set(settings.noiseReduction, forKey: Key.noiseReduction)
         defaults.set(settings.rxCompression, forKey: Key.rxCompression)
