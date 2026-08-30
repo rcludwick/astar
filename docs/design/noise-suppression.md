@@ -207,6 +207,21 @@ The honest gap: the claim "most 44.1 kHz-default devices also support 48 kHz" is
 an expectation, not a measurement. Milestone 2 below settles it by logging
 `supported_input_configs()` for every device on the machines we have.
 
+**First measurement (2026-08-29, Rob's Mac mini, `cargo run -p astar-audio
+--example capture_rates`).** Five input devices, **all five already default to
+48 kHz**: two USB radio interfaces (`USB Audio Device`, `KT USB Audio`) and
+three virtual devices (BlackHole and two aggregate devices). Nothing was
+rescued and nothing was stuck, so on this machine the preference is a no-op.
+
+That is a weak result, and it should be read as one. It does *not* confirm that
+44.1-default devices can be rescued — no such device was present to rescue. What
+it does establish is the thing that actually matters for the design: the
+hardware astar targets is 48 kHz native, so the guard's fallback path is the
+rare case rather than the common one. `USB Audio Device` advertises
+`[(44100, 44100), (48000, 48000)]` and picks 48 kHz itself, which is at least
+consistent with the expectation. The question stays open until a 44.1-default
+device is actually seen.
+
 ## The frame accumulator
 
 cpal delivers whatever buffer size the host feels like — 64, 128, 512, 1024
@@ -616,11 +631,15 @@ Each one is independently testable and each one leaves the tree shippable.
 
 ## Open questions
 
-* **Does the 48 kHz preference actually rescue 44.1 kHz devices?** Unknown until
-  milestone 2 logs `supported_input_configs()` on real hardware. If it turns out
-  a meaningful share of devices are 44.1-only, the rejected double-resample
-  comes back onto the table and this section needs rewriting rather than
-  patching.
+* **Does the 48 kHz preference actually rescue 44.1 kHz devices?** Still open,
+  and now open for a specific reason: the first measurement (see "The 48 kHz
+  guard") found five devices on Rob's Mac and all five already default to
+  48 kHz, so the preference had nothing to rescue and the fallback path went
+  unexercised. `crates/astar-audio/examples/capture_rates.rs` exists to be run
+  on any other machine — a Windows box, a Pi, a laptop's built-in mic — and it
+  prints the verdict per device. If a meaningful share turn out to be 44.1-only,
+  the rejected double-resample comes back onto the table and that section needs
+  rewriting rather than patching.
 * **Does RNNoise leave the characterized whine alone?** The argument for keeping
   the hum filter assumes it does. It is testable directly in milestone 6 — run a
   recording of the whining mic through the network with the notches disabled and

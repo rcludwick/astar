@@ -399,6 +399,59 @@ impl CpalBackend {
     }
 }
 
+/// The capture rate to ask a device for when it offers a choice
+/// (`docs/design/noise-suppression.md`).
+///
+/// 48 kHz is what any 48 kHz-trained device-rate stage requires — RNNoise's
+/// 480-sample frame *is* 10 ms only at this rate, its band table is in Hz
+/// and its pitch periods are in samples, so it is not resamplable. It is
+/// also the better decimation on its own: 48 → 8 kHz is a clean 6:1 where
+/// 44.1 → 8 kHz is 5.5125:1.
+pub const PREFERRED_CAPTURE_RATE: u32 = 48_000;
+
+/// Pick the capture rate: `want` if any advertised range covers it, else
+/// `fallback` (the device's own default).
+///
+/// `ranges` is `(min, max)` per advertised format, already narrowed to those
+/// matching the default config's channel count and sample format — asking
+/// for 48 kHz is not worth silently changing either of those, because the
+/// callback's downmix and its `SampleFormat` match arm are built from them.
+///
+/// A device that cannot offer 48 kHz is not an error. It keeps its default
+/// rate and the 48 kHz-only stage declines to run; see
+/// [`CaptureCapability`].
+fn choose_capture_rate(ranges: &[(u32, u32)], want: u32, fallback: u32) -> u32 {
+    if ranges.iter().any(|&(lo, hi)| (lo..=hi).contains(&want)) {
+        want
+    } else {
+        fallback
+    }
+}
+
+/// What the capture path can offer a device-rate DSP stage, as opened.
+///
+/// Read-only, and reported rather than inferred: without it the 48 kHz
+/// guard is invisible, and a mic that sounds different from everyone
+/// else's is indistinguishable from a bug.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureCapability {
+    /// The rate the stream was actually opened at.
+    pub device_rate: u32,
+    /// Whether that rate can drive a 48 kHz-only stage.
+    pub full_band: bool,
+}
+
+impl CaptureCapability {
+    /// Classify an opened stream's rate.
+    #[must_use]
+    pub fn at(device_rate: u32) -> Self {
+        Self {
+            device_rate,
+            full_band: device_rate == PREFERRED_CAPTURE_RATE,
+        }
+    }
+}
+
 /// A device's human-readable name, or a placeholder when the host won't say.
 ///
 /// cpal 0.18 dropped `Device::name()` for `description()`, which returns a
@@ -476,9 +529,33 @@ impl AudioBackend for CpalBackend {
         let supported = dev
             .default_input_config()
             .map_err(|e| AudioError::BuildStream(e.to_string()))?;
-        let device_rate = supported.sample_rate();
         let device_channels = supported.channels();
         let sample_format = supported.sample_format();
+
+        // Prefer 48 kHz over whatever the device calls its default: many
+        // devices default to 44.1 and support 48 anyway, and the choice is
+        // free — one enumeration at open, nothing per callback. Only ranges
+        // that keep the default's channel count and sample format count,
+        // since the callback is built around both.
+        let ranges: Vec<(u32, u32)> = dev
+            .supported_input_configs()
+            .map(|it| {
+                it.filter(|r| r.channels() == device_channels && r.sample_format() == sample_format)
+                    .map(|r| (r.min_sample_rate(), r.max_sample_rate()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let device_rate =
+            choose_capture_rate(&ranges, PREFERRED_CAPTURE_RATE, supported.sample_rate());
+        let capability = CaptureCapability::at(device_rate);
+        if !capability.full_band {
+            tracing::info!(
+                target: "astar_audio",
+                device = %device.name,
+                device_rate,
+                "capture device does not offer 48 kHz; full-band stages will not run"
+            );
+        }
 
         let target_rate = config.sample_rate;
         let target_channels = config.channels;
@@ -1460,6 +1537,64 @@ mod tests {
             written > 0 && written < frames / 2,
             "write must see the decimated stream (got {written} for {frames} device frames)"
         );
+    }
+
+    /// The 48 kHz preference (milestone 2 of
+    /// `docs/design/noise-suppression.md`), across the three device classes
+    /// that matter. Pure over advertised ranges, so it needs no hardware.
+    #[test]
+    fn capture_rate_prefers_48k_when_the_device_offers_it() {
+        // 48-only: already there, nothing to choose.
+        assert_eq!(
+            choose_capture_rate(&[(48_000, 48_000)], 48_000, 48_000),
+            48_000
+        );
+
+        // 44.1 default but 48 also advertised as a discrete range — the case
+        // the preference exists for.
+        assert_eq!(
+            choose_capture_rate(&[(44_100, 44_100), (48_000, 48_000)], 48_000, 44_100),
+            48_000,
+            "must take 48 kHz over the device's 44.1 default"
+        );
+
+        // A continuous range spanning 48 kHz counts too; ALSA advertises
+        // capture formats this way rather than as discrete points.
+        assert_eq!(
+            choose_capture_rate(&[(8_000, 96_000)], 48_000, 44_100),
+            48_000,
+            "a range covering 48 kHz offers 48 kHz"
+        );
+
+        // 44.1-only: keep the default, do not invent a rate the device
+        // cannot produce.
+        assert_eq!(
+            choose_capture_rate(&[(44_100, 44_100)], 48_000, 44_100),
+            44_100,
+            "a 44.1-only device keeps 44.1"
+        );
+
+        // A host that reports nothing is the same case: fall back, silently
+        // and correctly, rather than treating an empty list as permission.
+        assert_eq!(choose_capture_rate(&[], 48_000, 44_100), 44_100);
+    }
+
+    /// The capability line is derived from the rate actually opened, not
+    /// from what was asked for.
+    #[test]
+    fn capture_capability_reports_full_band_only_at_48k() {
+        let ok = CaptureCapability::at(48_000);
+        assert!(ok.full_band);
+        assert_eq!(ok.device_rate, 48_000);
+
+        for rate in [8_000, 16_000, 44_100, 96_000] {
+            let cap = CaptureCapability::at(rate);
+            assert!(
+                !cap.full_band,
+                "{rate} Hz is not full band for a 48 kHz stage"
+            );
+            assert_eq!(cap.device_rate, rate);
+        }
     }
 
     /// A sink that leaves `device_rate_stage` at its default body still

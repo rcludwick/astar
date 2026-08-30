@@ -77,4 +77,7 @@ pub use resample::{AntiAliasResampler, Resampler1, resample_offline};
 pub use router::{AudioRouter, CallAudio, MicId, OutputId};
 pub use signal_report::{Grade, SignalReport, analyze_signal, render_report, signal_report_text};
 pub use spectrum::{SPECTRUM_BINS, SpectrumAnalyzer};
-pub use stream::{AudioBackend, CpalBackend, InputSink, OutputSource, StreamConfig, StreamHandle};
+pub use stream::{
+    AudioBackend, CaptureCapability, CpalBackend, InputSink, OutputSource, PREFERRED_CAPTURE_RATE,
+    StreamConfig, StreamHandle,
+};
