@@ -185,7 +185,9 @@ network available. **M17** needs nothing installed and dials reflectors as
 `host[:port]/module`. It transmits your callsign, so set it before you key;
 AllStarLink identifies by node number instead.
 
-D-Star is implemented in the engine but is not in this client yet.
+**D-Star** needs a hardware vocoder dongle — its voice codec has no software
+implementation in astar — so it appears in the network picker only while one is
+attached. See [Digital voice](hardware.md#digital-voice).
 
 **Bluetooth and AirPods.** They work — they appear in the Mic and Speaker menus
 like any other device. Two caveats. First, the moment macOS starts using a

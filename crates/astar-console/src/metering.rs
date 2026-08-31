@@ -271,6 +271,15 @@ impl InputSink for MeteringSink {
         self.level.set(new_meter);
         self.inner.write(&self.buf, new_meter);
     }
+
+    /// Forward the device-rate hook (`docs/design/noise-suppression.md`).
+    /// Without this the neural stage never reaches the sink underneath —
+    /// the parrot, the DTMF decoder — because the default body does
+    /// nothing, and the symptom is a noise-reduction toggle that has no
+    /// effect and nothing to see.
+    fn device_rate_stage(&mut self, samples: &mut Vec<f32>, device_rate: u32) {
+        self.inner.device_rate_stage(samples, device_rate);
+    }
 }
 
 struct MeteringSource {

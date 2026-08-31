@@ -42,7 +42,7 @@ use astar_iax_core::session::fsm::{
 use astar_iax_core::session::reliability::{Reliability, ReliabilityConfig, RxOutcome};
 use astar_iax_core::subclass::{FrameType, IaxCommand};
 use mio::{Events, Poll, Token, Waker};
-use rand::RngCore;
+use rand::TryRng;
 
 use crate::call::{Call, CallEvent, CallId, CallSnapshotMode, STATE_ACTIVE, STATE_HUNGUP};
 use crate::error::IaxError;
@@ -1537,11 +1537,18 @@ fn spawn_leg(
     }
     let auto_answer = lowered.auto_answer;
 
-    // OsRng entropy at the runtime boundary (the FSM never calls OsRng).
+    // System entropy at the runtime boundary (the FSM never draws entropy).
+    // `SysRng` is fallible in rand 0.10 where `OsRng` was not; an OS that
+    // cannot produce entropy must not be papered over with a weak challenge,
+    // so this keeps the old panic rather than degrading the auth material.
     let mut token = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut token);
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut token)
+        .expect("system entropy");
     let mut chal = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut chal);
+    rand::rngs::SysRng
+        .try_fill_bytes(&mut chal)
+        .expect("system entropy");
     let mut challenge_hex = String::with_capacity(32);
     for b in chal {
         use std::fmt::Write as _;

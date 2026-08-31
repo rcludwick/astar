@@ -56,7 +56,7 @@ you are looking at.
 |---|---|
 | **AllStarLink (IAX2)** | The primary target. Dials nodes; speaks the `app_rpt` link-layer dialect on top of IAX2. |
 | **M17** | Native support, including reflectors. Transmits your callsign, so set it before you key. The app links Codec 2 in, so there is nothing to install; a system `libcodec2` is used in preference when one is present — see [Codec 2](../build/prerequisites.md#codec-2-only-for-m17). |
-| **D-Star** *(engine only)* | Implemented in the Rust engine — XLX/XRF reflectors over DExtra, AMBE+2 on a ThumbDV or DV3000 dongle — but **not exposed in this client yet**. See [Vocoder dongles](hardware.md#vocoder-dongles). |
+| **D-Star** *(needs a dongle)* | XLX/XRF reflectors over DExtra. Voice is AMBE+2, which runs on a **hardware vocoder dongle** — there is no software alternative, so the network appears in the picker only while one is attached. See [Digital voice](hardware.md#digital-voice). |
 
 ## Audio and PTT hardware
 

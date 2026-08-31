@@ -223,6 +223,36 @@ typedef enum {
 } IaxStatus;
 
 /**
+ * Which mic noise-reduction chain is live. Mirrors
+ * `astar_audio::DenoiseChain` (`docs/design/noise-suppression.md`).
+ *
+ * Read-only. It exists because the 48 kHz guard is otherwise invisible: a
+ * capture device that cannot offer 48 kHz silently gets the classical
+ * chain, and that is indistinguishable from a bug without being told.
+ * Discriminants are stable and mirrored on the Rust and Swift sides; add
+ * variants at the end.
+ */
+typedef enum {
+  /**
+   * No mic lane is open, so no chain is running.
+   */
+  IaxDenoiseChain_NotCapturing = 0,
+  /**
+   * Capturing, but noise reduction is switched off.
+   */
+  IaxDenoiseChain_Off = 1,
+  /**
+   * Neural (RNNoise) at device rate, hum filter after it, no gate.
+   */
+  IaxDenoiseChain_Neural = 2,
+  /**
+   * The classical hum filter + noise gate. Either the device could not
+   * give 48 kHz, or `ASTAR_MIC_DENOISE=legacy` asked for it.
+   */
+  IaxDenoiseChain_FilterGate = 3,
+} IaxDenoiseChain;
+
+/**
  * The kind of a drained lifecycle event (see [`iax_station_next_event`]).
  */
 typedef enum {
@@ -468,6 +498,28 @@ typedef struct {
    * counter, credential-free.
    */
   uint64_t tx_capture_overruns;
+  /**
+   * Which mic noise-reduction chain is live (`IaxDenoiseChain`). A plain
+   * enum, credential-free.
+   */
+  IaxDenoiseChain denoise_chain;
+  /**
+   * The rate the capture stream opened at, in Hz, or `0` when no mic lane
+   * is open. Pair it with `denoise_chain`: at 48000 the neural stage can
+   * run, below that it cannot and the classical chain is used instead. A
+   * plain sample rate, credential-free.
+   */
+  unsigned int denoise_device_rate;
+  /**
+   * `true` when `denoise_chain` was MEASURED from a running capture
+   * stream; `false` when it is a prediction of what the next one will do,
+   * from the current settings and the selected device's advertised rates.
+   *
+   * The idle prediction is why a UI can show this before anything is
+   * capturing, which is when it gets configured — but a prediction must
+   * not be presented as an observation, so render it differently.
+   */
+  bool denoise_live;
   /**
    * Negotiated voice codec of the active call as its IAX2 format bit
    * (iax-3e53): `0` = none (idle or still negotiating), `4` = G.711 µ-law,
@@ -895,6 +947,19 @@ int iax_station_set_rx_compression_level(IaxStation *st, float level);
 int iax_station_set_compression(IaxStation *st, bool on);
 
 /**
+ * Set the neural mic noise-reduction strength (`level` clamped to
+ * `0.0..=1.0`): `1.0` = full denoise (default), `0.0` = bypass. Takes effect
+ * immediately.
+ *
+ * RNNoise has no strength parameter of its own, so this drives a
+ * delay-compensated dry/wet mix. It has no effect while the classical
+ * hum-filter-plus-gate chain is running — read `IaxState::denoise_chain` to
+ * see which is live. Returns [`IAX_OK`], [`IAX_ERR_NULL`] (NULL `st`), or
+ * [`IAX_ERR_PANIC`].
+ */
+int iax_station_set_denoise_strength(IaxStation *st, float level);
+
+/**
  * Set the mic voice-compression strength (`level` clamped to `0.0..=1.0`):
  * `0.0` = light, `1.0` = most aggressive, default `0.90`. Takes effect
  * immediately when compression is enabled. Returns [`IAX_OK`], [`IAX_ERR_NULL`]
@@ -1140,6 +1205,27 @@ int iax_station_link_next_event(IaxStation *st, IaxLinkEvent *out);
  * the caller buffer; same contract as [`iax_station_incoming_from`]).
  */
 int iax_station_link_event_node(IaxStation *st, char *buf, uintptr_t len);
+
+/**
+ * Detail text of the most recent failed call on this station (NUL-terminated
+ * into the caller buffer; same query-then-fill contract as
+ * [`iax_station_list_inputs`] — pass `len == 0` to learn the required size).
+ *
+ * `IAX_ERR_*` codes are coarse on purpose: [`IAX_ERR_AUDIO`] alone covers a
+ * device that vanished, a config the device will not accept, and a cpal
+ * stream that failed to build. The code says which family failed; this says
+ * what happened — "device not found: KT USB Audio", "stream build failed:
+ * The requested device is no longer available", and so on.
+ *
+ * Empty when no call has failed yet. It is not cleared on success, so read
+ * it immediately after a negative return rather than treating it as current
+ * state.
+ *
+ * Secret-free: it is `StationError`'s own `Display`, which renders portal
+ * and resolve failures as generic text with no underlying source precisely
+ * so a credential embedded in one can never reach a caller.
+ */
+int iax_station_last_error(IaxStation *st, char *buf, uintptr_t len);
 
 /**
  * Route the whole engine — outgoing dials, the inbound listener, and outbound

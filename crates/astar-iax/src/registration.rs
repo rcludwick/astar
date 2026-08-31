@@ -345,8 +345,7 @@ fn run_loop(
             }
         });
         for kind in fired {
-            use rand::Rng;
-            let salt: u32 = rand::thread_rng().r#gen();
+            let salt: u32 = rand::random();
             let actions = fsm.handle(RegEvent::Timer {
                 kind,
                 now,

@@ -141,6 +141,42 @@ Surface audio/PTT config layered: sensible defaults and common controls up
 front, advanced device/serial tuning under progressive disclosure. Don't hide
 capability the station offers.
 
+## Versions — SemVer, since `0.1.10-beta`
+
+**Decided 2026-08-29 (Rob), and done in `0.1.10-beta`: every version string is
+real SemVer.** That includes the Rust crates. Releases up to and including
+`0.1.9beta` are NOT retrofitted — they are shipped, tagged and published, and
+rewriting a released version is worse than the inconsistency it fixes.
+
+The glued form (`0.1.9beta`, pre-release stuck to the patch number) is not
+SemVer and orders wrongly: `0.1.10beta` is newer than `0.1.9beta` and string
+comparison says the opposite. `0.1.10-beta` is the hyphenated pre-release form
+and sorts correctly against everything before it.
+
+**The two spellings have converged.** Cargo could never parse the glued form,
+so the Rust side spelled `0.1.9beta` as `0.1.9-beta` while the app spelled it
+`0.1.9beta`; from `0.1.10-beta` all five homes carry one identical string.
+`normalize()` in `ci/version_manifest.py` still bridges the old shape and must
+keep doing so — published manifests contain `0.1.9beta`-shaped strings forever.
+
+**One number, five homes, enforced.** `just ci` runs
+`ci/version_manifest.py --check`, which fails when they disagree:
+
+| Where | Spelling |
+|---|---|
+| `apps/macos/project.yml` | `MARKETING_VERSION` — Apple's free-form string |
+| `zensical.toml` | the version chip inside `copyright` |
+| `CHANGELOG.md` | the newest `## <version> — <date>` heading |
+| root `Cargo.toml` | `workspace.package.version` — strict SemVer, always |
+| `crates/*/Cargo.toml`, `apps/*/Cargo.toml` | every `astar-*` path dep's `version =` |
+
+The path-dep requirements are the ones to watch: Cargo reads a stale
+`version = "0.1.3-beta"` as a caret range the new crate still satisfies, so it
+never complains — which is how the workspace drifted six releases behind before
+`--check` started reading it.
+
+`vendor/ambe-thumbdv` is outside all of this and stays at its own `0.1.0`.
+
 ## Config version — bump it for translation, not for change
 
 `ConfigVersion.current` (AstarCore) is **1**. One number, two homes: stamped

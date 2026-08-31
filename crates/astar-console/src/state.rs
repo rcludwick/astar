@@ -72,6 +72,13 @@ pub struct ConsoleState {
     /// suspect for choppy TX. `0` when idle / monitor-only. A plain `u64` health
     /// counter, credential-free.
     pub tx_capture_overruns: u64,
+    /// Which mic noise-reduction chain is live, and at what device rate
+    /// (`docs/design/noise-suppression.md`). Read-only, and reported rather
+    /// than inferred: the 48 kHz guard is otherwise invisible, and a mic
+    /// that silently fell back to the classical chain is indistinguishable
+    /// from a bug. `NotCapturing` when no mic lane is open. Carries a rate
+    /// and an enum — credential-free.
+    pub denoise_status: astar_audio::DenoiseStatus,
     /// Negotiated voice codec of the active call, once known (`None` while
     /// idle or still negotiating) — mirrors the primary call's
     /// `CallSnapshot::negotiated_format` (iax-3e53) so a UI can show
@@ -138,6 +145,7 @@ impl Default for ConsoleState {
             tx_level_db: -60.0,
             rx_level_db: -60.0,
             input_level_db: -60.0,
+            denoise_status: astar_audio::DenoiseStatus::default(),
             ptt: false,
             remote_ptt: false,
             mode: OperatingMode::default(),

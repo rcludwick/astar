@@ -83,7 +83,10 @@
                 // chain actually improved his M17 audio over the raw mic —
                 // the per-network override mechanism below stays as-is.
                 groupCard("Mic") {
-                    devicePicker("In", devices: deviceMonitor.inputs, selection: $selectedInput) {
+                    devicePicker(
+                        "In", devices: deviceMonitor.inputs, selection: $selectedInput,
+                        readiness: deviceMonitor.inputReadiness
+                    ) {
                         pairOutputToInput()
                         applyDevices()
                     }
@@ -105,7 +108,51 @@
                     micProfileRow
                         .padding(.bottom, 8)
                     switchRow("Noise reduction", isOn: noiseReductionBinding)
+                        .padding(.bottom, denoiseSummary.isEmpty ? 4 : 0)
+                    // Strength, only where it does something. RNNoise has no
+                    // strength parameter of its own, so this is a
+                    // delay-compensated dry/wet mix — and there is no wet
+                    // path to mix against on the classical chain, so the
+                    // slider would be inert there. Showing an inert control
+                    // is worse than showing none.
+                    if noiseReductionOn && neuralIsLive {
+                        HStack(spacing: 8) {
+                            sublabel("Strength")
+                            Slider(value: denoiseStrengthBinding, in: 0...1)
+                                .tint(.blue)
+                                .accessibilityLabel("Noise reduction strength")
+                                .accessibilityValue(
+                                    AccessibilityValueFormatter.percent(
+                                        Double(session.denoiseStrength)))
+                            Text("\(Int((session.denoiseStrength * 100).rounded()))%")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .frame(width: 40, alignment: .trailing)
+                        }
                         .padding(.bottom, 4)
+                    }
+                    // Which chain is actually running. Shown only while a mic
+                    // lane is open, because until then there is nothing to
+                    // report and a permanent "not capturing" would be noise.
+                    //
+                    // It earns its place: the neural stage needs a 48 kHz
+                    // capture device, and one that cannot offer 48 kHz falls
+                    // back to the classical chain silently. Without this, a
+                    // mic that sounds unlike everyone else's is
+                    // indistinguishable from a bug — and astar installs no
+                    // log subscriber, so there is nowhere else to look.
+                    if !denoiseSummary.isEmpty {
+                        HStack(spacing: 4) {
+                            Text(denoiseSummary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.bottom, 4)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel("Noise reduction in use")
+                        .accessibilityValue(denoiseSummary)
+                    }
                     switchRow("Voice compression", isOn: compressionBinding)
                     if compressionOn {
                         HStack(spacing: 8) {
@@ -148,8 +195,10 @@
                 // still writes 0 straight through the API, unaffected by this
                 // floor.
                 groupCard("Speaker") {
-                    devicePicker("Out", devices: deviceMonitor.outputs, selection: $selectedOutput)
-                    {
+                    devicePicker(
+                        "Out", devices: deviceMonitor.outputs, selection: $selectedOutput,
+                        readiness: deviceMonitor.outputReadiness
+                    ) {
                         applyDevices()
                     }
                     gainSlider("Vol", tint: .green, range: 1...4, value: $outputGain) {
@@ -205,7 +254,16 @@
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .onAppear(perform: load)
+            .onAppear {
+                load()
+                trackDeviceReadiness()
+            }
+            .onDisappear { deviceMonitor.stopTrackingReadiness() }
+            // Probing during a call would be waste: the engine holds the
+            // devices, so the answer is both known and unchanging.
+            .onChange(of: isInCall) { _ in trackDeviceReadiness() }
+            .onChange(of: selectedInput) { _ in trackDeviceReadiness() }
+            .onChange(of: selectedOutput) { _ in trackDeviceReadiness() }
             // A Setup applied elsewhere (right-click menu) swaps the devices — keep the
             // pickers in sync while this view is on screen.
             .onReceive(setups.$selectedID) { _ in syncFromStore() }
@@ -343,6 +401,7 @@
         private func devicePicker(
             _ title: String, devices: [String],
             selection: Binding<String?>,
+            readiness: DeviceReadiness?,
             onChange: @escaping () -> Void
         ) -> some View {
             // astar-9d41 — names shared by more than one device. Coloured
@@ -372,6 +431,13 @@
                         }
                     }
                     .labelsHidden()
+                    // Locked during a call. The engine opened these devices at
+                    // connect and holds them for its duration, so a change here
+                    // would not take effect until the next call — a control
+                    // that silently does nothing is worse than one that is
+                    // visibly unavailable.
+                    .disabled(isInCall)
+                    .help(isInCall ? "Devices can't be changed during a call." : "")
                     // Red outline + triangle when the CHOSEN device is one of
                     // the ambiguous ones — the state that actually affects this
                     // rig, as opposed to a clash sitting unselected in the list.
@@ -380,7 +446,18 @@
                             .strokeBorder(Color.red, lineWidth: flagged ? 1.5 : 0)
                     )
                     .onChange(of: selection.wrappedValue) { _ in onChange() }
-                    if flagged {
+                    // One glyph, in this order. A device that cannot be opened
+                    // is the more urgent problem than an ambiguous name — and
+                    // both at once would be two triangles saying different
+                    // things in the same six points of space.
+                    if let readiness, readiness != .ready {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                            .font(.caption)
+                            .help(readiness.note(for: selection.wrappedValue) ?? "")
+                            .accessibilityLabel(
+                                readiness == .notFound ? "Device not connected" : "Device in use")
+                    } else if flagged {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(.red)
                             .font(.caption)
@@ -389,11 +466,28 @@
                                     + "the first — rename one in Audio MIDI Setup to pick either."
                             )
                             .accessibilityLabel("Ambiguous device")
+                    } else if readiness == .ready {
+                        // The quiet half of the same signal: confirmation that
+                        // the thing you are about to dial with is actually
+                        // there. Only shown once a probe has answered, so it
+                        // never claims readiness it has not checked.
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                            .font(.caption)
+                            .help("Connected and available")
+                            .accessibilityLabel("Device ready")
                     }
                 }
                 // The fact, under the control it applies to. The how-to-fix
                 // lives in the banner under the dial card, which has room.
-                if let note = AudioDeviceList.ambiguityNote(
+                // Same precedence as the glyph above, and the same slot, so at
+                // most one line ever appears here.
+                if let note = readiness?.note(for: selection.wrappedValue) {
+                    Text(note)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if let note = AudioDeviceList.ambiguityNote(
                     for: selection.wrappedValue, in: devices)
                 {
                     Text(note)
@@ -537,6 +631,35 @@
                 })
         }
 
+        /// The live chain, or empty while nothing is capturing. The M17
+        /// pane shows the same engine-wide fact: there is one mic lane, and
+        /// the per-network override chooses whether it denoises, not how.
+        private var denoiseSummary: String { session.denoiseSummary }
+
+        /// Whether noise reduction is switched on for whichever profile is
+        /// bound.
+        private var noiseReductionOn: Bool {
+            m17Context ? session.m17Overrides.noiseReduction : session.noiseReduction
+        }
+
+        /// Whether the NEURAL chain is the one running, or the one that will
+        /// run on the next key. The strength mix exists only there.
+        ///
+        /// Branches on the enum that crosses the ABI, not on the summary's
+        /// wording — the wording is display text and changes (it gained a
+        /// "when you key" suffix for predictions), and a UI gate that breaks
+        /// when a caption is reworded is a trap.
+        private var neuralIsLive: Bool { session.denoiseChain == .neural }
+
+        /// Strength is engine-wide rather than per-network: there is one mic
+        /// lane, and the M17 override chooses whether it denoises, not how
+        /// hard.
+        private var denoiseStrengthBinding: Binding<Double> {
+            Binding(
+                get: { Double(session.denoiseStrength) },
+                set: { session.setDenoiseStrength(Float($0)) })
+        }
+
         private var noiseReductionBinding: Binding<Bool> {
             Binding(
                 get: { m17Context ? session.m17Overrides.noiseReduction : session.noiseReduction },
@@ -652,6 +775,17 @@
         }
 
         // MARK: - Actions
+
+        /// Whether a call is up — the probe stops for its duration.
+        private var isInCall: Bool {
+            session.status == .dialing || session.status == .answered
+        }
+
+        /// Point the readiness probe at whatever the pickers currently hold.
+        private func trackDeviceReadiness() {
+            deviceMonitor.trackReadiness(
+                input: selectedInput, output: selectedOutput, inCall: isInCall)
+        }
 
         private func load() {
             // Devices come from `deviceMonitor` (already populated, off-main) — no

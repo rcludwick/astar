@@ -6,13 +6,12 @@
 //!
 //! # Why `rubato` (not `dasp_signal`)
 //!
-//! `rubato`'s `FastFixedIn` resampler with a polynomial interpolator is
-//! good enough for voice: G.711 telephony spec is 8 kHz × 8 bit µ-law,
-//! roughly 3.4 kHz of usable bandwidth. Linear/cubic polynomial is well
-//! below the noise floor at that band-limit. `rubato` also has a stable
-//! 0.16 API, has been in async-audio production use, and exposes a clean
-//! "push chunks of input, drain chunks of output" model that matches the
-//! cpal callback pattern.
+//! `rubato`'s async resampler with a polynomial interpolator is good
+//! enough for voice: G.711 telephony spec is 8 kHz × 8 bit µ-law, roughly
+//! 3.4 kHz of usable bandwidth. Linear/cubic polynomial is well below the
+//! noise floor at that band-limit. `rubato` has been in async-audio
+//! production use, and exposes a clean "push chunks of input, drain chunks
+//! of output" model that matches the cpal callback pattern.
 //!
 //! `dasp_signal` is excellent for offline DSP but its `from_hz_to_hz`
 //! iterator is awkward to drive from a `&mut [f32]` callback because it
@@ -21,11 +20,20 @@
 //!
 //! # Streaming wrapper
 //!
-//! `rubato::FastFixedIn` requires fixed-size input chunks. cpal callbacks
+//! [`FixedAsync::Input`] requires fixed-size input chunks. cpal callbacks
 //! are not fixed-size. We buffer input until we have enough, run the
 //! resampler, append the output to an output buffer, and drain on demand.
 //! Allocation happens on construction; the steady-state path does no
 //! heap traffic.
+//!
+//! # rubato 5
+//!
+//! rubato 5 folded `FastFixedIn`/`SincFixedIn` into one [`Async`] type
+//! selected by constructor (`new_poly` / `new_sinc`) and a [`FixedAsync`]
+//! discriminant, and moved its buffers to the `audioadapter` traits. Both
+//! wrappers here are single-channel, and a one-channel interleaved buffer
+//! is a flat slice — so [`InterleavedSlice`] adapts `&[f32]` in place and
+//! the old `Vec<Vec<f32>>` scratch, along with the copy into it, is gone.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -34,34 +42,78 @@
     clippy::cast_lossless
 )]
 
+use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{
-    FastFixedIn, PolynomialDegree, Resampler, SincFixedIn, SincInterpolationParameters,
+    Async, FixedAsync, PolynomialDegree, Resampler, SincInterpolationParameters,
     SincInterpolationType, WindowFunction,
 };
 
 use crate::AudioError;
 
-/// Chunk size (in input frames) passed to `FastFixedIn`. 256 is a
+/// Chunk size (in input frames) passed to the resampler. 256 is a
 /// reasonable balance for voice: ~5 ms at 48 kHz input or ~32 ms at
 /// 8 kHz input. Small enough to not introduce noticeable latency, large
 /// enough that per-chunk overhead is negligible.
 const CHUNK: usize = 256;
+
+/// The windowed-sinc settings shared by the anti-aliased streaming
+/// resampler and [`resample_offline`]. rubato 5 made `f_cutoff` an
+/// `Option`, where `None` asks it to pick a cutoff from the sinc length;
+/// the explicit 0.95 that has always been here is kept.
+fn sinc_params() -> SincInterpolationParameters {
+    SincInterpolationParameters {
+        sinc_len: 128,
+        f_cutoff: Some(0.95),
+        interpolation: SincInterpolationType::Linear,
+        oversampling_factor: 128,
+        window: WindowFunction::BlackmanHarris2,
+    }
+}
+
+/// Run one fixed-size input chunk through `inner`, writing into `out` and
+/// returning the number of frames produced.
+///
+/// Both wrappers are mono, so the flat `&[f32]` chunk *is* a one-channel
+/// interleaved buffer and adapts in place — no per-pass copy. `out` grows
+/// if the resampler asks for more than it currently holds; it is sized to
+/// `output_frames_max()` at construction, so in practice it never does.
+fn resample_one_chunk(
+    inner: &mut Async<f32>,
+    chunk: &[f32],
+    out: &mut Vec<f32>,
+) -> Result<usize, AudioError> {
+    let need = inner.output_frames_next();
+    if out.len() < need {
+        out.resize(need, 0.0);
+    }
+    let adapt_in = InterleavedSlice::new(chunk, 1, chunk.len())
+        .map_err(|e| AudioError::Resampler(e.to_string()))?;
+    let out_len = out.len();
+    let mut adapt_out = InterleavedSlice::new_mut(out, 1, out_len)
+        .map_err(|e| AudioError::Resampler(e.to_string()))?;
+    let (consumed, produced) = inner
+        .process_into_buffer(&adapt_in, &mut adapt_out, None)
+        .map_err(|e| AudioError::Resampler(e.to_string()))?;
+    // A `FixedAsync::Input` resampler always consumes the whole chunk.
+    debug_assert_eq!(consumed, chunk.len());
+    Ok(produced)
+}
 
 /// Single-channel streaming resampler.
 ///
 /// Use [`Resampler1::push`] to feed input samples and
 /// [`Resampler1::drain`] to take whatever output is currently available.
 pub struct Resampler1 {
-    inner: FastFixedIn<f32>,
+    inner: Async<f32>,
     /// Input samples per resampler pass (see [`Self::with_chunk`]).
     chunk: usize,
     /// Accumulates input frames until we reach `chunk`.
     in_buf: Vec<f32>,
     /// Holds output frames waiting for the caller to drain.
     out_buf: Vec<f32>,
-    /// Scratch buffers reused on each `process_into_buffer` call.
-    scratch_in: Vec<Vec<f32>>,
-    scratch_out: Vec<Vec<f32>>,
+    /// Scratch reused on each `process_into_buffer` call. Mono, so this is
+    /// a flat buffer adapted as one interleaved channel.
+    scratch_out: Vec<f32>,
 }
 
 impl Resampler1 {
@@ -83,25 +135,25 @@ impl Resampler1 {
             )));
         }
         let ratio = f64::from(to_rate) / f64::from(from_rate);
-        let inner = FastFixedIn::new(
+        let inner = Async::<f32>::new_poly(
             ratio,
             1.0, // no dynamic ratio changes
             PolynomialDegree::Linear,
             chunk,
             1, // single channel
+            FixedAsync::Input,
         )
         .map_err(|e| AudioError::Resampler(e.to_string()))?;
 
-        // FastFixedIn output size depends on ratio. Pre-size scratch to
-        // the worst case (ratio*chunk + a few samples of slack).
-        let max_out = ((chunk as f64) * ratio).ceil() as usize + 16;
+        // Output size depends on the ratio and varies by a frame or so per
+        // pass; the resampler knows its own worst case, so ask it.
+        let max_out = inner.output_frames_max();
         Ok(Self {
             inner,
             chunk,
             in_buf: Vec::with_capacity(chunk * 2),
             out_buf: Vec::with_capacity(max_out * 4),
-            scratch_in: vec![vec![0.0; chunk]],
-            scratch_out: vec![vec![0.0; max_out]],
+            scratch_out: vec![0.0; max_out],
         })
     }
 
@@ -111,23 +163,13 @@ impl Resampler1 {
     pub fn push(&mut self, input: &[f32]) -> Result<(), AudioError> {
         self.in_buf.extend_from_slice(input);
         while self.in_buf.len() >= self.chunk {
-            // Copy one chunk into scratch input.
-            self.scratch_in[0].clear();
-            self.scratch_in[0].extend_from_slice(&self.in_buf[..self.chunk]);
-
-            // Run the resampler. The output channel buffer must have
-            // capacity for the produced frames; rubato will resize if
-            // needed when using `process_into_buffer` with a Vec.
-            let (consumed, produced) = self
-                .inner
-                .process_into_buffer(&self.scratch_in, &mut self.scratch_out, None)
-                .map_err(|e| AudioError::Resampler(e.to_string()))?;
-
-            // FastFixedIn always consumes the entire chunk.
-            debug_assert_eq!(consumed, self.chunk);
-
+            let produced = resample_one_chunk(
+                &mut self.inner,
+                &self.in_buf[..self.chunk],
+                &mut self.scratch_out,
+            )?;
             self.out_buf
-                .extend_from_slice(&self.scratch_out[0][..produced]);
+                .extend_from_slice(&self.scratch_out[..produced]);
 
             // Drop consumed frames.
             self.in_buf.drain(..self.chunk);
@@ -156,23 +198,22 @@ impl Resampler1 {
 const AA_CHUNK: usize = 256;
 
 /// Anti-aliased single-channel streaming resampler (iax-6945). Same push/drain
-/// shell as [`Resampler1`], but wraps rubato `SincFixedIn` (windowed-sinc) so
+/// shell as [`Resampler1`], but wraps rubato's windowed-sinc interpolator so
 /// downsampling filters out-of-band content instead of folding it into the
 /// band. Used on the cpal device capture/playback paths (48k↔16k wideband),
 /// where the sinc group delay is acceptable as constant latency. NOT for the
 /// codec edge, which needs the zero-delay one-frame-in/one-frame-out of
 /// [`Resampler1`].
 pub struct AntiAliasResampler {
-    inner: SincFixedIn<f32>,
+    inner: Async<f32>,
     chunk: usize,
-    /// `from_rate == to_rate`: skip the sinc filter entirely (a 1:1
-    /// `SincFixedIn` still filters/delays, which would fail a true
+    /// `from_rate == to_rate`: skip the sinc filter entirely (a 1:1 sinc
+    /// resampler still filters/delays, which would fail a true
     /// passthrough — see `antialias_passthrough_when_rates_match`).
     passthrough: bool,
     in_buf: Vec<f32>,
     out_buf: Vec<f32>,
-    scratch_in: Vec<Vec<f32>>,
-    scratch_out: Vec<Vec<f32>>,
+    scratch_out: Vec<f32>,
 }
 
 impl AntiAliasResampler {
@@ -185,24 +226,16 @@ impl AntiAliasResampler {
         }
         let chunk = AA_CHUNK;
         let ratio = f64::from(to_rate) / f64::from(from_rate);
-        let params = SincInterpolationParameters {
-            sinc_len: 128,
-            f_cutoff: 0.95,
-            interpolation: SincInterpolationType::Linear,
-            oversampling_factor: 128,
-            window: WindowFunction::BlackmanHarris2,
-        };
-        let inner = SincFixedIn::<f32>::new(ratio, 1.0, params, chunk, 1)
+        let inner = Async::<f32>::new_sinc(ratio, 1.0, &sinc_params(), chunk, 1, FixedAsync::Input)
             .map_err(|e| AudioError::Resampler(e.to_string()))?;
-        let max_out = ((chunk as f64) * ratio).ceil() as usize + 16;
+        let max_out = inner.output_frames_max();
         Ok(Self {
             inner,
             chunk,
             passthrough: from_rate == to_rate,
             in_buf: Vec::with_capacity(chunk * 2),
             out_buf: Vec::with_capacity(max_out * 4),
-            scratch_in: vec![vec![0.0; chunk]],
-            scratch_out: vec![vec![0.0; max_out]],
+            scratch_out: vec![0.0; max_out],
         })
     }
 
@@ -214,21 +247,13 @@ impl AntiAliasResampler {
         }
         self.in_buf.extend_from_slice(input);
         while self.in_buf.len() >= self.chunk {
-            self.scratch_in[0].clear();
-            self.scratch_in[0].extend_from_slice(&self.in_buf[..self.chunk]);
-            // SincFixedIn output size can vary by ±1 per call; ensure scratch
-            // is large enough (grows once, then stable).
-            let need = self.inner.output_frames_next();
-            if self.scratch_out[0].len() < need {
-                self.scratch_out[0].resize(need, 0.0);
-            }
-            let (consumed, produced) = self
-                .inner
-                .process_into_buffer(&self.scratch_in, &mut self.scratch_out, None)
-                .map_err(|e| AudioError::Resampler(e.to_string()))?;
-            debug_assert_eq!(consumed, self.chunk);
+            let produced = resample_one_chunk(
+                &mut self.inner,
+                &self.in_buf[..self.chunk],
+                &mut self.scratch_out,
+            )?;
             self.out_buf
-                .extend_from_slice(&self.scratch_out[0][..produced]);
+                .extend_from_slice(&self.scratch_out[..produced]);
             self.in_buf.drain(..self.chunk);
         }
         Ok(())
@@ -251,7 +276,7 @@ impl AntiAliasResampler {
 
 /// One-shot anti-aliased resample of a complete buffer (iax-e6f1).
 ///
-/// Windowed-sinc (rubato `SincFixedIn`), so DOWNSAMPLING filters content
+/// Windowed-sinc, so DOWNSAMPLING filters content
 /// above the target Nyquist instead of folding it back into the band —
 /// which is exactly what [`Resampler1`]'s filterless linear interpolation
 /// does (piper's 22.05 kHz voice → 8 kHz aliased audibly: the "overdriven"
@@ -284,17 +309,9 @@ pub fn resample_offline(
         return Ok(input.to_vec());
     }
 
-    let params = SincInterpolationParameters {
-        sinc_len: 128,
-        f_cutoff: 0.95,
-        interpolation: SincInterpolationType::Linear,
-        oversampling_factor: 128,
-        window: WindowFunction::BlackmanHarris2,
-    };
     let ratio = f64::from(to_rate) / f64::from(from_rate);
-    let mut rs = SincFixedIn::<f32>::new(ratio, 1.0, params, CHUNK_IN, 1)
+    let mut rs = Async::<f32>::new_sinc(ratio, 1.0, &sinc_params(), CHUNK_IN, 1, FixedAsync::Input)
         .map_err(|e| AudioError::Resampler(e.to_string()))?;
-    let delay = rs.output_delay();
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -303,33 +320,18 @@ pub fn resample_offline(
     )]
     let expected = (input.len() as f64 * ratio).floor() as usize;
 
-    let mut out: Vec<f32> = Vec::with_capacity(expected + CHUNK_IN);
-    let mut pos = 0usize;
-    while pos + CHUNK_IN <= input.len() {
-        let chunk = [&input[pos..pos + CHUNK_IN]];
-        let o = rs
-            .process(&chunk, None)
-            .map_err(|e| AudioError::Resampler(e.to_string()))?;
-        out.extend_from_slice(&o[0]);
-        pos += CHUNK_IN;
-    }
-    // Tail, then empty passes to flush the filter's delay line.
-    let rem = [&input[pos..]];
-    let o = rs
-        .process_partial(Some(&rem), None)
+    // rubato 5's `process_all` does what the hand-rolled loop here used to:
+    // chunk the clip, feed the short tail as a partial, flush the filter's
+    // delay line, and trim the leading silence that delay produces. It only
+    // over-runs `expected` by the flush tail, so the cap still applies.
+    let adapt_in = InterleavedSlice::new(input, 1, input.len())
         .map_err(|e| AudioError::Resampler(e.to_string()))?;
-    out.extend_from_slice(&o[0]);
-    while out.len() < expected + delay {
-        let flush: Option<&[&[f32]]> = None;
-        let o = rs
-            .process_partial(flush, None)
-            .map_err(|e| AudioError::Resampler(e.to_string()))?;
-        if o[0].is_empty() {
-            break;
-        }
-        out.extend_from_slice(&o[0]);
-    }
-    Ok(out.into_iter().skip(delay).take(expected).collect())
+    let mut out = rs
+        .process_all(&adapt_in, input.len(), None)
+        .map_err(|e| AudioError::Resampler(e.to_string()))?
+        .take_data();
+    out.truncate(expected);
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -400,12 +402,23 @@ mod tests {
         assert!(out.iter().all(|v| v.is_finite()));
     }
 
-    fn goertzel_mag(samples: &[f32], freq: f32, rate: f32) -> f32 {
-        let n = samples.len();
+    /// Goertzel magnitude of `freq` in `samples`, both frequencies in Hz.
+    ///
+    /// The window is first trimmed to a whole number of cycles of `freq`, so
+    /// `k` below is exact rather than rounded. Off-bin analysis leaks energy
+    /// into neighbouring bins and reads several dB low: at 1 kHz in a 16 kHz
+    /// stream, a 7978-sample window puts the tone at bin 498.6 and measures
+    /// 0.196 where the tone really is 0.25. The resampler's output length is
+    /// not ours to choose, so the window has to be.
+    fn goertzel_mag(samples: &[f32], freq: u32, rate: u32) -> f32 {
+        // Shortest window holding a whole number of cycles of `freq`.
+        let period = rate / gcd(rate, freq);
+        let n = samples.len() - samples.len() % period as usize;
         if n == 0 {
             return 0.0;
         }
-        let k = (freq * n as f32 / rate).round();
+        let samples = &samples[..n];
+        let k = (freq as f32) * n as f32 / rate as f32;
         let w = std::f32::consts::TAU * k / n as f32;
         let coeff = 2.0 * w.cos();
         let (mut s1, mut s2) = (0.0f32, 0.0f32);
@@ -415,6 +428,10 @@ mod tests {
             s1 = s0;
         }
         (s1 * s1 + s2 * s2 - coeff * s1 * s2).max(0.0).sqrt() / n as f32
+    }
+
+    const fn gcd(a: u32, b: u32) -> u32 {
+        if b == 0 { a } else { gcd(b, a % b) }
     }
 
     #[test]
@@ -435,7 +452,7 @@ mod tests {
         let lin_out = lin.drain_all();
 
         // Goertzel magnitude at the aliased image (6 kHz) in the 16 kHz output.
-        let mag6 = |v: &[f32]| goertzel_mag(v, 6_000.0, 16_000.0);
+        let mag6 = |v: &[f32]| goertzel_mag(v, 6_000, 16_000);
         let aa6 = mag6(&aa_out);
         let lin6 = mag6(&lin_out);
         let atten_db = 20.0 * (aa6 / lin6.max(1e-9)).log10();
@@ -456,7 +473,7 @@ mod tests {
         let out = aa.drain_all();
         // Measure on the settled middle (skip the filter warm-up).
         let mid = &out[out.len() / 4..out.len() * 3 / 4];
-        let mag1 = goertzel_mag(mid, 1_000.0, 16_000.0);
+        let mag1 = goertzel_mag(mid, 1_000, 16_000);
         // A 0.5-amplitude sine has Goertzel mag ~0.25 with this helper; require
         // it within ~1 dB (>= 0.223).
         assert!(mag1 > 0.223, "in-band 1 kHz preserved (got {mag1:.4})");

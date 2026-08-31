@@ -2008,6 +2008,16 @@ impl Manager {
         }
     }
 
+    /// Set the neural denoise strength (0.0..=1.0, clamped) on `call`'s
+    /// routed mic. `1.0` = full denoise, `0.0` = bypass. No-op if
+    /// unrouted/unknown, and no effect while the classical chain is running
+    /// — there is no wet path to mix.
+    pub fn set_denoise_strength(&self, call: CallId, level: f32) {
+        if let Some(mic) = self.calls.get(&call).and_then(|c| c.mic.as_ref()) {
+            self.router.set_mic_denoise_strength(mic, level);
+        }
+    }
+
     /// Toggle RX/output compression on `call`'s output bus (iax-a4e7 PHASE 1):
     /// automatic leveling of the received audio, reusing the mic-path
     /// compressor. No-op if the call is unknown.
@@ -2096,6 +2106,19 @@ impl Manager {
     pub fn input_dbfs(&self, call: CallId) -> Option<f32> {
         let mic = self.calls.get(&call)?.mic.as_ref()?;
         self.router.mic_input_dbfs(mic)
+    }
+
+    /// Which mic noise-reduction chain is live on `call`'s routed mic, and
+    /// at what device rate (`docs/design/noise-suppression.md`). `None` when
+    /// the call is unknown or unrouted.
+    ///
+    /// Read-only. It exists because the 48 kHz guard is otherwise invisible:
+    /// a device that could not offer 48 kHz silently gets the classical
+    /// chain, and that is indistinguishable from a bug without being told.
+    #[must_use]
+    pub fn denoise_status(&self, call: CallId) -> Option<astar_audio::DenoiseStatus> {
+        let mic = self.calls.get(&call)?.mic.as_ref()?;
+        self.router.mic_denoise_status(mic)
     }
 
     /// Smoothed RX level (dBFS) of `call`'s output bus (`None` = unknown call).

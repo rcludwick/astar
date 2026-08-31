@@ -440,3 +440,117 @@ fn register_without_resolver_surfaces_register_failed() {
     }
     assert!(saw_failed, "no resolver must surface RegisterFailed");
 }
+
+// --- idle noise-reduction capability (docs/design/noise-suppression.md) ---
+
+/// A backend that reports a fixed capture rate and counts how often it is
+/// asked. `NullBackend` inherits the trait's `None` default, which would make
+/// the caching assertion below vacuous.
+#[derive(Clone)]
+struct CountingBackend {
+    rate: u32,
+    probes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl astar_audio::AudioBackend for CountingBackend {
+    fn devices(&self) -> Result<Vec<astar_audio::DeviceInfo>, astar_audio::AudioError> {
+        Ok(Vec::new())
+    }
+    fn default_input(&self) -> Option<astar_audio::DeviceInfo> {
+        None
+    }
+    fn default_output(&self) -> Option<astar_audio::DeviceInfo> {
+        None
+    }
+    fn input_capture_rate(&self, _device: Option<&str>) -> Option<u32> {
+        self.probes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(self.rate)
+    }
+    fn open_input(
+        &self,
+        _d: &astar_audio::DeviceInfo,
+        _c: astar_audio::StreamConfig,
+        _s: Box<dyn astar_audio::InputSink>,
+        _o: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ) -> Result<Box<dyn astar_audio::StreamHandle>, astar_audio::AudioError> {
+        Err(astar_audio::AudioError::DeviceNotFound("counting".into()))
+    }
+    fn open_output(
+        &self,
+        _d: &astar_audio::DeviceInfo,
+        _c: astar_audio::StreamConfig,
+        _s: Box<dyn astar_audio::OutputSource>,
+    ) -> Result<Box<dyn astar_audio::StreamHandle>, astar_audio::AudioError> {
+        Err(astar_audio::AudioError::DeviceNotFound("counting".into()))
+    }
+}
+
+fn counting_station(rate: u32) -> (Station, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let probes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let b = CountingBackend {
+        rate,
+        probes: std::sync::Arc::clone(&probes),
+    };
+    let s = Station::with_backend_factory(
+        StationConfig::default(),
+        Box::new(move || Box::new(b.clone())),
+    );
+    (s, probes)
+}
+
+/// Idle is when noise reduction gets configured, so the capability line and
+/// the strength slider have to answer with nothing capturing. The answer is a
+/// PREDICTION and must say so: `live` stays false.
+#[test]
+fn an_idle_snapshot_predicts_the_noise_reduction_chain() {
+    let (s, _) = counting_station(48_000);
+
+    s.set_noise_reduction(false);
+    let off = s.snapshot().denoise_status;
+    assert_eq!(off.chain, astar_station::DenoiseChain::Off);
+    assert!(
+        !off.live,
+        "nothing is capturing; this cannot be a measurement"
+    );
+
+    s.set_noise_reduction(true);
+    let on = s.snapshot().denoise_status;
+    assert_eq!(on.chain, astar_station::DenoiseChain::Neural);
+    assert_eq!(on.device_rate, 48_000);
+    assert!(!on.live);
+    assert_eq!(on.summary(), "neural (48 kHz) when you key");
+}
+
+/// The 48 kHz guard shows up in the prediction too — a device that cannot
+/// offer 48 kHz gets the classical chain, and the line says why.
+#[test]
+fn an_idle_snapshot_predicts_the_fallback_on_a_44_1_device() {
+    let (s, _) = counting_station(44_100);
+    s.set_noise_reduction(true);
+    let st = s.snapshot().denoise_status;
+    assert_eq!(st.chain, astar_station::DenoiseChain::FilterGate);
+    assert_eq!(st.summary(), "filter + gate (device 44.1 kHz) when you key");
+}
+
+/// The probe is cached. It costs a host construction plus an enumeration
+/// (~1.4 ms measured on CoreAudio) and `snapshot()` is polled at ~20 Hz, so
+/// probing per poll would burn a few percent of a core to redraw a caption.
+#[test]
+fn the_capture_probe_is_cached_across_polls() {
+    let (s, probes) = counting_station(48_000);
+    for _ in 0..50 {
+        let _ = s.snapshot();
+    }
+    assert_eq!(
+        probes.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the capture rate must be probed once, not once per poll"
+    );
+
+    // Changing the selected device invalidates it — that is the one thing
+    // that can make the cached answer wrong.
+    s.set_devices(Some("some-other-mic".into()), None);
+    let _ = s.snapshot();
+    assert_eq!(probes.load(std::sync::atomic::Ordering::Relaxed), 2);
+}

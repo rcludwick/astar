@@ -250,6 +250,11 @@ impl WgStack {
     ) -> Result<Self, WgConfigError> {
         let private_key = cfg.resolve_private_key(resolver)?;
         let keepalive = cfg.keepalive();
+        // boringtun 0.7 stopped returning a Result here: key validation moved
+        // into the typed key arguments, which are already parsed by the time
+        // they reach this call, so there is nothing left for it to reject.
+        // `WgConfigError::Key` is still produced by `resolve_private_key`
+        // above, which is where a bad key actually gets caught.
         let tunn = Tunn::new(
             private_key,
             cfg.peer_public_key(),
@@ -257,8 +262,7 @@ impl WgStack {
             (keepalive != 0).then_some(keepalive),
             0,
             None,
-        )
-        .map_err(|e| WgConfigError::Key(e.to_string()))?;
+        );
         let inner = Arc::new(StackInner {
             tunn: Mutex::new(tunn),
             transport: Mutex::new(transport),
@@ -649,7 +653,7 @@ mod tests {
         let b_sock = b.bind(4569).unwrap();
         let peer_priv = StaticSecret::from([1u8; 32]);
         let b_pub = PublicKey::from(&StaticSecret::from([2u8; 32]));
-        let mut peer = Tunn::new(peer_priv, b_pub, None, None, 7, None).expect("valid peer tunn");
+        let mut peer = Tunn::new(peer_priv, b_pub, None, None, 7, None);
 
         // Handshake: peer initiates by encapsulating a valid packet; the queued
         // packet is flushed to the stack once the handshake completes.

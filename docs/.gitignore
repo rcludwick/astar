@@ -2,3 +2,10 @@
 # cache. Both are regenerable; `just docs-build` rewrites them.
 /.site/
 /.cache/
+
+# The generated release manifest (ci/version_manifest.py, run by
+# ci/build-docs.sh). Zensical copies it out of docs/site into the built site.
+# It is derived entirely from CHANGELOG.md + zensical.toml + project.yml, so
+# committing it would only create a fourth thing to keep in step by hand —
+# which is the problem it was built to remove.
+/site/api/

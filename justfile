@@ -202,11 +202,23 @@ m17-parrot port module="A":
 
 # Serve the documentation site locally with live reload (http://localhost:8000).
 docs:
+    # Generate the release manifest first: it is gitignored, so a fresh clone
+    # has no docs/site/api/v1/releases.json for `serve` to pick up.
+    python3 ci/version_manifest.py --write docs/site
     uvx zensical serve
 
-# Build the documentation site (docs/site -> docs/.site), exactly as CI does.
+# Build the documentation site (docs/site -> docs/.site), exactly as CI does —
+# through ci/build-docs.sh, which is literally the script the Pages workflow
+# runs, so a local build and a published build cannot diverge.
 docs-build:
-    uvx zensical build --clean --strict
+    ./ci/build-docs.sh
+
+# The version is spelled in three places (apps/macos/project.yml's
+# MARKETING_VERSION, zensical.toml's footer chip, CHANGELOG.md's newest
+# heading). This fails if they disagree, and is part of `just ci`.
+version-check:
+    python3 ci/version_manifest.py --check
+    python3 ci/test_version_manifest.py
 
 # ── CI mirrors ──────────────────────────────────────────────────────────────
 
@@ -220,9 +232,9 @@ audit:
     cargo audit --deny warnings
 
 # The everyday Rust gate: format, lint, test, header-drift.
-ci: fmt-check clippy test cbindgen
-    @echo "✓ ci: fmt + clippy + test + cbindgen passed"
+ci: fmt-check clippy test cbindgen version-check
+    @echo "✓ ci: fmt + clippy + test + cbindgen + version-check passed"
 
 # Everything, including the Swift side (needs a full Xcode).
-ci-full: fmt-check clippy test cbindgen ffi-example python swift-fmt-check app-test
+ci-full: fmt-check clippy test cbindgen version-check ffi-example python swift-fmt-check app-test
     @echo "✓ ci-full: rust + swift gates passed locally"

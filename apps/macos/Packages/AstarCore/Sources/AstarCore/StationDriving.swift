@@ -117,6 +117,9 @@ public protocol StationDriving {
     /// final TX gain stage after compression. Takes effect on the live capture lane.
     func setTxTrim(_ gain: Float) throws
     func setNoiseReduction(_ on: Bool) throws
+    /// Set the neural noise-reduction strength (0…1; 1.0 = full, 0.0 =
+    /// bypass). No effect while the classical filter+gate chain is running.
+    func setDenoiseStrength(_ level: Float) throws
 
     // Output (RX/speaker) processing toggle. Mirrors `Station`'s methods 1:1
     // (iax-a4e7): automatic leveling of the RECEIVED audio, reusing the

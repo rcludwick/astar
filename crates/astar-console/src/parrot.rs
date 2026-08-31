@@ -7,14 +7,14 @@
 //! (Task 2) is the I/O shell that opens and holds the streams.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use astar_audio::{
-    AudioBackend, Compressor, DeviceInfo, Direction, InputSink, MicProfile, NoiseReducer,
-    OutputSource, StreamConfig, StreamHandle, characterize,
+    AudioBackend, Compressor, DenoiseMode, DeviceInfo, Direction, InputSink, MicProfile,
+    NoiseReducer, OutputSource, RnnoiseStage, StreamConfig, StreamHandle, characterize,
 };
 
 use crate::metering::{Gain, Level, MeteringBackend};
@@ -116,8 +116,24 @@ pub(crate) struct ParrotMicSink {
     pub(crate) buf: Vec<f32>,
     pub(crate) was_keyed: bool,
     pub(crate) out: Sender<Vec<f32>>,
-    /// Noise reducer (hum filter + gate) applied first when `shared.denoise`.
+    /// Noise reducer applied first when `shared.denoise`. The gate stands
+    /// down while the neural stage is running, exactly as on the call path —
+    /// see `MicLane`.
     pub(crate) nr: NoiseReducer,
+    /// Neural stage, run at DEVICE rate from `device_rate_stage` ahead of
+    /// everything else. The parrot is the fastest A/B available — mic to
+    /// speaker, no network — so it has to run the same chain a call does or
+    /// it is measuring the wrong thing.
+    pub(crate) rnnoise: RnnoiseStage,
+    /// `ASTAR_MIC_DENOISE`, read once per process.
+    pub(crate) denoise_mode: DenoiseMode,
+    /// Whether the neural stage ran on the most recent callback, so `write`
+    /// knows whether to keep the gate.
+    pub(crate) neural_active: bool,
+    /// What `nr` was last built for, so a change of chain rebuilds it.
+    pub(crate) nr_built_neural: bool,
+    /// Pipeline rate, for rebuilding `nr`.
+    pub(crate) sample_rate: u32,
     /// Voice compressor applied to capture when `shared.compress` is set.
     pub(crate) comp: Compressor,
     /// Scratch buffer for the processed copy (capture slice is read-only).
@@ -125,6 +141,20 @@ pub(crate) struct ParrotMicSink {
 }
 
 impl InputSink for ParrotMicSink {
+    /// Device-rate stage: the neural denoiser, on the same terms as the call
+    /// path (`docs/design/noise-suppression.md`). The operator's parrot
+    /// denoise toggle drives it, `ASTAR_MIC_DENOISE` chooses the chain, and
+    /// a device that cannot give 48 kHz falls back rather than being fed a
+    /// rate the network was never trained on.
+    fn device_rate_stage(&mut self, samples: &mut Vec<f32>, device_rate: u32) {
+        self.neural_active = self.denoise_mode.allows_neural()
+            && device_rate == astar_audio::RNNOISE_RATE
+            && self.shared.denoise.load(Ordering::Relaxed);
+        if self.neural_active {
+            self.rnnoise.process(samples);
+        }
+    }
+
     fn write(&mut self, samples: &[f32], meter: f32) {
         let keyed = self.shared.key.load(Ordering::Relaxed);
         self.shared.tx.set(if keyed { meter } else { 0.0 });
@@ -136,6 +166,17 @@ impl InputSink for ParrotMicSink {
             }
             let denoise = self.shared.denoise.load(Ordering::Relaxed);
             let compress = self.shared.compress.load(Ordering::Relaxed);
+            // Rebuild the reducer when the chain changes: with the network
+            // running the gate stands down, because its thresholds are
+            // calibrated against a raw floor the denoiser has already moved.
+            if self.neural_active != self.nr_built_neural {
+                self.nr = if self.neural_active {
+                    NoiseReducer::hum_only(self.sample_rate)
+                } else {
+                    NoiseReducer::new(self.sample_rate)
+                };
+                self.nr_built_neural = self.neural_active;
+            }
             if denoise || compress {
                 // Chain: noise reduction (clean) before compression (lift).
                 self.scratch.clear();
@@ -276,6 +317,11 @@ impl LocalParrot {
             was_keyed: false,
             out: tx,
             nr,
+            rnnoise: RnnoiseStage::new(Arc::new(AtomicU32::new(0))),
+            denoise_mode: DenoiseMode::from_env(),
+            neural_active: false,
+            nr_built_neural: false,
+            sample_rate: sr,
             comp: Compressor::new(sr),
             scratch: Vec::new(),
         };
@@ -395,6 +441,11 @@ mod tests {
                 was_keyed: false,
                 out: tx,
                 nr: NoiseReducer::new(StreamConfig::default().sample_rate),
+                rnnoise: RnnoiseStage::new(Arc::new(AtomicU32::new(0))),
+                denoise_mode: DenoiseMode::from_env(),
+                neural_active: false,
+                nr_built_neural: false,
+                sample_rate: StreamConfig::default().sample_rate,
                 comp: Compressor::new(StreamConfig::default().sample_rate),
                 scratch: Vec::new(),
             },

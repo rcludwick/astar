@@ -39,6 +39,32 @@ pub struct IaxStation {
     /// The node label of the most recently drained link event, exposed via
     /// [`iax_station_link_event_node`] (iax-1075). Mirrors `last_incoming`.
     last_link_node: Mutex<String>,
+    /// Detail text of the most recent failed call on this station, exposed
+    /// via [`iax_station_last_error`].
+    ///
+    /// `IAX_ERR_*` codes are coarse by design — `IAX_ERR_AUDIO` alone covers
+    /// a missing device, an unsupported config and a cpal build failure — so
+    /// the code tells a caller which family failed and this tells them what
+    /// actually happened.
+    ///
+    /// Secret-free by construction: it is `StationError`'s own `Display`,
+    /// which renders `Portal` and `Resolve` as generic text with no
+    /// underlying source precisely so a portal password embedded in an
+    /// `Asl3Error` can never reach here. Every other variant's message is
+    /// documented secret-free at its definition.
+    last_error: Mutex<String>,
+}
+
+impl IaxStation {
+    /// Record `e`'s detail and return its code. The single funnel through
+    /// which a `StationError` becomes an FFI result.
+    fn fail(&self, e: &StationError) -> c_int {
+        if let Ok(mut slot) = self.last_error.lock() {
+            slot.clear();
+            slot.push_str(&e.to_string());
+        }
+        err_code(e)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -92,6 +118,28 @@ pub enum IaxMode {
     Wt = 0,
     /// Inbound IAX2 node (accept calls, bridge to the local handset).
     Node = 1,
+}
+
+/// Which mic noise-reduction chain is live. Mirrors
+/// `astar_audio::DenoiseChain` (`docs/design/noise-suppression.md`).
+///
+/// Read-only. It exists because the 48 kHz guard is otherwise invisible: a
+/// capture device that cannot offer 48 kHz silently gets the classical
+/// chain, and that is indistinguishable from a bug without being told.
+/// Discriminants are stable and mirrored on the Rust and Swift sides; add
+/// variants at the end.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum IaxDenoiseChain {
+    /// No mic lane is open, so no chain is running.
+    NotCapturing = 0,
+    /// Capturing, but noise reduction is switched off.
+    Off = 1,
+    /// Neural (RNNoise) at device rate, hum filter after it, no gate.
+    Neural = 2,
+    /// The classical hum filter + noise gate. Either the device could not
+    /// give 48 kHz, or `ASTAR_MIC_DENOISE=legacy` asked for it.
+    FilterGate = 3,
 }
 
 /// How [`iax_station_send_dtmf`] emits digits on the active call. Mirrors
@@ -222,6 +270,22 @@ pub struct IaxState {
     /// suspect for choppy TX; `0` when monitor-only. A plain `u64` health
     /// counter, credential-free.
     pub tx_capture_overruns: u64,
+    /// Which mic noise-reduction chain is live (`IaxDenoiseChain`). A plain
+    /// enum, credential-free.
+    pub denoise_chain: IaxDenoiseChain,
+    /// The rate the capture stream opened at, in Hz, or `0` when no mic lane
+    /// is open. Pair it with `denoise_chain`: at 48000 the neural stage can
+    /// run, below that it cannot and the classical chain is used instead. A
+    /// plain sample rate, credential-free.
+    pub denoise_device_rate: c_uint,
+    /// `true` when `denoise_chain` was MEASURED from a running capture
+    /// stream; `false` when it is a prediction of what the next one will do,
+    /// from the current settings and the selected device's advertised rates.
+    ///
+    /// The idle prediction is why a UI can show this before anything is
+    /// capturing, which is when it gets configured — but a prediction must
+    /// not be presented as an observation, so render it differently.
+    pub denoise_live: bool,
     /// Negotiated voice codec of the active call as its IAX2 format bit
     /// (iax-3e53): `0` = none (idle or still negotiating), `4` = G.711 µ-law,
     /// `8` = G.711 A-law, `64` = slin (8 kHz linear), `32768` = slin16
@@ -426,6 +490,14 @@ fn fill_state(s: &astar_station::ConsoleState) -> IaxState {
         mode: mode_to_ffi(s.mode),
         tx_reanchors: s.tx_reanchors,
         tx_capture_overruns: s.tx_capture_overruns,
+        denoise_chain: match s.denoise_status.chain {
+            astar_station::DenoiseChain::Off => IaxDenoiseChain::Off,
+            astar_station::DenoiseChain::Neural => IaxDenoiseChain::Neural,
+            astar_station::DenoiseChain::FilterGate => IaxDenoiseChain::FilterGate,
+            astar_station::DenoiseChain::NotCapturing => IaxDenoiseChain::NotCapturing,
+        },
+        denoise_device_rate: s.denoise_status.device_rate,
+        denoise_live: s.denoise_status.live,
         negotiated_format: s.negotiated_format.map_or(0, VoiceFormat::as_u32),
         dtmf_played: s.dtmf_played,
         dtmf_total: s.dtmf_total,
@@ -444,11 +516,12 @@ fn mode_to_ffi(m: OperatingMode) -> IaxMode {
     }
 }
 
-/// Map a `Result<(), StationError>` to an integer code.
-fn result_code(r: Result<(), StationError>) -> c_int {
+/// Map a `Result<(), StationError>` to an integer code, recording the error's
+/// detail on `station` for [`iax_station_last_error`].
+fn result_code(station: &IaxStation, r: Result<(), StationError>) -> c_int {
     match r {
         Ok(()) => IAX_OK,
-        Err(e) => err_code(&e),
+        Err(e) => station.fail(&e),
     }
 }
 
@@ -524,6 +597,7 @@ pub unsafe extern "C" fn iax_station_new(cfg: *const IaxConfig) -> *mut IaxStati
             inner: Station::new(sc),
             last_incoming: Mutex::new(String::new()),
             last_link_node: Mutex::new(String::new()),
+            last_error: Mutex::new(String::new()),
         }))
     }))
     .unwrap_or(std::ptr::null_mut())
@@ -580,7 +654,7 @@ pub unsafe extern "C" fn iax_station_connect(
         // secret defaults to the configured guest secret when NULL.
         let secret_owned = unsafe { opt_str(secret) };
         let secret = secret_owned.as_deref().unwrap_or("allstar");
-        result_code(station.inner.connect(dest, calling, secret, name))
+        result_code(station, station.inner.connect(dest, calling, secret, name))
     }))
     .unwrap_or(IAX_ERR_PANIC)
 }
@@ -603,7 +677,7 @@ pub unsafe extern "C" fn iax_station_connect_wt(
             Ok(s) => s,
             Err(c) => return c,
         };
-        result_code(station.inner.connect_wt(dest))
+        result_code(station, station.inner.connect_wt(dest))
     }))
     .unwrap_or(IAX_ERR_PANIC)
 }
@@ -641,7 +715,7 @@ pub unsafe extern "C" fn iax_station_connect_wt_addr(
         };
         // An empty address is rejected by `connect_wt_at` (→ `IAX_ERR_RESOLVE`),
         // so callers fall back to `iax_station_connect_wt` for the no-override path.
-        result_code(station.inner.connect_wt_at(dest, addr))
+        result_code(station, station.inner.connect_wt_at(dest, addr))
     }))
     .unwrap_or(IAX_ERR_PANIC)
 }
@@ -668,7 +742,7 @@ pub unsafe extern "C" fn iax_station_mint_token(st: *mut IaxStation) -> c_int {
     }
     let station = unsafe { &*st };
     catch_unwind(AssertUnwindSafe(|| {
-        result_code(station.inner.test_mint_token())
+        result_code(station, station.inner.test_mint_token())
     }))
     .unwrap_or(IAX_ERR_PANIC)
 }
@@ -729,7 +803,7 @@ pub unsafe extern "C" fn iax_station_set_mode(st: *mut IaxStation, mode: IaxMode
     }
     let station = unsafe { &*st };
     catch_unwind(AssertUnwindSafe(|| {
-        result_code(station.inner.set_mode(mode_from_ffi(mode)))
+        result_code(station, station.inner.set_mode(mode_from_ffi(mode)))
     }))
     .unwrap_or(IAX_ERR_PANIC)
 }
@@ -867,7 +941,7 @@ pub unsafe extern "C" fn iax_station_enable_inbound(
             max_calls: 20,
             ..InboundConfig::default()
         };
-        result_code(station.inner.enable_inbound(ic))
+        result_code(station, station.inner.enable_inbound(ic))
     }))
     .unwrap_or(IAX_ERR_PANIC)
 }
@@ -935,7 +1009,7 @@ pub unsafe extern "C" fn iax_station_register(
             username,
             refresh,
         };
-        result_code(station.inner.register(rc))
+        result_code(station, station.inner.register(rc))
     }))
     .unwrap_or(IAX_ERR_PANIC)
 }
@@ -1035,7 +1109,10 @@ pub unsafe extern "C" fn iax_station_answer(st: *mut IaxStation) -> c_int {
         return IAX_ERR_NULL;
     }
     let station = unsafe { &*st };
-    catch_unwind(AssertUnwindSafe(|| result_code(station.inner.answer()))).unwrap_or(IAX_ERR_PANIC)
+    catch_unwind(AssertUnwindSafe(|| {
+        result_code(station, station.inner.answer())
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
 }
 
 /// Reject the pending inbound offer (Node/Manual). Returns
@@ -1046,7 +1123,10 @@ pub unsafe extern "C" fn iax_station_reject(st: *mut IaxStation) -> c_int {
         return IAX_ERR_NULL;
     }
     let station = unsafe { &*st };
-    catch_unwind(AssertUnwindSafe(|| result_code(station.inner.reject()))).unwrap_or(IAX_ERR_PANIC)
+    catch_unwind(AssertUnwindSafe(|| {
+        result_code(station, station.inner.reject())
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
 }
 
 /// Write the caller id of the most recent [`IaxEventKind::Incoming`] event into
@@ -1086,8 +1166,10 @@ pub unsafe extern "C" fn iax_station_set_ptt(st: *mut IaxStation, on: bool) -> c
         return IAX_ERR_NULL;
     }
     let station = unsafe { &*st };
-    catch_unwind(AssertUnwindSafe(|| result_code(station.inner.set_ptt(on))))
-        .unwrap_or(IAX_ERR_PANIC)
+    catch_unwind(AssertUnwindSafe(|| {
+        result_code(station, station.inner.set_ptt(on))
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
 }
 
 /// Send a single DTMF digit to the active call's peer (iax-0e9b). How the
@@ -1113,7 +1195,7 @@ pub unsafe extern "C" fn iax_station_send_dtmf(st: *mut IaxStation, digit: c_cha
         if !byte.is_ascii() {
             return IAX_ERR_INVALID_DIGIT;
         }
-        result_code(station.inner.send_dtmf(char::from(byte)))
+        result_code(station, station.inner.send_dtmf(char::from(byte)))
     }))
     .unwrap_or(IAX_ERR_PANIC)
 }
@@ -1145,7 +1227,7 @@ pub unsafe extern "C" fn iax_station_send_dtmf_string(
         let Ok(s) = unsafe { std::ffi::CStr::from_ptr(digits) }.to_str() else {
             return IAX_ERR_INVALID_DIGIT;
         };
-        result_code(station.inner.send_dtmf_string(s))
+        result_code(station, station.inner.send_dtmf_string(s))
     }))
     .unwrap_or(IAX_ERR_PANIC)
 }
@@ -1280,6 +1362,31 @@ pub unsafe extern "C" fn iax_station_set_compression(st: *mut IaxStation, on: bo
     .unwrap_or(IAX_ERR_PANIC)
 }
 
+/// Set the neural mic noise-reduction strength (`level` clamped to
+/// `0.0..=1.0`): `1.0` = full denoise (default), `0.0` = bypass. Takes effect
+/// immediately.
+///
+/// RNNoise has no strength parameter of its own, so this drives a
+/// delay-compensated dry/wet mix. It has no effect while the classical
+/// hum-filter-plus-gate chain is running — read `IaxState::denoise_chain` to
+/// see which is live. Returns [`IAX_OK`], [`IAX_ERR_NULL`] (NULL `st`), or
+/// [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_set_denoise_strength(
+    st: *mut IaxStation,
+    level: c_float,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        station.inner.set_denoise_strength(level);
+        IAX_OK
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
 /// Set the mic voice-compression strength (`level` clamped to `0.0..=1.0`):
 /// `0.0` = light, `1.0` = most aggressive, default `0.90`. Takes effect
 /// immediately when compression is enabled. Returns [`IAX_OK`], [`IAX_ERR_NULL`]
@@ -1400,7 +1507,7 @@ pub unsafe extern "C" fn iax_station_monitor_start(
     let station = unsafe { &*st };
     catch_unwind(AssertUnwindSafe(|| {
         let input = unsafe { opt_str(input) };
-        result_code(station.inner.monitor_start(input.as_deref()))
+        result_code(station, station.inner.monitor_start(input.as_deref()))
     }))
     .unwrap_or(IAX_ERR_PANIC)
 }
@@ -1744,7 +1851,7 @@ unsafe fn list_devices_dir(
             let joined = list.join("\n");
             unsafe { fill_buf(&joined, buf, len) }
         }
-        Err(e) => err_code(&e),
+        Err(e) => station.fail(&e),
     }))
     .unwrap_or(IAX_ERR_PANIC)
 }
@@ -1988,7 +2095,7 @@ unsafe fn link_connect_impl(
         };
         match r {
             Ok(_) => IAX_OK,
-            Err(e) => err_code(&e),
+            Err(e) => station.fail(&e),
         }
     }))
     .unwrap_or(IAX_ERR_PANIC)
@@ -2046,7 +2153,7 @@ unsafe fn link_node_op(
     };
     catch_unwind(AssertUnwindSafe(|| match op(&station.inner, node) {
         Ok(()) => IAX_OK,
-        Err(e) => err_code(&e),
+        Err(e) => station.fail(&e),
     }))
     .unwrap_or(IAX_ERR_PANIC)
 }
@@ -2139,6 +2246,40 @@ pub unsafe extern "C" fn iax_station_link_event_node(
     .unwrap_or(IAX_ERR_PANIC)
 }
 
+/// Detail text of the most recent failed call on this station (NUL-terminated
+/// into the caller buffer; same query-then-fill contract as
+/// [`iax_station_list_inputs`] — pass `len == 0` to learn the required size).
+///
+/// `IAX_ERR_*` codes are coarse on purpose: [`IAX_ERR_AUDIO`] alone covers a
+/// device that vanished, a config the device will not accept, and a cpal
+/// stream that failed to build. The code says which family failed; this says
+/// what happened — "device not found: KT USB Audio", "stream build failed:
+/// The requested device is no longer available", and so on.
+///
+/// Empty when no call has failed yet. It is not cleared on success, so read
+/// it immediately after a negative return rather than treating it as current
+/// state.
+///
+/// Secret-free: it is `StationError`'s own `Display`, which renders portal
+/// and resolve failures as generic text with no underlying source precisely
+/// so a credential embedded in one can never reach a caller.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_last_error(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let text = station.last_error.lock().expect("last error mutex");
+        unsafe { fill_buf(&text, buf, len) }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
 // ---------------------------------------------------------------------------
 // WireGuard link transport (iax-912e)
 // ---------------------------------------------------------------------------
@@ -2227,7 +2368,7 @@ pub unsafe extern "C" fn iax_station_set_wireguard(
     let station = unsafe { &*st };
     catch_unwind(AssertUnwindSafe(|| {
         if cfg.is_null() {
-            return result_code(station.inner.clear_wireguard());
+            return result_code(station, station.inner.clear_wireguard());
         }
         let cfg = unsafe { &*cfg };
         let endpoint = match unsafe { req_str(cfg.endpoint) } {
@@ -2286,7 +2427,7 @@ pub unsafe extern "C" fn iax_station_set_wireguard(
             Ok(c) => c.with_also_bind_udp(also_bind_udp),
             Err(e) => return wg_err_code(&e),
         };
-        result_code(station.inner.set_wireguard(wg, private_key))
+        result_code(station, station.inner.set_wireguard(wg, private_key))
     }))
     .unwrap_or(IAX_ERR_PANIC)
 }
@@ -2339,6 +2480,7 @@ pub unsafe extern "C" fn iax_station_connect_m17(
             return IAX_ERR_M17;
         }
         result_code(
+            station,
             station
                 .inner
                 .m17_connect(host, port, char::from(byte), callsign),
@@ -2481,13 +2623,12 @@ pub unsafe extern "C" fn iax_station_connect_dstar(
         if !byte.is_ascii() {
             return IAX_ERR_DSTAR;
         }
-        result_code(station.inner.dstar_connect(
-            host,
-            port,
-            char::from(byte),
-            callsign,
-            reflector_callsign,
-        ))
+        result_code(
+            station,
+            station
+                .inner
+                .dstar_connect(host, port, char::from(byte), callsign, reflector_callsign),
+        )
     }))
     .unwrap_or(IAX_ERR_PANIC)
 }

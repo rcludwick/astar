@@ -4,9 +4,129 @@ Notable changes to astar. Newest first.
 
 Since `0.1.1beta` there is a signed, notarized macOS `astar.dmg` on the
 [releases page](https://github.com/rcludwick/astar/releases/latest); everything
-else is still built from source. Versions are `MAJOR.MINOR.PATCHbeta` and will
-stay on `beta` until the client has had a real sit-down-and-use-it pass on all
-three platforms.
+else is still built from source. Versions stay on `beta` until the client has
+had a real sit-down-and-use-it pass on all three platforms.
+
+From `0.1.10-beta` onward the version is real SemVer — `MAJOR.MINOR.PATCH-beta`,
+with a hyphen. Everything up to and including `0.1.9beta` glued the
+pre-release to the patch number, which sorts wrongly: `0.1.10beta` is newer
+than `0.1.9beta` and a string comparison says the opposite. Shipped versions
+are left as they were spelled.
+
+## 0.1.10-beta — 2026-08-30
+
+Noise reduction that works while you are talking — new, and off until you turn
+it on. Plus failures that say what went wrong, and every dependency brought
+current.
+
+### Added
+
+- **Noise reduction that can clean up under your voice.** astar's noise
+  reduction has always been a gate: it quietens the gaps between words, and by
+  its nature can do nothing about a fan, traffic or a noisy room while you are
+  actually speaking. There is now a second option that can — a small neural
+  network (RNNoise, via the pure-Rust `nnnoiseless`) running on the microphone
+  at the device's own rate, before anything else touches it.
+
+  **It is off by default, and it has not been judged on real air yet.** Tick
+  "Noise reduction" in Settings to try it. Whether it helps on your microphone
+  — and especially whether it survives a low-bitrate vocoder like Codec 2 or
+  AMBE, which allocate bits by spectral structure and may not thank you for it
+  — is an open question this release does not answer. That is why the default
+  is off, and why it stays off until somebody has sat and listened.
+
+  It needs a capture device running at 48 kHz, which most USB radio interfaces
+  are. A device that cannot offer 48 kHz keeps the old hum filter and gate
+  instead of being fed audio the network was never trained on, and a line
+  underneath the toggle tells you which of the two is running — or which
+  *would* run, when you are not in a call and there is nothing to measure.
+
+  A **Strength** slider appears alongside it, from full down to bypass. Turning
+  it down leaves more of your original audio in the mix, which is the dial to
+  reach for if it sounds over-processed.
+
+  The hum filter stays in the chain either way: a measured notch removes a
+  cheap microphone's whine deterministically, and a general-purpose network has
+  no particular reason to treat a steady in-band tone as noise. The gate stands
+  down only while the network is running, and comes back the moment it is not.
+
+  The cost is about 35.7 µs of CPU per 10 ms of audio — 0.357% of one core,
+  measured on Apple silicon and not yet anywhere else — and up to roughly 20 ms
+  of extra delay on transmit, which is under one voice frame and does not delay
+  keying. The design, including what has and has not been measured, is written
+  up in `docs/design/noise-suppression.md`.
+
+  There is also an `ASTAR_MIC_DENOISE` environment variable (`neural`,
+  `legacy`, or `off`) for anyone who wants to A/B the two chains directly. It
+  chooses which chain the checkbox turns on; it does not turn anything on by
+  itself.
+
+- **A published release list**, at
+  [`/api/v1/releases.json`](https://rcludwick.github.io/astar/api/v1/releases.json),
+  built with the docs from the app's own `MARKETING_VERSION` so it cannot
+  describe a version that was never built. Every release carries both the
+  display `version` and a strict-SemVer `semver`, so a client written against
+  either one keeps working across the spelling change below.
+
+- **A Discord server**, linked from the site header, the front page and the
+  README.
+
+### Changed
+
+- **Versions are real SemVer from here on**, this one included, and the app and
+  the Rust workspace now spell a release identically — they had been carrying
+  two different strings for the same version because Cargo demands the hyphen.
+  `just ci` fails if any of the five places that record a version disagree.
+  Released versions are not retrofitted.
+
+- **astar asks capture devices for 48 kHz.** It used to take whatever a device
+  called its default. 48 kHz is what the new noise reduction requires, and it
+  is the better rate regardless: 48 → 8 kHz is a clean 6:1 decimation where
+  44.1 → 8 kHz is 5.5125:1. A device that does not offer it keeps its own
+  default and simply does not get the neural chain.
+
+- **Every dependency a major version behind was brought forward**: cpal
+  0.15 → 0.18, rubato 0.16 → 5.0, rand 0.8 → 0.10, base64 0.22 → 0.23,
+  libloading 0.8 → 0.9, md-5 0.10 → 0.11, and toml 0.8 → 1.1 in the Iced
+  client, alongside 52 packages moved to their latest compatible versions.
+  Device names are unchanged across the cpal upgrade, so saved input and
+  output selections still resolve; cpal 0.18 also finds output devices 0.15
+  did not enumerate.
+
+### Fixed
+
+- **Failures say what actually went wrong.** A dial that failed used to read
+  something like "astarstation error -7: audio error" — a number and a
+  category, neither of which tells you what to do about it. The engine knew
+  more all along and had nowhere to put it; now it does. D-Star failures name
+  the real reason instead of listing the three likeliest causes, and everything
+  else shows the engine's own sentence rather than an error code.
+
+  A microphone or speaker that will not open is the deliberate exception: it
+  says simply "Couldn't open audio device, is it busy or unplugged?", because
+  every cause behind that code has the same two remedies and naming which one
+  it was would give you nothing more to act on.
+
+  Failures are also **orange** now rather than red, matching every other
+  warning in the app. A dial that did not go through is something for you to
+  fix, not a fault in astar.
+
+- **Switching networks clears the dial field.** A node number typed for
+  AllStar is not an M17 or D-Star target and never was, but it used to stay
+  in the box after the switch, looking like one. Picking a favorite, a recent
+  or a reflector still fills the field as before — those set the target and
+  the network together.
+
+- **Two security advisories** in the WireGuard transport's dependencies,
+  both inherited from boringtun 0.6: a timing-variability finding in
+  curve25519-dalek (RUSTSEC-2024-0344) and a panic in ring's AES with
+  overflow checks on (RUSTSEC-2025-0009). boringtun 0.7 clears both, and
+  the dependency audit is now clean.
+
+- **The docs site republishes on a changelog-only edit.** Its path filter
+  never matched `CHANGELOG.md` — the file the site renders is a symlink to
+  it — so a release that touched nothing else would not have rebuilt the
+  page announcing it.
 
 ## 0.1.9beta — 2026-08-29
 

@@ -42,7 +42,7 @@ site_dir = "docs/.site"
 
 # The version chip. `copyright` accepts raw HTML; astar.css styles the span.
 # Bump this in lockstep with MARKETING_VERSION in apps/macos/project.yml.
-copyright = "Copyright &copy; 2026 Rob Ludwick — AGPL-3.0-only &nbsp;<span class=\"astar-version\">v0.1.9beta</span>"
+copyright = "Copyright &copy; 2026 Rob Ludwick — AGPL-3.0-only &nbsp;<span class=\"astar-version\">v0.1.10-beta</span>"
 
 extra_css = ["stylesheets/astar.css"]
 
@@ -127,6 +127,11 @@ accent = "custom"
 icon = "fontawesome/brands/github"
 link = "https://github.com/rcludwick/astar"
 name = "astar on GitHub"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/discord"
+link = "https://discord.gg/zDz5R8rVAM"
+name = "astar on Discord"
 
 # ----------------------------------------------------------------------------
 # Markdown extensions

@@ -39,15 +39,31 @@ by per-file headers.
 
 ## Third-party components
 
-Three paths in the repository are **not** AGPL-3.0. This list matches the table
-in the repository's `README.md`; if the two ever disagree, the licence files
-shipped alongside the code win.
+Three paths in the repository, and two upstream dependencies, are **not**
+AGPL-3.0. This list matches the table in the repository's `README.md`; if the
+two ever disagree, the licence files shipped alongside the code win.
 
-| Path | Component | Licence |
+| Path or crate | Component | Licence |
 |---|---|---|
 | `vendor/ambe-thumbdv` | ThumbDV / DV3000 AMBE driver | MIT **OR** Apache-2.0 |
 | `apps/gui/assets/fonts` | The Inter typeface, bundled with the Iced client | SIL Open Font License 1.1 (`LICENSE-Inter.txt`) |
 | `harness/asterisk_parity/c_iaxclient/vendored/libiax2` | The historical C libiax2, used only as a parity reference by the test harness — never linked into a shipped binary | GPL v2 (`COPYING`) / LGPL v2 (`COPYING.LIB`) |
+| `codec2` crate / system `libcodec2` | Codec 2 — the M17 voice codec. Opt-in features only | `LGPL-2.1-only AND MIT` / LGPL-2.1 |
+| `nnnoiseless` crate | RNNoise — mic noise reduction, compiled into every build | BSD-3-Clause |
+
+### `nnnoiseless` (RNNoise)
+
+Mic noise reduction is `nnnoiseless`, a pure-Rust port of Xiph's RNNoise. It is
+an ordinary crates.io dependency rather than vendored source, and the ~87 KB
+model is a const array inside the crate — there is no runtime file to locate,
+sign or bundle on any platform.
+
+BSD-3-Clause is GPL-compatible, so a shipped astar binary is distributable under
+the AGPL. The licence asks for attribution in return, and **five** copyright
+lines ship together: the Rust port, the Mozilla-era RNNoise, Jean-Marc Valin's
+original work, the Xiph.Org Foundation — whom the no-endorsement clause names
+specifically — and Mark Borgerding's KISS FFT. All five, and the full licence
+text, are reproduced in `LICENSE-EXCEPTIONS.md` §3.
 
 ### `vendor/ambe-thumbdv`
 

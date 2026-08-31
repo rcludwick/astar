@@ -92,6 +92,36 @@ public enum AuthPolicy: Int32, Sendable {
     case off = 2
 }
 
+/// Which mic noise-reduction chain is live, as reported by
+/// `Snapshot.denoiseChain`. Mirrors the C-ABI `IaxDenoiseChain` and
+/// `astar_audio::DenoiseChain`; the raw values are part of the published
+/// interface, so add cases at the end.
+///
+/// This is read-only and reported rather than inferred. The neural stage
+/// needs a 48 kHz capture device, and a device that cannot offer one
+/// silently falls back to `.filterGate` — which without this is
+/// indistinguishable from a bug.
+public enum DenoiseChain: UInt32, Sendable, CustomStringConvertible {
+    /// No mic lane is open, so no chain is running.
+    case notCapturing = 0
+    /// Capturing, but noise reduction is switched off.
+    case off = 1
+    /// Neural (RNNoise) at device rate, hum filter after it, no gate.
+    case neural = 2
+    /// The classical hum filter + noise gate. Either the device could not
+    /// give 48 kHz, or `ASTAR_MIC_DENOISE=legacy` asked for it.
+    case filterGate = 3
+
+    public var description: String {
+        switch self {
+        case .notCapturing: return "Not capturing"
+        case .off: return "Off"
+        case .neural: return "Neural"
+        case .filterGate: return "Filter + gate"
+        }
+    }
+}
+
 /// Negotiated voice codec of the active call, as reported by
 /// `Snapshot.negotiatedFormat`. Raw values are the IAX2 format bits carried
 /// across the C-ABI (`IaxState.negotiated_format`); `0` = none/unknown, which
@@ -150,6 +180,43 @@ public struct Snapshot: Sendable, Equatable {
     /// captured mic PCM) on the active call's routed mic. The lead suspect for
     /// choppy TX; `0` when monitor-only. A plain health counter, credential-free.
     public let txCaptureOverruns: UInt64
+    /// Which mic noise-reduction chain is live. A plain enum,
+    /// credential-free.
+    public let denoiseChain: DenoiseChain
+    /// The rate the capture stream opened at, in Hz, or `0` when no mic lane
+    /// is open. Pair it with `denoiseChain`: at 48000 the neural stage can
+    /// run; below that it cannot, and `.filterGate` is why.
+    public let denoiseDeviceRate: UInt32
+    /// `true` when `denoiseChain` was measured from a running capture
+    /// stream; `false` when it is a prediction of what the next one will do.
+    /// A prediction is rendered differently — see `denoiseSummary`.
+    public let denoiseLive: Bool
+    /// A short line naming the chain, and the rate where the rate is the
+    /// explanation — `"Neural (48 kHz)"`, `"Filter + gate (device
+    /// 44.1 kHz)"`, `"Off"`. Empty when the chain cannot be determined at
+    /// all, so a caller can hide the row rather than print "not capturing"
+    /// at someone.
+    ///
+    /// A prediction (`denoiseLive == false`) is suffixed "when you key", so
+    /// the line never claims to have observed a stream that is not open.
+    /// This must stay in step with `DenoiseStatus::summary()` on the Rust
+    /// side, which words it the same way.
+    public var denoiseSummary: String {
+        let kHz: (UInt32) -> String = { r in
+            r % 1000 == 0
+                ? "\(r / 1000) kHz"
+                : String(format: "%.1f kHz", Double(r) / 1000.0)
+        }
+        let base: String
+        switch denoiseChain {
+        case .notCapturing: return ""
+        case .off: base = "Off"
+        case .neural: base = "Neural (\(kHz(denoiseDeviceRate)))"
+        case .filterGate where denoiseDeviceRate == 48000: base = "Filter + gate"
+        case .filterGate: base = "Filter + gate (device \(kHz(denoiseDeviceRate)))"
+        }
+        return denoiseLive ? base : "\(base) when you key"
+    }
     /// Negotiated voice codec of the active call, or `nil` while idle or still
     /// negotiating (iax-3e53). Shows `.slin16` when wideband is live. A plain
     /// codec id, credential-free.
@@ -342,21 +409,42 @@ public enum Event: Sendable, Equatable {
 public struct StationError: Error, CustomStringConvertible, Equatable {
     /// The `IAX_ERR_*` code (always negative).
     public let code: Int32
-    /// The generic, secret-free text from `iax_error_text`.
+    /// The generic, secret-free text from `iax_error_text` — the error
+    /// FAMILY, e.g. "audio error".
     public let text: String
+    /// What actually went wrong, from the station's `iax_station_last_error`,
+    /// when the failing call came from a station. Empty otherwise.
+    ///
+    /// The codes are coarse on purpose: `IAX_ERR_AUDIO` alone covers a device
+    /// that vanished, a config the device will not accept, and a stream that
+    /// failed to build. `text` says which family; this says which one.
+    /// Secret-free — see the C-ABI's documentation on that accessor.
+    public let detail: String
 
-    public var description: String { "astarstation error \(code): \(text)" }
+    /// `text`, plus `detail` when there is one. What a UI should show.
+    public var message: String { detail.isEmpty ? text : detail }
+
+    /// `detail` defaults to empty so a caller constructing an error directly
+    /// — and every existing call site — need not supply one.
+    public init(code: Int32, text: String, detail: String = "") {
+        self.code = code
+        self.text = text
+        self.detail = detail
+    }
+
+    public var description: String { "astarstation error \(code): \(message)" }
 
     /// Build a `StationError` from a negative C code, resolving its text via the
     /// C-ABI's `iax_error_text` (owned by the library; never freed here).
-    static func from(_ code: Int32) -> StationError {
+    /// `detail` comes from the station when one is available.
+    static func from(_ code: Int32, detail: String = "") -> StationError {
         let text: String
         if let raw = iax_error_text(code) {
             text = String(cString: raw)
         } else {
             text = "unknown error"
         }
-        return StationError(code: code, text: text)
+        return StationError(code: code, text: text, detail: detail)
     }
 }
 
@@ -743,6 +831,18 @@ public final class Station {
         try check(iax_station_set_compression_level(handle, level))
     }
 
+    /// Set the neural mic noise-reduction strength (`0.0...1.0`, clamped):
+    /// `1.0` = full denoise (default), `0.0` = bypass. Takes effect
+    /// immediately.
+    ///
+    /// RNNoise has no strength parameter of its own, so this drives a
+    /// delay-compensated dry/wet mix. It has **no effect while the classical
+    /// hum-filter-plus-gate chain is running** — there is no wet path to mix
+    /// against. Read `Snapshot.denoiseChain` to see which is live.
+    public func setDenoiseStrength(_ level: Float) throws {
+        try check(iax_station_set_denoise_strength(handle, level))
+    }
+
     /// Set the TX trim gain (`0.0...2.0`, clamped; default `1.0` = unity): the
     /// always-on final TX gain stage after compression. Attenuates a hot mic
     /// that compression makeup gain would otherwise keep loud; values above
@@ -839,14 +939,14 @@ public final class Station {
     /// per device and feed it back via `setMicProfile(_:)`.
     public func characterize(harmonicComb: Bool = false) throws -> String {
         let needed = iax_station_characterize(handle, harmonicComb, nil, 0)
-        if needed < 0 { throw StationError.from(needed) }
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
         if needed == 0 { return "" }
         // +1 for the NUL the C-ABI writes.
         var buf = [CChar](repeating: 0, count: Int(needed) + 1)
         let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
             iax_station_characterize(handle, harmonicComb, ptr.baseAddress, UInt(ptr.count))
         }
-        if rc < 0 { throw StationError.from(rc) }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
         return String(cString: buf)
     }
 
@@ -1040,14 +1140,14 @@ public final class Station {
     /// is a node identifier — secret-free.
     public func incomingFrom() throws -> String {
         let needed = iax_station_incoming_from(handle, nil, 0)
-        if needed < 0 { throw StationError.from(needed) }
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
         if needed == 0 { return "" }
         // +1 for the NUL the C-ABI writes.
         var buf = [CChar](repeating: 0, count: Int(needed) + 1)
         let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
             iax_station_incoming_from(handle, ptr.baseAddress, UInt(ptr.count))
         }
-        if rc < 0 { throw StationError.from(rc) }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
         return String(cString: buf)
     }
 
@@ -1125,17 +1225,17 @@ public final class Station {
     /// Live link roster, decoded from the C-ABI's JSON snapshot.
     public func linkRoster() throws -> LinkRoster {
         let needed = iax_station_link_roster_json(handle, nil, 0)
-        if needed < 0 { throw StationError.from(needed) }
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
         var buf = [CChar](repeating: 0, count: Int(needed) + 1)
         let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
             iax_station_link_roster_json(handle, ptr.baseAddress, UInt(ptr.count))
         }
-        if rc < 0 { throw StationError.from(rc) }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
         let json = String(cString: buf)
         guard let data = json.data(using: .utf8),
             let roster = try? JSONDecoder().decode(LinkRoster.self, from: data)
         else {
-            throw StationError(code: -1, text: "undecodable link roster json")
+            throw StationError(code: -1, text: "undecodable link roster json", detail: "")
         }
         return roster
     }
@@ -1144,7 +1244,7 @@ public final class Station {
     public func nextLinkEvent() throws -> LinkEvent? {
         var out = IaxLinkEvent(kind: IaxLinkEventKind_None, call: 0, keyed: false)
         let rc = iax_station_link_next_event(handle, &out)
-        if rc < 0 { throw StationError.from(rc) }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
         if rc == 0 { return nil }
         let node = try linkEventNode()
         switch out.kind {
@@ -1158,13 +1258,13 @@ public final class Station {
     /// Node label of the most recently drained link event.
     private func linkEventNode() throws -> String {
         let needed = iax_station_link_event_node(handle, nil, 0)
-        if needed < 0 { throw StationError.from(needed) }
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
         if needed == 0 { return "" }
         var buf = [CChar](repeating: 0, count: Int(needed) + 1)
         let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
             iax_station_link_event_node(handle, ptr.baseAddress, UInt(ptr.count))
         }
-        if rc < 0 { throw StationError.from(rc) }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
         return String(cString: buf)
     }
 
@@ -1344,14 +1444,14 @@ public final class Station {
     /// this at UI rate for the talker and link.
     public func dstarState() throws -> DStarState? {
         let needed = iax_station_dstar_state(handle, nil, 0)
-        if needed < 0 { throw StationError.from(needed) }
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
         if needed == 0 { return nil }
         // +1 for the NUL the C-ABI writes.
         var buf = [CChar](repeating: 0, count: Int(needed) + 1)
         let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
             iax_station_dstar_state(handle, ptr.baseAddress, UInt(ptr.count))
         }
-        if rc < 0 { throw StationError.from(rc) }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
         return DStarState(json: String(cString: buf))
     }
 
@@ -1372,6 +1472,9 @@ public final class Station {
             mode: Mode(rawValue: Int32(out.mode.rawValue)) ?? .wt,
             txReanchors: out.tx_reanchors,
             txCaptureOverruns: out.tx_capture_overruns,
+            denoiseChain: DenoiseChain(rawValue: out.denoise_chain.rawValue) ?? .notCapturing,
+            denoiseDeviceRate: out.denoise_device_rate,
+            denoiseLive: out.denoise_live,
             // 0 (none) and any unknown bit both land as nil.
             negotiatedFormat: VoiceFormat(rawValue: out.negotiated_format),
             dtmfPlayed: Int(out.dtmf_played),
@@ -1437,9 +1540,23 @@ public final class Station {
     @discardableResult
     private func check(_ code: Int32) throws -> Int32 {
         if code < 0 {
-            throw StationError.from(code)
+            throw StationError.from(code, detail: lastErrorDetail())
         }
         return code
+    }
+
+    /// The station's detail text for the most recent failure. Best-effort:
+    /// an empty string when the station has nothing to say, and never a
+    /// reason to fail the call that is already failing.
+    private func lastErrorDetail() -> String {
+        let needed = iax_station_last_error(handle, nil, 0)
+        guard needed > 0 else { return "" }
+        var buf = [CChar](repeating: 0, count: Int(needed) + 1)
+        let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+            iax_station_last_error(handle, ptr.baseAddress, UInt(ptr.count))
+        }
+        guard rc >= 0 else { return "" }
+        return String(cString: buf)
     }
 
     /// Query the required size (`len == 0`), then fill the buffer. Splits the
@@ -1448,14 +1565,14 @@ public final class Station {
         _ fn: (OpaquePointer?, UnsafeMutablePointer<CChar>?, UInt) -> Int32
     ) throws -> [String] {
         let needed = fn(handle, nil, 0)
-        if needed < 0 { throw StationError.from(needed) }
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
         if needed == 0 { return [] }
         // +1 for the NUL the C-ABI writes.
         var buf = [CChar](repeating: 0, count: Int(needed) + 1)
         let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
             fn(handle, ptr.baseAddress, UInt(ptr.count))
         }
-        if rc < 0 { throw StationError.from(rc) }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
         let joined = String(cString: buf)
         return joined.split(separator: "\n").map(String.init)
     }

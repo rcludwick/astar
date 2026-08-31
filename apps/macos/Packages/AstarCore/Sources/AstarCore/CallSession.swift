@@ -27,6 +27,21 @@ public final class CallSession: ObservableObject {
     /// negotiating (astar-eb6c). The status card names it via `badge` whenever
     /// set — green-tinted when `.slin16` (wideband) is live (astar-ef35).
     @Published public private(set) var negotiatedFormat: VoiceFormat?
+    /// Which mic noise-reduction chain is actually running, as a short line
+    /// — `"Neural (48 kHz)"`, `"Filter + gate (device 44.1 kHz)"`, `"Off"`.
+    /// Empty when no mic lane is open, so the UI hides the row rather than
+    /// telling someone "not capturing".
+    ///
+    /// Read-only, and reported rather than inferred. The neural stage needs
+    /// a 48 kHz capture device; one that cannot offer 48 kHz silently falls
+    /// back to the classical chain, which without this line is
+    /// indistinguishable from a bug.
+    @Published public private(set) var denoiseSummary: String = ""
+    /// The live (or predicted) mic noise-reduction chain. UI branches on
+    /// this; `denoiseSummary` is for display only. The neural strength mix
+    /// exists only on `.neural`, because there is no wet path to mix against
+    /// on the classical chain.
+    @Published public private(set) var denoiseChain: DenoiseChain = .notCapturing
     /// Digits already sent of the active `sendDTMF(sequence:)` command
     /// (astar-7d21); `0` when no sequence is playing. The dialpad dims the
     /// played prefix from this.
@@ -92,6 +107,12 @@ public final class CallSession: ObservableObject {
     /// Compression strength (0…1) applied when `compression` is on. Default 0.90
     /// reproduces today's feel. Persisted via the audio store.
     @Published public private(set) var compressionLevel: Float = 0.90
+    /// Neural noise-reduction strength (0…1; `1.0` = full, `0.0` = bypass).
+    /// RNNoise has no strength parameter of its own, so this drives a
+    /// delay-compensated dry/wet mix in the engine — and it does nothing
+    /// while the classical filter+gate chain is running, which
+    /// `denoiseSummary` names.
+    @Published public private(set) var denoiseStrength: Float = 1.0
     /// TX trim (0…2, 1.0 = unity): the always-on final TX gain stage after
     /// compression.
     @Published public private(set) var txTrim: Float = 1.0
@@ -620,6 +641,10 @@ public final class CallSession: ObservableObject {
             if negotiatedFormat != snap.negotiatedFormat {
                 negotiatedFormat = snap.negotiatedFormat
             }
+            if denoiseSummary != snap.denoiseSummary {
+                denoiseSummary = snap.denoiseSummary
+            }
+            if denoiseChain != snap.denoiseChain { denoiseChain = snap.denoiseChain }
             if dtmfPlayed != snap.dtmfPlayed { dtmfPlayed = snap.dtmfPlayed }
             if dtmfTotal != snap.dtmfTotal { dtmfTotal = snap.dtmfTotal }
             if m17Available != snap.m17Available { m17Available = snap.m17Available }
@@ -1386,6 +1411,14 @@ public final class CallSession: ObservableObject {
         persistAudio { $0.compressionLevel = level }
     }
 
+    /// Set the neural noise-reduction strength (0…1): publish, push to the
+    /// station, and persist (preserving the other audio prefs).
+    public func setDenoiseStrength(_ level: Float) {
+        denoiseStrength = level
+        try? station.setDenoiseStrength(level)
+        persistAudio { $0.denoiseStrength = level }
+    }
+
     /// Set the TX trim gain (0…2, 1.0 = unity; the engine clamps): publish, push
     /// to the station, and persist (preserving the other audio prefs).
     public func setTxTrim(_ gain: Float) {
@@ -1959,6 +1992,13 @@ public func connectFailureMessage(for error: Error, node: String) -> String {
         // the account side, not the node.
         return "Couldn’t sign in to AllStarLink — check your AllStarLink "
             + "account in Settings."
+    case -7:  // IAX_ERR_AUDIO — a device problem. One sentence, deliberately
+        // (Rob's wording): every cause the engine distinguishes here —
+        // missing, busy, unplugged, config refused — has the same two
+        // remedies, so naming which one it was buys the operator nothing they
+        // can act on. The engine's detail is still carried on
+        // `StationError.detail` for anyone debugging.
+        return "Couldn’t open audio device, is it busy or unplugged?"
     case -19:  // IAX_ERR_DSTAR — every D-Star connect failure, and the most
         // likely one by far is the dongle. The engine DOES classify these
         // precisely ("ThumbDV at /dev/cu.usbserial-… is busy — another
@@ -1969,11 +2009,43 @@ public func connectFailureMessage(for error: Error, node: String) -> String {
         // nothing. Naming the three real causes is more use than that, and
         // more honest than picking one we cannot distinguish from here.
         //
-        // The fix that would beat this is an engine-side last-error accessor
-        // on the C-ABI; until then, this.
+        // The engine-side last-error accessor now exists, so prefer the real
+        // reason when the engine gave one and keep naming the three likely
+        // causes only when it did not.
+        let what = engineDetail(stationError)
+        if !what.isEmpty {
+            return "Couldn’t connect to \(node): \(what)."
+        }
         return "Couldn’t connect to \(node) — check the ThumbDV is plugged in "
             + "and not in use by another app."
     default:
-        return stationError.description
+        // `message` rather than `description`: the operator should not be
+        // shown "astarstation error -8: iax error".
+        return stationError.message
     }
+}
+
+/// The engine's detail with its family labels and trailing full stop removed.
+///
+/// The engine stacks labels as an error crosses layers: a missing capture
+/// device arrives as `"audio error: audio device: no device matched \"x\" for
+/// Input"` — `StationError.Audio` adding the first and `ConsoleError.Device`
+/// the second. Both repeat what the surrounding sentence already says.
+///
+/// The rule is deliberately narrow rather than "strip any `label: ` prefix",
+/// because that over-trims: `"device not found: KT USB Audio"` would collapse
+/// to a bare device name and lose the only word that says what went wrong.
+/// So it strips only labels ending in "error", plus the one bare-label case
+/// the console layer produces.
+private func engineDetail(_ error: StationError) -> String {
+    var detail = error.detail
+    while let colon = detail.range(of: ": ") {
+        let label = detail[..<colon.lowerBound]
+        guard label.hasSuffix("error") || label == "audio device" else { break }
+        detail = String(detail[colon.upperBound...])
+    }
+    return
+        detail
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .trimmingCharacters(in: CharacterSet(charactersIn: "."))
 }
