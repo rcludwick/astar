@@ -155,6 +155,7 @@ fn failed_registration_clears_flag_and_supervision_reregisters() {
     station.set_secret_resolver(Box::new(|_u| "hunter2".to_string()));
     station
         .register(RegisterConfig {
+            fallbacks: Vec::new(),
             peer: registrar_addr,
             username: "77777".to_string(),
             refresh: Duration::from_secs(60),
@@ -196,4 +197,78 @@ fn failed_registration_clears_flag_and_supervision_reregisters() {
     assert!(station.is_registered(), "flag set again after recovery");
 
     let _ = fake_server.join();
+}
+
+/// `RegisterConfig::resolve` and the candidate list — the enabling half of
+/// registrar failover.
+///
+/// The operational failure this exists for: `register.allstarlink.org`
+/// resolves to three hosts that do NOT all answer a given source address, and
+/// which of them answers changes over time. A config pinning one address
+/// therefore fails silently — REGREQs go out, nothing comes back — and one
+/// node stayed unregistered for nine days that way.
+mod registrar_candidates {
+    use astar_station::RegisterConfig;
+    use std::time::Duration;
+
+    #[test]
+    fn a_literal_address_yields_exactly_one_candidate() {
+        let cfg = RegisterConfig::resolve("127.0.0.1:4569", "69586", Duration::from_secs(60))
+            .expect("literal address resolves");
+        assert_eq!(cfg.peer, "127.0.0.1:4569".parse().unwrap());
+        assert!(
+            cfg.fallbacks.is_empty(),
+            "a literal has nothing to fall back to"
+        );
+        assert_eq!(cfg.candidates().len(), 1);
+    }
+
+    /// `localhost` is the one name that resolves the same everywhere, and on
+    /// a dual-stack host it resolves to more than one address — which is the
+    /// shape that matters, without depending on the internet.
+    #[test]
+    fn a_hostname_yields_every_address_it_has() {
+        let cfg = RegisterConfig::resolve("localhost:4569", "69586", Duration::from_secs(60))
+            .expect("localhost resolves");
+        let candidates = cfg.candidates();
+        assert!(!candidates.is_empty(), "never empty");
+        assert_eq!(candidates[0], cfg.peer, "peer is first");
+        assert_eq!(candidates.len(), 1 + cfg.fallbacks.len());
+        assert!(
+            candidates.iter().all(|a| a.port() == 4569),
+            "the port carries to every candidate: {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn a_name_that_does_not_resolve_is_an_error_not_a_silent_default() {
+        assert!(
+            RegisterConfig::resolve(
+                "no-such-registrar.invalid:4569",
+                "69586",
+                Duration::from_secs(60)
+            )
+            .is_err()
+        );
+    }
+
+    /// `candidates()` is what the supervisor rotates through, so its order is
+    /// load-bearing: the configured peer must be tried first.
+    #[test]
+    fn candidates_puts_the_configured_peer_first() {
+        let cfg = RegisterConfig {
+            peer: "10.0.0.1:4569".parse().unwrap(),
+            fallbacks: vec![
+                "10.0.0.2:4569".parse().unwrap(),
+                "10.0.0.3:4569".parse().unwrap(),
+            ],
+            username: "69586".into(),
+            refresh: Duration::from_secs(60),
+        };
+        let candidates = cfg.candidates();
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0], cfg.peer);
+        assert_eq!(candidates[1], cfg.fallbacks[0]);
+        assert_eq!(candidates[2], cfg.fallbacks[1]);
+    }
 }

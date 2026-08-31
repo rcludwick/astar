@@ -227,6 +227,11 @@ pub struct Station {
 struct RegSupervise {
     cfg: Option<RegisterConfig>,
     retry: Option<(std::time::Instant, std::time::Duration)>,
+    /// Which of `cfg.candidates()` the next attempt uses. Advanced on every
+    /// retry, so sustained failure walks the list rather than hammering one
+    /// address that has stopped answering. See `RegisterConfig::fallbacks`
+    /// for why a registrar hostname's addresses are not interchangeable.
+    peer_index: usize,
 }
 
 /// First re-register attempt lands 5 s after a failure; each subsequent
@@ -1121,6 +1126,9 @@ impl Station {
             let mut s = self.reg_supervise.lock().unwrap();
             s.cfg = Some(cfg);
             s.retry = None;
+            // An explicit register starts from the top of the list, not
+            // wherever a previous failure left the rotation.
+            s.peer_index = 0;
         }
         self.do_register(&attempt)
     }
@@ -1129,6 +1137,20 @@ impl Station {
     /// the supervision state (shared by [`Station::register`] and the retry
     /// path in [`Station::next_event`]).
     fn do_register(&self, cfg: &RegisterConfig) -> Result<(), StationError> {
+        let peer = {
+            let s = self.reg_supervise.lock().unwrap();
+            let candidates = cfg.candidates();
+            candidates[s.peer_index % candidates.len()]
+        };
+        self.do_register_to(cfg, peer)
+    }
+
+    /// [`Self::do_register`] against one chosen candidate.
+    fn do_register_to(
+        &self,
+        cfg: &RegisterConfig,
+        peer: std::net::SocketAddr,
+    ) -> Result<(), StationError> {
         // Resolve the secret on-demand; pass None if no resolver is set.
         let secret: Option<Arc<Secret>> = self
             .secret_resolver
@@ -1140,7 +1162,7 @@ impl Station {
         self.session
             .lock()
             .unwrap()
-            .start_register(cfg.peer, cfg.username.clone(), cfg.refresh, secret)
+            .start_register(peer, cfg.username.clone(), cfg.refresh, secret)
             .map_err(|e| StationError::Iax(e.to_string()))
     }
 
@@ -1929,6 +1951,12 @@ impl Station {
                         std::time::Instant::now() + next,
                         (next * 2).min(REG_RETRY_MAX),
                     ));
+                    // Try the NEXT candidate. A registrar hostname is often
+                    // several hosts that do not all answer a given source
+                    // address, and the failure is silent — REGREQs go out,
+                    // nothing comes back — so retrying the same one forever
+                    // is an outage rather than a retry.
+                    s.peer_index = s.peer_index.wrapping_add(1);
                     Some(cfg)
                 }
                 _ => None,
@@ -1948,7 +1976,9 @@ impl Station {
         if let Some(outcome) = self.session.lock().unwrap().take_register_event() {
             return Some(match outcome {
                 RegisterOutcome::Registered => {
-                    // Success ends the supervision backoff (iax-177d).
+                    // Success ends the supervision backoff (iax-177d). The
+                    // candidate that worked is left selected: it is the one
+                    // answering, and re-registration should keep using it.
                     self.reg_supervise.lock().unwrap().retry = None;
                     StationEvent::Registered
                 }

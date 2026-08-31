@@ -877,6 +877,7 @@ pub unsafe extern "C" fn iax_station_set_node_config(
                 u64::from(cfg.refresh_secs)
             });
             Some(RegisterConfig {
+                fallbacks: Vec::new(),
                 peer,
                 username,
                 refresh,
@@ -1010,6 +1011,7 @@ pub unsafe extern "C" fn iax_station_register(
             u64::from(cfg.refresh_secs)
         });
         let rc = RegisterConfig {
+            fallbacks: Vec::new(),
             peer,
             username,
             refresh,
