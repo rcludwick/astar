@@ -1444,6 +1444,7 @@ mod tests {
             secrets,
             inbound_cfg,
             Some(RegisterConfig {
+                fallbacks: Vec::new(),
                 peer: "127.0.0.1:4569".parse().unwrap(),
                 username: "77777".into(),
                 refresh: std::time::Duration::from_secs(60),
@@ -2196,6 +2197,7 @@ mod tests {
             events: None,
         });
         let register_cfg = Some(RegisterConfig {
+            fallbacks: Vec::new(),
             peer: "127.0.0.1:4569".parse().unwrap(),
             username: node_id.to_string(),
             refresh: std::time::Duration::from_secs(60),

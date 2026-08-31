@@ -328,6 +328,7 @@ fn node_register_some_fires_regreq_at_the_registrar() {
             policy,
             answer: AnswerPolicy::Auto,
             register: Some(RegisterConfig {
+                fallbacks: Vec::new(),
                 peer: reg_addr,
                 username: "77777test".to_string(),
                 refresh: Duration::from_secs(60),
@@ -375,6 +376,7 @@ fn node_register_without_resolver_surfaces_register_failed() {
             },
             answer: AnswerPolicy::Auto,
             register: Some(RegisterConfig {
+                fallbacks: Vec::new(),
                 peer: "127.0.0.1:1".parse().unwrap(),
                 username: "x".to_string(),
                 refresh: Duration::from_secs(60),
@@ -411,6 +413,7 @@ fn register_secret_never_appears_in_events_or_config_debug() {
 
     // RegisterConfig Debug must not carry a secret (it doesn't hold one).
     let reg = RegisterConfig {
+        fallbacks: Vec::new(),
         peer: "127.0.0.1:1".parse().unwrap(),
         username: "77777".to_string(),
         refresh: Duration::from_secs(60),
@@ -432,6 +435,7 @@ fn register_secret_never_appears_in_events_or_config_debug() {
             },
             answer: AnswerPolicy::Auto,
             register: Some(RegisterConfig {
+                fallbacks: Vec::new(),
                 // An unreachable registrar address so registration will fail and
                 // surface a RegisterFailed event whose Debug we can inspect.
                 peer: "127.0.0.1:1".parse().unwrap(),

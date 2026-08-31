@@ -584,15 +584,14 @@ impl NodeFileConfig {
         let Some(reg) = &self.register else {
             return Ok(None);
         };
-        let peer: SocketAddr = reg
-            .peer
-            .parse()
-            .map_err(|e| format!("register.peer: {e}"))?;
-        Ok(Some(RegisterConfig {
-            peer,
-            username: reg.node_id.clone(),
-            refresh: Duration::from_secs(60),
-        }))
+        // Resolve rather than parse. A literal `IP:port` still works and
+        // yields one candidate; a hostname yields every address it has, which
+        // is what makes the registrar failover in `RegisterConfig` possible
+        // at all. Requiring a literal is why deployments pin one address —
+        // and pinning is what fails silently when that host stops answering.
+        let cfg = RegisterConfig::resolve(&reg.peer, reg.node_id.clone(), Duration::from_secs(60))
+            .map_err(|e| format!("register.peer {}: {e}", reg.peer))?;
+        Ok(Some(cfg))
     }
 
     /// Build the engine [`astar_iax::LinkTransport`] from the optional
