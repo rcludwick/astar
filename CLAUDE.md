@@ -211,6 +211,38 @@ outlives the session goes there.
 directly on the default branch in the main checkout, which is reserved for
 merging and doc commits. Check `git worktree list` first.
 
+### Design docs — and keeping them honest
+
+Designs and implementation plans live in `docs/superpowers/`, which is
+**gitignored on purpose**: this is internal working material, it is not
+published, and it is not in either remote. Browse it with `just design`
+(localhost:8001, live reload); `zensical.design.toml` is a second Zensical
+project kept deliberately separate from the public site, because
+`ci/build-docs.sh` reads only `zensical.toml`.
+
+| Directory | Means |
+|---|---|
+| `specs/` | a design agreed but **not yet shipped** |
+| `plans/` | a task-by-task plan for work **still in progress** |
+| `notes/` | a finding that belongs to no single spec |
+| `implemented/` | shipped. Kept for the reasoning, not as a to-do list |
+
+**A file's directory is a claim about the state of the code, and that claim
+rots.** Work lands, the backlog moves on, and nobody moves the file — so
+`specs/` silently fills with things that were finished months ago, and the
+next session reads them as outstanding work.
+
+So: **when you pick up design work, check the open designs against reality
+first.** For each one that looks related to what you are about to do, confirm
+against the code and `docs/BACKLOG.md` whether it actually shipped. If it did,
+`git mv`-style move it to `implemented/` — plans especially, which are pure
+procedure and worthless once the steps are ticked. A spec whose reasoning
+exists nowhere else belongs in `docs/design/` first; move it only after that
+reasoning has a permanent home.
+
+Nothing here is in version control, so a deletion is unrecoverable except from
+Time Machine. **Move to `implemented/`; do not delete.**
+
 ## Conventions
 
 * No Claude/AI attribution anywhere — not in commits, merges, PRs, code

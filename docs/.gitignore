@@ -9,3 +9,7 @@
 # committing it would only create a fourth thing to keep in step by hand —
 # which is the problem it was built to remove.
 /site/api/
+
+# Zensical build output for the internal design docs (site_dir in
+# ../zensical.design.toml). Regenerable by `just design`.
+/.design-site/

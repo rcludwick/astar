@@ -223,6 +223,36 @@ docs:
 docs-build:
     ./ci/build-docs.sh
 
+# NOT PUBLISHED, by two independent mechanisms: docs/superpowers/ is gitignored,
+# and ci/build-docs.sh reads only zensical.toml. Read zensical.design.toml's
+# header before changing either. A separate project and port from `just docs`,
+# so both can run at once.
+#
+# Serve the internal design docs (specs, plans, notes) on localhost:8001.
+design: design-stop
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 ci/design_index.py
+    # pkill returns before the kernel releases the socket, so a immediate
+    # bind loses to TIME_WAIT and reports "Address already in use" -- which
+    # is the confusing error this recipe exists to stop producing.
+    for _ in $(seq 1 40); do
+      curl -sS -o /dev/null --max-time 1 http://localhost:8001/ 2>/dev/null || break
+      sleep 0.25
+    done
+    uvx zensical serve -f zensical.design.toml -a localhost:8001 --open
+
+# Stop a running design-docs server. `just design` runs this first.
+design-stop:
+    @pkill -f "zensical serve -f zensical.design.toml" 2>/dev/null && echo "stopped previous design server" || true
+
+# Output is gitignored and never shipped; useful to check a page renders.
+#
+# Build the internal design-docs site once (docs/superpowers -> docs/.design-site).
+design-build:
+    python3 ci/design_index.py
+    uvx zensical build -f zensical.design.toml
+
 # The version is spelled in three places (apps/macos/project.yml's
 # MARKETING_VERSION, zensical.toml's footer chip, CHANGELOG.md's newest
 # heading). This fails if they disagree, and is part of `just ci`.
