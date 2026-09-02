@@ -7,7 +7,8 @@
 //!
 //! `astar-ysf` carries the payload and decodes nothing in it, on purpose.
 //! This module is the other half: it lifts the five 20 ms AMBE+2 half-rate
-//! voice frames out of a DN payload and puts them back.
+//! voice frames out of a DN payload and puts them back, and it builds the
+//! two DVSI control/channel packets that tell an AMBE-3000 to speak DN.
 //!
 //! # DN only, and VW says so
 //!
@@ -31,9 +32,11 @@
 //!   `processVDMode1Audio` regenerates five nine-byte blocks at byte
 //!   offsets 9, 27, 45, 63, 81, while `processVDMode2Audio` walks five
 //!   104-bit VCH sections from bit offset 40 in steps of 144.
-//! * **Doug McLain's `DroidStar`** — `ysf.cpp`. A second reading of the
-//!   mode-2 VCH, and the confirmation that a YSF client strips YSF's own
-//!   FEC and keeps only the 49 voice bits.
+//! * **Doug McLain's `DroidStar`** — `serialambe.cpp`, `ysf.cpp`,
+//!   `nxdn.cpp`. The authority for what an AMBE-3000 is told and fed for
+//!   YSF: rate parameters for 2450 bit/s voice with **no** FEC (the FEC on
+//!   YSF is YSF's own, and is stripped here), a 49-bit channel packet, and
+//!   the permutation between the codec's logical bit order and the chip's.
 //!
 //! Neither project's code was copied — they are GPL-2.0 and this is
 //! AGPL-3.0-only. Every table they print is generated here from the rule
@@ -95,7 +98,8 @@ pub enum DnError {
 /// The bits are in the codec's *logical* order — the twelve bits the Golay
 /// (24, 12) word protects, then the twelve the (23, 12) word protects, then
 /// the twenty-five that nothing protects. That is the order both DN modes
-/// carry them in.
+/// carry them in, and it is not the order an AMBE-3000 wants on its wire;
+/// [`channel_in_dn`] applies the permutation between the two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DnFrame([u8; VOICE_BYTES]);
 
@@ -460,6 +464,101 @@ fn check(data_type: DataType, payload: &[u8]) -> Result<(), DnError> {
     Ok(())
 }
 
+// ── Talking to the AMBE-3000 ────────────────────────────────────────────
+
+/// DVSI packet framing: start byte, big-endian length, packet type, fields.
+/// Four bytes of documented header (AMBE-3000R users' manual §3), written
+/// out here because the vendored driver keeps its own builder private and
+/// `vendor/ambe-thumbdv` is a verbatim copy that must not grow functions.
+fn dvsi_packet(ptype: u8, fields: &[u8]) -> Vec<u8> {
+    let mut packet = vec![0x61];
+    let len = u16::try_from(fields.len()).expect("a DVSI packet's fields fit in 16 bits");
+    packet.extend_from_slice(&len.to_be_bytes());
+    packet.push(ptype);
+    packet.extend_from_slice(fields);
+    packet
+}
+
+/// Rate parameters for YSF DN: AMBE+2 at 2450 bit/s of voice and **no**
+/// FEC.
+///
+/// The counterpart to `ambe_thumbdv::ratep_dstar`, which sets 2400 + 1200
+/// for D-Star. Zero FEC is the point: YSF protects its voice bits itself —
+/// mode 1 with Golay and a PRNG, mode 2 with triple redundancy — and
+/// [`unpack_dn`] has already stripped that, so what reaches the chip is 49
+/// bare voice bits and nothing else. `DroidStar` configures its AMBE-3000
+/// exactly this way for YSF and NXDN (`AMBE3000_2450_0000` in
+/// `serialambe.cpp`), and sets 2450 + 1150 only for DMR, whose air frames
+/// keep their FEC.
+#[must_use]
+pub fn ratep_dn() -> Vec<u8> {
+    dvsi_packet(
+        0,
+        &[
+            0x0A, // RATEP field ID
+            0x04, 0x31, // e
+            0x07, 0x54, // u
+            0x00, 0x00, // v
+            0x00, 0x00, // w
+            0x00, 0x00, // x
+            0x70, 0x31, // y
+        ],
+    )
+}
+
+/// The permutation between the codec's logical bit order and the
+/// AMBE-3000's channel-bit order, as a rule rather than a table.
+///
+/// `DroidStar` prints it as `dvsi_interleave`, 49 entries in rows of 18,
+/// 18 and 13, and applies it only when a hardware dongle is in play — its
+/// software vocoders take the logical order. Those three row lengths are
+/// the rule: write the 49 logical bits into rows of 18, 18 and 13, read
+/// them out column by column, and the position each lands in is its place
+/// on the chip's wire.
+fn dvsi_bit_order() -> [usize; VOICE_BITS] {
+    const ROWS: [usize; 3] = [18, 18, 13];
+    let mut order = [0usize; VOICE_BITS];
+    let mut out = 0;
+    for column in 0..ROWS[0] {
+        let mut start = 0;
+        for len in ROWS {
+            if column < len {
+                order[start + column] = out;
+                out += 1;
+            }
+            start += len;
+        }
+    }
+    order
+}
+
+/// A channel packet carrying one DN voice frame to the AMBE-3000 for
+/// decoding: 49 bits, in the chip's own bit order.
+///
+/// `ambe_thumbdv::channel_in` cannot be used for this — it hard-codes 72
+/// bits (`0x48`), which is what D-Star and DMR send. YSF DN sends `0x31`.
+#[must_use]
+pub fn channel_in_dn(frame: DnFrame) -> Vec<u8> {
+    let mut bits = [0u8; VOICE_BYTES];
+    for (i, &to) in dvsi_bit_order().iter().enumerate() {
+        write_bit(&mut bits, to, read_bit(&frame.0, i));
+    }
+    let mut fields = vec![0x01, 0x31]; // CHAND field ID, bit count (49)
+    fields.extend_from_slice(&bits);
+    dvsi_packet(1, &fields)
+}
+
+/// Turns a channel packet's 49 bits — as the AMBE-3000 emits them when
+/// encoding — back into a [`DnFrame`] ready for [`pack_dn`].
+#[must_use]
+pub fn dn_frame_from_channel(bits: &[u8; VOICE_BYTES]) -> DnFrame {
+    let mut voice = [0u8; VOICE_BYTES];
+    for (i, &from) in dvsi_bit_order().iter().enumerate() {
+        write_bit(&mut voice, i, read_bit(bits, from));
+    }
+    DnFrame(voice)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,6 +567,13 @@ mod tests {
     const WHITENING_REFERENCE: [u8; 20] = [
         0x93, 0xD7, 0x51, 0x21, 0x9C, 0x2F, 0x6C, 0xD0, 0xEF, 0x0F, 0xF8, 0x3D, 0xF1, 0x73, 0x20,
         0x94, 0xED, 0x1E, 0x7C, 0xD8,
+    ];
+
+    /// `DroidStar`'s `dvsi_interleave`, `ysf.cpp`.
+    const DVSI_REFERENCE: [usize; 49] = [
+        0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 41, 43, 45, 47, 1, 4, 7, 10, 13, 16,
+        19, 22, 25, 28, 31, 34, 37, 40, 42, 44, 46, 48, 2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32,
+        35, 38,
     ];
 
     /// `MMDVMHost`'s `INTERLEAVE_TABLE_26_4`, first and last rows.
@@ -491,6 +597,11 @@ mod tests {
     #[test]
     fn the_scrambler_is_the_published_sequence() {
         assert_eq!(WHITENING, WHITENING_REFERENCE);
+    }
+
+    #[test]
+    fn the_dvsi_bit_order_is_the_published_table() {
+        assert_eq!(dvsi_bit_order(), DVSI_REFERENCE);
     }
 
     /// `MMDVMHost`'s `PRNG_TABLE`, spot-checked. The full 4,096 entries
@@ -554,6 +665,40 @@ mod tests {
     fn the_two_modes_carry_the_same_three_fields() {
         assert_eq!(12 + 12 + 25, VOICE_BITS);
         assert_eq!(27 + 22, VOICE_BITS);
+    }
+
+    /// `DroidStar`'s `AMBE3000_2450_0000`, `serialambe.cpp`.
+    #[test]
+    fn the_ratep_word_is_2450_with_no_fec() {
+        assert_eq!(
+            ratep_dn(),
+            hex("61 00 0D 00 0A 04 31 07 54 00 00 00 00 00 00 70 31")
+        );
+    }
+
+    /// `DroidStar`'s `decode_3000` with `packet_size == 7`: length 0x09,
+    /// channel type, CHAND field, 49 bits.
+    #[test]
+    fn a_channel_packet_carries_forty_nine_bits() {
+        let frame = DnFrame::from_bytes([0x00; 7]);
+        assert_eq!(
+            channel_in_dn(frame),
+            hex("61 00 09 01 01 31 00 00 00 00 00 00 00")
+        );
+        assert_eq!(
+            channel_in_dn(DnFrame::MUTE),
+            hex("61 00 09 01 01 31 DA 40 80 00 00 00 00")
+        );
+    }
+
+    #[test]
+    fn the_chips_bit_order_round_trips() {
+        for frame in sample_frames() {
+            let packet = channel_in_dn(frame);
+            let mut bits = [0u8; VOICE_BYTES];
+            bits.copy_from_slice(&packet[6..]);
+            assert_eq!(dn_frame_from_channel(&bits), frame);
+        }
     }
 
     #[test]
@@ -743,16 +888,16 @@ mod tests {
         assert_eq!(vd1_voice(&block), DnFrame::MUTE);
     }
 
+    #[test]
+    fn a_frame_never_carries_more_than_forty_nine_bits() {
+        let frame = DnFrame::from_bytes([0xFF; 7]);
+        assert_eq!(frame.as_bytes()[6], 0x80);
+    }
+
     /// Parses `"AB CD"` into bytes, as `ambe`'s tests do.
     fn hex(s: &str) -> Vec<u8> {
         s.split_whitespace()
             .map(|b| u8::from_str_radix(b, 16).unwrap())
             .collect()
-    }
-
-    #[test]
-    fn a_frame_never_carries_more_than_forty_nine_bits() {
-        let frame = DnFrame::from_bytes([0xFF; 7]);
-        assert_eq!(frame.as_bytes()[6], 0x80);
     }
 }
