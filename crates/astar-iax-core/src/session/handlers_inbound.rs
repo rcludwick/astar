@@ -180,6 +180,23 @@ impl Fsm {
             offered.preferred_codec,
             self.inbound_policy.codec_policy,
         );
+        // The whole codec negotiation in one line, because when a peer links
+        // and then drops immediately this is the first thing anyone needs and
+        // it is otherwise invisible: what the caller said it could carry, what
+        // it asked for, our policy, and what we named in the ACCEPT. A caller
+        // that gets back something other than what it asked for is the shape
+        // of an interop bug, and `capability` is the evidence for whether
+        // overriding it was defensible.
+        tracing::info!(
+            target: "astar_iax::negotiate",
+            caller = offered.calling_number.as_deref().unwrap_or("?"),
+            called = offered.called_number.as_deref().unwrap_or("?"),
+            capability = format_args!("0x{:04x}", offered.offered_codecs.get()),
+            requested = ?offered.preferred_codec,
+            policy = ?self.inbound_policy.codec_policy,
+            accepted = ?chosen,
+            "inbound codec negotiated"
+        );
         out.push(Action::SetPeerCall(peer_call));
         out.push(Action::SendReliable(build_accept(
             our_call, peer_call, chosen,
