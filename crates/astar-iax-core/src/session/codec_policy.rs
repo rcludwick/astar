@@ -58,18 +58,6 @@ impl CodecPolicy {
         self.preference_order()[0]
     }
 
-    /// Whether this policy ASSERTS its own codec preference over a caller's
-    /// stated FORMAT when the caller is capable of ours (iax-d0cc — Asterisk
-    /// callee-preference semantics). `Prefer*` policies do: the point of
-    /// "prefer slin/slin16" is to get wideband whenever the caller can,
-    /// even if the caller stated a lesser preference. `UlawOnly`/`AllowSlin`
-    /// defer to the caller's FORMAT — `AllowSlin`'s contract is explicitly
-    /// "slin only when the peer prefers it".
-    #[must_use]
-    pub fn asserts_preference(self) -> bool {
-        matches!(self, Self::PreferSlin | Self::PreferSlin16)
-    }
-
     /// Highest audio sample rate this policy can negotiate. Pins the station
     /// pipeline rate (iax-4348): 16 kHz iff slin16 is offerable, else 8 kHz.
     #[must_use]
