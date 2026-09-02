@@ -20,6 +20,11 @@ pub mod codec2;
 #[cfg(feature = "ambe-hw")]
 pub mod ambe;
 
+/// System Fusion DN voice: the AMBE+2 half-rate frames inside a YSF
+/// payload, and the AMBE-3000 words that decode them (`iax-e8a4` §1). Pure
+/// bytes in and bytes out — no hardware, so it is not `ambe-hw`-gated.
+pub mod ysf;
+
 /// slin (16-bit signed linear PCM) wire framing (iax-31f7).
 pub mod slin;
 
