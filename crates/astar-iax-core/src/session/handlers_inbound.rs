@@ -54,9 +54,18 @@ fn choose_codec(
     // caller's stated FORMAT (so a prefer_slin16 node pulls a slin16-capable
     // but ulaw-preferring caller up to wideband). Deferential policies
     // (UlawOnly/AllowSlin) honor the caller's FORMAT when we can.
-    if !policy.asserts_preference()
-        && let Some(p) = peer_pref
+    //
+    // The assert rests entirely on CAPABILITY being evidence that the caller
+    // can carry what we pick. A caller that sent NO CAPABILITY has offered no
+    // such evidence: `common` was widened to `ours` above purely so the call
+    // can proceed, and asserting over a mask we invented names a codec the
+    // peer never claimed -- wideband to a narrowband node, which fails as a
+    // dropped call rather than a clean REJECT. With no CAPABILITY the stated
+    // FORMAT is the only thing the caller actually told us, so honor it.
+    let capability_is_evidence = !offered.is_empty();
+    if let Some(p) = peer_pref
         && common.contains(p)
+        && (!policy.asserts_preference() || !capability_is_evidence)
     {
         return p;
     }
@@ -1037,6 +1046,24 @@ mod inbound_handler_tests {
         assert_eq!(
             choose_codec(CodecMask::EMPTY, Some(Slin), CodecPolicy::AllowSlin),
             Slin
+        );
+        // Empty CAPABILITY under an ASSERTING policy. The assert is only
+        // legitimate when CAPABILITY proves the caller can carry what we pick;
+        // a caller that sent none has proved nothing, and `common` was widened
+        // to our own mask purely so the call could proceed. Naming slin16 there
+        // sends wideband to a node that never claimed it, which shows up as an
+        // immediate dropped call rather than a clean REJECT. The stated FORMAT
+        // is the only thing the caller actually told us.
+        assert_eq!(
+            choose_codec(CodecMask::EMPTY, Some(G711U), CodecPolicy::PreferSlin16),
+            G711U,
+            "no CAPABILITY is no evidence -- must not assert slin16 over a stated ulaw"
+        );
+        // ...but a caller whose CAPABILITY really does carry slin16 is still
+        // pulled up, which is the whole point of a Prefer* policy.
+        assert_eq!(
+            choose_codec(wide_peer, Some(G711U), CodecPolicy::PreferSlin16),
+            Slin16
         );
         // PreferSlin16 picks slin16 from a wideband-capable peer.
         assert_eq!(
