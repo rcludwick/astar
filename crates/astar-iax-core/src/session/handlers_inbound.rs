@@ -36,6 +36,17 @@ use crate::subclass::{IaxCommand, VoiceFormat};
 /// prefers ulaw. Either way, fall to the first codec in our preference order
 /// common to both, else our preference (the peer offered nothing usable —
 /// ACCEPT still names a single format per RFC 5456 design decision 2).
+/// Codecs best-fidelity first, used only to degrade a request we cannot meet.
+/// Distinct from any policy's `preference_order`, which encodes what a node
+/// WANTS; this encodes what is least bad when the caller cannot have what it
+/// asked for. Linear beats companded; 16 kHz beats 8 kHz.
+const QUALITY_ORDER: &[VoiceFormat] = &[
+    VoiceFormat::Slin16,
+    VoiceFormat::Slin,
+    VoiceFormat::G711U,
+    VoiceFormat::G711A,
+];
+
 fn choose_codec(
     offered: CodecMask,
     peer_pref: Option<VoiceFormat>,
@@ -50,25 +61,43 @@ fn choose_codec(
         offered.intersect(ours)
     };
 
-    // iax-d0cc: a Prefer* policy asserts its own preference over a capable
-    // caller's stated FORMAT (so a prefer_slin16 node pulls a slin16-capable
-    // but ulaw-preferring caller up to wideband). Deferential policies
-    // (UlawOnly/AllowSlin) honor the caller's FORMAT when we can.
+    // iax-d0cc revisited (2026-09-02). Honour an explicitly stated FORMAT
+    // whenever we can carry it -- asserting policy or not.
     //
-    // The assert rests entirely on CAPABILITY being evidence that the caller
-    // can carry what we pick. A caller that sent NO CAPABILITY has offered no
-    // such evidence: `common` was widened to `ours` above purely so the call
-    // can proceed, and asserting over a mask we invented names a codec the
-    // peer never claimed -- wideband to a narrowband node, which fails as a
-    // dropped call rather than a clean REJECT. With no CAPABILITY the stated
-    // FORMAT is the only thing the caller actually told us, so honor it.
-    let capability_is_evidence = !offered.is_empty();
+    // CAPABILITY says what a peer CAN transcode; FORMAT says what it wants on
+    // THIS link. They are different claims, and treating the first as consent
+    // to override the second was wrong in both directions on the live hub:
+    //
+    //   * an Asterisk node lists SLIN16 in CAPABILITY for completeness, asks
+    //     for ulaw, and was handed slin16 -- which it answers by dropping the
+    //     call, with no REJECT and no cause anyone can read;
+    //   * and the same rule is what makes a caller's own request ignorable,
+    //     so a client asking for slin16 on a hub without it fell all the way
+    //     to ulaw rather than to the slin both ends offered.
+    //
+    // A Prefer* policy still pulls a caller up -- but only one that expressed
+    // no usable preference, which is the case the pull-up was for.
     if let Some(p) = peer_pref
         && common.contains(p)
-        && (!policy.asserts_preference() || !capability_is_evidence)
     {
         return p;
     }
+    // The peer asked for something we cannot carry. Degrade toward what it
+    // wanted rather than to the front of our own list: a caller asking for
+    // 16-bit linear should land on the 8 kHz 16-bit linear both ends offer,
+    // not on 8-bit companded ulaw because that happens to head the policy
+    // order. This is not hypothetical -- a client dialled the hub with
+    // FORMAT=slin16 and CAPABILITY=0x804c, which carries slin, and was
+    // answered with ulaw.
+    if peer_pref.is_some() {
+        for &fmt in QUALITY_ORDER {
+            if common.contains(fmt) {
+                return fmt;
+            }
+        }
+    }
+    // No stated preference at all: our order decides, so a Prefer* policy
+    // pulls a silent caller up to wideband.
     for &fmt in policy.preference_order() {
         if common.contains(fmt) {
             return fmt;
@@ -1059,11 +1088,13 @@ mod inbound_handler_tests {
             G711U,
             "no CAPABILITY is no evidence -- must not assert slin16 over a stated ulaw"
         );
-        // ...but a caller whose CAPABILITY really does carry slin16 is still
-        // pulled up, which is the whole point of a Prefer* policy.
+        // ...and the same now holds when CAPABILITY *does* carry slin16: the
+        // caller asked for ulaw, so it gets ulaw. Listing a codec is not
+        // asking for it. (This assertion said Slin16 until 2026-09-02; the
+        // override it pinned is what dropped Asterisk nodes on the live hub.)
         assert_eq!(
             choose_codec(wide_peer, Some(G711U), CodecPolicy::PreferSlin16),
-            Slin16
+            G711U
         );
         // PreferSlin16 picks slin16 from a wideband-capable peer.
         assert_eq!(
@@ -1076,21 +1107,43 @@ mod inbound_handler_tests {
             G711U
         );
 
-        // iax-d0cc: a Prefer* node ASSERTS its preference over a capable
-        // caller's stated FORMAT. A slin16-capable caller that PREFERS ulaw
-        // must still be pulled up to slin16 by a PreferSlin16 node — otherwise
-        // the node yields to ulaw and the audio is needlessly narrowband/8-bit
-        // (astar's echo bug). AllowSlin/UlawOnly stay deferential (asserted
-        // above).
+        // iax-d0cc revisited 2026-09-02. A Prefer* node no longer overrides a
+        // caller's stated FORMAT. Listing slin16 in CAPABILITY says the caller
+        // CAN transcode it, not that it wants it on this link; an Asterisk
+        // node lists it and then drops the call when handed it.
         assert_eq!(
             choose_codec(wide_peer, Some(G711U), CodecPolicy::PreferSlin16),
-            Slin16,
-            "PreferSlin16 must override a capable caller's ulaw preference"
+            G711U,
+            "a stated ulaw must be honoured even by a wideband node"
         );
         assert_eq!(
             choose_codec(slin_peer, Some(G711U), CodecPolicy::PreferSlin),
+            G711U,
+            "a stated ulaw must be honoured even by a slin-preferring node"
+        );
+        // The pull-up survives for the case it was actually for: a caller that
+        // expressed no usable preference at all.
+        assert_eq!(
+            choose_codec(wide_peer, None, CodecPolicy::PreferSlin16),
+            Slin16
+        );
+
+        // Captured off the live hub 2026-09-02. astar dials with
+        // CAPABILITY=0x804c (ulaw|alaw|slin|slin16) and FORMAT=slin16.
+        let astar: CodecMask = [Slin16, Slin, G711U, G711A].into_iter().collect();
+        assert_eq!(astar.get(), 0x0000_804c, "the mask astar really sends");
+        // Against a wideband hub it gets what it asked for.
+        assert_eq!(
+            choose_codec(astar, Some(Slin16), CodecPolicy::PreferSlin16),
+            Slin16
+        );
+        // Against a hub with no slin16 it must degrade to the slin BOTH ends
+        // offered -- not all the way to 8-bit ulaw, which is what the hub
+        // actually did to a real client and is the regression this pins.
+        assert_eq!(
+            choose_codec(astar, Some(Slin16), CodecPolicy::AllowSlin),
             Slin,
-            "PreferSlin must override a capable caller's ulaw preference"
+            "a slin16 request degrades to slin, never to ulaw"
         );
     }
 
