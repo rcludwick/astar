@@ -168,6 +168,38 @@ final class CallSessionYSFDialTests: XCTestCase {
         XCTAssertFalse(session.ysfReceiving)
     }
 
+    // MARK: - Transmit is refused, at the choke point
+
+    /// astar has no YSF encoder, so a key-down has nothing to put on the air.
+    /// Refused inside `setPTT` rather than only by hiding the button, because
+    /// VOX and serial PTT key without anyone pressing anything.
+    func testFusionCannotTransmitAndSetPTTNeverKeys() throws {
+        let (session, fake) = session()
+        XCTAssertTrue(session.canTransmit, "nothing connected: nothing to refuse")
+
+        try session.connect(node: "US-KCWIDE", network: .ysf)
+        XCTAssertFalse(session.canTransmit, "Fusion is receive-only")
+
+        try session.setPTT(true)
+        XCTAssertEqual(
+            fake.pttCalls.last, false,
+            "a key-down on Fusion must reach the station as unkeyed, never as true")
+
+        try session.disconnect()
+        XCTAssertTrue(session.canTransmit, "and the refusal lifts with the link")
+    }
+
+    /// The refusal is about the NETWORK, not the listen-only setting. Turning
+    /// TX back on must not make Fusion transmittable, or an operator goes
+    /// hunting for a switch that cannot exist.
+    func testDisablingListenOnlyDoesNotMakeFusionTransmittable() throws {
+        let (session, _) = session()
+        try session.connect(node: "US-KCWIDE", network: .ysf)
+        session.setTxDisabled(false)
+        XCTAssertFalse(session.canTransmit)
+        try session.disconnect()
+    }
+
     // MARK: - Teardown
 
     func testHangingUpDisconnectsTheLinkExplicitly() throws {

@@ -1234,7 +1234,13 @@
 
         private var callControls: some View {
             HStack(spacing: 10) {
-                if session.txDisabled {
+                if !session.canTransmit {
+                    // Checked BEFORE listen-only: that is a setting the
+                    // operator can turn off, this is a property of the
+                    // network. Showing "TX disabled" here would invite
+                    // someone to go looking for the switch that fixes it.
+                    receiveOnlyIndicator
+                } else if session.txDisabled {
                     listenOnlyIndicator  // monitor mode: TX is hard-muted
                 } else if session.voxEnabled {
                     voxIndicator
@@ -1324,6 +1330,30 @@
                 .accessibilityValue(session.ptt ? "on air" : "listening")
         }
 
+        /// Replaces the PTT/VOX control on a network astar can receive but not
+        /// transmit — System Fusion today.
+        ///
+        /// A PTT button that did nothing would be worse than an absent one:
+        /// the operator would key, hear nothing happen, and reasonably assume
+        /// the radio or the link was broken. Naming the reason costs one line
+        /// and answers the question before it is asked.
+        private var receiveOnlyIndicator: some View {
+            Label(
+                "Receive only — astar can't transmit Fusion yet",
+                systemImage: "antenna.radiowaves.left.and.right"
+            )
+            .font(.callout.weight(.semibold))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(
+                Color.secondary.opacity(0.18),
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+            .foregroundStyle(.secondary)
+            .accessibilityElement()
+            .accessibilityLabel("Receive only, astar cannot transmit Fusion yet")
+        }
+
         /// Replaces the PTT/VOX control while listen-only (Disable TX) is on: makes it
         /// obvious the radio can't transmit.
         private var listenOnlyIndicator: some View {
@@ -1387,7 +1417,8 @@
                         event.window?.firstResponder ?? NSApp.keyWindow?.firstResponder
                     if SpaceKeyGuard.spaceIsTyping(firstResponder: firstResponder) { return event }
                 }
-                guard session.status == .answered, !session.voxEnabled else { return event }
+                guard session.status == .answered, !session.voxEnabled, session.canTransmit
+                else { return event }
                 if event.type == .keyDown {
                     if !event.isARepeat { setKeyed(true) }
                 } else {
