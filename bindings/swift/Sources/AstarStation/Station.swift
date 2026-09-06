@@ -251,6 +251,125 @@ public struct Snapshot: Sendable, Equatable {
     /// an active IAX2 call and an M17 session (see
     /// ``Station/connectDStar(host:port:module:callsign:)``).
     public let dstarActive: Bool
+    /// `true` when System Fusion voice is available: the `ysf` feature is
+    /// compiled in AND a ThumbDV is attached right now.
+    ///
+    /// The same probe ``dstarAvailable`` reads — one dongle, one answer — so
+    /// the two always agree, and a UI can grey both affordances together.
+    public let ysfAvailable: Bool
+    /// `true` while a YSF link is live — mutually exclusive with an IAX2
+    /// call, an M17 session and a D-Star session.
+    ///
+    /// RECEIVE ONLY. There is no YSF transmit, so a UI must not offer a PTT
+    /// affordance while this is set.
+    public let ysfActive: Bool
+}
+
+/// The YSF-shaped state of a live link, from ``Station/ysfState()``.
+///
+/// Everything network-agnostic — the level meters, the call status — lives on
+/// ``Station/Snapshot``. Credential-free: callsigns and counters only.
+public struct YSFState: Equatable, Sendable {
+    /// State of the link to the reflector.
+    public enum Link: String, Sendable {
+        case idle, linking, linked, unlinking, failed
+    }
+
+    /// Which vocoder is decoding. Always ``Backend/thumbdv`` — YSF voice is
+    /// AMBE+2 and there is no software vocoder.
+    public enum Backend: String, Sendable {
+        case thumbdv, soft
+    }
+
+    /// A frame mode astar cannot decode.
+    ///
+    /// astar decodes DN — V/D modes 1 and 2 — and nothing else. A reflector
+    /// carrying one of these would otherwise be indistinguishable from a
+    /// broken one: silence, with nothing saying why. Surface it.
+    public enum UnsupportedMode: String, Sendable {
+        /// VW: full-rate voice.
+        case voiceFullRate = "voice-fr"
+        /// A data frame, which is not voice at all.
+        case dataFullRate = "data-fr"
+
+        /// What to tell the operator.
+        public var localizedDescription: String {
+            switch self {
+            case .voiceFullRate:
+                return "This reflector is sending VW (wide) voice, which astar cannot decode."
+            case .dataFullRate:
+                return "This reflector is sending data frames, which carry no voice."
+            }
+        }
+    }
+
+    public let link: Link
+    /// The callsign of the most recently heard transmission, or `nil` until
+    /// one arrives.
+    ///
+    /// Read from the frame header in clear — no vocoder involved, so it is
+    /// populated even without a dongle. PERSISTS past end-of-transmission:
+    /// this is "last heard", not "transmitting right now". Read ``receiving``
+    /// for that.
+    ///
+    /// Attacker-controlled: it is whatever whoever is transmitting put in the
+    /// header. Render it as text, never as markup.
+    public let lastHeard: String?
+    /// Radio frames received since the link came up.
+    ///
+    /// A liveness counter: a link that is up and silent and one that is
+    /// receiving look identical from ``link`` alone.
+    public let framesRX: UInt64
+    /// `true` while a transmission is in progress.
+    public let receiving: Bool
+    /// The last mode this link could not decode, or `nil` — the usual case.
+    ///
+    /// Never cleared once set: a caller that has seen it has something true
+    /// to tell the operator, and clearing it on the next DN frame would make
+    /// a mixed-mode reflector flicker.
+    public let unsupportedMode: UnsupportedMode?
+    /// The vocoder decoding this link, or `nil` for a link opened without
+    /// audio (or one whose backend this binding does not recognise).
+    public let backend: Backend?
+
+    /// Construct one directly.
+    ///
+    /// Public, unlike ``DStarState``'s, because this type is worth building
+    /// without an engine: a SwiftUI preview showing the unsupported-mode
+    /// warning, and a test proving a client renders it, both need a value and
+    /// neither has a reflector sending VW to hand.
+    public init(
+        link: Link, lastHeard: String? = nil, framesRX: UInt64 = 0, receiving: Bool = false,
+        unsupportedMode: UnsupportedMode? = nil, backend: Backend? = nil
+    ) {
+        self.link = link
+        self.lastHeard = lastHeard
+        self.framesRX = framesRX
+        self.receiving = receiving
+        self.unsupportedMode = unsupportedMode
+        self.backend = backend
+    }
+
+    /// Decode from the C-ABI's JSON. Returns `nil` for the `{}` no-link
+    /// document.
+    ///
+    /// An unrecognized `link` string means a newer engine is talking to an
+    /// older binding, and lands as ``Link/failed`` — the safe direction. An
+    /// unrecognized `unsupported_mode` lands as `nil` rather than being
+    /// invented, so a UI never names a mode it does not understand.
+    init?(json: String) {
+        guard let data = json.data(using: .utf8),
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let linkString = obj["link"] as? String
+        else { return nil }
+        link = Link(rawValue: linkString) ?? .failed
+        lastHeard = obj["last_heard"] as? String
+        framesRX = (obj["frames_rx"] as? NSNumber)?.uint64Value ?? 0
+        receiving = obj["receiving"] as? Bool ?? false
+        unsupportedMode = (obj["unsupported_mode"] as? String)
+            .flatMap(UnsupportedMode.init(rawValue:))
+        backend = (obj["backend"] as? String).flatMap(Backend.init(rawValue:))
+    }
 }
 
 /// The D-Star-shaped state of a live session, from ``Station/dstarState()``
@@ -1430,6 +1549,64 @@ public final class Station {
         )
     }
 
+    /// Link to a YSFReflector and decode the audio on it.
+    ///
+    /// `host` is `host:port`. YSF publishes a port per reflector and has no
+    /// conventional default, so there is nothing to assume — the directory
+    /// row carries it. `options` is the YCS room request; leave it `nil` for
+    /// a plain reflector.
+    ///
+    /// RECEIVE ONLY. There is no YSF transmit and no PTT: do not offer a key
+    /// affordance for a YSF link.
+    ///
+    /// HARDWARE-ONLY, like D-Star and for the same reason — the vocoder is
+    /// AMBE+2 on a ThumbDV. Gate the affordance on ``Snapshot/ysfAvailable``
+    /// rather than calling this speculatively. Throws
+    /// `IAX_ERR_ALREADY_CONNECTED` when another session is live.
+    ///
+    /// NOTE: this blocks for a serial-port scan plus a per-port dongle init
+    /// before it ever touches the network — on the order of a second. Call it
+    /// off the main thread.
+    public func connectYSF(
+        host: String,
+        callsign: String,
+        options: String? = nil
+    ) throws {
+        try check(
+            host.withCString { hostPtr in
+                callsign.withCString { callsignPtr in
+                    withOptionalCString(options) { optionsPtr in
+                        iax_station_connect_ysf(handle, hostPtr, callsignPtr, optionsPtr)
+                    }
+                }
+            }
+        )
+    }
+
+    /// Disconnect the live YSF link, if any. Idempotent — a no-op while idle.
+    public func ysfDisconnect() throws {
+        try check(iax_station_ysf_disconnect(handle))
+    }
+
+    /// The live YSF link's own state, or `nil` when none is active.
+    ///
+    /// Cheap, but not as cheap as ``snapshot()`` — it crosses the ABI with a
+    /// buffer and parses JSON. Poll ``snapshot()`` for meters; call this at
+    /// UI rate for the talker, the link state and the unsupported-mode
+    /// warning.
+    public func ysfState() throws -> YSFState? {
+        let needed = iax_station_ysf_state(handle, nil, 0)
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
+        if needed == 0 { return nil }
+        // +1 for the NUL the C-ABI writes.
+        var buf = [CChar](repeating: 0, count: Int(needed) + 1)
+        let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+            iax_station_ysf_state(handle, ptr.baseAddress, UInt(ptr.count))
+        }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
+        return YSFState(json: String(cString: buf))
+    }
+
     /// Disconnect the live D-Star session, if any (iax-4c8e). Idempotent — a
     /// no-op while idle.
     public func dstarDisconnect() throws {
@@ -1482,7 +1659,9 @@ public final class Station {
             m17Available: out.m17_available,
             m17Active: out.m17_active,
             dstarAvailable: out.dstar_available,
-            dstarActive: out.dstar_active
+            dstarActive: out.dstar_active,
+            ysfAvailable: out.ysf_available,
+            ysfActive: out.ysf_active
         )
     }
 

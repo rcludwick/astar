@@ -712,6 +712,7 @@ impl Station {
         // iax-a9d4 Task 6: same lesson, same fix, for a live/failed D-Star
         // session — `detach()` below never touches `self.dstar` either.
         self.dstar_disconnect();
+        self.ysf_disconnect();
         if self.mode() == OperatingMode::Node {
             // Node mode: hang up the active inbound-adopted call but keep the
             // listener running for the next caller (the session retains its
@@ -998,6 +999,115 @@ impl Station {
         {
             false
         }
+    }
+
+    /// Link to a `YSFReflector` and decode the audio on it (astar-e7b3 §2).
+    ///
+    /// `host` is `host:port` — YSF has no single conventional port and the
+    /// directory publishes one per reflector, so there is nothing to default
+    /// to. `options` is the YCS room request; `None` for a plain reflector.
+    ///
+    /// Primitive args rather than an `astar_console::YsfConfig` for the same
+    /// reason [`Station::dstar_connect`] takes them: that type only exists
+    /// when the feature is compiled in, and this method must stay
+    /// byte-identically callable either way.
+    ///
+    /// Receive only. There is no `ysf` PTT and no transmit path — see
+    /// `astar_console::ysf`'s module docs for the specific blocker, which is
+    /// the vendored deframer rather than unfinished work.
+    ///
+    /// Mutually exclusive with an IAX2 call, an M17 session and a D-Star
+    /// session. One `ThumbDV`, one link.
+    ///
+    /// # Blocking
+    /// The `ThumbDV` probe/init and the audio-device open both run with the
+    /// session mutex NOT held, exactly as `dstar_connect` does and for the
+    /// same reason: every `Station` method takes that mutex, and the contract
+    /// is poll-and-snapshot.
+    ///
+    /// # Errors
+    /// [`StationError::Ysf`] for an empty callsign, when the `ysf` feature
+    /// isn't compiled in, and for every vocoder-availability failure (the
+    /// message names the specific port when a dongle is merely busy).
+    /// [`StationError::AlreadyConnected`] while another network is live.
+    pub fn ysf_connect(
+        &self,
+        host: &str,
+        callsign: &str,
+        options: Option<&str>,
+    ) -> Result<(), StationError> {
+        if callsign.is_empty() {
+            return Err(StationError::Ysf("callsign must not be empty".into()));
+        }
+        #[cfg(feature = "ysf")]
+        {
+            let (_input, output) = self.selected_devices();
+            let cfg = astar_console::YsfConfig {
+                host: host.to_string(),
+                callsign: callsign.to_string(),
+                options: options.map(str::to_string),
+                output,
+            };
+            // Refuse early and cheaply, holding the lock for a few
+            // instructions rather than for the whole dongle probe.
+            self.session
+                .lock()
+                .unwrap()
+                .ysf_can_connect()
+                .map_err(map_console_err)?;
+
+            let backend = std::cell::RefCell::new(Some((self.make_backend)()));
+            let link = astar_console::YsfLink::connect_with_audio(&cfg, &move || {
+                backend
+                    .borrow_mut()
+                    .take()
+                    .expect("ysf backend factory called exactly once")
+            })
+            .map_err(map_console_err)?;
+
+            self.session
+                .lock()
+                .unwrap()
+                .ysf_adopt(link)
+                .map_err(map_console_err)
+        }
+        #[cfg(not(feature = "ysf"))]
+        {
+            let _ = (host, options);
+            Err(StationError::Ysf("ysf support not compiled".into()))
+        }
+    }
+
+    /// Disconnect the live YSF link, if any. No-op when none is active (and
+    /// when the `ysf` feature isn't compiled in).
+    pub fn ysf_disconnect(&self) {
+        #[cfg(feature = "ysf")]
+        {
+            self.session.lock().unwrap().ysf_disconnect();
+        }
+    }
+
+    /// `true` when System Fusion voice is available: the `ysf` feature is
+    /// compiled in AND a `ThumbDV` is attached. The same cached probe
+    /// [`Station::dstar_available`] reads — one dongle, one answer.
+    #[must_use]
+    pub fn ysf_available(&self) -> bool {
+        #[cfg(feature = "ysf")]
+        {
+            astar_console::ysf_available()
+        }
+        #[cfg(not(feature = "ysf"))]
+        {
+            false
+        }
+    }
+
+    /// A poll-cheap snapshot of the live YSF link, or `None`. Only compiled
+    /// when the `ysf` feature is enabled.
+    #[cfg(feature = "ysf")]
+    #[must_use]
+    pub fn ysf_state(&self) -> Option<astar_console::YsfSnapshot> {
+        self.session.lock().unwrap().ysf_state()
     }
 
     /// A poll-cheap snapshot of the live D-Star session's state (iax-a9d4
@@ -2061,6 +2171,7 @@ impl Drop for Station {
         self.disconnect();
         self.m17_disconnect();
         self.dstar_disconnect();
+        self.ysf_disconnect();
         // Stop monitor mode (releases the input device).
         self.monitor_stop();
         // Stop outbound registration (sends REGREL, joins the thread).

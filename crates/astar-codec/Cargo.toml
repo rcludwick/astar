@@ -12,6 +12,14 @@ description = "Audio codecs for IAX2. G.711 always-on; GSM/Speex/iLBC behind fea
 workspace = true
 
 [dependencies]
+# System Fusion protocol primitives (iax-e8a4). `astar-ysf` is pure `std` —
+# no I/O, no third-party crates — so this costs nothing at build time and
+# raises no licensing question, and it is deliberately NOT behind a feature:
+# `just ci` builds default features only, and the YSF frame packing in
+# `ysf.rs` is the one piece of this crate whose byte layout was read out of
+# other people's implementations. That is exactly the code that must be
+# under test on every run, not behind a flag nobody turns on.
+astar-ysf = { path = "../astar-ysf" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 codec2 = { workspace = true, optional = true }

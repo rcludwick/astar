@@ -71,6 +71,16 @@ m17 = ["astar-console/m17"]
 # above (methods exist, return `StationError::Dstar("dstar support not
 # compiled")` / are no-ops / return `false`).
 dstar = ["astar-console/dstar"]
+# System Fusion (astar-e7b3 §2): re-exposes astar-console's `ysf` feature,
+# wired through `Station::ysf_connect`/`ysf_disconnect`/`ysf_available`/
+# `ysf_state`. Not in `default`, for the same reason `dstar` is not: YSF
+# voice is AMBE+2 and needs the same `ThumbDV`, so this pulls
+# `astar-console/ysf` and through it `astar-codec/ambe-hw`. Receive only —
+# there is no transmit path (see `astar_console::ysf`'s module docs).
+# Byte-identical defaults with the feature off, same contract as `dstar`:
+# the methods exist, and return `StationError::Ysf("ysf support not
+# compiled")` / are no-ops / return `false`.
+ysf = ["astar-console/ysf"]
 # Link Codec 2 into the binary instead of relying on a system libcodec2 found
 # at runtime (astar-8c4d). NOT default, and it must never become one — see the
 # licensing note in `astar-codec/Cargo.toml`. The shipped macOS app turns this

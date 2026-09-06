@@ -83,13 +83,14 @@ codec2-static = ["astar-codec/codec2-static"]
 # `cargo tree -p astar-console --features dstar` (`ambe-thumbdv`
 # present).
 dstar = ["dep:astar-dstar", "astar-codec/ambe-hw"]
-# System Fusion (iax-e8a4). `astar-ysf` is pure protocol — no I/O beyond its
-# own loopback reflector, no deps past `std` — so this feature costs nothing
-# but the code. It does NOT pull `astar-codec/ambe-hw` the way `dstar` does,
-# because the link layer carries the ninety payload bytes without decoding
-# them: YSF voice is AMBE+2 and there is no vocoder path yet. When one lands
-# this gains `astar-codec/ambe-hw` and the feature stops being audio-free.
-ysf = ["dep:astar-ysf"]
+# System Fusion (iax-e8a4 link layer, astar-e7b3 §2 audio). Like `dstar` and
+# unlike `m17`, this is NOT part of `default`, and for the same reason: YSF
+# voice is AMBE+2, there is no software AMBE, so decoding it needs
+# `astar-codec/ambe-hw` and the vendored `ThumbDV` driver behind it. A link
+# can still be opened without a dongle (`YsfLink::connect`) — it just makes
+# no sound. Receive only: see this crate's `ysf` module docs for why transmit
+# is blocked at the vendored deframer rather than merely unwritten.
+ysf = ["dep:astar-ysf", "astar-codec/ambe-hw"]
 
 [lints]
 workspace = true

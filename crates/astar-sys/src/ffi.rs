@@ -319,6 +319,16 @@ pub struct IaxState {
     /// an active IAX2 call and an M17 session (see
     /// [`iax_station_connect_dstar`]).
     pub dstar_active: bool,
+    /// `true` when System Fusion voice is available: the `ysf` feature is
+    /// compiled in AND a `ThumbDV` is attached right now. The same probe
+    /// [`Self::dstar_available`] reads — one dongle, one answer — so the two
+    /// flags move together and a UI can trust that they agree.
+    pub ysf_available: bool,
+    /// `true` while a YSF link is live — mutually exclusive with an IAX2
+    /// call, an M17 session and a D-Star session (see
+    /// [`iax_station_connect_ysf`]). Receive only: there is no YSF transmit,
+    /// so a UI must not offer PTT while this is set.
+    pub ysf_active: bool,
 }
 
 /// The kind of a drained lifecycle event (see [`iax_station_next_event`]).
@@ -510,6 +520,8 @@ fn fill_state(s: &astar_station::ConsoleState) -> IaxState {
         m17_active: s.m17_active,
         dstar_available: s.dstar_available,
         dstar_active: s.dstar_active,
+        ysf_available: s.ysf_available,
+        ysf_active: s.ysf_active,
     }
 }
 
@@ -2731,6 +2743,157 @@ fn dstar_state_json(station: &IaxStation) -> String {
         .to_string()
     }
     #[cfg(not(feature = "dstar"))]
+    {
+        let _ = station;
+        "{}".to_string()
+    }
+}
+
+/// Link to a `YSFReflector` and decode the audio on it (astar-e7b3 §2).
+///
+/// `host` is `host:port` — YSF publishes a port per reflector and has no
+/// conventional default, so there is nothing sensible to assume. `options`
+/// is the YCS room request; pass NULL for a plain reflector.
+///
+/// RECEIVE ONLY. There is no YSF transmit and no YSF PTT: a front-end must
+/// not offer a key affordance while [`IaxSnapshot::ysf_active`] is set. The
+/// blocker is named in `astar_console::ysf`'s module docs and is a vendored
+/// deframer, not unfinished work.
+///
+/// YSF is HARDWARE-ONLY for the same reason D-Star is — the vocoder is
+/// AMBE+2 on a DVSI `ThumbDV`. Poll [`IaxSnapshot::ysf_available`] and offer
+/// the affordance only when it is `true`, rather than calling this
+/// speculatively.
+///
+/// `host` and `callsign` are required (NULL/non-UTF-8 → [`IAX_ERR_NULL`] /
+/// [`IAX_ERR_UTF8`]); `options` is optional, but a non-NULL, non-UTF-8 one is
+/// [`IAX_ERR_UTF8`]. Returns [`IAX_OK`], [`IAX_ERR_ALREADY_CONNECTED`] (any
+/// other network is live), [`IAX_ERR_YSF`], or [`IAX_ERR_PANIC`].
+///
+/// NOTE: this performs blocking work — a serial-port scan plus, per candidate
+/// port and baud rate, an open and an eight-transaction dongle init, then a
+/// socket bind and thread spawn. It can take on the order of a second. Call
+/// it off any UI thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_connect_ysf(
+    st: *mut IaxStation,
+    host: *const c_char,
+    callsign: *const c_char,
+    options: *const c_char,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let host = match unsafe { req_str(host) } {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        let callsign = match unsafe { req_str(callsign) } {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        // Optional. Held to the same strict-UTF-8 rule as the required
+        // strings: a lossy conversion would silently request a different
+        // YCS room than the operator asked for.
+        let options = if options.is_null() {
+            None
+        } else {
+            match unsafe { req_str(options) } {
+                Ok(s) => Some(s),
+                Err(c) => return c,
+            }
+        };
+        result_code(station, station.inner.ysf_connect(host, callsign, options))
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Disconnect the live YSF link, if any. Idempotent — a no-op while idle.
+/// Returns [`IAX_OK`], [`IAX_ERR_NULL`], or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_ysf_disconnect(st: *mut IaxStation) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        station.inner.ysf_disconnect();
+        IAX_OK
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Write the live YSF link's state as JSON into the caller buffer `buf` of
+/// `len` bytes (NUL-terminated, truncate-safe; same contract as
+/// [`iax_station_dstar_state`] — returns the byte length the full JSON needs,
+/// excluding the NUL, so a `len == 0` call is a sizing query).
+///
+/// ```json
+/// {"link":"linked","last_heard":"AJ7HR","frames_rx":412,"receiving":true,
+///  "unsupported_mode":null,"backend":"thumbdv"}
+/// ```
+///
+/// `link` is one of `idle`/`linking`/`linked`/`unlinking`/`failed`.
+/// `last_heard` is read from the frame header in clear, needs no vocoder, and
+/// PERSISTS past end-of-transmission — it is "most recently heard", not
+/// "currently transmitting"; `receiving` is the one that says whether a
+/// transmission is in progress. `frames_rx` is a liveness counter: a link
+/// that is up and silent and one that is receiving look identical from
+/// `link` alone.
+///
+/// `unsupported_mode` is the field worth wiring into the UI. It is `null`
+/// normally, and otherwise names a mode astar could not decode — `voice-fr`
+/// (VW, full-rate voice) or `data-fr`. astar decodes DN only, and a reflector
+/// carrying VW would otherwise be indistinguishable from a broken one:
+/// silence, with nothing saying why. Show it.
+///
+/// Every field is credential-free: callsigns and counters only.
+///
+/// Writes `{}` when no link is active or the `ysf` feature isn't compiled in.
+/// Returns [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_ysf_state(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let json = ysf_state_json(station);
+        unsafe { fill_buf(&json, buf, len) }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Render the live YSF link's state as JSON, or `"{}"` when there is none.
+/// Split out of [`iax_station_ysf_state`] so it is reachable from tests
+/// without an FFI buffer dance.
+fn ysf_state_json(station: &IaxStation) -> String {
+    #[cfg(feature = "ysf")]
+    {
+        let Some(s) = station.inner.ysf_state() else {
+            return "{}".to_string();
+        };
+        // Built through serde_json rather than `format!`: `last_heard` is
+        // attacker-supplied — it is whatever callsign the person
+        // transmitting put in the header — so a quote or backslash in it
+        // must not be able to break out of the string.
+        serde_json::json!({
+            "link": s.link_state,
+            "last_heard": s.last_heard,
+            "frames_rx": s.frames_rx,
+            "receiving": s.receiving,
+            "unsupported_mode": s.unsupported_mode,
+            "backend": s.backend,
+        })
+        .to_string()
+    }
+    #[cfg(not(feature = "ysf"))]
     {
         let _ = station;
         "{}".to_string()

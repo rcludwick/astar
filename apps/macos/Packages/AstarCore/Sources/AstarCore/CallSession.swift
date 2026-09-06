@@ -68,6 +68,38 @@ public final class CallSession: ObservableObject {
     /// dongle plugged in after launch does not appear until the next one.
     @Published public private(set) var dstarAvailable = false
 
+    /// Whether the engine can link System Fusion: mirrors the snapshot's
+    /// `ysfAvailable` flag. Gates the YSF picker segment
+    /// (`Network.available(m17:dstar:ysf:)`).
+    ///
+    /// Hardware, not a build — and the SAME hardware `dstarAvailable`
+    /// reports, read through the same probe, so the two always agree. YSF
+    /// voice is AMBE+2 from the same ThumbDV.
+    @Published public private(set) var ysfAvailable = false
+
+    /// The callsign of the most recently heard YSF transmission, or `nil`.
+    /// **Last heard, not talking now** — it persists past end-of-transmission
+    /// (`ysfReceiving` is what says whether a transmission is in progress).
+    /// Cleared when the link ends.
+    @Published public private(set) var ysfLastHeard: String?
+
+    /// `true` while a YSF transmission is in progress. Unlike AllStar's
+    /// `receiving`, this is not inferred from audio level — the frame header
+    /// says so directly.
+    @Published public private(set) var ysfReceiving = false
+
+    /// The YSF link's state, or `nil` when no link is live.
+    @Published public private(set) var ysfLink: YSFState.Link?
+
+    /// Set when the reflector is sending a mode astar cannot decode — VW
+    /// (full-rate voice) or data frames.
+    ///
+    /// Worth surfacing rather than logging. astar decodes DN only, and a
+    /// reflector carrying VW is otherwise indistinguishable from a broken
+    /// one: a link that says `linked`, a counter that climbs, and silence.
+    /// This is the sentence that explains it.
+    @Published public private(set) var ysfUnsupportedMode: YSFState.UnsupportedMode?
+
     /// The MY callsign of the most recently heard D-Star transmission, or
     /// `nil` until one arrives. **Last heard, not talking now** — it persists
     /// past end-of-transmission by design (`receiving` is what says whether
@@ -348,7 +380,7 @@ public final class CallSession: ObservableObject {
     /// Whether `network` needs the operator's callsign before it can dial.
     /// Both reflector networks transmit it; AllStar dials as the user's node.
     public static func requiresCallsign(_ network: Network) -> Bool {
-        network == .m17 || network == .dstar
+        network == .m17 || network == .dstar || network == .ysf
     }
 
     /// The operator's DMR radio ID — the numeric half of the identity model.
@@ -570,6 +602,7 @@ public final class CallSession: ObservableObject {
         switch network {
         case .m17: return M17Dial.parse(raw) != nil
         case .dstar: return DStarDial.parse(raw) != nil
+        case .ysf: return YSFDial.parse(raw) != nil
         case .allstar, .hamlink: return DialTarget.parse(raw) != nil
         }
     }
@@ -661,6 +694,25 @@ public final class CallSession: ObservableObject {
             } else if dstarLink != nil || dstarTalker != nil || dstarSlowText != nil {
                 clearDStarState()
             }
+            if ysfAvailable != snap.ysfAvailable { ysfAvailable = snap.ysfAvailable }
+            // Same arrangement as D-Star's above, for the same reason: YSF's
+            // own fields cost an ABI crossing and a JSON parse, so they are
+            // asked for only while a link is live.
+            if snap.ysfActive {
+                let state = try? station.ysfState()
+                if ysfLastHeard != state?.lastHeard { ysfLastHeard = state?.lastHeard }
+                if ysfReceiving != (state?.receiving ?? false) {
+                    ysfReceiving = state?.receiving ?? false
+                }
+                if ysfLink != state?.link { ysfLink = state?.link }
+                if ysfUnsupportedMode != state?.unsupportedMode {
+                    ysfUnsupportedMode = state?.unsupportedMode
+                }
+            } else if ysfLink != nil || ysfLastHeard != nil || ysfReceiving
+                || ysfUnsupportedMode != nil
+            {
+                clearYSFState()
+            }
             // Quarter-second peak-hold for the VU meters (astar-f78a) so they read
             // steadily instead of flickering at the poll rate.
             let meterNow = Date()
@@ -751,6 +803,14 @@ public final class CallSession: ObservableObject {
             {
                 setActiveCallNetwork(nil)
                 clearDStarState()
+            }
+            // And the same for YSF — a reflector that dropped the link, or a
+            // dongle pulled out mid-listen, never reaches `disconnect()`.
+            if activeCallNetwork == .ysf, snap.status == .hangup || snap.status == .idle,
+                lastPolledStatus != .hangup, lastPolledStatus != .idle
+            {
+                setActiveCallNetwork(nil)
+                clearYSFState()
             }
             lastPolledStatus = snap.status
             // "Receiving" = far end keyed (when the node reports it) OR live rx
@@ -848,6 +908,13 @@ public final class CallSession: ObservableObject {
         /// not offer D-Star without a dongle — but reachable if the dongle is
         /// unplugged between the picker appearing and Connect being pressed.
         case dstarUnavailable
+        /// The YSF dial field's text names nothing in the directory and does
+        /// not parse as `host[:port]` either.
+        case badYSFTarget
+        /// YSF was dialled with no vocoder present. Same shape and the same
+        /// dongle as ``dstarUnavailable``, and a separate case so the message
+        /// can name the network the operator actually chose.
+        case ysfUnavailable
 
         public var errorDescription: String? {
             switch self {
@@ -874,6 +941,14 @@ public final class CallSession: ObservableObject {
             case .dstarUnavailable:
                 return
                     "D-Star needs a ThumbDV vocoder dongle attached — "
+                    + "astar has no software AMBE decoder."
+            case .badYSFTarget:
+                return
+                    "Enter a reflector name, or an address as host:port "
+                    + "(for example ysf.example:42000)."
+            case .ysfUnavailable:
+                return
+                    "System Fusion needs a ThumbDV vocoder dongle attached — "
                     + "astar has no software AMBE decoder."
             }
         }
@@ -918,6 +993,8 @@ public final class CallSession: ObservableObject {
             try connectM17(target: node)
         case .dstar:
             try connectDStar(target: node)
+        case .ysf:
+            try connectYSF(target: node)
         }
     }
 
@@ -1124,6 +1201,84 @@ public final class CallSession: ObservableObject {
             // the session we just established is nobody's. Tear it down.
             onStale: {
                 try? station.dstarDisconnect()
+                try? station.disconnect()
+            })
+    }
+
+    /// Turn the YSF dial field's text into a host and port — **directory
+    /// first, address second**, the same order and the same reason as
+    /// `m17Target` and `dstarTarget`.
+    ///
+    /// Simpler than either, because there is no module: a plain YSFReflector
+    /// is one room, so `needsModule` cannot arise and there is no destination
+    /// callsign to transmit. What is left is the port, which YSF does not
+    /// standardise — the directory row carries the real one, and only a typed
+    /// address falls back to `YSFDial.defaultPort`.
+    private func ysfTarget(_ target: String) throws -> (host: String, port: UInt16) {
+        switch resolveReflector(target, network: .ysf) {
+        case .ready(let reflector):
+            return (host: reflector.host, port: reflector.port)
+        case .needsModule(let entry):
+            // Unreachable for YSF — `addressesModule` is false for this
+            // network, so the resolver never asks for one — but stated rather
+            // than silently treated as dialable.
+            throw ConnectError.needsModule(entry.id)
+        case .notDialable(let entry):
+            throw ConnectError.reflectorNotDialable(entry.id)
+        case .notInDirectory:
+            guard let parsed = YSFDial.parse(target) else {
+                throw ConnectError.badYSFTarget
+            }
+            return (host: parsed.host, port: parsed.port)
+        }
+    }
+
+    /// The `.ysf` arm of `connect(node:network:)`.
+    ///
+    /// Structured exactly like `connectDStar` — validate before touching any
+    /// state, claim the single-flight dial slot, generation-gate every write
+    /// after the engine call — because the races are the same races and two
+    /// connect paths guarding them differently is how one ends up not
+    /// guarding them at all.
+    ///
+    /// Receive only: nothing here arms a transmit path, and none exists to
+    /// arm. The engine call BLOCKS for a serial scan plus a per-port dongle
+    /// init before it touches the network, so every caller runs this off the
+    /// main thread.
+    private func connectYSF(target: String) throws {
+        let parsed = try ysfTarget(target)
+        let callsign = operatorCallsign.trimmingCharacters(in: .whitespaces)
+        guard !callsign.isEmpty else {
+            throw ConnectError.missingCallsign
+        }
+        guard ysfAvailable else {
+            throw ConnectError.ysfUnavailable
+        }
+        let generation = try claimDial()
+        try? station.disconnect()
+        setDialedNode(target)
+        recordedRecentForCall = false
+        dialAwaitingAnswer = false
+        setLastDialFailure(nil)
+        do {
+            try station.connectYSF(
+                host: "\(parsed.host):\(parsed.port)", callsign: callsign, options: nil)
+        } catch {
+            testPostEngineCallHook?()
+            releaseDial(
+                generation: generation,
+                onCurrent: { setDialedNode(nil) },
+                onStale: {})
+            throw error
+        }
+        testPostEngineCallHook?()
+        releaseDial(
+            generation: generation,
+            onCurrent: { setActiveCallNetwork(.ysf) },
+            // A disconnect superseded us while the dongle was initialising:
+            // the link we just made is nobody's. Tear it down.
+            onStale: {
+                try? station.ysfDisconnect()
                 try? station.disconnect()
             })
     }
@@ -1346,6 +1501,10 @@ public final class CallSession: ObservableObject {
                 try? station.dstarDisconnect()
                 clearDStarState()
             }
+            if activeCallNetwork == .ysf {
+                try? station.ysfDisconnect()
+                clearYSFState()
+            }
             try station.disconnect()
             setDialedNode(nil)
             setActiveCallNetwork(nil)
@@ -1361,6 +1520,18 @@ public final class CallSession: ObservableObject {
         dstarTalker = nil
         dstarSlowText = nil
         dstarLink = nil
+    }
+
+    /// Drop the last-heard YSF fields, on every path a link can end by — for
+    /// the same reason `clearDStarState` exists: a callsign left on screen
+    /// after the link is gone is a claim about the present that is no longer
+    /// true. `ysfUnsupportedMode` goes with them, because it describes the
+    /// reflector that is no longer connected.
+    private func clearYSFState() {
+        ysfLastHeard = nil
+        ysfReceiving = false
+        ysfLink = nil
+        ysfUnsupportedMode = nil
     }
 
     /// Record (or clear) the dialed node. `@Published`, so hop to the main thread —

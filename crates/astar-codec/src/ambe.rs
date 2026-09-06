@@ -52,12 +52,103 @@ pub trait AmbeVoice: Send {
 /// hardware backend, everything already submitted may already be written to
 /// the device and cannot be recalled, so the newest frame is the only one
 /// that can safely be dropped.
+/// Which vocoder mode a stream was opened for.
+///
+/// The AMBE-3000 is told its rate parameters ONCE, during the init cookbook,
+/// and every channel frame afterwards must match what it was told. A dongle
+/// initialized for D-Star cannot decode a YSF DN frame and will not say so —
+/// it will return confident noise. So the mode is chosen when the stream is
+/// opened and is fixed for its lifetime, which is also the truth about the
+/// hardware: one `ThumbDV` is one physical link in one configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VocoderMode {
+    /// D-Star and DMR: AMBE+2 full-rate, 72-bit channel frames, FEC on.
+    #[default]
+    Dstar,
+    /// System Fusion DN (V/D modes 1 and 2): AMBE+2 half-rate, 49-bit
+    /// channel frames, FEC off — YSF carries its own, and
+    /// [`crate::ysf::unpack_dn`] has already stripped it.
+    YsfDn,
+}
+
+impl VocoderMode {
+    /// Bytes one channel frame occupies in this mode.
+    #[must_use]
+    pub const fn channel_bytes(self) -> usize {
+        match self {
+            Self::Dstar => 9,
+            Self::YsfDn => crate::ysf::VOICE_BYTES,
+        }
+    }
+
+    /// A stable lowercase name, for logs and for the state JSON that crosses
+    /// the C ABI.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Dstar => "dstar",
+            Self::YsfDn => "ysf-dn",
+        }
+    }
+}
+
+/// One vocoder channel frame — the compressed bits for a single 20 ms voice
+/// frame — tagged with the mode that produced it.
+///
+/// An enum rather than a byte slice with a length, because the two widths are
+/// not interchangeable and a mismatch is silent on the wire: the AMBE-3000
+/// answers a wrongly-sized channel packet with noise, or with a `Channel`
+/// response the deframer reads as "rate lost". Making the caller name the
+/// mode means a mismatch is a compile error where it can be, and a logged
+/// drop where it cannot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelFrame {
+    /// A 72-bit D-Star/DMR frame.
+    Dstar([u8; 9]),
+    /// A 49-bit YSF DN frame, FEC already stripped.
+    YsfDn(crate::ysf::DnFrame),
+}
+
+impl ChannelFrame {
+    /// The mode this frame belongs to.
+    #[must_use]
+    pub const fn mode(self) -> VocoderMode {
+        match self {
+            Self::Dstar(_) => VocoderMode::Dstar,
+            Self::YsfDn(_) => VocoderMode::YsfDn,
+        }
+    }
+}
+
+impl ChannelFrame {
+    /// The frame's bytes, whatever its width.
+    #[must_use]
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Dstar(bytes) => &bytes[..],
+            Self::YsfDn(dn) => &dn.as_bytes()[..],
+        }
+    }
+}
+
+impl From<[u8; 9]> for ChannelFrame {
+    fn from(bytes: [u8; 9]) -> Self {
+        Self::Dstar(bytes)
+    }
+}
+
+impl From<crate::ysf::DnFrame> for ChannelFrame {
+    fn from(frame: crate::ysf::DnFrame) -> Self {
+        Self::YsfDn(frame)
+    }
+}
+
 pub trait AmbeStream: Send {
     /// Queue a frame for decoding. Never blocks on the device; when the
     /// pipeline is already at [`AMBE_STREAM_MAX_IN_FLIGHT`] this drops the
     /// incoming frame (logged via `tracing::warn!`) rather than submitting
     /// it.
-    fn submit_decode(&mut self, frame: [u8; 9]);
+    fn submit_decode(&mut self, frame: ChannelFrame);
     /// Take the next decoded frame, if one has come back yet.
     fn poll_decoded(&mut self) -> Option<[i16; 160]>;
     /// Frames currently in flight: submitted but not yet returned by
@@ -458,18 +549,21 @@ pub fn open_ambe(prefer: Option<AmbeBackend>) -> Option<(Box<dyn AmbeVoice>, Amb
 ///
 /// Returns `None` if no backend is available.
 #[must_use]
-pub fn open_ambe_stream(prefer: Option<AmbeBackend>) -> Option<(Box<dyn AmbeStream>, AmbeBackend)> {
+pub fn open_ambe_stream(
+    prefer: Option<AmbeBackend>,
+    mode: VocoderMode,
+) -> Option<(Box<dyn AmbeStream>, AmbeBackend)> {
     #[cfg(feature = "ambe-hw")]
     {
         // `Hardware` is the only backend, so `None` (no opinion) and
         // `Some(Hardware)` take the same path.
         let _ = prefer;
-        open_hw_stream_from_candidate_ports().map(|stream| (stream, AmbeBackend::Hardware))
+        open_hw_stream_from_candidate_ports(mode).map(|stream| (stream, AmbeBackend::Hardware))
     }
 
     #[cfg(not(feature = "ambe-hw"))]
     {
-        let _ = prefer;
+        let _ = (prefer, mode);
         None
     }
 }
@@ -481,13 +575,13 @@ pub fn open_ambe_stream(prefer: Option<AmbeBackend>) -> Option<(Box<dyn AmbeStre
 /// (unplugged, busy, wrong device) — see [`open_ambe_stream`]'s doc for why
 /// finer-grained classification isn't this function's job.
 #[cfg(feature = "ambe-hw")]
-fn open_hw_stream_from_candidate_ports() -> Option<Box<dyn AmbeStream>> {
+fn open_hw_stream_from_candidate_ports(mode: VocoderMode) -> Option<Box<dyn AmbeStream>> {
     for path in thumbdv_candidate_ports() {
         for baud in [460_800u32, 230_400u32] {
             let Ok(transport) = ambe_thumbdv::SerialTransport::open(&path, baud) else {
                 continue;
             };
-            if let Ok(stream) = open_hw_stream_with(transport) {
+            if let Ok(stream) = open_hw_stream_with(transport, mode) {
                 return Some(stream);
             }
         }
@@ -711,6 +805,7 @@ fn hw_stream_check_status(
 #[cfg(feature = "ambe-hw")]
 fn hw_stream_init<T: ambe_thumbdv::Transport>(
     transport: &mut T,
+    mode: VocoderMode,
 ) -> Result<(), ambe_thumbdv::DeviceError> {
     use ambe_thumbdv::{
         DeviceError, Response, dcmode_off, ecmode_off, gain_zero, init_encdec, prodid_query,
@@ -748,9 +843,15 @@ fn hw_stream_init<T: ambe_thumbdv::Transport>(
         _ => return Err(DeviceError::Protocol("expected Version".into())),
     }
 
-    // Steps 5-9: D-STAR rate params, encoder/decoder init, EC/DC off, gain
-    // zero.
-    hw_stream_check_status(&hw_stream_transact(transport, &ratep_dstar())?, 0x0A)?;
+    // Steps 5-9: rate params for the requested mode, encoder/decoder init,
+    // EC/DC off, gain zero. The rate word is the ONE step that differs
+    // between modes, and it is the step that decides what every subsequent
+    // channel packet means to the chip.
+    let ratep = match mode {
+        VocoderMode::Dstar => ratep_dstar(),
+        VocoderMode::YsfDn => crate::ysf::ratep_dn(),
+    };
+    hw_stream_check_status(&hw_stream_transact(transport, &ratep)?, 0x0A)?;
     hw_stream_check_status(&hw_stream_transact(transport, &init_encdec())?, 0x0B)?;
     hw_stream_check_status(&hw_stream_transact(transport, &ecmode_off())?, 0x05)?;
     hw_stream_check_status(&hw_stream_transact(transport, &dcmode_off())?, 0x06)?;
@@ -870,9 +971,28 @@ impl<Resp> PipelineSide<Resp> {
 fn hw_stream_write_decode<T: ambe_thumbdv::Transport>(
     transport: &mut T,
     side: &mut PipelineSide<[i16; 160]>,
-    frame: [u8; 9],
+    frame: ChannelFrame,
+    mode: VocoderMode,
 ) {
-    match transport.send(&ambe_thumbdv::channel_in(&frame)) {
+    // A frame of the wrong mode would be written as a channel packet the
+    // chip is not configured to read, and the chip would answer with noise
+    // rather than an error. Drop it and say so — this is an internal
+    // invariant (the session that owns the stream opened it), so reaching
+    // here at all is a bug, not a device fault.
+    if frame.mode() != mode {
+        tracing::warn!(
+            expected = mode.as_str(),
+            got = frame.mode().as_str(),
+            "ambe-hw stream: channel frame does not match the mode this stream was opened for, dropping"
+        );
+        let _ = side.resp_tx.send([0i16; 160]);
+        return;
+    }
+    let packet = match frame {
+        ChannelFrame::Dstar(bytes) => ambe_thumbdv::channel_in(&bytes),
+        ChannelFrame::YsfDn(dn) => crate::ysf::channel_in_dn(dn),
+    };
+    match transport.send(&packet) {
         Ok(()) => side.outstanding.push_back(std::time::Instant::now()),
         Err(e) => {
             tracing::warn!("ambe-hw stream: decode write failed: {e}, substituting silence");
@@ -984,7 +1104,7 @@ fn hw_stream_deliver_to_side<Resp>(side: &mut PipelineSide<Resp>, value: Resp, k
 /// `Decode` variant (`clippy::large_enum_variant`).
 #[cfg(feature = "ambe-hw")]
 enum StreamReq {
-    Decode([u8; 9]),
+    Decode(ChannelFrame),
     Encode(Box<[i16; 160]>),
 }
 
@@ -996,9 +1116,10 @@ fn hw_stream_write_req<T: ambe_thumbdv::Transport>(
     decode_side: &mut PipelineSide<[i16; 160]>,
     encode_side: &mut PipelineSide<[u8; 9]>,
     req: StreamReq,
+    mode: VocoderMode,
 ) {
     match req {
-        StreamReq::Decode(frame) => hw_stream_write_decode(transport, decode_side, frame),
+        StreamReq::Decode(frame) => hw_stream_write_decode(transport, decode_side, frame, mode),
         StreamReq::Encode(pcm) => hw_stream_write_encode(transport, encode_side, &pcm),
     }
 }
@@ -1029,6 +1150,7 @@ fn hw_stream_worker<T: ambe_thumbdv::Transport>(
     req_rx: &std::sync::mpsc::Receiver<StreamReq>,
     decode_resp_tx: &std::sync::mpsc::Sender<[i16; 160]>,
     encode_resp_tx: &std::sync::mpsc::Sender<[u8; 9]>,
+    mode: VocoderMode,
 ) {
     use ambe_thumbdv::{Deframer, Response, parse_response};
     use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
@@ -1043,7 +1165,13 @@ fn hw_stream_worker<T: ambe_thumbdv::Transport>(
         loop {
             match req_rx.try_recv() {
                 Ok(req) => {
-                    hw_stream_write_req(&mut transport, &mut decode_side, &mut encode_side, req);
+                    hw_stream_write_req(
+                        &mut transport,
+                        &mut decode_side,
+                        &mut encode_side,
+                        req,
+                        mode,
+                    );
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -1124,7 +1252,13 @@ fn hw_stream_worker<T: ambe_thumbdv::Transport>(
             // worker thread on repeated empty reads.
             match req_rx.recv_timeout(STREAM_IDLE_WAIT) {
                 Ok(req) => {
-                    hw_stream_write_req(&mut transport, &mut decode_side, &mut encode_side, req);
+                    hw_stream_write_req(
+                        &mut transport,
+                        &mut decode_side,
+                        &mut encode_side,
+                        req,
+                        mode,
+                    );
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
@@ -1205,11 +1339,13 @@ pub(crate) struct HwAmbeStream {
     resp_rx_encode: std::sync::mpsc::Receiver<[u8; 9]>,
     in_flight: usize,
     in_flight_encode: usize,
+    /// What the chip was initialized for. Fixed for the stream's lifetime.
+    mode: VocoderMode,
 }
 
 #[cfg(feature = "ambe-hw")]
 impl AmbeStream for HwAmbeStream {
-    fn submit_decode(&mut self, frame: [u8; 9]) {
+    fn submit_decode(&mut self, frame: ChannelFrame) {
         if self.in_flight >= AMBE_STREAM_MAX_IN_FLIGHT {
             tracing::warn!(
                 "ambe-hw stream: pipeline full ({AMBE_STREAM_MAX_IN_FLIGHT} in flight), dropping newest frame"
@@ -1255,6 +1391,23 @@ impl AmbeStream for HwAmbeStream {
     }
 
     fn submit_encode(&mut self, pcm: [i16; 160]) {
+        // YSF DN encode is not wired up, and must not appear to be. The
+        // AMBE-3000 would answer a half-rate encode request with a `Channel`
+        // response carrying 0x31 (49) bits, and the vendored deframer rejects
+        // any count but 0x48 as "rate lost" (`parse_channel` in
+        // `vendor/ambe-thumbdv/src/packet.rs`). The request would therefore
+        // time out and be answered with `NULL_AMBE_FRAME` — a D-STAR null
+        // codeword — which on a YSF link is not silence, it is nine bytes of
+        // the wrong vocoder's noise, transmitted. Refusing here is the
+        // lowest place that can stop it.
+        if self.mode == VocoderMode::YsfDn {
+            tracing::warn!(
+                "ambe-hw stream: encode requested on a YSF DN stream; YSF transmit is not \
+                 implemented (the vendored deframer cannot read a 49-bit channel response), \
+                 discarding"
+            );
+            return;
+        }
         if self.in_flight_encode >= AMBE_STREAM_MAX_IN_FLIGHT {
             tracing::warn!(
                 "ambe-hw stream: encode pipeline full ({AMBE_STREAM_MAX_IN_FLIGHT} in flight), dropping newest frame"
@@ -1308,13 +1461,14 @@ impl AmbeStream for HwAmbeStream {
 #[cfg(feature = "ambe-hw")]
 pub(crate) fn open_hw_stream_with_handle<T: ambe_thumbdv::Transport + Send + 'static>(
     mut transport: T,
+    mode: VocoderMode,
 ) -> Result<(HwAmbeStream, std::thread::JoinHandle<()>), ambe_thumbdv::DeviceError> {
-    hw_stream_init(&mut transport)?;
+    hw_stream_init(&mut transport, mode)?;
     let (req_tx, req_rx) = std::sync::mpsc::channel::<StreamReq>();
     let (decode_resp_tx, resp_rx_decode) = std::sync::mpsc::channel::<[i16; 160]>();
     let (encode_resp_tx, resp_rx_encode) = std::sync::mpsc::channel::<[u8; 9]>();
     let handle = std::thread::spawn(move || {
-        hw_stream_worker(transport, &req_rx, &decode_resp_tx, &encode_resp_tx);
+        hw_stream_worker(transport, &req_rx, &decode_resp_tx, &encode_resp_tx, mode);
     });
     Ok((
         HwAmbeStream {
@@ -1323,6 +1477,7 @@ pub(crate) fn open_hw_stream_with_handle<T: ambe_thumbdv::Transport + Send + 'st
             resp_rx_encode,
             in_flight: 0,
             in_flight_encode: 0,
+            mode,
         },
         handle,
     ))
@@ -1343,8 +1498,9 @@ pub(crate) fn open_hw_stream_with_handle<T: ambe_thumbdv::Transport + Send + 'st
 #[cfg(feature = "ambe-hw")]
 pub fn open_hw_stream_with<T: ambe_thumbdv::Transport + Send + 'static>(
     transport: T,
+    mode: VocoderMode,
 ) -> Result<Box<dyn AmbeStream>, ambe_thumbdv::DeviceError> {
-    let (stream, _worker) = open_hw_stream_with_handle(transport)?;
+    let (stream, _worker) = open_hw_stream_with_handle(transport, mode)?;
     Ok(Box::new(stream))
 }
 
@@ -1444,8 +1600,8 @@ pub(crate) mod test_support {
 mod hw_tests {
     use super::test_support::with_no_thumbdv;
     use super::{
-        AmbeBackend, AmbeStream, AmbeVoice, NULL_AMBE_FRAME, open_ambe, open_ambe_stream,
-        open_hw_stream_with, open_hw_stream_with_handle, open_hw_with,
+        AmbeBackend, AmbeStream, AmbeVoice, ChannelFrame, NULL_AMBE_FRAME, VocoderMode, open_ambe,
+        open_ambe_stream, open_hw_stream_with, open_hw_stream_with_handle, open_hw_with,
     };
     use ambe_thumbdv::{
         MockTransport, ThumbDv, channel_in, dcmode_off, ecmode_off, gain_zero, init_encdec,
@@ -1527,6 +1683,12 @@ mod hw_tests {
     /// `MockTransport` — mirrors ambe-thumbdv's own `device.rs` test
     /// fixture (`scripted_init`), which isn't exported for reuse here.
     fn scripted_init() -> MockTransport {
+        scripted_init_mode(VocoderMode::Dstar)
+    }
+
+    /// [`scripted_init`] for an explicit mode: the rate word is the only
+    /// step of the cookbook that differs between them.
+    fn scripted_init_mode(mode: VocoderMode) -> MockTransport {
         let mut m = MockTransport::new();
         m.expect(reset(), vec![hex("61 00 01 00 39")]);
         let mut prod = hex("61 00 0B 00 30");
@@ -1535,7 +1697,11 @@ mod hw_tests {
         let mut ver = hex("61 00 07 00 31");
         ver.extend_from_slice(b"V120A\0");
         m.expect(ambe_thumbdv::packet::verstring_query(), vec![ver]);
-        m.expect(ratep_dstar(), vec![hex("61 00 02 00 0A 00")]);
+        let ratep = match mode {
+            VocoderMode::Dstar => ratep_dstar(),
+            VocoderMode::YsfDn => crate::ysf::ratep_dn(),
+        };
+        m.expect(ratep, vec![hex("61 00 02 00 0A 00")]);
         m.expect(init_encdec(), vec![hex("61 00 02 00 0B 00")]);
         m.expect(ecmode_off(), vec![hex("61 00 02 00 05 00")]);
         m.expect(dcmode_off(), vec![hex("61 00 02 00 06 00")]);
@@ -1626,8 +1792,9 @@ mod hw_tests {
         // substitutes_soft` above: same contract, same reasoning, just
         // exercised through `open_ambe_stream`'s own candidate-port scan
         // instead of `ambe_thumbdv::detect()`.
-        let result =
-            with_no_thumbdv(|| open_ambe_stream(Some(AmbeBackend::Hardware)).map(|(_, b)| b));
+        let result = with_no_thumbdv(|| {
+            open_ambe_stream(Some(AmbeBackend::Hardware), VocoderMode::Dstar).map(|(_, b)| b)
+        });
         assert_eq!(
             result, None,
             "an explicit Hardware preference with no hardware available must return None, never \
@@ -1638,6 +1805,117 @@ mod hw_tests {
     // -------------------------------------------------------------------
     // Pipelined AmbeStream tests (iax-b3e7 M0).
     // -------------------------------------------------------------------
+
+    // -------------------------------------------------------------------
+    // Vocoder modes (astar-e7b3 §2). A ThumbDV is told its rate parameters
+    // once and never again, so the mode a stream is opened for decides what
+    // every channel packet afterwards MEANS to the chip. Getting it wrong is
+    // silent: the chip answers with confident noise, not an error.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn a_ysf_stream_initializes_the_chip_for_half_rate_not_dstar() {
+        // `scripted_init_mode` scripts `ratep_dn()`, and `MockTransport`
+        // panics on any send that is not the one it expects next. Init runs
+        // on THIS thread (before the worker is spawned), so sending
+        // `ratep_dstar()` here would fail the test rather than quietly
+        // wedging a background thread.
+        let mock = scripted_init_mode(VocoderMode::YsfDn);
+        let (stream, handle) = open_hw_stream_with_handle(mock, VocoderMode::YsfDn)
+            .expect("the YSF init cookbook must complete");
+        drop(stream);
+        assert!(
+            join_with_timeout(handle, Duration::from_secs(2)),
+            "worker must exit once the handle is dropped"
+        );
+    }
+
+    #[test]
+    fn a_ysf_stream_sends_a_49_bit_channel_packet_not_a_72_bit_one() {
+        // The whole point of the mode: `channel_in_dn` writes 0x31 (49 bits)
+        // where `channel_in` writes 0x48 (72). If the worker built the
+        // D-Star packet the mock would panic, the worker would die, and no
+        // PCM would ever come back — so a successful round trip IS the
+        // assertion that the right packet went out.
+        let mut mock = scripted_init_mode(VocoderMode::YsfDn);
+        let frame = crate::ysf::DnFrame::from_bytes([0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0x00]);
+        mock.expect(crate::ysf::channel_in_dn(frame), vec![speech_response(777)]);
+
+        let (mut stream, handle) =
+            open_hw_stream_with_handle(mock, VocoderMode::YsfDn).expect("YSF init");
+        stream.submit_decode(frame.into());
+        let pcm =
+            poll_until(&mut stream, Duration::from_secs(2)).expect("the decoded frame must return");
+        assert_eq!(pcm[0], 777, "the worker must return the scripted PCM");
+        drop(stream);
+        assert!(join_with_timeout(handle, Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn a_frame_of_the_wrong_mode_is_dropped_and_never_written() {
+        // A D-Star frame reaching a YSF stream is an internal bug, not a
+        // device fault. It must never be written — the chip is configured
+        // for half rate and would answer 72 bits of D-Star with noise. No
+        // expectation is scripted past the init, so any write at all panics
+        // the worker; the substituted silence proves the caller is answered
+        // rather than left waiting forever.
+        let mock = scripted_init_mode(VocoderMode::YsfDn);
+        let (mut stream, handle) =
+            open_hw_stream_with_handle(mock, VocoderMode::YsfDn).expect("YSF init");
+        stream.submit_decode(ChannelFrame::Dstar([0x11; 9]));
+        let pcm = poll_until(&mut stream, Duration::from_secs(2))
+            .expect("a dropped frame must still answer its caller, or the pipeline stalls");
+        assert_eq!(
+            pcm, [0i16; 160],
+            "a mode mismatch is answered with silence, not the wrong vocoder's noise"
+        );
+        drop(stream);
+        assert!(join_with_timeout(handle, Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn a_ysf_stream_refuses_to_encode() {
+        // YSF transmit does not exist: the vendored deframer rejects the
+        // 49-bit Channel response the chip would send back (`parse_channel`,
+        // "rate lost"), so an encode request would time out and be answered
+        // with NULL_AMBE_FRAME — a D-STAR null codeword, which on a YSF link
+        // is the wrong vocoder's noise rather than silence. The refusal is
+        // here, at the lowest point that can see it. Nothing is scripted
+        // past init, so a write would panic the worker.
+        let mock = scripted_init_mode(VocoderMode::YsfDn);
+        let (mut stream, handle) =
+            open_hw_stream_with_handle(mock, VocoderMode::YsfDn).expect("YSF init");
+        stream.submit_encode([0i16; 160]);
+        assert_eq!(
+            stream.in_flight_encoded(),
+            0,
+            "a refused encode must not be tracked as in flight"
+        );
+        assert!(
+            poll_encoded_until(&mut stream, Duration::from_millis(200)).is_none(),
+            "a YSF stream must never produce an encoded frame"
+        );
+        drop(stream);
+        assert!(join_with_timeout(handle, Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn channel_frames_carry_their_own_mode() {
+        assert_eq!(ChannelFrame::from([0u8; 9]).mode(), VocoderMode::Dstar);
+        assert_eq!(
+            ChannelFrame::from(crate::ysf::DnFrame::default()).mode(),
+            VocoderMode::YsfDn
+        );
+        assert_eq!(VocoderMode::Dstar.channel_bytes(), 9);
+        assert_eq!(VocoderMode::YsfDn.channel_bytes(), crate::ysf::VOICE_BYTES);
+        assert_eq!(ChannelFrame::from([7u8; 9]).as_slice().len(), 9);
+        assert_eq!(
+            ChannelFrame::from(crate::ysf::DnFrame::default())
+                .as_slice()
+                .len(),
+            crate::ysf::VOICE_BYTES
+        );
+    }
 
     #[test]
     fn hw_stream_fifo_orders_responses_under_a_full_pipeline() {
@@ -1663,9 +1941,9 @@ mod hw_tests {
             ],
         );
 
-        let (mut stream, handle) = open_hw_stream_with_handle(mock).unwrap();
+        let (mut stream, handle) = open_hw_stream_with_handle(mock, VocoderMode::Dstar).unwrap();
         for f in frames {
-            stream.submit_decode(f);
+            stream.submit_decode(f.into());
         }
         assert_eq!(
             stream.in_flight(),
@@ -1702,13 +1980,13 @@ mod hw_tests {
         // panic here ("unexpected send() after all expectations consumed")
         // instead of this test silently passing.
 
-        let (mut stream, handle) = open_hw_stream_with_handle(mock).unwrap();
+        let (mut stream, handle) = open_hw_stream_with_handle(mock, VocoderMode::Dstar).unwrap();
         for f in frames {
-            stream.submit_decode(f);
+            stream.submit_decode(f.into());
         }
         assert_eq!(stream.in_flight(), 4);
 
-        stream.submit_decode([0xFFu8; 9]);
+        stream.submit_decode([0xFFu8; 9].into());
         assert_eq!(
             stream.in_flight(),
             4,
@@ -1728,9 +2006,9 @@ mod hw_tests {
         let frame = [3u8; 9];
         mock.expect(channel_in(&frame), vec![speech_response(42)]);
 
-        let (mut stream, handle) = open_hw_stream_with_handle(mock).unwrap();
+        let (mut stream, handle) = open_hw_stream_with_handle(mock, VocoderMode::Dstar).unwrap();
         assert_eq!(stream.in_flight(), 0);
-        stream.submit_decode(frame);
+        stream.submit_decode(frame.into());
         assert_eq!(
             stream.in_flight(),
             1,
@@ -1773,7 +2051,7 @@ mod hw_tests {
             ],
         );
 
-        let (mut stream, handle) = open_hw_stream_with_handle(mock).unwrap();
+        let (mut stream, handle) = open_hw_stream_with_handle(mock, VocoderMode::Dstar).unwrap();
         for pcm in pcms {
             stream.submit_encode(pcm);
         }
@@ -1811,7 +2089,7 @@ mod hw_tests {
         // wrote the dropped frame anyway, the worker's send() call would
         // panic here instead of this test silently passing.
 
-        let (mut stream, handle) = open_hw_stream_with_handle(mock).unwrap();
+        let (mut stream, handle) = open_hw_stream_with_handle(mock, VocoderMode::Dstar).unwrap();
         for pcm in pcms {
             stream.submit_encode(pcm);
         }
@@ -1837,7 +2115,7 @@ mod hw_tests {
         let pcm = [3i16; 160];
         mock.expect(speech_in(&pcm), vec![channel_response([42u8; 9])]);
 
-        let (mut stream, handle) = open_hw_stream_with_handle(mock).unwrap();
+        let (mut stream, handle) = open_hw_stream_with_handle(mock, VocoderMode::Dstar).unwrap();
         assert_eq!(stream.in_flight_encoded(), 0);
         stream.submit_encode(pcm);
         assert_eq!(
@@ -1865,7 +2143,7 @@ mod hw_tests {
         let pcm = [5i16; 160];
         mock.expect(speech_in(&pcm), vec![]); // never answered: must time out
 
-        let (mut stream, handle) = open_hw_stream_with_handle(mock).unwrap();
+        let (mut stream, handle) = open_hw_stream_with_handle(mock, VocoderMode::Dstar).unwrap();
         stream.submit_encode(pcm);
         assert_eq!(stream.in_flight_encoded(), 1);
 
@@ -1896,8 +2174,8 @@ mod hw_tests {
         mock.expect(channel_in(&frame), vec![]); // never answered
         mock.expect(speech_in(&pcm), vec![]); // never answered
 
-        let (mut stream, handle) = open_hw_stream_with_handle(mock).unwrap();
-        stream.submit_decode(frame);
+        let (mut stream, handle) = open_hw_stream_with_handle(mock, VocoderMode::Dstar).unwrap();
+        stream.submit_decode(frame.into());
         stream.submit_encode(pcm);
         assert_eq!(stream.in_flight(), 1);
         assert_eq!(stream.in_flight_encoded(), 1);
@@ -2015,9 +2293,10 @@ mod hw_tests {
         bytes.extend(speech_response(77));
         let transport = ScriptedTransport::new(vec![(Duration::from_millis(10), bytes)]);
 
-        let (mut stream, handle) = open_hw_stream_with_handle(transport).unwrap();
-        stream.submit_decode([1u8; 9]);
-        stream.submit_decode([2u8; 9]);
+        let (mut stream, handle) =
+            open_hw_stream_with_handle(transport, VocoderMode::Dstar).unwrap();
+        stream.submit_decode([1u8; 9].into());
+        stream.submit_decode([2u8; 9].into());
 
         let first = poll_until(&mut stream, Duration::from_secs(2)).expect("first response");
         assert_eq!(
@@ -2059,8 +2338,9 @@ mod hw_tests {
             (Duration::from_millis(400), speech_response(222)), // B's, on time
         ]);
 
-        let (mut stream, handle) = open_hw_stream_with_handle(transport).unwrap();
-        stream.submit_decode([0xAAu8; 9]);
+        let (mut stream, handle) =
+            open_hw_stream_with_handle(transport, VocoderMode::Dstar).unwrap();
+        stream.submit_decode([0xAAu8; 9].into());
         let substituted =
             poll_until(&mut stream, Duration::from_secs(2)).expect("A must time out into silence");
         assert_eq!(substituted, [0i16; 160]);
@@ -2068,7 +2348,7 @@ mod hw_tests {
         // Let A's late response actually arrive and be reconciled while the
         // pipeline is idle, then start "the next transmission".
         std::thread::sleep(Duration::from_millis(250));
-        stream.submit_decode([0xBBu8; 9]);
+        stream.submit_decode([0xBBu8; 9].into());
 
         let b = poll_until(&mut stream, Duration::from_secs(2)).expect("B must decode");
         assert_eq!(
@@ -2096,8 +2376,9 @@ mod hw_tests {
         bytes.extend(speech_response(4242)); // decode's answer, arrives second
         let transport = ScriptedTransport::new(vec![(Duration::from_millis(10), bytes)]);
 
-        let (mut stream, handle) = open_hw_stream_with_handle(transport).unwrap();
-        stream.submit_decode([1u8; 9]);
+        let (mut stream, handle) =
+            open_hw_stream_with_handle(transport, VocoderMode::Dstar).unwrap();
+        stream.submit_decode([1u8; 9].into());
         stream.submit_encode([2i16; 160]);
         assert_eq!(stream.in_flight(), 1);
         assert_eq!(stream.in_flight_encoded(), 1);
@@ -2181,8 +2462,9 @@ mod hw_tests {
             ],
         );
 
-        let (mut stream, handle) = open_hw_stream_with_handle(transport).unwrap();
-        stream.submit_decode([0xAAu8; 9]);
+        let (mut stream, handle) =
+            open_hw_stream_with_handle(transport, VocoderMode::Dstar).unwrap();
+        stream.submit_decode([0xAAu8; 9].into());
         stream.submit_encode([0xBBi16; 160]);
 
         let decoded = poll_until(&mut stream, Duration::from_secs(2)).expect("decode must arrive");
@@ -2226,8 +2508,9 @@ mod hw_tests {
             (Duration::from_millis(270), channel_response([0x22u8; 9])),
         ]);
 
-        let (mut stream, handle) = open_hw_stream_with_handle(transport).unwrap();
-        stream.submit_decode([0xAAu8; 9]); // A: never answered
+        let (mut stream, handle) =
+            open_hw_stream_with_handle(transport, VocoderMode::Dstar).unwrap();
+        stream.submit_decode([0xAAu8; 9].into()); // A: never answered
         let substituted_a =
             poll_until(&mut stream, Duration::from_secs(2)).expect("A must time out into silence");
         assert_eq!(substituted_a, [0i16; 160]);
@@ -2264,8 +2547,9 @@ mod hw_tests {
             (Duration::from_millis(400), channel_response([0x55u8; 9])), // B's, on time
         ]);
 
-        let (mut stream, handle) = open_hw_stream_with_handle(transport).unwrap();
-        stream.submit_decode([0xAAu8; 9]); // A
+        let (mut stream, handle) =
+            open_hw_stream_with_handle(transport, VocoderMode::Dstar).unwrap();
+        stream.submit_decode([0xAAu8; 9].into()); // A
         let substituted =
             poll_until(&mut stream, Duration::from_secs(2)).expect("A must time out into silence");
         assert_eq!(substituted, [0i16; 160]);
@@ -2299,9 +2583,10 @@ mod hw_tests {
         }
         let transport = ScriptedTransport::new(vec![(Duration::from_millis(5), bytes)]);
 
-        let (mut stream, handle) = open_hw_stream_with_handle(transport).unwrap();
+        let (mut stream, handle) =
+            open_hw_stream_with_handle(transport, VocoderMode::Dstar).unwrap();
         for f in 0..4u8 {
-            stream.submit_decode([f; 9]);
+            stream.submit_decode([f; 9].into());
         }
         for expected in [10i16, 11, 12, 13] {
             let pcm = poll_until(&mut stream, Duration::from_secs(2))
@@ -2325,7 +2610,8 @@ mod hw_tests {
         }
         let transport = ScriptedTransport::new(vec![(Duration::from_millis(5), bytes)]);
 
-        let (mut stream, handle) = open_hw_stream_with_handle(transport).unwrap();
+        let (mut stream, handle) =
+            open_hw_stream_with_handle(transport, VocoderMode::Dstar).unwrap();
         for f in 0..4u8 {
             stream.submit_encode([i16::from(f); 160]);
         }
@@ -2346,8 +2632,8 @@ mod hw_tests {
         let frame = [5u8; 9];
         mock.expect(channel_in(&frame), vec![]); // never answered: must time out
 
-        let (mut stream, handle) = open_hw_stream_with_handle(mock).unwrap();
-        stream.submit_decode(frame);
+        let (mut stream, handle) = open_hw_stream_with_handle(mock, VocoderMode::Dstar).unwrap();
+        stream.submit_decode(frame.into());
         assert_eq!(stream.in_flight(), 1);
 
         let t0 = Instant::now();
@@ -2372,8 +2658,8 @@ mod hw_tests {
         let frame = [9u8; 9];
         mock.expect(channel_in(&frame), vec![]); // never answered
 
-        let (mut stream, handle) = open_hw_stream_with_handle(mock).unwrap();
-        stream.submit_decode(frame);
+        let (mut stream, handle) = open_hw_stream_with_handle(mock, VocoderMode::Dstar).unwrap();
+        stream.submit_decode(frame.into());
         assert_eq!(stream.in_flight(), 1);
 
         // Drop while the request is still outstanding (no response, and the
@@ -2396,8 +2682,8 @@ mod hw_tests {
         let frame = [4u8; 9];
         mock.expect(channel_in(&frame), vec![speech_response(9)]);
 
-        let mut stream = open_hw_stream_with(mock).unwrap();
-        stream.submit_decode(frame);
+        let mut stream = open_hw_stream_with(mock, VocoderMode::Dstar).unwrap();
+        stream.submit_decode(frame.into());
         let pcm = poll_until(stream.as_mut(), Duration::from_secs(2)).expect("decode must arrive");
         assert_eq!(pcm, [9i16; 160]);
     }
@@ -2422,7 +2708,7 @@ mod hw_tests {
 #[cfg(all(test, feature = "ambe-hw"))]
 mod hw_hardware_tests {
     use super::test_support::{hardware_lock, hardware_opted_in};
-    use super::{AmbeBackend, open_ambe_stream};
+    use super::{AmbeBackend, VocoderMode, open_ambe_stream};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -2452,7 +2738,7 @@ mod hw_hardware_tests {
             return;
         }
         let _hw = hardware_lock();
-        let (_stream, backend) = open_ambe_stream(Some(AmbeBackend::Hardware)).expect(
+        let (_stream, backend) = open_ambe_stream(Some(AmbeBackend::Hardware), VocoderMode::Dstar).expect(
             "strict Hardware open must succeed when IAX_THUMBDV_TESTS=1 and a dongle is attached",
         );
         assert_eq!(
@@ -2506,14 +2792,15 @@ mod hw_hardware_tests {
         let frame = [0xA5u8, 0x3C, 0x91, 0x77, 0x2E, 0xC4, 0x58, 0xDA, 0x0F];
 
         let (mut stream, backend) =
-            open_ambe_stream(Some(AmbeBackend::Hardware)).expect("dongle required for this test");
+            open_ambe_stream(Some(AmbeBackend::Hardware), VocoderMode::Dstar)
+                .expect("dongle required for this test");
         assert_eq!(backend, AmbeBackend::Hardware);
 
         // Prime the pipeline (mirrors DstarSession's own priming, spec item
         // 2) before starting the clock, so warm-up isn't counted in the
         // measured mean.
         for _ in 0..IN_FLIGHT {
-            stream.submit_decode(frame);
+            stream.submit_decode(frame.into());
         }
 
         let hang_guard = Instant::now() + Duration::from_secs(10);
@@ -2536,7 +2823,7 @@ mod hw_hardware_tests {
                     nonsilent += 1;
                 }
                 if submitted < N {
-                    stream.submit_decode(frame);
+                    stream.submit_decode(frame.into());
                     submitted += 1;
                 }
             } else {
@@ -2618,7 +2905,8 @@ mod hw_hardware_tests {
         }
 
         let (mut stream, backend) =
-            open_ambe_stream(Some(AmbeBackend::Hardware)).expect("dongle required for this test");
+            open_ambe_stream(Some(AmbeBackend::Hardware), VocoderMode::Dstar)
+                .expect("dongle required for this test");
         assert_eq!(backend, AmbeBackend::Hardware);
 
         for _ in 0..IN_FLIGHT {

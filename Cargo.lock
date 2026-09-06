@@ -218,6 +218,7 @@ name = "astar-codec"
 version = "0.1.10-beta"
 dependencies = [
  "ambe-thumbdv",
+ "astar-ysf",
  "codec2",
  "libloading 0.9.0",
  "thiserror 2.0.20",

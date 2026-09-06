@@ -59,6 +59,13 @@ public struct CallSnapshot: Equatable {
     /// Whether the live session is D-Star. Mutually exclusive with an IAX2
     /// call and with M17 at the engine.
     public var dstarActive: Bool
+    /// Whether the engine can link System Fusion. The SAME fact as
+    /// `dstarAvailable` — one ThumbDV, one probe — carried separately only so
+    /// a caller never has to know that.
+    public var ysfAvailable: Bool
+    /// Whether the live session is a YSF link. Mutually exclusive with every
+    /// other network at the engine. Receive only: no PTT while it is set.
+    public var ysfActive: Bool
 
     public init(
         status: IaxStatus, ptt: Bool, remotePTT: Bool,
@@ -68,7 +75,8 @@ public struct CallSnapshot: Equatable {
         denoiseChain: DenoiseChain = .notCapturing,
         dtmfPlayed: Int = 0, dtmfTotal: Int = 0,
         m17Available: Bool = false, m17Active: Bool = false,
-        dstarAvailable: Bool = false, dstarActive: Bool = false
+        dstarAvailable: Bool = false, dstarActive: Bool = false,
+        ysfAvailable: Bool = false, ysfActive: Bool = false
     ) {
         self.status = status
         self.ptt = ptt
@@ -86,6 +94,8 @@ public struct CallSnapshot: Equatable {
         self.m17Active = m17Active
         self.dstarAvailable = dstarAvailable
         self.dstarActive = dstarActive
+        self.ysfAvailable = ysfAvailable
+        self.ysfActive = ysfActive
     }
 
     /// The idle resting state: no call, meters at the floor.

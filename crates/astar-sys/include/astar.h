@@ -573,6 +573,20 @@ typedef struct {
    * [`iax_station_connect_dstar`]).
    */
   bool dstar_active;
+  /**
+   * `true` when System Fusion voice is available: the `ysf` feature is
+   * compiled in AND a `ThumbDV` is attached right now. The same probe
+   * [`Self::dstar_available`] reads — one dongle, one answer — so the two
+   * flags move together and a UI can trust that they agree.
+   */
+  bool ysf_available;
+  /**
+   * `true` while a YSF link is live — mutually exclusive with an IAX2
+   * call, an M17 session and a D-Star session (see
+   * [`iax_station_connect_ysf`]). Receive only: there is no YSF transmit,
+   * so a UI must not offer PTT while this is set.
+   */
+  bool ysf_active;
 } IaxState;
 
 /**
@@ -1375,6 +1389,76 @@ int iax_station_dstar_disconnect(IaxStation *st);
  * needs the D-Star-specific fields.
  */
 int iax_station_dstar_state(IaxStation *st, char *buf, uintptr_t len);
+
+/**
+ * Link to a `YSFReflector` and decode the audio on it (astar-e7b3 §2).
+ *
+ * `host` is `host:port` — YSF publishes a port per reflector and has no
+ * conventional default, so there is nothing sensible to assume. `options`
+ * is the YCS room request; pass NULL for a plain reflector.
+ *
+ * RECEIVE ONLY. There is no YSF transmit and no YSF PTT: a front-end must
+ * not offer a key affordance while [`IaxSnapshot::ysf_active`] is set. The
+ * blocker is named in `astar_console::ysf`'s module docs and is a vendored
+ * deframer, not unfinished work.
+ *
+ * YSF is HARDWARE-ONLY for the same reason D-Star is — the vocoder is
+ * AMBE+2 on a DVSI `ThumbDV`. Poll [`IaxSnapshot::ysf_available`] and offer
+ * the affordance only when it is `true`, rather than calling this
+ * speculatively.
+ *
+ * `host` and `callsign` are required (NULL/non-UTF-8 → [`IAX_ERR_NULL`] /
+ * [`IAX_ERR_UTF8`]); `options` is optional, but a non-NULL, non-UTF-8 one is
+ * [`IAX_ERR_UTF8`]. Returns [`IAX_OK`], [`IAX_ERR_ALREADY_CONNECTED`] (any
+ * other network is live), [`IAX_ERR_YSF`], or [`IAX_ERR_PANIC`].
+ *
+ * NOTE: this performs blocking work — a serial-port scan plus, per candidate
+ * port and baud rate, an open and an eight-transaction dongle init, then a
+ * socket bind and thread spawn. It can take on the order of a second. Call
+ * it off any UI thread.
+ */
+int iax_station_connect_ysf(IaxStation *st,
+                            const char *host,
+                            const char *callsign,
+                            const char *options);
+
+/**
+ * Disconnect the live YSF link, if any. Idempotent — a no-op while idle.
+ * Returns [`IAX_OK`], [`IAX_ERR_NULL`], or [`IAX_ERR_PANIC`].
+ */
+int iax_station_ysf_disconnect(IaxStation *st);
+
+/**
+ * Write the live YSF link's state as JSON into the caller buffer `buf` of
+ * `len` bytes (NUL-terminated, truncate-safe; same contract as
+ * [`iax_station_dstar_state`] — returns the byte length the full JSON needs,
+ * excluding the NUL, so a `len == 0` call is a sizing query).
+ *
+ * ```json
+ * {"link":"linked","last_heard":"AJ7HR","frames_rx":412,"receiving":true,
+ *  "unsupported_mode":null,"backend":"thumbdv"}
+ * ```
+ *
+ * `link` is one of `idle`/`linking`/`linked`/`unlinking`/`failed`.
+ * `last_heard` is read from the frame header in clear, needs no vocoder, and
+ * PERSISTS past end-of-transmission — it is "most recently heard", not
+ * "currently transmitting"; `receiving` is the one that says whether a
+ * transmission is in progress. `frames_rx` is a liveness counter: a link
+ * that is up and silent and one that is receiving look identical from
+ * `link` alone.
+ *
+ * `unsupported_mode` is the field worth wiring into the UI. It is `null`
+ * normally, and otherwise names a mode astar could not decode — `voice-fr`
+ * (VW, full-rate voice) or `data-fr`. astar decodes DN only, and a reflector
+ * carrying VW would otherwise be indistinguishable from a broken one:
+ * silence, with nothing saying why. Show it.
+ *
+ * Every field is credential-free: callsigns and counters only.
+ *
+ * Writes `{}` when no link is active or the `ysf` feature isn't compiled in.
+ * Returns [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
+ */
+int iax_station_ysf_state(IaxStation *st, char *buf, uintptr_t len);
 
 #ifdef __cplusplus
 }  // extern "C"

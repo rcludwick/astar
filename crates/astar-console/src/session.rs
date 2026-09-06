@@ -28,6 +28,8 @@ use crate::dstar::{DstarConfig, DstarSession, DstarSnapshotState};
 use crate::m17::{M17Config, M17Prefs, M17Session};
 use crate::metering::Gain;
 use crate::state::{CallStatus, ConsoleState};
+#[cfg(feature = "ysf")]
+use crate::ysf::{YsfConfig, YsfLink, YsfSnapshot};
 #[cfg(feature = "m17")]
 use astar_m17::LinkState;
 
@@ -345,6 +347,11 @@ pub struct ConsoleSession {
     /// see that field's docs for why only this field needs it).
     #[cfg(feature = "dstar")]
     dstar: Option<DstarSession>,
+    /// The live System Fusion link, if any. Read through
+    /// [`Self::ysf_state`], never mirrored into [`ConsoleState`] beyond the
+    /// two flags — same arrangement, and same reason, as [`Self::dstar`].
+    #[cfg(feature = "ysf")]
+    ysf: Option<YsfLink>,
     /// The live outbound node registration handle (Task 3.1). `Some` only while
     /// a registration is in flight; `Drop` sends REGREL when cleared.
     /// Secret-free: the resolved password was consumed into the `Registrar`
@@ -422,6 +429,8 @@ impl ConsoleSession {
             m17: None,
             #[cfg(feature = "dstar")]
             dstar: None,
+            #[cfg(feature = "ysf")]
+            ysf: None,
             reg_handle: None,
             reg_events: None,
             reg_queue: VecDeque::new(),
@@ -625,6 +634,10 @@ impl ConsoleSession {
         if let Some(m17) = self.m17.as_ref() {
             m17.set_rx_compress(on);
         }
+        #[cfg(feature = "ysf")]
+        if let Some(ysf) = self.ysf.as_ref() {
+            ysf.set_rx_compression(on);
+        }
         #[cfg(feature = "dstar")]
         if let Some(dstar) = self.dstar.as_ref() {
             dstar.set_rx_compression(on);
@@ -644,6 +657,10 @@ impl ConsoleSession {
         #[cfg(feature = "m17")]
         if let Some(m17) = self.m17.as_ref() {
             m17.set_rx_compression_level(level);
+        }
+        #[cfg(feature = "ysf")]
+        if let Some(ysf) = self.ysf.as_ref() {
+            ysf.set_rx_compression_level(level);
         }
         #[cfg(feature = "dstar")]
         if let Some(dstar) = self.dstar.as_ref() {
@@ -716,7 +733,11 @@ impl ConsoleSession {
         peer: SocketAddr,
         cfg: ConsoleConfig,
     ) -> Result<(), ConsoleError> {
-        if self.active.is_some() || self.m17_is_active() || self.dstar_is_active() {
+        if self.active.is_some()
+            || self.m17_is_active()
+            || self.dstar_is_active()
+            || self.ysf_is_active()
+        {
             return Err(ConsoleError::AlreadyConnected);
         }
 
@@ -1038,7 +1059,11 @@ impl ConsoleSession {
                 // is a defensive fallback that should never fire under
                 // AppDecide.
                 IncomingCallEvent::Answered { call, events } => {
-                    if self.active.is_none() && !self.m17_is_active() && !self.dstar_is_active() {
+                    if self.active.is_none()
+                        && !self.m17_is_active()
+                        && !self.dstar_is_active()
+                        && !self.ysf_is_active()
+                    {
                         self.adopt_inbound(call, events);
                     }
                 }
@@ -1059,7 +1084,7 @@ impl ConsoleSession {
         // adds the same guard for a live D-Star session: adopting an inbound
         // call would open the local handset's output device concurrently
         // with the D-Star session's own output device.
-        if self.m17_is_active() || self.dstar_is_active() {
+        if self.m17_is_active() || self.dstar_is_active() || self.ysf_is_active() {
             let _ = incoming.reject(Some("busy".into()));
             return;
         }
@@ -1182,7 +1207,7 @@ impl ConsoleSession {
     /// operator can retry once the other session is disconnected;
     /// [`ConsoleError::Iax`] if the answer handshake fails.
     pub fn answer_pending(&mut self) -> Result<(), ConsoleError> {
-        if self.m17_is_active() || self.dstar_is_active() {
+        if self.m17_is_active() || self.dstar_is_active() || self.ysf_is_active() {
             return Err(ConsoleError::AlreadyConnected);
         }
         let inc = self
@@ -1518,7 +1543,11 @@ impl ConsoleSession {
         backend: Box<dyn AudioBackend>,
         cfg: M17Config,
     ) -> Result<(), ConsoleError> {
-        if self.active.is_some() || self.m17.is_some() || self.dstar_is_active() {
+        if self.active.is_some()
+            || self.m17.is_some()
+            || self.dstar_is_active()
+            || self.ysf_is_active()
+        {
             return Err(ConsoleError::AlreadyConnected);
         }
         // iax-f2b8-fix Fix 4: mirror the standing-pref re-push `Self::connect`
@@ -1621,7 +1650,11 @@ impl ConsoleSession {
     /// or a D-Star session is live.
     #[cfg(feature = "dstar")]
     pub fn dstar_can_connect(&self) -> Result<(), ConsoleError> {
-        if self.active.is_some() || self.m17_is_active() || self.dstar.is_some() {
+        if self.active.is_some()
+            || self.m17_is_active()
+            || self.dstar.is_some()
+            || self.ysf_is_active()
+        {
             return Err(ConsoleError::AlreadyConnected);
         }
         Ok(())
@@ -1728,6 +1761,120 @@ impl ConsoleSession {
         self.dstar.as_ref().map(DstarSession::state)
     }
 
+    /// Open a System Fusion link with audio, and adopt it.
+    ///
+    /// Mutually exclusive with an IAX2 call, an M17 session and a D-Star
+    /// session — not by analogy with them but because there is one `ThumbDV`,
+    /// and both digital-voice networks need it exclusively.
+    ///
+    /// # Errors
+    /// [`ConsoleError::AlreadyConnected`] per [`Self::ysf_can_connect`];
+    /// otherwise whatever [`YsfLink::connect_with_audio`] returns.
+    #[cfg(feature = "ysf")]
+    pub fn ysf_connect(
+        &mut self,
+        backend: Box<dyn AudioBackend>,
+        cfg: &YsfConfig,
+    ) -> Result<(), ConsoleError> {
+        self.ysf_can_connect()?;
+        let slot = std::cell::RefCell::new(Some(backend));
+        let make_backend = move || -> Box<dyn AudioBackend> {
+            slot.borrow_mut()
+                .take()
+                .expect("ysf backend factory called exactly once")
+        };
+        let link = YsfLink::connect_with_audio(cfg, &make_backend)?;
+        self.ysf_adopt(link)
+    }
+
+    /// The mutual-exclusion guard on its own, so a caller building the link
+    /// OUTSIDE this session's mutex can refuse early — before scanning for a
+    /// dongle. Same reasoning as [`Self::dstar_can_connect`].
+    ///
+    /// # Errors
+    /// [`ConsoleError::AlreadyConnected`] while any other network is live.
+    #[cfg(feature = "ysf")]
+    pub fn ysf_can_connect(&self) -> Result<(), ConsoleError> {
+        if self.active.is_some()
+            || self.m17_is_active()
+            || self.dstar_is_active()
+            || self.ysf.is_some()
+        {
+            return Err(ConsoleError::AlreadyConnected);
+        }
+        Ok(())
+    }
+
+    /// Install an already-constructed [`YsfLink`], re-checking exclusion.
+    ///
+    /// Exists so `astar-station` can run the `ThumbDV` scan and init cookbook
+    /// with the session mutex NOT held — every `Station` method takes it, and
+    /// the contract is poll-and-snapshot, never blocking.
+    ///
+    /// On refusal the link is disconnected here rather than handed back: it
+    /// has already bound a socket, opened an output stream and taken the
+    /// dongle, and leaking the dongle — which only one process may hold —
+    /// would be worse than the error the caller is about to see.
+    ///
+    /// # Errors
+    /// [`ConsoleError::AlreadyConnected`] per [`Self::ysf_can_connect`].
+    #[cfg(feature = "ysf")]
+    pub fn ysf_adopt(&mut self, link: YsfLink) -> Result<(), ConsoleError> {
+        if let Err(e) = self.ysf_can_connect() {
+            link.disconnect();
+            return Err(e);
+        }
+        // Seed the link with what the operator has already chosen, or it
+        // starts at the router's unity default while every other network
+        // sits at whatever was dialed in. That bug has shipped once already,
+        // on D-Star.
+        link.set_output_gain(self.output_gain.get());
+        link.set_rx_compression(self.rx_compress.load(Ordering::Relaxed));
+        link.set_rx_compression_level(f32::from_bits(
+            self.rx_compress_level.load(Ordering::Relaxed),
+        ));
+        self.ysf = Some(link);
+        Ok(())
+    }
+
+    /// The live YSF link's listener-side audio preferences, or `None` when
+    /// no link is active. Exists so the fan-out can be proven rather than
+    /// assumed.
+    #[cfg(feature = "ysf")]
+    #[must_use]
+    pub fn ysf_session_audio_prefs(&self) -> Option<(f32, bool, f32)> {
+        self.ysf.as_ref().map(YsfLink::audio_prefs)
+    }
+
+    /// Disconnect the live YSF link, if any. No-op when none is active.
+    #[cfg(feature = "ysf")]
+    pub fn ysf_disconnect(&mut self) {
+        if let Some(link) = self.ysf.take() {
+            link.disconnect();
+        }
+    }
+
+    /// `true` while a YSF link is live. Always `false` when the `ysf`
+    /// feature isn't compiled in, so callers never need their own `#[cfg]`.
+    #[allow(clippy::unused_self)]
+    fn ysf_is_active(&self) -> bool {
+        #[cfg(feature = "ysf")]
+        {
+            self.ysf.is_some()
+        }
+        #[cfg(not(feature = "ysf"))]
+        {
+            false
+        }
+    }
+
+    /// A poll-cheap snapshot of the live YSF link, or `None`.
+    #[cfg(feature = "ysf")]
+    #[must_use]
+    pub fn ysf_state(&self) -> Option<YsfSnapshot> {
+        self.ysf.as_ref().map(YsfLink::snapshot)
+    }
+
     /// Reset console state to idle immediately and hand back the live `Call` and
     /// its owning `Manager` so the caller can tear them down OUTSIDE any session
     /// lock. Returns `None` when no call is active.
@@ -1805,6 +1952,10 @@ impl ConsoleSession {
         #[cfg(feature = "dstar")]
         if let Some(dstar) = self.dstar.as_ref() {
             dstar.set_output_gain(clamped);
+        }
+        #[cfg(feature = "ysf")]
+        if let Some(ysf) = self.ysf.as_ref() {
+            ysf.set_output_gain(clamped);
         }
     }
 
@@ -2374,6 +2525,8 @@ impl ConsoleSession {
         }
         self.state.dstar_active = self.dstar_is_active();
         self.state.dstar_available = dstar_available();
+        self.state.ysf_active = self.ysf_is_active();
+        self.state.ysf_available = ysf_available();
 
         self.state.clone()
     }
@@ -2454,6 +2607,55 @@ pub fn m17_available() -> bool {
     }
 }
 
+/// The one cached `ThumbDV` probe, shared by every network that needs the
+/// dongle.
+///
+/// D-Star and System Fusion both decode AMBE+2 on the same hardware, so
+/// "available" means the same thing to both and there is no second scan to
+/// keep in step with this one — see [`dstar_available`] for why the probe is
+/// enumeration-only and why it is cached on a short TTL rather than once.
+#[cfg(any(feature = "dstar", feature = "ysf"))]
+fn thumbdv_available_cached() -> bool {
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, bool)>> =
+        std::sync::Mutex::new(None);
+    // Poison-tolerant: there is no invariant to protect here (a memoized
+    // bool + timestamp), so a panicking prior caller must not wedge every
+    // later availability query.
+    let mut cache = CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((at, val)) = *cache
+        && at.elapsed() < DSTAR_AVAILABLE_TTL
+    {
+        return val;
+    }
+    let val = astar_codec::ambe::thumbdv_present();
+    *cache = Some((std::time::Instant::now(), val));
+    val
+}
+
+/// `true` when System Fusion voice is available: the `ysf` feature is
+/// compiled in AND a `ThumbDV` is attached.
+///
+/// Deliberately the same probe as [`dstar_available`], not a parallel one.
+/// The design said to reuse D-Star's rather than grow a second, and the
+/// reason is not tidiness: two probes with two caches would eventually
+/// disagree about whether a dongle is plugged in, and a UI would grey out
+/// one network and not the other for the same dongle.
+///
+/// Always `false` when the `ysf` feature isn't compiled in.
+#[must_use]
+pub fn ysf_available() -> bool {
+    #[cfg(feature = "ysf")]
+    {
+        thumbdv_available_cached()
+    }
+    #[cfg(not(feature = "ysf"))]
+    {
+        false
+    }
+}
+
 /// `true` when D-Star voice is available: the `dstar` feature is compiled in
 /// AND a `ThumbDV` dongle is attached (iax-b3e7 M0 — D-Star is hardware-only,
 /// so "available" means exactly "the dongle is plugged in").
@@ -2478,22 +2680,7 @@ pub fn m17_available() -> bool {
 pub fn dstar_available() -> bool {
     #[cfg(feature = "dstar")]
     {
-        static CACHE: std::sync::Mutex<Option<(std::time::Instant, bool)>> =
-            std::sync::Mutex::new(None);
-        // Poison-tolerant: there is no invariant to protect here (a memoized
-        // bool + timestamp), so a panicking prior caller must not wedge every
-        // later availability query.
-        let mut cache = CACHE
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((at, val)) = *cache
-            && at.elapsed() < DSTAR_AVAILABLE_TTL
-        {
-            return val;
-        }
-        let val = astar_codec::ambe::thumbdv_present();
-        *cache = Some((std::time::Instant::now(), val));
-        val
+        thumbdv_available_cached()
     }
     #[cfg(not(feature = "dstar"))]
     {
@@ -2501,10 +2688,11 @@ pub fn dstar_available() -> bool {
     }
 }
 
-/// How long [`dstar_available`]'s port enumeration is reused before being
-/// recomputed. Long enough that a UI polling on a 100 ms tick scans ~twice a
-/// second; short enough that plugging the dongle in shows up promptly.
-#[cfg(feature = "dstar")]
+/// How long [`thumbdv_available_cached`]'s port enumeration is reused before
+/// being recomputed. Long enough that a UI polling on a 100 ms tick scans
+/// ~twice a second; short enough that plugging the dongle in shows up
+/// promptly.
+#[cfg(any(feature = "dstar", feature = "ysf"))]
 const DSTAR_AVAILABLE_TTL: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Map an engine error from a link-transport switch (iax-5bbd):
@@ -3016,5 +3204,113 @@ mod tests {
         );
 
         session.m17_disconnect();
+    }
+
+    // ── System Fusion wiring (astar-e7b3 §2.4) ──────────────────────────
+
+    /// A link that needs no dongle: enough to prove exclusion, the fan-out
+    /// and the mirror, all of which are about the session rather than about
+    /// the vocoder. Everything binds `127.0.0.1`.
+    #[cfg(feature = "ysf")]
+    fn loopback_ysf() -> (astar_ysf::ReflectorHandle, crate::ysf::YsfLink) {
+        let r =
+            astar_ysf::Reflector::bind("127.0.0.1:0".parse().expect("v4")).expect("bind reflector");
+        let addr = r.local_addr();
+        let handle = r.run();
+        let link = crate::ysf::YsfLink::connect(&addr.to_string(), "N0CALL", None)
+            .expect("connect the link");
+        (handle, link)
+    }
+
+    /// One `ThumbDV`, one link. A live YSF link must refuse every other
+    /// network, and be refused by them — the exclusion is about the hardware,
+    /// not about tidiness.
+    #[cfg(feature = "ysf")]
+    #[test]
+    fn a_live_ysf_link_excludes_every_other_network() {
+        let (reflector, link) = loopback_ysf();
+        let mut s = ConsoleSession::new();
+        s.ysf_adopt(link).expect("adopt");
+
+        assert!(
+            matches!(s.ysf_can_connect(), Err(ConsoleError::AlreadyConnected)),
+            "a second YSF link must be refused"
+        );
+        #[cfg(feature = "dstar")]
+        assert!(
+            matches!(s.dstar_can_connect(), Err(ConsoleError::AlreadyConnected)),
+            "D-Star must be refused while YSF holds the dongle"
+        );
+
+        s.ysf_disconnect();
+        assert!(s.ysf_can_connect().is_ok(), "disconnect must free the slot");
+        reflector.shutdown();
+    }
+
+    /// A link adopted after the operator has already set a volume must start
+    /// at that volume, not at the router's unity default. This is the bug
+    /// that shipped on D-Star; asserting it here is what stops it shipping
+    /// again on a second network.
+    #[cfg(feature = "ysf")]
+    #[test]
+    fn a_ysf_link_is_seeded_with_the_prefs_already_chosen() {
+        let (reflector, link) = loopback_ysf();
+        let mut s = ConsoleSession::new();
+        s.set_output_gain(2.5);
+        s.set_rx_compress(true);
+        s.set_rx_compression_level(0.75);
+
+        s.ysf_adopt(link).expect("adopt");
+
+        let (gain, compress, level) = s
+            .ysf_session_audio_prefs()
+            .expect("a link is live, so it has prefs");
+        assert!((gain - 2.5).abs() < 1e-6, "gain seeded, got {gain}");
+        assert!(compress, "compression seeded");
+        assert!((level - 0.75).abs() < 1e-6, "level seeded, got {level}");
+
+        s.ysf_disconnect();
+        reflector.shutdown();
+    }
+
+    /// And a change made while the link is live must reach it, which is the
+    /// other half of the same bug.
+    #[cfg(feature = "ysf")]
+    #[test]
+    fn preference_changes_fan_out_to_a_live_ysf_link() {
+        let (reflector, link) = loopback_ysf();
+        let mut s = ConsoleSession::new();
+        s.ysf_adopt(link).expect("adopt");
+
+        s.set_output_gain(0.25);
+        s.set_rx_compress(true);
+        s.set_rx_compression_level(0.1);
+
+        let (gain, compress, level) = s.ysf_session_audio_prefs().expect("live");
+        assert!((gain - 0.25).abs() < 1e-6, "got {gain}");
+        assert!(compress);
+        assert!((level - 0.1).abs() < 1e-6, "got {level}");
+
+        s.ysf_disconnect();
+        reflector.shutdown();
+    }
+
+    /// `ysf_active` is what `astar-server` reads to refuse remote keying, so
+    /// it has to be true while a link is live and false the moment it is not.
+    #[cfg(feature = "ysf")]
+    #[test]
+    fn the_snapshot_mirrors_whether_a_ysf_link_is_live() {
+        let (reflector, link) = loopback_ysf();
+        let mut s = ConsoleSession::new();
+        assert!(!s.snapshot().ysf_active, "nothing is live yet");
+
+        s.ysf_adopt(link).expect("adopt");
+        assert!(s.snapshot().ysf_active, "a live link must show");
+        assert!(s.ysf_state().is_some(), "and be readable");
+
+        s.ysf_disconnect();
+        assert!(!s.snapshot().ysf_active, "and stop showing when it is gone");
+        assert!(s.ysf_state().is_none());
+        reflector.shutdown();
     }
 }

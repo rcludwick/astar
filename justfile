@@ -69,15 +69,20 @@ dstar-test:
     cargo test -p astar-station --features dstar
     cargo test -p astar-cli --features dstar
 
-# System Fusion (iax-e8a4). Unlike `dstar-test` this needs no hardware at
-# all: `astar-ysf` ships its own loopback reflector, so the link tests bind
-# 127.0.0.1, start a reflector, and link to it. Kept as its own recipe to
-# match the `dstar` convention — but note it COULD join `ci`, because
-# nothing here is gated on a dongle and the whole thing runs in well under a
-# second. If the `ysf` feature ever rots unnoticed, that is the fix.
+# System Fusion (iax-e8a4 link, astar-e7b3 §2 audio). Unlike `dstar-test`
+# this needs no hardware at all: `astar-ysf` ships its own loopback
+# reflector, so the link tests bind 127.0.0.1 and link to it, and the decode
+# tests drive a fake vocoder rather than a dongle.
+#
+# YSF is ALREADY covered by `just ci` — `astar-sys` has `ysf` in its default
+# features and Cargo unifies features across a workspace build, so
+# `cargo test --workspace` compiles and runs all of this. This recipe is the
+# way to run it alone, and the way to catch a break in the per-crate feature
+# combinations that the unified build would hide.
 ysf-test:
     cargo test -p astar-ysf
     cargo test -p astar-console --features ysf
+    cargo test -p astar-station --features ysf
 
 dstar-test-hw:
     IAX_THUMBDV_TESTS=1 cargo test -p astar-codec --features ambe-hw
