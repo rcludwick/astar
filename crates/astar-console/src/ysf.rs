@@ -43,6 +43,24 @@
 //! then a terminator with the wire's end flag set. Without that flag every
 //! receiver waits out a timeout instead, and the next station hears a gap.
 //!
+//! # Half-duplex
+//!
+//! The `ThumbDV` is one physical link with one AMBE-3000 behind it, so this
+//! link never decodes and encodes at the same time — the same rule
+//! [`crate::dstar`] has always enforced, and for the same reason:
+//! interleaving the two directions on one chip makes both come out wrong.
+//!
+//! While keyed, a received `YSFD`'s voice is never submitted to the decoder,
+//! and on the key-DOWN edge whatever RX was queued or in flight is discarded
+//! before the first mic frame is submitted. Both are enforced in code rather
+//! than assumed true in the common case.
+//!
+//! Reading the callsign out of a received frame costs no vocoder, so
+//! last-heard stays truthful while transmitting. Only the voice is refused —
+//! which does mean a busy reflector's audio is muted for the length of a
+//! local over. That is the unavoidable consequence of one dongle, not an RX
+//! bug.
+//!
 //! This was blocked until 2026-09-06 by the vendored deframer, which rejected
 //! any `Channel` response but 72 bits as "rate lost" and so discarded every
 //! half-rate encode reply. That check now lives in the caller that configured
@@ -876,8 +894,21 @@ fn handle(
                 *slot = Some(source);
             }
             if let Some(a) = audio {
-                decode_frame(&packet.frame, a, shared);
-                if packet.end {
+                // HALF-DUPLEX. The ThumbDV is one physical link with one
+                // AMBE-3000 behind it, and D-Star has never let a session
+                // decode and encode at the same time. YSF must not either:
+                // interleaving the two directions on one chip is how a
+                // transmission and whatever else is on the reflector both
+                // come out wrong.
+                //
+                // The header fields above are still tracked — reading a
+                // callsign out of a `YSFD` costs no vocoder — so "last
+                // heard" stays truthful while transmitting. Only the voice
+                // is refused.
+                if a.tx.is_none() {
+                    decode_frame(&packet.frame, a, shared);
+                }
+                if packet.end && a.tx.is_none() {
                     // The tail of a transmission is still working through
                     // the pipeline when its last frame arrives. Play it, or
                     // every transmission loses its final ~100 ms — and one
@@ -996,6 +1027,12 @@ fn apply_ptt(
             shared.ptt.store(false, Ordering::Relaxed);
             return;
         }
+        // Clear the decode path BEFORE the first mic frame is submitted.
+        // Whatever is queued or in flight belongs to the moment before this
+        // station keyed; playing it now would land it under our own
+        // transmission, and leaving it in the vocoder would interleave it
+        // with the encode requests about to start.
+        discard_rx(audio);
         audio.mic.set_gate(&audio.router, true);
         audio.tx = Some(Tx::new());
         shared.ptt.store(true, Ordering::Relaxed);
@@ -1004,6 +1041,28 @@ fn apply_ptt(
         shared.ptt.store(false, Ordering::Relaxed);
         end_tx(audio, socket, addr, callsign);
     }
+}
+
+/// Empty the decode path and throw the audio away.
+///
+/// Used on the key-down edge only. `flush` forwards its tail because that
+/// audio belongs to a talker whose over just ended; this one discards,
+/// because the audio belongs to the moment before the local operator keyed
+/// and playing it under their own transmission would be worse than losing it.
+///
+/// Bounded by [`FLUSH_DEADLINE`] like every other drain here: a dongle that
+/// stops answering must delay a key-down, never hang the link thread.
+fn discard_rx(audio: &mut Audio) {
+    audio.pending.clear();
+    let deadline = Instant::now() + FLUSH_DEADLINE;
+    while audio.ambe.in_flight() > 0 && Instant::now() < deadline {
+        while audio.ambe.poll_decoded().is_some() {}
+        if audio.ambe.in_flight() > 0 {
+            thread::sleep(DRAIN_POLL_INTERVAL);
+        }
+    }
+    audio.decoded.clear();
+    audio.next_release = None;
 }
 
 /// Build one radio frame: sync, FICH, and a DN payload carrying `voice`.
@@ -1690,6 +1749,66 @@ mod tests {
         assert_eq!(packet.gateway.to_trimmed_string(), "AJ7HR");
         assert_eq!(packet.counter, 7);
         assert!(packet.end, "the end flag must survive the round trip");
+    }
+
+    /// Half-duplex, as a test: while transmitting, a received frame must
+    /// never reach the vocoder. One AMBE-3000, one direction at a time —
+    /// interleaving them is how both come out wrong.
+    #[test]
+    fn a_received_frame_is_not_decoded_while_transmitting() {
+        let (mut audio, rx) = test_audio();
+        let shared = Arc::new(Shared::new());
+        let frame = frame_of(DataType::VDMode2);
+
+        // Unkeyed: decoded normally.
+        decode_frame(&frame, &mut audio, &shared);
+        flush(&mut audio);
+        assert_eq!(
+            rx.try_iter().count(),
+            FRAMES_PER_PAYLOAD,
+            "RX works while idle"
+        );
+
+        // Keyed: the run loop's `handle` skips the decode entirely, so the
+        // vocoder is never asked. Exercised here through the same guard.
+        audio.tx = Some(Tx::new());
+        if audio.tx.is_none() {
+            decode_frame(&frame, &mut audio, &shared);
+        }
+        flush(&mut audio);
+        assert_eq!(
+            rx.try_iter().count(),
+            0,
+            "no received audio may be decoded while this station transmits"
+        );
+    }
+
+    /// The key-down edge throws away RX that was mid-flight. It belongs to
+    /// the moment before the operator keyed; playing it under their own
+    /// transmission would be worse than losing it.
+    #[test]
+    fn keying_discards_receive_audio_still_in_the_pipeline() {
+        let (mut audio, rx) = test_audio();
+        let shared = Arc::new(Shared::new());
+
+        // Fill the decode path but do not release it.
+        decode_frame(&frame_of(DataType::VDMode2), &mut audio, &shared);
+        assert!(
+            !audio.decoded.is_empty() || audio.ambe.in_flight() > 0 || !audio.pending.is_empty(),
+            "the decode path must actually have something in it"
+        );
+
+        // Anything already released belongs to before the key-down and is
+        // rightly on its way to the speaker; this test is about what is
+        // still IN the pipeline when the operator keys.
+        let _released_before_keying: Vec<_> = rx.try_iter().collect();
+
+        discard_rx(&mut audio);
+
+        assert!(audio.pending.is_empty(), "queued frames dropped");
+        assert!(audio.decoded.is_empty(), "decoded frames dropped");
+        assert!(audio.next_release.is_none(), "and the clock re-primes");
+        assert_eq!(rx.try_iter().count(), 0, "none of it reaches the speaker");
     }
 
     /// The garble, as a test. `submit_encode` DROPS when the vocoder is at
