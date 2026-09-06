@@ -83,6 +83,27 @@ ysf-test:
     cargo test -p astar-ysf
     cargo test -p astar-console --features ysf
     cargo test -p astar-station --features ysf
+    cargo test -p astar-cli --features ysf
+
+# The YSF hardware checkpoint — ROB RUNS THIS, not an agent.
+#
+# Needs a ThumbDV attached and a live reflector, so it is the one thing the
+# rest of the YSF suites cannot answer: they prove bytes in and bytes out,
+# this proves the result is speech. Receive only — `ysf-listen` has no PTT
+# and astar has no YSF transmit path, so nothing here can go on the air.
+#
+# KC-Wide's two, from the design doc:
+#     just ysf-listen ysf.kcwide.net:42000 AJ7HR      # US-KCWIDE
+# Add --wav /tmp/ysf.wav to capture instead of play.
+#
+# What to watch for: "linked … (backend: thumbdv)", then a "▶ <callsign>"
+# line per transmission with audible speech. A "!!" line means the reflector
+# is sending VW or data, which astar does not decode — that is the refusal
+# working, not a fault. Silence with a climbing frame count and no "!!" line
+# would be the interesting failure: most likely V/D mode 1, where MMDVMHost
+# and DroidStar disagree about the layout and astar follows MMDVMHost.
+ysf-listen host callsign *args:
+    cargo run --release -p astar-cli --features ysf -- ysf-listen {{host}} --callsign {{callsign}} {{args}}
 
 dstar-test-hw:
     IAX_THUMBDV_TESTS=1 cargo test -p astar-codec --features ambe-hw

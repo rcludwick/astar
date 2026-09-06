@@ -47,6 +47,19 @@ ctrlc = { version = "3", features = ["termination"], optional = true }
 # `ThumbDV` USB dongle backend) — no software-codec fallback, no preference
 # knob. Verify with `cargo tree -p astar-cli` (no ambe-*) vs
 # `cargo tree -p astar-cli --features dstar` (`ambe-thumbdv` present).
+# System Fusion receive-only listen mode (astar-e7b3 §2), OFF by default for
+# the same reason `dstar` is: YSF voice is AMBE+2, so this pulls
+# `astar-codec/ambe-hw` and the vendored ThumbDV driver. Receive only — the
+# command has no PTT, because astar has no YSF transmit path.
+ysf = [
+    "dep:astar-station",
+    "astar-station/ysf",
+    "dep:astar-console",
+    "astar-console/ysf",
+    "dep:astar-codec",
+    "astar-codec/ambe-hw",
+    "dep:ctrlc",
+]
 dstar = [
     "dep:astar-station",
     "astar-station/dstar",

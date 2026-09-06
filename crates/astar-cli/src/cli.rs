@@ -19,6 +19,8 @@ COMMANDS:
     register       Register to an IAX2 peer and report registration status.
     dial           Place a call, drive the FSM to answered, stream audio.
     parrot         Call a parrot/echo extension and loop audio back.
+    ysf-listen     Link to a YSFReflector and decode RX audio (receive only;
+                   requires a ThumbDV dongle and `--features ysf`).
     dstar-listen   Link to a D-Star DExtra reflector module, decode RX
                    audio, and key manual TX from stdin (built with
                    `--features dstar`).
@@ -136,6 +138,41 @@ appended once it arrives).
 Manual TX: type key/k to transmit, unkey/u to release, t to toggle, q to
 quit (press Enter after each). Starts UNKEYED; nothing transmits until you
 type key. Ctrl-C unlinks cleanly and exits.
+";
+
+/// `ysf-listen` usage. Only compiled with `--features ysf`.
+#[cfg(feature = "ysf")]
+pub const YSF_LISTEN_USAGE: &str = "\
+astar-cli ysf-listen — link to a YSFReflector and decode RX audio
+
+USAGE:
+    astar-cli ysf-listen [OPTIONS] <host>
+
+ARGS:
+    <host>      Reflector host, or host:port. YSF standardises no port, so
+                 the reflector's own is the one that matters; 42000 is the
+                 most common and is used when none is given.
+
+OPTIONS:
+    --port <u16>        Reflector UDP port. Equivalent to host:port; giving
+                         both is an error if they disagree.
+    --callsign <CS>     This station's callsign (required).
+    --wav <path>        Write decoded audio as an 8 kHz s16 mono WAV file at
+                         <path> instead of playing it on the default output
+                         device.
+    --options <TEXT>    YCS room request. Omit for a plain YSFReflector.
+    -h, --help          Print this help and exit.
+
+RECEIVE ONLY. There is no PTT here and astar has no YSF transmit path at all
+— see `iax-ysftx` in the backlog for the specific reason.
+
+YSF is hardware-only: a ThumbDV USB dongle must be attached (AMBE+2, no
+software fallback). Links, prints \"linked <host>:<port> (backend: thumbdv)\",
+then a \"▶ <callsign>\" line per received transmission.
+
+astar decodes DN — V/D modes 1 and 2, what Yaesu radios transmit. A reflector
+sending VW (full-rate voice) or data frames prints a \"!!\" line saying so
+rather than producing silence with no explanation. Ctrl-C unlinks cleanly.
 ";
 
 /// Resolve `host` (optionally `host:port`) to a `SocketAddr`, defaulting the
