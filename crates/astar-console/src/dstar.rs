@@ -170,7 +170,9 @@ use std::time::{Duration, Instant};
 use std::sync::mpsc::Sender;
 
 use astar_audio::{AudioBackend, AudioRouter, CallAudio, MicId, OutputId, StreamConfig};
-use astar_codec::ambe::{AMBE_STREAM_MAX_IN_FLIGHT, AmbeBackend, AmbeStream, open_ambe_stream};
+use astar_codec::ambe::{
+    AMBE_STREAM_MAX_IN_FLIGHT, AmbeBackend, AmbeStream, VocoderMode, open_ambe_stream,
+};
 use astar_dstar::tx::general_call_header;
 use astar_dstar::{
     DSVT_MAGIC, DextraFsm, DsvtPacket, FsmAction, LinkState, NULL_AMBE, RfHeader, SlowDataRx,
@@ -678,9 +680,9 @@ impl DstarSession {
         // in the busy case.
         let (ambe, backend) = match vocoder {
             Some(v) => v,
-            None => open_ambe_stream(Some(AmbeBackend::Hardware)).ok_or_else(|| {
-                ConsoleError::Dstar(astar_codec::ambe::classify_thumbdv_failure().message())
-            })?,
+            None => open_ambe_stream(Some(AmbeBackend::Hardware), VocoderMode::Dstar).ok_or_else(
+                || ConsoleError::Dstar(astar_codec::ambe::classify_thumbdv_failure().message()),
+            )?,
         };
 
         let socket = connect_udp_socket(&cfg.host, cfg.port)?;
@@ -1398,7 +1400,7 @@ fn pump(rx: &mut RxState<'_>) {
         let Some(frame) = rx.pending.pop_front() else {
             break;
         };
-        rx.ambe.submit_decode(frame);
+        rx.ambe.submit_decode(frame.into());
         rx.tracker.note_frame_submitted();
     }
     if rx.tracker.is_primed() {
@@ -1434,7 +1436,7 @@ fn flush_pipeline(rx: &mut RxState<'_>, forward: bool) {
             let Some(frame) = rx.pending.pop_front() else {
                 break;
             };
-            rx.ambe.submit_decode(frame);
+            rx.ambe.submit_decode(frame.into());
         }
         let mut delivered = false;
         while let Some(pcm) = rx.ambe.poll_decoded() {
@@ -2283,7 +2285,7 @@ mod tx_tests {
     }
 
     impl AmbeStream for FakeEncoder {
-        fn submit_decode(&mut self, _frame: [u8; 9]) {}
+        fn submit_decode(&mut self, _frame: astar_codec::ambe::ChannelFrame) {}
         fn poll_decoded(&mut self) -> Option<[i16; 160]> {
             None
         }
@@ -2311,7 +2313,7 @@ mod tx_tests {
     }
 
     impl AmbeStream for WedgedEncoder {
-        fn submit_decode(&mut self, _frame: [u8; 9]) {}
+        fn submit_decode(&mut self, _frame: astar_codec::ambe::ChannelFrame) {}
         fn poll_decoded(&mut self) -> Option<[i16; 160]> {
             None
         }
@@ -2625,7 +2627,7 @@ mod tx_tests {
     }
 
     impl AmbeStream for PreloadedEncoder {
-        fn submit_decode(&mut self, _frame: [u8; 9]) {}
+        fn submit_decode(&mut self, _frame: astar_codec::ambe::ChannelFrame) {}
         fn poll_decoded(&mut self) -> Option<[i16; 160]> {
             None
         }

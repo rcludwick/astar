@@ -149,7 +149,7 @@ impl FakeVocoder {
 }
 
 impl AmbeStream for FakeVocoder {
-    fn submit_decode(&mut self, frame: [u8; 9]) {
+    fn submit_decode(&mut self, frame: astar_codec::ambe::ChannelFrame) {
         let mut stats = self.stats.lock().unwrap();
         if self.queue.len() >= AMBE_STREAM_MAX_IN_FLIGHT {
             stats.dropped += 1;
@@ -159,7 +159,8 @@ impl AmbeStream for FakeVocoder {
         // The frame's payload carries the PCM level the test wants back, so
         // decoded audio can be attributed to the exact frame that produced
         // it (see `voice_frame`).
-        let value = i16::from_be_bytes([frame[0], frame[1]]);
+        let bytes = frame.as_slice();
+        let value = i16::from_be_bytes([bytes[0], bytes[1]]);
         self.queue
             .push_back((Instant::now() + self.latency, [value; 160]));
     }
