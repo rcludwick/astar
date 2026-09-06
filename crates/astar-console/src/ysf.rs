@@ -99,6 +99,22 @@ const FLUSH_DEADLINE: Duration = Duration::from_millis(500);
 /// How long the drain sleeps between empty polls, rather than spinning.
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(2);
 
+/// One voice frame's worth of wall clock. The output bus consumes frames at
+/// exactly this rate, so this is the rate they must be handed over at.
+const FRAME_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Decoded frames to accumulate before releasing the first one.
+///
+/// YSF is the only network here whose wire cadence is bursty: five 20 ms
+/// frames arrive together every 100 ms, where D-Star sends one every 20 ms
+/// and is paced by the air itself. Handing a burst straight to the bus
+/// empties the vocoder in ~40 ms and then starves the bus for ~60, which is
+/// heard as a beat at roughly two per second. So the frames are released on
+/// the audio clock instead, and this cushion is what absorbs the arrival
+/// jitter — the same reason D-Star primes, at the same cost of ~60 ms of
+/// one-way latency.
+const PRIME_FRAMES: usize = 3;
+
 /// What the control side can see of a link, without touching the thread.
 ///
 /// `PartialEq` but not `Eq`: it carries a level in dBFS, and `f32` has no
@@ -268,6 +284,12 @@ struct Audio {
     /// and the vocoder accepts four, so this queue is not an optimisation —
     /// without it the fifth frame of every burst would be dropped.
     pending: VecDeque<DnFrame>,
+    /// Decoded frames waiting to be released to the bus on the audio clock.
+    /// See [`PRIME_FRAMES`] for why they are not handed over as they finish.
+    decoded: VecDeque<[i16; 160]>,
+    /// When the next frame is due. `None` while re-priming — before the
+    /// first frame of a transmission, and after the queue has run dry.
+    next_release: Option<Instant>,
     router: AudioRouter,
     out: OutputId,
 }
@@ -389,6 +411,8 @@ impl YsfLink {
             ambe,
             bus: call_audio,
             pending: VecDeque::new(),
+            decoded: VecDeque::new(),
+            next_release: None,
             router,
             out,
         };
@@ -757,8 +781,44 @@ fn pump(audio: &mut Audio) {
         };
         audio.ambe.submit_decode(frame.into());
     }
+    // Decoded frames go to a queue, NOT straight to the bus: the vocoder
+    // finishes a whole payload's worth in ~40 ms and the bus wants them
+    // spread over 100. See `release`.
     while let Some(pcm) = audio.ambe.poll_decoded() {
+        audio.decoded.push_back(pcm);
+    }
+    release(audio, Instant::now());
+}
+
+/// Hand decoded frames to the output bus on the audio clock — one per
+/// [`FRAME_INTERVAL`] — rather than as fast as the vocoder produces them.
+///
+/// The bus consumes at exactly 50 frames a second. Handing it five at once
+/// and then nothing for 60 ms makes it starve in the hole, which is audible
+/// as a beat; this is what turns a bursty wire cadence back into a steady
+/// one.
+///
+/// Running dry re-primes rather than free-running: a queue that has emptied
+/// means the cushion was too small for the jitter actually seen, and
+/// releasing the next frame the instant it arrives would just reopen the
+/// same hole.
+fn release(audio: &mut Audio, now: Instant) {
+    if audio.next_release.is_none() {
+        if audio.decoded.len() < PRIME_FRAMES {
+            return;
+        }
+        audio.next_release = Some(now);
+    }
+    while let Some(due) = audio.next_release {
+        if now < due {
+            break;
+        }
+        let Some(pcm) = audio.decoded.pop_front() else {
+            audio.next_release = None;
+            break;
+        };
         let _ = audio.bus.rx_frames.send(pcm.to_vec());
+        audio.next_release = Some(due + FRAME_INTERVAL);
     }
 }
 
@@ -773,6 +833,7 @@ fn flush(audio: &mut Audio) {
     loop {
         pump(audio);
         if audio.pending.is_empty() && audio.ambe.in_flight() == 0 {
+            drain_tail(audio);
             return;
         }
         if Instant::now() >= deadline {
@@ -786,6 +847,21 @@ fn flush(audio: &mut Audio) {
         thread::sleep(DRAIN_POLL_INTERVAL);
     }
     audio.pending.clear();
+    drain_tail(audio);
+}
+
+/// Push whatever is still queued at end-of-transmission and re-prime.
+///
+/// Unpaced, deliberately: this is the tail of an over that has already
+/// finished, so a short burst at the end costs nothing an ear will notice,
+/// where holding it back would clip the last few frames. Clearing
+/// `next_release` makes the NEXT transmission prime again from scratch
+/// instead of inheriting a stale clock.
+fn drain_tail(audio: &mut Audio) {
+    while let Some(pcm) = audio.decoded.pop_front() {
+        let _ = audio.bus.rx_frames.send(pcm.to_vec());
+    }
+    audio.next_release = None;
 }
 
 #[cfg(test)]
@@ -943,6 +1019,8 @@ mod tests {
                 ambe: Box::new(FakeVocoder::new()),
                 bus: call_audio,
                 pending: VecDeque::new(),
+                decoded: VecDeque::new(),
+                next_release: None,
                 router,
                 out: OutputId::new("out:test"),
             },
@@ -1064,6 +1142,200 @@ mod tests {
     /// having in a test that might later grow a conversion.
     fn near(a: f32, b: f32) -> bool {
         (a - b).abs() < 1e-6
+    }
+
+    /// `release` on a fabricated clock — the pacing rule itself, with no
+    /// wall-clock dependence, so it guards the behaviour in CI where the
+    /// timing probe below would be flaky.
+    #[test]
+    fn frames_are_released_one_per_frame_interval_after_priming() {
+        let (audio_rx_tx, rx) = channel::<Vec<i16>>();
+        let (_t, tx_rx) = channel::<Vec<i16>>();
+        let mut audio = Audio {
+            ambe: Box::new(FakeVocoder::new()),
+            bus: CallAudio {
+                tx_frames: tx_rx,
+                rx_frames: audio_rx_tx,
+                preroll_lead: Arc::new(AtomicU32::new(0)),
+            },
+            pending: VecDeque::new(),
+            decoded: VecDeque::new(),
+            next_release: None,
+            router: AudioRouter::new(Box::new(astar_audio::NullBackend::new())),
+            out: OutputId::new("out:test"),
+        };
+        let t0 = Instant::now();
+
+        // Below the cushion, nothing goes out at all — releasing early is
+        // what reopens the hole the cushion exists to close.
+        for _ in 0..(PRIME_FRAMES - 1) {
+            audio.decoded.push_back([1i16; 160]);
+        }
+        release(&mut audio, t0);
+        assert_eq!(rx.try_iter().count(), 0, "must not release under-primed");
+
+        // At the cushion, exactly one frame goes out — not the whole queue.
+        audio.decoded.push_back([1i16; 160]);
+        for _ in 0..7 {
+            audio.decoded.push_back([1i16; 160]);
+        }
+        release(&mut audio, t0);
+        assert_eq!(rx.try_iter().count(), 1, "one frame, not the burst");
+
+        // Nothing more until the next frame is due.
+        release(&mut audio, t0 + Duration::from_millis(19));
+        assert_eq!(rx.try_iter().count(), 0, "not due yet");
+
+        release(&mut audio, t0 + FRAME_INTERVAL);
+        assert_eq!(rx.try_iter().count(), 1, "exactly one per interval");
+
+        // A late wake-up catches up rather than losing the time: three
+        // intervals elapsed means three frames owed.
+        release(&mut audio, t0 + FRAME_INTERVAL * 4);
+        assert_eq!(
+            rx.try_iter().count(),
+            3,
+            "catch-up is bounded by what is due"
+        );
+
+        // Running dry re-primes instead of free-running.
+        while audio.decoded.pop_front().is_some() {}
+        release(&mut audio, t0 + FRAME_INTERVAL * 10);
+        assert!(
+            audio.next_release.is_none(),
+            "an emptied queue must re-prime, or the next frame reopens the gap"
+        );
+    }
+
+    // ── Delivery cadence (astar-ysfbeat) ────────────────────────────────
+    //
+    // The output bus consumes 20 ms frames at a steady 50/s. What this
+    // measures is whether the decode path DELIVERS them at that rate, or in
+    // bursts with gaps the bus has to paper over — a gap is a dropout, and a
+    // periodic gap is a beat.
+
+    /// A vocoder with realistic latency: a frame submitted now is answered
+    /// `LATENCY` later, matching the `ThumbDV`'s measured ~7.45 ms/frame
+    /// pipelined cost. An instant fake would hide the very timing under test.
+    struct LatentVocoder {
+        queue: VecDeque<(Instant, [i16; 160])>,
+        in_flight: usize,
+    }
+
+    const LATENCY: Duration = Duration::from_micros(7_450);
+
+    impl AmbeStream for LatentVocoder {
+        fn submit_decode(&mut self, frame: ChannelFrame) {
+            let v = i16::from(frame.as_slice()[0]);
+            self.queue.push_back((Instant::now() + LATENCY, [v; 160]));
+            self.in_flight += 1;
+        }
+        fn poll_decoded(&mut self) -> Option<[i16; 160]> {
+            if self
+                .queue
+                .front()
+                .is_some_and(|(due, _)| Instant::now() >= *due)
+            {
+                self.in_flight -= 1;
+                return self.queue.pop_front().map(|(_, p)| p);
+            }
+            None
+        }
+        fn in_flight(&self) -> usize {
+            self.in_flight
+        }
+        fn submit_encode(&mut self, _pcm: [i16; 160]) {
+            unreachable!()
+        }
+        fn poll_encoded(&mut self) -> Option<[u8; 9]> {
+            None
+        }
+        fn in_flight_encoded(&self) -> usize {
+            0
+        }
+    }
+
+    /// Drives the real `decode_frame`/`pump` at the reflector's real cadence
+    /// — one 5-frame payload every 100 ms, the run loop waking every 20 ms in
+    /// between — and reports when audio actually reached the bus.
+    #[test]
+    #[ignore = "timing probe, run explicitly: cargo test -p astar-console --features ysf -- --ignored delivery"]
+    fn delivery_cadence_probe() {
+        let (rx_tx, rx_rx) = channel::<Vec<i16>>();
+        let (_tx_tx, tx_rx) = channel::<Vec<i16>>();
+        let mut audio = Audio {
+            ambe: Box::new(LatentVocoder {
+                queue: VecDeque::new(),
+                in_flight: 0,
+            }),
+            bus: CallAudio {
+                tx_frames: tx_rx,
+                rx_frames: rx_tx,
+                preroll_lead: Arc::new(AtomicU32::new(0)),
+            },
+            pending: VecDeque::new(),
+            decoded: VecDeque::new(),
+            next_release: None,
+            router: AudioRouter::new(Box::new(astar_audio::NullBackend::new())),
+            out: OutputId::new("out:test"),
+        };
+        let shared = Arc::new(Shared::new());
+        let frame = frame_of(DataType::VDMode2);
+
+        let t0 = Instant::now();
+        let mut arrivals = Vec::new();
+        // 60 payloads = 6 seconds of continuous speech, which is the "after a
+        // few seconds" the beat is reported at.
+        for payload in 0..60 {
+            let due = t0 + Duration::from_millis(payload * 100);
+            while Instant::now() < due {
+                std::thread::sleep(Duration::from_millis(20));
+                pump(&mut audio);
+                while rx_rx.try_recv().is_ok() {
+                    arrivals.push(Instant::now().duration_since(t0).as_secs_f64());
+                }
+            }
+            decode_frame(&frame, &mut audio, &shared);
+            while rx_rx.try_recv().is_ok() {
+                arrivals.push(Instant::now().duration_since(t0).as_secs_f64());
+            }
+        }
+        flush(&mut audio);
+        while rx_rx.try_recv().is_ok() {
+            arrivals.push(Instant::now().duration_since(t0).as_secs_f64());
+        }
+
+        println!("payloads sent: 60 (= 300 voice frames = 6.00s of audio)");
+        println!("frames delivered: {}", arrivals.len());
+        println!("pending left over: {}", audio.pending.len());
+        let gaps: Vec<f64> = arrivals.windows(2).map(|w| w[1] - w[0]).collect();
+        let over = gaps.iter().filter(|g| **g > 0.030).count();
+        println!("inter-frame gaps > 30ms: {over}");
+        let mut sorted = gaps.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        if !sorted.is_empty() {
+            println!(
+                "gap p50={:.1}ms p90={:.1}ms max={:.1}ms",
+                sorted[sorted.len() / 2] * 1000.0,
+                sorted[sorted.len() * 9 / 10] * 1000.0,
+                sorted[sorted.len() - 1] * 1000.0
+            );
+        }
+        println!(
+            "delivery spans {:.2}s for 6.00s of audio",
+            arrivals.last().unwrap_or(&0.0)
+        );
+        // How often does a gap exceed what a small bus buffer can absorb?
+        // That, not the gap count, is what an ear hears as a beat.
+        for thresh_ms in [40.0, 60.0, 70.0, 80.0] {
+            let n = gaps.iter().filter(|g| **g * 1000.0 >= thresh_ms).count();
+            println!(
+                "  gaps >= {:>3.0}ms: {:>3}  = {:.1}/second",
+                thresh_ms,
+                n,
+                f64::from(u32::try_from(n).unwrap_or(u32::MAX)) / 6.0
+            );
+        }
     }
 
     #[test]
