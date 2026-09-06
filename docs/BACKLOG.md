@@ -12,7 +12,7 @@ inline. All 228 issues (164 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (93)
+## Open items (94)
 
 ### astar-uid — Audio devices need a stable identity, not their name
 *P2 medium · bug · labels: audio, macos, migration, cx:5*
@@ -524,10 +524,56 @@ FICH coding (Golay 24/12, rate-1/2 K=5 convolutional, interleave, CRC), the
 `YSFReflector` datagrams, a client link FSM, and a loopback reflector with a
 parrot mode, 62 tests, `std` only. The wire numbers were verified against the
 deployed reference implementations rather than recalled; see the design doc's
-"Where this stands". **Remaining:** the AMBE+2 payload — RATEP word and YSF
-frame packing in `astar-codec` — then `astar-console`'s session and the ABI /
-Swift / `Network.ysf` layers. The payload bytes are carried, not decoded:
-nothing yet claims to hear a YSF stream.
+"Where this stands".
+
+**Progress 2026-09-05 — RECEIVE IS BUILT, end to end.** `astar-codec::ysf`
+carries the AMBE+2 DN vocoder (both V/D modes, the RATEP word, the chip's bit
+order); `AmbeStream` gained a `VocoderMode` so the ThumbDV is initialized for
+half rate and fed 49-bit channel packets; `astar-console::ysf` decodes each
+payload's five voice frames onto an output bus; and the Station facade, C ABI,
+node key guard, Swift binding and `Network.ysf` are all in. VW and data frames
+are refused by name into `unsupported_mode`, which reaches the UI.
+
+**Unverified on hardware.** Bytes in and bytes out are proven; that the audio
+is intelligible is not, and cannot be without a ThumbDV on a live reflector
+(KC-Wide US-KCWIDE YSF32453, US-XLX458 YSF28054). V/D mode 1 especially:
+MMDVMHost gives it its own layout, DroidStar runs it through the mode-2 path,
+and astar follows MMDVMHost.
+
+**Remaining: transmit — and it is blocked, not merely unwritten.** See
+iax-ysftx below.
+
+### iax-ysftx — YSF transmit is blocked at the vendored deframer
+*P3 low · feature · labels: ysf, vendor, cx:3*
+
+Found 2026-09-05 while building YSF receive. Receive needed nothing from the
+vendored crate — a decode reply is `Response::Speech(pcm)`, which carries no
+mode. Transmit does, and cannot have it.
+
+`vendor/ambe-thumbdv/src/packet.rs`'s `parse_channel` rejects any `Channel`
+response whose bit count is not `0x48` (72 bits) as "rate lost", and there is
+a test in that crate asserting a `0x31` (49-bit) response IS an error. A YSF
+encode comes back at 49 bits. So every encode request would go unanswered,
+time out, and be substituted with `NULL_AMBE_FRAME` — a **D-Star** null
+codeword, which on a YSF link is not silence but nine bytes of the wrong
+vocoder, transmitted.
+
+`astar-codec::ambe` refuses `submit_encode` outright on a `YsfDn` stream so
+nothing downstream can come to depend on it, and `astar-console::ysf` has no
+TX path at all.
+
+**The fix is not a patch in place.** `vendor/ambe-thumbdv` is a verbatim copy
+of `rcludwick/ambe` (MIT/Apache), and `VENDORED.md` says so; editing it here
+forfeits cheap re-vendoring and diverges someone else's licensed code. The
+clean path is upstream, then re-vendor: widen `parse_channel` to accept the
+bit count the packet declares (and carry it), rather than assuming 72.
+
+**Also needed once the deframer can read it:** `pack_dn` and
+`dn_frame_from_channel` already exist and are tested; the encode side of
+`AmbeStream` needs the mode plumbed through the way decode's now is, and
+`YsfLink` needs a mic lane. And the node key guard already refuses YSF
+(`key_refusal` in `astar-server`), so remote keying stays refused whatever
+lands here.
 
 ### iax-d4f7 — DMR engine backend: MMDVM/homebrew, TGIF first
 *P4 backlog · feature · labels: dmr, protocol, cx:8*

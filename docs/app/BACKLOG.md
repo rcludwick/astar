@@ -12,7 +12,28 @@ inline. All 129 issues (107 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (35)
+## Open items (36)
+
+### astar-guidv — the Iced client has no digital voice at all
+*P2 medium · feature · labels: gui, cross-platform, dstar, ysf, cx:8*
+
+Found 2026-09-05 while landing `Network.ysf` in the Mac app. `apps/gui`'s
+`Network` enum stops at `Allstar`/`Hamlink`/`M17`: there is no D-Star, and now
+no YSF either. Windows and Linux cannot reach either dongle network.
+
+This is the cross-platform principle unmet — "every feature ships on all
+platforms with per-platform native UI" — and it is one job, not two. What is
+missing is the whole digital-voice layer for that client: the availability
+capability plumbed from the snapshot, a talker/last-heard line, the
+YSF unsupported-mode warning, and the dial arms. `astar-station` is linked
+directly there, so none of it needs ABI work — §3 of the YSF design is the
+whole story for this client.
+
+Deliberately NOT half-built with the YSF work: a picker entry that could never
+connect is the same mistake as one that always fails to. D-Star should land
+first, since YSF was modelled on it and shipping YSF ahead of it on Linux
+would be backwards.
+
 
 ### astar-menu — MainMenu.install never wins; SwiftUI's default menu ships instead
 *P3 low · bug · labels: macos, ui, cx:2*
