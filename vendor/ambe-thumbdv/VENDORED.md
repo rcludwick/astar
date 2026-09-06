@@ -9,7 +9,7 @@ or decode AMBE.
 |---|---|
 | Upstream | <https://github.com/rcludwick/ambe> |
 | Path upstream | `crates/ambe-thumbdv` |
-| Revision | `cf0aeb5718bd5025dcf1cd855d615cae69cf3636` (2026-08-10) |
+| Revision | `41c35d817af39016707f58b1bbbc6b1bfaeedabe` (2026-09-06) |
 | Licence | MIT OR Apache-2.0 (see `LICENSE-MIT`, `LICENSE-APACHE`) |
 | Copyright | Rob Ludwick |
 

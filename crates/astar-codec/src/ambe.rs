@@ -81,6 +81,18 @@ impl VocoderMode {
         }
     }
 
+    /// BITS one channel frame carries — what the device declares in a
+    /// `Channel` response, and what it must be told to expect. Not
+    /// `channel_bytes * 8`: half rate is 49 bits in seven bytes, and the
+    /// seven trailing zero bits are padding rather than data.
+    #[must_use]
+    pub const fn channel_bits(self) -> usize {
+        match self {
+            Self::Dstar => 72,
+            Self::YsfDn => crate::ysf::VOICE_BITS,
+        }
+    }
+
     /// A stable lowercase name, for logs and for the state JSON that crosses
     /// the C ABI.
     #[must_use]
@@ -109,6 +121,23 @@ pub enum ChannelFrame {
     YsfDn(crate::ysf::DnFrame),
 }
 
+/// Rebuild the frame a stream in `mode` expects from a device response that
+/// declared `bits` bits, or `None` when the two disagree.
+#[cfg(feature = "ambe-hw")]
+fn channel_frame_for(mode: VocoderMode, bits: u8, data: [u8; 9]) -> Option<ChannelFrame> {
+    if usize::from(bits) != mode.channel_bits() {
+        return None;
+    }
+    Some(match mode {
+        VocoderMode::Dstar => ChannelFrame::Dstar(data),
+        VocoderMode::YsfDn => {
+            let mut seven = [0u8; crate::ysf::VOICE_BYTES];
+            seven.copy_from_slice(&data[..crate::ysf::VOICE_BYTES]);
+            ChannelFrame::YsfDn(crate::ysf::DnFrame::from_bytes(seven))
+        }
+    })
+}
+
 impl ChannelFrame {
     /// The mode this frame belongs to.
     #[must_use]
@@ -121,6 +150,19 @@ impl ChannelFrame {
 }
 
 impl ChannelFrame {
+    /// The nine bytes of a full-rate frame, or `None` if this is not one.
+    ///
+    /// For callers whose wire format is fixed at 72 bits — D-Star's TX path —
+    /// so a frame of the wrong width is a visible `None` to handle rather
+    /// than a silent truncation.
+    #[must_use]
+    pub const fn as_dstar(self) -> Option<[u8; 9]> {
+        match self {
+            Self::Dstar(bytes) => Some(bytes),
+            Self::YsfDn(_) => None,
+        }
+    }
+
     /// The frame's bytes, whatever its width.
     #[must_use]
     pub fn as_slice(&self) -> &[u8] {
@@ -168,7 +210,7 @@ pub trait AmbeStream: Send {
     /// time without either affecting the other's backpressure.
     fn submit_encode(&mut self, pcm: [i16; 160]);
     /// Take the next encoded 9-byte channel frame, if one has come back yet.
-    fn poll_encoded(&mut self) -> Option<[u8; 9]>;
+    fn poll_encoded(&mut self) -> Option<ChannelFrame>;
     /// Frames currently in flight on the encode side: submitted but not yet
     /// returned by `poll_encoded`. Independent of [`in_flight`](AmbeStream::in_flight),
     /// which tracks the decode side only.
@@ -882,6 +924,21 @@ const HW_STREAM_MAX_PENDING_DISCARD: usize = AMBE_STREAM_MAX_IN_FLIGHT;
 #[cfg(feature = "ambe-hw")]
 const NULL_AMBE_FRAME: [u8; 9] = [0x9E, 0x8D, 0x32, 0x88, 0x26, 0x1A, 0x3F, 0x61, 0xE8];
 
+/// The frame substituted for an encode request the device never answered, for
+/// the mode the stream is running.
+///
+/// Getting this wrong is an on-air fault, not a glitch: a D-Star null codeword
+/// pushed onto a YSF link is not silence, it is nine bytes of the wrong
+/// vocoder, transmitted. [`crate::ysf::DnFrame::MUTE`] is what the YSF
+/// reference implementations send for the same purpose.
+#[cfg(feature = "ambe-hw")]
+fn null_frame(mode: VocoderMode) -> ChannelFrame {
+    match mode {
+        VocoderMode::Dstar => ChannelFrame::Dstar(NULL_AMBE_FRAME),
+        VocoderMode::YsfDn => ChannelFrame::YsfDn(crate::ysf::DnFrame::MUTE),
+    }
+}
+
 /// One direction's (decode's or encode's) outstanding-request accounting.
 /// Decode and encode requests share one worker thread and one serial link
 /// (§5a of the iax-2f6b scout: the `ThumbDV` is a single USB device, only one
@@ -1007,14 +1064,15 @@ fn hw_stream_write_decode<T: ambe_thumbdv::Transport>(
 #[cfg(feature = "ambe-hw")]
 fn hw_stream_write_encode<T: ambe_thumbdv::Transport>(
     transport: &mut T,
-    side: &mut PipelineSide<[u8; 9]>,
+    side: &mut PipelineSide<ChannelFrame>,
     pcm: &[i16; 160],
+    mode: VocoderMode,
 ) {
     match transport.send(&ambe_thumbdv::speech_in(pcm)) {
         Ok(()) => side.outstanding.push_back(std::time::Instant::now()),
         Err(e) => {
             tracing::warn!("ambe-hw stream: encode write failed: {e}, substituting a null frame");
-            let _ = side.resp_tx.send(NULL_AMBE_FRAME);
+            let _ = side.resp_tx.send(null_frame(mode));
         }
     }
 }
@@ -1041,13 +1099,31 @@ fn hw_stream_write_encode<T: ambe_thumbdv::Transport>(
 fn hw_stream_deliver_packet(
     pkt: &ambe_thumbdv::RawPacket,
     decode_side: &mut PipelineSide<[i16; 160]>,
-    encode_side: &mut PipelineSide<[u8; 9]>,
+    encode_side: &mut PipelineSide<ChannelFrame>,
+    mode: VocoderMode,
 ) {
     use ambe_thumbdv::{Response, parse_response};
 
     match parse_response(pkt) {
         Ok(Response::Speech(pcm)) => hw_stream_deliver_to_side(decode_side, pcm, "decode"),
-        Ok(Response::Channel(frame)) => hw_stream_deliver_to_side(encode_side, frame, "encode"),
+        Ok(Response::Channel { bits, data }) => {
+            // The device reports the bit count it encoded at; this stream
+            // knows the count it configured. A disagreement is the "rate
+            // lost" condition (§8.4) — the chip's rate configuration went
+            // away — and the frame is meaningless, so it is dropped rather
+            // than delivered as though it were audio.
+            match channel_frame_for(mode, bits, data) {
+                Some(frame) => hw_stream_deliver_to_side(encode_side, frame, "encode"),
+                None => {
+                    tracing::warn!(
+                        expected = mode.channel_bits(),
+                        got = bits,
+                        "ambe-hw stream: rate lost — the device encoded at a different rate \
+                         than this stream configured, discarding the frame"
+                    );
+                }
+            }
+        }
         Ok(other) => {
             tracing::warn!(
                 "ambe-hw stream: unexpected response {other:?} (neither Speech nor Channel), \
@@ -1114,13 +1190,13 @@ enum StreamReq {
 fn hw_stream_write_req<T: ambe_thumbdv::Transport>(
     transport: &mut T,
     decode_side: &mut PipelineSide<[i16; 160]>,
-    encode_side: &mut PipelineSide<[u8; 9]>,
+    encode_side: &mut PipelineSide<ChannelFrame>,
     req: StreamReq,
     mode: VocoderMode,
 ) {
     match req {
         StreamReq::Decode(frame) => hw_stream_write_decode(transport, decode_side, frame, mode),
-        StreamReq::Encode(pcm) => hw_stream_write_encode(transport, encode_side, &pcm),
+        StreamReq::Encode(pcm) => hw_stream_write_encode(transport, encode_side, &pcm, mode),
     }
 }
 
@@ -1149,7 +1225,7 @@ fn hw_stream_worker<T: ambe_thumbdv::Transport>(
     mut transport: T,
     req_rx: &std::sync::mpsc::Receiver<StreamReq>,
     decode_resp_tx: &std::sync::mpsc::Sender<[i16; 160]>,
-    encode_resp_tx: &std::sync::mpsc::Sender<[u8; 9]>,
+    encode_resp_tx: &std::sync::mpsc::Sender<ChannelFrame>,
     mode: VocoderMode,
 ) {
     use ambe_thumbdv::{Deframer, Response, parse_response};
@@ -1191,7 +1267,7 @@ fn hw_stream_worker<T: ambe_thumbdv::Transport>(
         //    2 and 3 each wait out a fresh `recv_some` poll would stall the
         //    consumer for no reason.
         while let Some(pkt) = deframer.next_packet() {
-            hw_stream_deliver_packet(&pkt, &mut decode_side, &mut encode_side);
+            hw_stream_deliver_packet(&pkt, &mut decode_side, &mut encode_side, mode);
         }
 
         // 3. Nothing outstanding on either side.
@@ -1229,7 +1305,7 @@ fn hw_stream_worker<T: ambe_thumbdv::Transport>(
                         Ok(Response::Speech(_)) if decode_side.pending_discard > 0 => {
                             decode_side.pending_discard -= 1;
                         }
-                        Ok(Response::Channel(_)) if encode_side.pending_discard > 0 => {
+                        Ok(Response::Channel { .. }) if encode_side.pending_discard > 0 => {
                             encode_side.pending_discard -= 1;
                         }
                         _ => {}
@@ -1318,7 +1394,7 @@ fn hw_stream_worker<T: ambe_thumbdv::Transport>(
             .is_some_and(|t| t.elapsed() > HW_REPLY_TIMEOUT)
         {
             tracing::warn!("ambe-hw stream: encode response timeout, substituting a null frame");
-            encode_side.substitute(NULL_AMBE_FRAME);
+            encode_side.substitute(null_frame(mode));
         }
     }
 }
@@ -1336,11 +1412,9 @@ fn hw_stream_worker<T: ambe_thumbdv::Transport>(
 pub(crate) struct HwAmbeStream {
     req_tx: std::sync::mpsc::Sender<StreamReq>,
     resp_rx_decode: std::sync::mpsc::Receiver<[i16; 160]>,
-    resp_rx_encode: std::sync::mpsc::Receiver<[u8; 9]>,
+    resp_rx_encode: std::sync::mpsc::Receiver<ChannelFrame>,
     in_flight: usize,
     in_flight_encode: usize,
-    /// What the chip was initialized for. Fixed for the stream's lifetime.
-    mode: VocoderMode,
 }
 
 #[cfg(feature = "ambe-hw")]
@@ -1391,23 +1465,6 @@ impl AmbeStream for HwAmbeStream {
     }
 
     fn submit_encode(&mut self, pcm: [i16; 160]) {
-        // YSF DN encode is not wired up, and must not appear to be. The
-        // AMBE-3000 would answer a half-rate encode request with a `Channel`
-        // response carrying 0x31 (49) bits, and the vendored deframer rejects
-        // any count but 0x48 as "rate lost" (`parse_channel` in
-        // `vendor/ambe-thumbdv/src/packet.rs`). The request would therefore
-        // time out and be answered with `NULL_AMBE_FRAME` — a D-STAR null
-        // codeword — which on a YSF link is not silence, it is nine bytes of
-        // the wrong vocoder's noise, transmitted. Refusing here is the
-        // lowest place that can stop it.
-        if self.mode == VocoderMode::YsfDn {
-            tracing::warn!(
-                "ambe-hw stream: encode requested on a YSF DN stream; YSF transmit is not \
-                 implemented (the vendored deframer cannot read a 49-bit channel response), \
-                 discarding"
-            );
-            return;
-        }
         if self.in_flight_encode >= AMBE_STREAM_MAX_IN_FLIGHT {
             tracing::warn!(
                 "ambe-hw stream: encode pipeline full ({AMBE_STREAM_MAX_IN_FLIGHT} in flight), dropping newest frame"
@@ -1428,7 +1485,7 @@ impl AmbeStream for HwAmbeStream {
         }
     }
 
-    fn poll_encoded(&mut self) -> Option<[u8; 9]> {
+    fn poll_encoded(&mut self) -> Option<ChannelFrame> {
         match self.resp_rx_encode.try_recv() {
             Ok(frame) => {
                 self.in_flight_encode = self.in_flight_encode.saturating_sub(1);
@@ -1466,7 +1523,7 @@ pub(crate) fn open_hw_stream_with_handle<T: ambe_thumbdv::Transport + Send + 'st
     hw_stream_init(&mut transport, mode)?;
     let (req_tx, req_rx) = std::sync::mpsc::channel::<StreamReq>();
     let (decode_resp_tx, resp_rx_decode) = std::sync::mpsc::channel::<[i16; 160]>();
-    let (encode_resp_tx, resp_rx_encode) = std::sync::mpsc::channel::<[u8; 9]>();
+    let (encode_resp_tx, resp_rx_encode) = std::sync::mpsc::channel::<ChannelFrame>();
     let handle = std::thread::spawn(move || {
         hw_stream_worker(transport, &req_rx, &decode_resp_tx, &encode_resp_tx, mode);
     });
@@ -1477,7 +1534,6 @@ pub(crate) fn open_hw_stream_with_handle<T: ambe_thumbdv::Transport + Send + 'st
             resp_rx_encode,
             in_flight: 0,
             in_flight_encode: 0,
-            mode,
         },
         handle,
     ))
@@ -1655,7 +1711,7 @@ mod hw_tests {
     fn poll_encoded_until<S: AmbeStream + ?Sized>(
         stream: &mut S,
         timeout: Duration,
-    ) -> Option<[u8; 9]> {
+    ) -> Option<ChannelFrame> {
         let deadline = Instant::now() + timeout;
         loop {
             if let Some(frame) = stream.poll_encoded() {
@@ -1873,27 +1929,63 @@ mod hw_tests {
         assert!(join_with_timeout(handle, Duration::from_secs(2)));
     }
 
+    /// A YSF stream encodes, and the frame comes back at 49 bits.
+    ///
+    /// This test used to assert the opposite. `vendor/ambe-thumbdv`'s
+    /// `parse_channel` rejected any bit count but 0x48 as "rate lost", so a
+    /// half-rate encode reply was discarded, the request timed out, and the
+    /// substituted value was a D-STAR null codeword — the wrong vocoder's
+    /// noise on a YSF link. That check now lives in the caller that knows
+    /// which rate it configured, which is what makes this reachable.
     #[test]
-    fn a_ysf_stream_refuses_to_encode() {
-        // YSF transmit does not exist: the vendored deframer rejects the
-        // 49-bit Channel response the chip would send back (`parse_channel`,
-        // "rate lost"), so an encode request would time out and be answered
-        // with NULL_AMBE_FRAME — a D-STAR null codeword, which on a YSF link
-        // is the wrong vocoder's noise rather than silence. The refusal is
-        // here, at the lowest point that can see it. Nothing is scripted
-        // past init, so a write would panic the worker.
-        let mock = scripted_init_mode(VocoderMode::YsfDn);
+    fn a_ysf_stream_encodes_at_half_rate() {
+        let mut mock = scripted_init_mode(VocoderMode::YsfDn);
+        // Length counts the payload after it: field + count + 7 data = 9.
+        let mut resp = hex("61 00 09 01 01 31");
+        resp.extend_from_slice(&[0x5A; 7]);
+        mock.expect(ambe_thumbdv::speech_in(&[0i16; 160]), vec![resp]);
+
         let (mut stream, handle) =
             open_hw_stream_with_handle(mock, VocoderMode::YsfDn).expect("YSF init");
         stream.submit_encode([0i16; 160]);
+        assert_eq!(stream.in_flight_encoded(), 1, "the request must be tracked");
+
+        let frame = poll_encoded_until(&mut stream, Duration::from_secs(2))
+            .expect("the encoded frame must come back");
         assert_eq!(
-            stream.in_flight_encoded(),
-            0,
-            "a refused encode must not be tracked as in flight"
+            frame,
+            ChannelFrame::YsfDn(crate::ysf::DnFrame::from_bytes([
+                0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A
+            ])),
+            "a 49-bit reply is a DN frame, not nine bytes of something else"
         );
-        assert!(
-            poll_encoded_until(&mut stream, Duration::from_millis(200)).is_none(),
-            "a YSF stream must never produce an encoded frame"
+        drop(stream);
+        assert!(join_with_timeout(handle, Duration::from_secs(2)));
+    }
+
+    /// A reply at the WRONG rate is discarded rather than delivered. That is
+    /// the real "rate lost" condition (§8.4): the chip's rate configuration
+    /// went away, so the frame means nothing, and handing it on as audio
+    /// would put the wrong vocoder's bits on the air.
+    #[test]
+    fn a_reply_at_the_wrong_rate_is_discarded_not_delivered() {
+        let mut mock = scripted_init_mode(VocoderMode::YsfDn);
+        let mut resp = hex("61 00 0B 01 01 48");
+        resp.extend_from_slice(&[0x11; 9]);
+        mock.expect(ambe_thumbdv::speech_in(&[0i16; 160]), vec![resp]);
+
+        let (mut stream, handle) =
+            open_hw_stream_with_handle(mock, VocoderMode::YsfDn).expect("YSF init");
+        stream.submit_encode([0i16; 160]);
+        // The reply is dropped, so the request goes unanswered and times out
+        // into the substitute — which for a YSF stream is DN's mute frame.
+        // Silence is the right answer to a lost rate; what must never happen
+        // is the wrong-rate bytes arriving dressed as audio.
+        let got = poll_encoded_until(&mut stream, Duration::from_secs(3));
+        assert_eq!(
+            got,
+            Some(ChannelFrame::YsfDn(crate::ysf::DnFrame::MUTE)),
+            "a lost rate must yield silence, never the frame the device actually sent"
         );
         drop(stream);
         assert!(join_with_timeout(handle, Duration::from_secs(2)));
@@ -2065,7 +2157,8 @@ mod hw_tests {
             let frame = poll_encoded_until(&mut stream, Duration::from_secs(2))
                 .unwrap_or_else(|| panic!("frame {i} never encoded"));
             assert_eq!(
-                frame, [expected; 9],
+                frame,
+                ChannelFrame::Dstar([expected; 9]),
                 "frame {i} out of order: expected all-{expected}, positional FIFO matching broke"
             );
         }
@@ -2126,7 +2219,7 @@ mod hw_tests {
 
         let frame =
             poll_encoded_until(&mut stream, Duration::from_secs(2)).expect("encode must arrive");
-        assert_eq!(frame, [42u8; 9]);
+        assert_eq!(frame, ChannelFrame::Dstar([42u8; 9]));
         assert_eq!(
             stream.in_flight_encoded(),
             0,
@@ -2151,7 +2244,8 @@ mod hw_tests {
         let out = poll_encoded_until(&mut stream, Duration::from_millis(500))
             .expect("a lost response must eventually manufacture a filler frame, not hang forever");
         assert_eq!(
-            out, NULL_AMBE_FRAME,
+            out,
+            ChannelFrame::Dstar(NULL_AMBE_FRAME),
             "the substituted frame goes ON THE AIR: it must be D-Star's null codeword, not \
              all-zero (which is a click, not silence)"
         );
@@ -2386,7 +2480,8 @@ mod hw_tests {
         let encoded =
             poll_encoded_until(&mut stream, Duration::from_secs(2)).expect("encode response");
         assert_eq!(
-            encoded, [0x77u8; 9],
+            encoded,
+            ChannelFrame::Dstar([0x77u8; 9]),
             "the Channel-typed response must reach the encode queue even though the decode \
              request was submitted first"
         );
@@ -2476,7 +2571,8 @@ mod hw_tests {
         let encoded =
             poll_encoded_until(&mut stream, Duration::from_secs(2)).expect("encode must arrive");
         assert_eq!(
-            encoded, [0x77u8; 9],
+            encoded,
+            ChannelFrame::Dstar([0x77u8; 9]),
             "the encode direction was innocent: substituting a filler frame for it puts fabricated \
              audio ON THE AIR and desyncs the queue when the real answer lands"
         );
@@ -2518,12 +2614,13 @@ mod hw_tests {
         stream.submit_encode([0x0Bi16; 160]); // B: answered far too late
         let substituted_b = poll_encoded_until(&mut stream, Duration::from_secs(2))
             .expect("B must time out into a filler frame");
-        assert_eq!(substituted_b, NULL_AMBE_FRAME);
+        assert_eq!(substituted_b, ChannelFrame::Dstar(NULL_AMBE_FRAME));
 
         stream.submit_encode([0x0Ci16; 160]); // C
         let c = poll_encoded_until(&mut stream, Duration::from_secs(2)).expect("C must answer");
         assert_ne!(
-            c, [0x11u8; 9],
+            c,
+            ChannelFrame::Dstar([0x11u8; 9]),
             "C received B's owed straggler: the encode side's debt was written off by the DECODE \
              side's stale deadline, and the on-air stream is now permanently offset by one frame"
         );
@@ -2561,7 +2658,8 @@ mod hw_tests {
 
         let b = poll_encoded_until(&mut stream, Duration::from_secs(2)).expect("B must encode");
         assert_eq!(
-            b, [0x55u8; 9],
+            b,
+            ChannelFrame::Dstar([0x55u8; 9]),
             "B's real Channel response must reach the encode queue, not be swallowed as A's \
              owed decode straggler (or vice versa)"
         );
@@ -2618,7 +2716,11 @@ mod hw_tests {
         for expected in [20u8, 21, 22, 23] {
             let frame = poll_encoded_until(&mut stream, Duration::from_secs(2))
                 .unwrap_or_else(|| panic!("frame {expected} never encoded"));
-            assert_eq!(frame, [expected; 9], "positional FIFO order must hold");
+            assert_eq!(
+                frame,
+                ChannelFrame::Dstar([expected; 9]),
+                "positional FIFO order must hold"
+            );
         }
         assert_eq!(stream.in_flight_encoded(), 0);
 
@@ -2931,7 +3033,9 @@ mod hw_hardware_tests {
                 last = Instant::now();
                 // Neither all-zero (a write failure's substitute) nor the
                 // null codeword (a response timeout's substitute).
-                if frame != [0u8; 9] && frame != super::NULL_AMBE_FRAME {
+                if frame != super::ChannelFrame::Dstar([0u8; 9])
+                    && frame != super::ChannelFrame::Dstar(super::NULL_AMBE_FRAME)
+                {
                     nontrivial += 1;
                 }
                 if submitted < N {

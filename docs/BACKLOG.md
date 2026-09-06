@@ -12,7 +12,7 @@ inline. All 228 issues (164 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (95)
+## Open items (96)
 
 ### astar-uid — Audio devices need a stable identity, not their name
 *P2 medium · bug · labels: audio, macos, migration, cx:5*
@@ -569,6 +569,43 @@ The cheap way to settle it: capture a known-length transmission into a local
 `ysf-parrot`/`m17-parrot` and compare the WAV's duration against the wall
 clock, with nothing else running. If the cadence is the cause, the fix is to
 drive the writer from a real-time clock rather than the pull loop's own pace.
+
+### iax-ysfdch — a YSF transmission carries no in-payload data channel
+*P3 low · feature · labels: ysf, protocol, cx:3*
+
+Found 2026-09-06 while building YSF transmit. The DN payload has a data
+channel alongside the voice — the one a Yaesu radio reads to show a callsign
+— and astar does not build it. `pack_dn` writes voice bits only, by design,
+and `build_frame` in `astar-console/src/ysf.rs` leaves the rest zeroed.
+
+**This does not stop a transmission being heard or attributed.** The `YSFD`
+routing header carries gateway/source/destination in clear, every reflector
+and gateway reads it, and that is where astar's own receive path takes the
+talker from. What may be missing is the callsign on a radio's display.
+
+Unverified either way: it needs a Yaesu radio on the far end, which is Rob's
+checkpoint. If it turns out radios do show the header callsign, this closes as
+won't-fix.
+
+Building it means the VD mode 2 DCH with its own FEC and interleave, read out
+of the reference implementations to the same standard the voice layout was.
+
+### iax-ysftx — DONE 2026-09-06: YSF transmit
+*P3 low · feature · labels: ysf, vendor, cx:3*
+
+**Closed.** The blocker was real and is gone. `vendor/ambe-thumbdv` is
+re-vendored at `41c35d817af3`, where `parse_channel` reports the bit count the
+device declared instead of requiring 0x48 — the check moved to
+`ThumbDv::encode_frame` and to `astar-codec`'s worker, both of which know what
+rate they configured. Encode is mode-aware end to end, and the timeout
+substitution is `DnFrame::MUTE` for YSF rather than a D-Star null codeword.
+
+`astar-console::ysf` transmits: lazy mic lane (shared with D-Star), a PTT
+request the run loop applies, AMBE+2 half-rate encode, five frames to a
+payload, header/communications/terminator with the end flag set. See
+`iax-ysfdch` for the one thing it still does not carry.
+
+Original text follows.
 
 ### iax-ysftx — YSF transmit is blocked at the vendored deframer
 *P3 low · feature · labels: ysf, vendor, cx:3*

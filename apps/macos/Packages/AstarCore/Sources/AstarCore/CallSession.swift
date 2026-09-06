@@ -1414,16 +1414,13 @@ public final class CallSession: ObservableObject {
     /// a key request while `txDisabled` is forced to unkeyed.
     /// Whether the live network can transmit at all.
     ///
-    /// System Fusion cannot: astar decodes YSF and has no encoder for it, so
-    /// there is nothing a key-down could put on the air. This is a property
-    /// of the network rather than a setting, which is why it is separate from
-    /// `txDisabled` — turning listen-only off does not make Fusion
-    /// transmittable, and a UI that implied otherwise would be lying.
-    ///
-    /// `true` when nothing is connected: the answer is about the live
-    /// network, and with none live there is nothing to refuse.
+    /// Every network astar dials can, as of the YSF transmit path. Kept
+    /// rather than deleted because the answer was `false` for Fusion until
+    /// 2026-09-06 and will be `false` again for the next receive-only network
+    /// — and because the two places that consult it, the PTT control and the
+    /// key choke point, are the two that must never disagree.
     public var canTransmit: Bool {
-        activeCallNetwork != .ysf
+        true
     }
 
     public func setPTT(_ on: Bool) throws {

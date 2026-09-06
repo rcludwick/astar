@@ -168,35 +168,34 @@ final class CallSessionYSFDialTests: XCTestCase {
         XCTAssertFalse(session.ysfReceiving)
     }
 
-    // MARK: - Transmit is refused, at the choke point
+    // MARK: - Transmit
 
-    /// astar has no YSF encoder, so a key-down has nothing to put on the air.
-    /// Refused inside `setPTT` rather than only by hiding the button, because
-    /// VOX and serial PTT key without anyone pressing anything.
-    func testFusionCannotTransmitAndSetPTTNeverKeys() throws {
+    /// Fusion transmits now. This test asserted the opposite until the
+    /// vendored deframer stopped rejecting half-rate encode replies — kept
+    /// rather than deleted, because it is the assertion that has to flip when
+    /// a network gains or loses a transmit path.
+    func testFusionCanTransmitAndAKeyDownReachesTheStation() throws {
         let (session, fake) = session()
-        XCTAssertTrue(session.canTransmit, "nothing connected: nothing to refuse")
-
         try session.connect(node: "US-KCWIDE", network: .ysf)
-        XCTAssertFalse(session.canTransmit, "Fusion is receive-only")
+        XCTAssertTrue(session.canTransmit, "Fusion is transceive")
 
+        try session.setPTT(true)
+        XCTAssertEqual(fake.pttCalls.last, true, "a key-down must reach the station")
+        try session.setPTT(false)
+        XCTAssertEqual(fake.pttCalls.last, false)
+        try session.disconnect()
+    }
+
+    /// Listen-only still wins over a key-down, on Fusion as on every other
+    /// network — the setting is the operator's and outranks the request.
+    func testListenOnlyStillRefusesAKeyDownOnFusion() throws {
+        let (session, fake) = session()
+        try session.connect(node: "US-KCWIDE", network: .ysf)
+        session.setTxDisabled(true)
         try session.setPTT(true)
         XCTAssertEqual(
             fake.pttCalls.last, false,
-            "a key-down on Fusion must reach the station as unkeyed, never as true")
-
-        try session.disconnect()
-        XCTAssertTrue(session.canTransmit, "and the refusal lifts with the link")
-    }
-
-    /// The refusal is about the NETWORK, not the listen-only setting. Turning
-    /// TX back on must not make Fusion transmittable, or an operator goes
-    /// hunting for a switch that cannot exist.
-    func testDisablingListenOnlyDoesNotMakeFusionTransmittable() throws {
-        let (session, _) = session()
-        try session.connect(node: "US-KCWIDE", network: .ysf)
-        session.setTxDisabled(false)
-        XCTAssertFalse(session.canTransmit)
+            "listen-only must force unkeyed whatever the network")
         try session.disconnect()
     }
 
