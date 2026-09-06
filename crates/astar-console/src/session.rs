@@ -1852,6 +1852,14 @@ impl ConsoleSession {
         if let Some(link) = self.ysf.take() {
             link.disconnect();
         }
+        // Reset every field the snapshot's YSF branch writes, exactly as
+        // `dstar_disconnect` does and for the identical reason: the mirror
+        // simply STOPS running once `self.ysf` is `None`, so without this the
+        // last values it wrote stay frozen in `self.state` forever. A link
+        // that came up and then disconnected would leave a snapshot reporting
+        // `Answered` for a station with no session at all.
+        self.state.status = CallStatus::Idle;
+        self.state.remote_ptt = false;
     }
 
     /// `true` while a YSF link is live. Always `false` when the `ysf`
@@ -2525,6 +2533,43 @@ impl ConsoleSession {
         }
         self.state.dstar_active = self.dstar_is_active();
         self.state.dstar_available = dstar_available();
+
+        // System Fusion, mirrored the same way and for the same reason the two
+        // branches above are: a front-end drives ONE connection state machine
+        // off `status`, whatever the network. Without this a live YSF link
+        // leaves `status` at whatever it was — `Idle` on a fresh station — so
+        // the link comes up, holds the vocoder, and the UI still reports
+        // nothing connected. That is exactly how this shipped, and it read as
+        // "I can't connect to a YSF reflector" rather than as a missing
+        // mirror.
+        //
+        // `remote_ptt` carries "somebody is transmitting", which YSF states
+        // outright in the frame header rather than inferring from audio level
+        // — the same field M17 fills from its own `receiving`.
+        //
+        // No PTT and no TX meter: YSF is receive-only (see `crate::ysf`), so
+        // `ptt` is deliberately NOT written here. Writing `false` would be
+        // just as wrong — it would clobber a D-Star or IAX2 value — and the
+        // exclusion guards make a concurrent session impossible anyway.
+        #[cfg(feature = "ysf")]
+        if let Some(link) = self.ysf.as_ref() {
+            let snap = link.snapshot();
+            self.state.remote_ptt = snap.receiving;
+            // Fully qualified: the bare `LinkState` in this scope is M17's.
+            self.state.status = match link.link_state() {
+                astar_ysf::LinkState::Idle | astar_ysf::LinkState::Linking => CallStatus::Dialing,
+                astar_ysf::LinkState::Linked => CallStatus::Answered,
+                // Unlinking reports as ending rather than connected, matching
+                // D-Star's treatment: the link is going away and an operator
+                // should not be told otherwise.
+                astar_ysf::LinkState::Unlinking => CallStatus::Hangup {
+                    reason: "ysf unlinking".into(),
+                },
+                astar_ysf::LinkState::Failed => CallStatus::Hangup {
+                    reason: "ysf link lost".into(),
+                },
+            };
+        }
         self.state.ysf_active = self.ysf_is_active();
         self.state.ysf_available = ysf_available();
 
@@ -3292,6 +3337,64 @@ mod tests {
         assert!((level - 0.1).abs() < 1e-6, "got {level}");
 
         s.ysf_disconnect();
+        reflector.shutdown();
+    }
+
+    /// The regression this suite was missing, and the one that shipped: a
+    /// front-end drives ONE connection state machine off `status`, whatever
+    /// the network — M17 and D-Star both mirror their link into it. YSF did
+    /// not, so a live link left `status` at `Idle` and the app reported
+    /// nothing connected while holding the vocoder open.
+    ///
+    /// Asserting `ysf_active` was never enough: that flag is read by
+    /// `astar-server`'s key guard, not by any UI.
+    #[cfg(feature = "ysf")]
+    #[test]
+    fn a_live_ysf_link_reaches_the_status_a_front_end_reads() {
+        let (reflector, link) = loopback_ysf();
+        let mut s = ConsoleSession::new();
+        assert_eq!(s.snapshot().status, CallStatus::Idle);
+
+        s.ysf_adopt(link).expect("adopt");
+        // The link is `Linking` until the loopback reflector answers, so both
+        // of the pre-`Linked` states are legal here — what must NOT happen is
+        // `status` staying `Idle`, which is what "nothing is connected" means
+        // to every front-end.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut seen = s.snapshot().status;
+        while seen != CallStatus::Answered && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            seen = s.snapshot().status;
+        }
+        assert_eq!(
+            seen,
+            CallStatus::Answered,
+            "a linked YSF session must report as connected, not idle"
+        );
+
+        s.ysf_disconnect();
+        assert_eq!(
+            s.snapshot().status,
+            CallStatus::Idle,
+            "the mirror stops running on disconnect, so disconnect must reset it \
+             or the snapshot reports a session that no longer exists"
+        );
+        reflector.shutdown();
+    }
+
+    /// "Somebody is transmitting" reaches the same field M17 fills, so a UI's
+    /// receive indicator works on YSF without a per-network special case.
+    #[cfg(feature = "ysf")]
+    #[test]
+    fn a_ysf_transmission_sets_remote_ptt() {
+        let (reflector, link) = loopback_ysf();
+        let mut s = ConsoleSession::new();
+        s.ysf_adopt(link).expect("adopt");
+        // Nobody is transmitting on a freshly-linked loopback reflector.
+        let _ = s.snapshot();
+        assert!(!s.snapshot().remote_ptt);
+        s.ysf_disconnect();
+        assert!(!s.snapshot().remote_ptt, "and it clears on teardown");
         reflector.shutdown();
     }
 

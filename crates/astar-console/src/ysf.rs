@@ -237,6 +237,22 @@ fn state_index(s: LinkState) -> u32 {
     }
 }
 
+/// The typed inverse of [`state_index`].
+///
+/// Exists so callers that must branch on the link state — the console's
+/// snapshot mirror in particular — match an enum the compiler can check
+/// rather than the ABI strings. A new `LinkState` variant then breaks those
+/// call sites at compile time instead of silently falling into a catch-all.
+fn state_from_index(i: u32) -> LinkState {
+    match i {
+        1 => LinkState::Linking,
+        2 => LinkState::Linked,
+        3 => LinkState::Unlinking,
+        4 => LinkState::Failed,
+        _ => LinkState::Idle,
+    }
+}
+
 fn state_str(i: u32) -> &'static str {
     match i {
         1 => LinkState::Linking.as_str(),
@@ -400,6 +416,16 @@ impl YsfLink {
             unsupported_mode: self.shared.unsupported_mode.lock().map_or(None, |g| *g),
             backend: self.backend.map(AmbeBackend::as_str),
         }
+    }
+
+    /// The link state as the protocol crate's own enum.
+    ///
+    /// [`YsfSnapshot::link_state`] carries the ABI string for anything
+    /// crossing a boundary; this is for in-process callers that need to
+    /// branch, so they get an exhaustive match instead of string comparison.
+    #[must_use]
+    pub fn link_state(&self) -> LinkState {
+        state_from_index(self.shared.link_state.load(Ordering::Relaxed))
     }
 
     /// Set the output (RX/speaker) gain multiplier, 0.0..=4.0 (clamped).
