@@ -27,8 +27,19 @@ workspace = true
 # refuses on the feature-independent `dstar_active` snapshot flag instead of a
 # `#[cfg]` (iax-d9f4). Do not weaken that guard on the assumption that the
 # node is built without `dstar`: in a workspace build, it is not.
-default = ["dstar"]
+default = ["dstar", "ysf"]
 dstar = ["astar-station/dstar"]
+# System Fusion, ON by default for the same reason `dstar` is: the Swift
+# binding is generated from this crate and reaching YSF from astar is the
+# point of these entry points. It costs a dongle-free user nothing —
+# `ysf_available` reports `false` through the same cached probe `dstar` uses,
+# and every YSF call fails cleanly.
+#
+# SAFETY: the same feature-unification warning applies as for `dstar` above.
+# Enabling this turns `astar-station/ysf` on in every crate of a workspace
+# build, `astar-server` included. That is why the node's key path refuses on
+# the feature-independent `ysf_active` snapshot flag rather than a `#[cfg]`.
+ysf = ["astar-station/ysf"]
 # Statically-linked Codec 2 for M17 (astar-8c4d). Deliberately NOT default:
 # `codec2` is LGPL-2.1-only AND MIT, and a plain `cargo build` of this crate
 # must stay free of LGPL code. The macOS app opts in when it builds the

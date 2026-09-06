@@ -193,7 +193,7 @@ impl NodeController {
                 // iax-d9f4: this crate exposes remote keying (`POST /key`, a
                 // TUI keystroke) and `Station::set_ptt` is deliberately
                 // network-agnostic — it keys whatever session is live. A
-                // D-Star session must never be keyable from here.
+                // digital-voice session must never be keyable from here.
                 //
                 // The guard reads the snapshot's feature-INDEPENDENT
                 // `dstar_active` flag rather than being `#[cfg]`-gated, so it
@@ -205,7 +205,8 @@ impl NodeController {
                 // manifest asks for. Before this guard, that unification
                 // alone would have made `POST /key` a remote D-Star transmit
                 // trigger.
-                if let Some(refusal) = key_refusal(self.station.snapshot().dstar_active) {
+                let snap = self.station.snapshot();
+                if let Some(refusal) = key_refusal(snap.dstar_active, snap.ysf_active) {
                     return Err(refusal);
                 }
                 self.station.set_ptt(true).map_err(|e| station_err(&e))?;
@@ -882,21 +883,36 @@ impl NodeController {
     }
 }
 
-/// Whether a key-down must be refused, given the snapshot's `dstar_active`
-/// flag (iax-d9f4). `Some(err)` refuses; `None` lets the key through.
+/// Whether a key-down must be refused, given the snapshot's digital-voice
+/// flags (iax-d9f4, extended for YSF in astar-e7b3). `Some(err)` refuses;
+/// `None` lets the key through.
 ///
 /// Pure, so the policy is testable without a `ThumbDV` and a live reflector —
-/// the only way to make a real `Station` report `dstar_active`.
+/// the only way to make a real `Station` report either flag.
 ///
-/// D-Star is the one network this crate must never key. Everything else
-/// reachable from here (IAX2, M17) is remotely keyable by design; see
-/// `Station::set_ptt`'s "Remote-control surfaces" section for why the check
-/// lives at the caller rather than inside the station.
-fn key_refusal(dstar_active: bool) -> Option<NodeError> {
-    dstar_active.then(|| NodeError {
-        message: "refusing to key: a D-Star session is active and D-Star transmit is not \
-                  remotely keyable"
-            .into(),
+/// The two dongle networks are the ones this crate must never key. D-Star
+/// can transmit and must not be made to do so from here; YSF cannot transmit
+/// at all yet, so keying it would be a refusal further down anyway — but a
+/// refusal that names the reason beats one that does not, and the day YSF
+/// grows a transmit path this guard is already in front of it rather than
+/// needing to be remembered.
+///
+/// Everything else reachable from here (IAX2, M17) is remotely keyable by
+/// design; see `Station::set_ptt`'s "Remote-control surfaces" section for why
+/// the check lives at the caller rather than inside the station.
+fn key_refusal(dstar_active: bool, ysf_active: bool) -> Option<NodeError> {
+    let network = if dstar_active {
+        "D-Star"
+    } else if ysf_active {
+        "System Fusion"
+    } else {
+        return None;
+    };
+    Some(NodeError {
+        message: format!(
+            "refusing to key: a {network} session is active and {network} transmit is not \
+             remotely keyable"
+        ),
     })
 }
 
@@ -2253,14 +2269,16 @@ mod tests {
         assert!(DEFAULT_JOIN_TEMPLATE.contains(JOIN_NODE_TOKEN));
     }
 
-    // --- iax-d9f4: D-Star is never remotely keyable ---
+    // --- iax-d9f4 / astar-e7b3: the dongle networks are never remotely
+    // keyable ---
 
     /// A live D-Star session refuses `NodeCommand::Key`. This crate exposes
     /// keying over HTTP (`POST /key`) and a TUI keystroke; D-Star transmit
     /// must stay a local, deliberate act.
     #[test]
     fn keying_is_refused_while_a_dstar_session_is_active() {
-        let refusal = key_refusal(true).expect("an active D-Star session must refuse the key");
+        let refusal =
+            key_refusal(true, false).expect("an active D-Star session must refuse the key");
         assert!(
             refusal.message.contains("D-Star"),
             "the refusal must say why, so an operator is not left guessing: {:?}",
@@ -2268,13 +2286,27 @@ mod tests {
         );
     }
 
+    /// And so does a live YSF link. YSF cannot transmit at all today, so this
+    /// is not what stops a transmission — it is what makes the refusal name
+    /// its reason, and what will already be in front of a YSF transmit path
+    /// on the day one exists.
+    #[test]
+    fn keying_is_refused_while_a_ysf_link_is_active() {
+        let refusal = key_refusal(false, true).expect("an active YSF link must refuse the key");
+        assert!(
+            refusal.message.contains("System Fusion"),
+            "the refusal must name the network: {:?}",
+            refusal.message
+        );
+    }
+
     /// Every other network stays remotely keyable — the guard must not have
     /// turned `POST /key` off wholesale.
     #[test]
-    fn keying_is_allowed_when_no_dstar_session_is_active() {
+    fn keying_is_allowed_when_no_digital_voice_session_is_active() {
         assert!(
-            key_refusal(false).is_none(),
-            "IAX2 and M17 keying must be unaffected by the D-Star guard"
+            key_refusal(false, false).is_none(),
+            "IAX2 and M17 keying must be unaffected by the dongle-network guard"
         );
     }
 }
