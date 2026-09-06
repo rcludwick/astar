@@ -1412,14 +1412,32 @@ public final class CallSession: ObservableObject {
 
     /// Key (`true`) or unkey (`false`) the local transmit. Honors listen-only:
     /// a key request while `txDisabled` is forced to unkeyed.
+    /// Whether the live network can transmit at all.
+    ///
+    /// System Fusion cannot: astar decodes YSF and has no encoder for it, so
+    /// there is nothing a key-down could put on the air. This is a property
+    /// of the network rather than a setting, which is why it is separate from
+    /// `txDisabled` — turning listen-only off does not make Fusion
+    /// transmittable, and a UI that implied otherwise would be lying.
+    ///
+    /// `true` when nothing is connected: the answer is about the live
+    /// network, and with none live there is nothing to refuse.
+    public var canTransmit: Bool {
+        activeCallNetwork != .ysf
+    }
+
     public func setPTT(_ on: Bool) throws {
-        try station.setPTT(on && !txDisabled)
+        try station.setPTT(on && !txDisabled && canTransmit)
     }
 
     /// Single choke point for the auto/edge keying sources (VOX, serial). Forces
     /// unkeyed while listen-only so the radio never transmits. Best-effort.
     private func keyStation(_ on: Bool) {
-        try? station.setPTT(on && !txDisabled)
+        // `canTransmit` matters most HERE, not on the button: VOX and serial
+        // PTT key without anyone pressing anything, so a network that cannot
+        // transmit has to be refused at the choke point rather than only by
+        // hiding a control.
+        try? station.setPTT(on && !txDisabled && canTransmit)
     }
 
     /// Enable/disable listen-only (monitor) mode. When enabling, fail-safe unkey
