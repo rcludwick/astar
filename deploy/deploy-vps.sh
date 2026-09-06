@@ -11,7 +11,13 @@ VPS="${ASTAR_VPS:?set ASTAR_VPS=user@host for your own server}"
 deploy/build.sh
 ssh "$VPS" 'mkdir -p /tmp/iaxnode-deploy'
 scp deploy/out/astar-server deploy/Containerfile.app "$VPS:/tmp/iaxnode-deploy/"
-ssh "$VPS" 'podman build -t astar-server:latest \
+# The tag MUST match what run-iaxnode.sh starts (gh-runners:
+# vps/run-iaxnode.sh). It did not between the astar-server rename and
+# 2026-09-02: this built `astar-server:latest` while the helper ran
+# `iaxclient-node:latest`, so a deploy built a fresh image under a tag
+# nothing used and then restarted the old one. It reported success and
+# shipped nothing.
+ssh "$VPS" 'podman build -t iaxclient-node:latest \
               -f /tmp/iaxnode-deploy/Containerfile.app /tmp/iaxnode-deploy \
             && /home/allstar/bin/iaxnode-run'
 sleep 3
