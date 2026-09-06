@@ -331,6 +331,10 @@ public struct YSFState: Equatable, Sendable {
     /// The vocoder decoding this link, or `nil` for a link opened without
     /// audio (or one whose backend this binding does not recognise).
     public let backend: Backend?
+    /// `true` while this station is transmitting — the engine's
+    /// ACTUALLY-APPLIED state, not an echo of the last key request. A
+    /// key-down refused for want of a capture device never sets it.
+    public let ptt: Bool
 
     /// Construct one directly.
     ///
@@ -340,7 +344,7 @@ public struct YSFState: Equatable, Sendable {
     /// neither has a reflector sending VW to hand.
     public init(
         link: Link, lastHeard: String? = nil, framesRX: UInt64 = 0, receiving: Bool = false,
-        unsupportedMode: UnsupportedMode? = nil, backend: Backend? = nil
+        unsupportedMode: UnsupportedMode? = nil, backend: Backend? = nil, ptt: Bool = false
     ) {
         self.link = link
         self.lastHeard = lastHeard
@@ -348,6 +352,7 @@ public struct YSFState: Equatable, Sendable {
         self.receiving = receiving
         self.unsupportedMode = unsupportedMode
         self.backend = backend
+        self.ptt = ptt
     }
 
     /// Decode from the C-ABI's JSON. Returns `nil` for the `{}` no-link
@@ -369,6 +374,7 @@ public struct YSFState: Equatable, Sendable {
         unsupportedMode = (obj["unsupported_mode"] as? String)
             .flatMap(UnsupportedMode.init(rawValue:))
         backend = (obj["backend"] as? String).flatMap(Backend.init(rawValue:))
+        ptt = obj["ptt"] as? Bool ?? false
     }
 }
 
@@ -1555,9 +1561,6 @@ public final class Station {
     /// conventional default, so there is nothing to assume — the directory
     /// row carries it. `options` is the YCS room request; leave it `nil` for
     /// a plain reflector.
-    ///
-    /// RECEIVE ONLY. There is no YSF transmit and no PTT: do not offer a key
-    /// affordance for a YSF link.
     ///
     /// HARDWARE-ONLY, like D-Star and for the same reason — the vocoder is
     /// AMBE+2 on a ThumbDV. Gate the affordance on ``Snapshot/ysfAvailable``

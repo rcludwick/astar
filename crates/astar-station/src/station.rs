@@ -1012,9 +1012,8 @@ impl Station {
     /// when the feature is compiled in, and this method must stay
     /// byte-identically callable either way.
     ///
-    /// Receive only. There is no `ysf` PTT and no transmit path — see
-    /// `astar_console::ysf`'s module docs for the specific blocker, which is
-    /// the vendored deframer rather than unfinished work.
+    /// Transceive. `Station::set_ptt` keys a live YSF link exactly as it
+    /// keys D-Star; nothing keys on its own.
     ///
     /// Mutually exclusive with an IAX2 call, an M17 session and a D-Star
     /// session. One `ThumbDV`, one link.
@@ -1041,12 +1040,13 @@ impl Station {
         }
         #[cfg(feature = "ysf")]
         {
-            let (_input, output) = self.selected_devices();
+            let (input, output) = self.selected_devices();
             let cfg = astar_console::YsfConfig {
                 host: host.to_string(),
                 callsign: callsign.to_string(),
                 options: options.map(str::to_string),
                 output,
+                input,
             };
             // Refuse early and cheaply, holding the lock for a few
             // instructions rather than for the whole dongle probe.

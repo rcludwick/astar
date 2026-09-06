@@ -167,8 +167,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use std::sync::mpsc::Sender;
-
 use astar_audio::{AudioBackend, AudioRouter, CallAudio, MicId, OutputId, StreamConfig};
 use astar_codec::ambe::{
     AMBE_STREAM_MAX_IN_FLIGHT, AmbeBackend, AmbeStream, VocoderMode, open_ambe_stream,
@@ -179,6 +177,7 @@ use astar_dstar::{
     TxStream, generate_stream_id, repeater_fields,
 };
 
+use crate::mic_lane::MicLane;
 use crate::session::{ConsoleError, resolve_device};
 
 /// The run-loop thread's socket read timeout: also the cadence at which the
@@ -1009,110 +1008,6 @@ struct RunLoopParams {
     shutdown: Arc<AtomicBool>,
     ptt_request: Arc<AtomicBool>,
     shared: Arc<SharedState>,
-}
-
-/// The capture side of a session, opened LAZILY (see the module docs): a
-/// resolved-but-unopened device id, the parked TX `Sender`
-/// [`AudioRouter::open_monitor_call`] handed back, and whether the stream has
-/// actually been opened yet.
-///
-/// Two reasons this isn't just an open mic:
-///
-/// - a receive-only D-Star session must work on a machine with no usable
-///   microphone (none attached, permission denied, or already exclusively
-///   held) — resolving/opening one at connect made that fatal;
-/// - a live microphone should exist only while it can actually be used, not
-///   for the whole lifetime of a session that may never key.
-struct MicLane {
-    /// The resolved capture device, `None` when none could be resolved.
-    id: Option<MicId>,
-    /// Parked until the lane is opened, then handed to the router.
-    tx: Option<Sender<Vec<i16>>>,
-    /// The call's VOX pre-roll cell, carried into the lane on open.
-    preroll_lead: Arc<AtomicU32>,
-    config: StreamConfig,
-    /// `true` once the capture stream is open (and therefore once
-    /// `set_gate` means anything).
-    opened: bool,
-}
-
-impl MicLane {
-    fn new(
-        id: Option<MicId>,
-        tx: Sender<Vec<i16>>,
-        call_audio: &CallAudio,
-        config: StreamConfig,
-    ) -> MicLane {
-        MicLane {
-            id,
-            tx: Some(tx),
-            preroll_lead: Arc::clone(&call_audio.preroll_lead),
-            config,
-            opened: false,
-        }
-    }
-
-    /// A lane that reports itself already open, for unit tests that drive
-    /// [`apply_ptt_edge`] directly against an unopened `NullBackend` router
-    /// (`set_gate` on a mic the router never opened is a documented no-op —
-    /// the same "valid if inert stand-in" idiom `crate::m17`'s own tests
-    /// use). Never constructed outside tests.
-    #[cfg(test)]
-    fn opened_stub(id: &str) -> MicLane {
-        MicLane {
-            id: Some(MicId::new(id)),
-            tx: None,
-            preroll_lead: Arc::new(AtomicU32::new(0)),
-            config: StreamConfig::default(),
-            opened: true,
-        }
-    }
-
-    /// Open the capture stream if it isn't already, returning `false` when
-    /// this session cannot transmit at all (no device resolved, or the open
-    /// failed). Callers must treat `false` as "refuse this key-down": a
-    /// transmission with no possible audio is worse than none, since it puts
-    /// an RF header and a stream of silence on the reflector.
-    fn ensure_open(&mut self, router: &mut AudioRouter) -> bool {
-        if self.opened {
-            return true;
-        }
-        let Some(id) = self.id.as_ref() else {
-            tracing::error!(
-                "dstar: PTT requested but no capture device was resolved for this session — \
-                 refusing to key"
-            );
-            return false;
-        };
-        let Some(tx) = self.tx.take() else {
-            tracing::error!("dstar: mic lane's TX sender already consumed — refusing to key");
-            return false;
-        };
-        match router.open_mic_lane(id, tx.clone(), Arc::clone(&self.preroll_lead), self.config) {
-            Ok(()) => {
-                self.opened = true;
-                true
-            }
-            Err(e) => {
-                // Park the sender again so a later key-down can retry (the
-                // device may come back, or permission may be granted).
-                self.tx = Some(tx);
-                tracing::error!(
-                    error = ?e,
-                    "dstar: could not open the capture device for transmit — refusing to key"
-                );
-                false
-            }
-        }
-    }
-
-    /// Key/unkey the lane's gate. A no-op before the lane is opened — which
-    /// is exactly right for the unkey direction (nothing can be capturing).
-    fn set_gate(&self, router: &AudioRouter, keyed: bool) {
-        if let Some(id) = self.id.as_ref() {
-            router.set_gate(id, keyed);
-        }
-    }
 }
 
 /// Per-transmission TX bookkeeping (iax-2f6b): `Some` from the moment the
@@ -2717,13 +2612,7 @@ mod tx_tests {
         let (call_audio, _push, _rx) = fake_call_audio();
         let mut router = AudioRouter::new(Box::new(astar_audio::NullBackend::new()));
         // No capture device was ever resolved for this session.
-        let mut mic = MicLane {
-            id: None,
-            tx: None,
-            preroll_lead: Arc::new(AtomicU32::new(0)),
-            config: StreamConfig::default(),
-            opened: false,
-        };
+        let mut mic = MicLane::unresolved(StreamConfig::default());
         let mut ambe = FakeEncoder::new();
         let mut tx = TxState::new();
         let shared = SharedState::new();

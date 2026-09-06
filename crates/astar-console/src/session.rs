@@ -1385,6 +1385,11 @@ impl ConsoleSession {
         // then mirrors the run loop's ACTUALLY-applied state back on every
         // poll, so a refused key-down or a forced unkey (link lost, time-out
         // timer) shows up here too.
+        #[cfg(feature = "ysf")]
+        if let Some(link) = self.ysf.as_ref() {
+            link.set_ptt(on);
+            return Ok(());
+        }
         #[cfg(feature = "dstar")]
         if let Some(session) = self.dstar.as_mut() {
             session.set_ptt(on);
@@ -1864,6 +1869,7 @@ impl ConsoleSession {
         // `Answered` for a station with no session at all.
         self.state.status = CallStatus::Idle;
         self.state.remote_ptt = false;
+        self.state.ptt = false;
         self.state.rx_level_db = -60.0;
     }
 
@@ -2564,6 +2570,11 @@ impl ConsoleSession {
         if let Some(link) = self.ysf.as_ref() {
             let snap = link.snapshot();
             self.state.remote_ptt = snap.receiving;
+            // The ACTUALLY-APPLIED key state, so a key-down refused for want
+            // of a capture device corrects the optimistic value `set_ptt`
+            // wrote, on the very next poll. A snapshot must never report a
+            // station as transmitting when it is not.
+            self.state.ptt = snap.ptt;
             // The received level, from the link's own output bus. Without
             // this every meter on a live YSF session sits at the -60 floor
             // the `else` branch above leaves it at — audio playing, meters

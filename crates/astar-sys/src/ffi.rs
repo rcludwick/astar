@@ -326,8 +326,8 @@ pub struct IaxState {
     pub ysf_available: bool,
     /// `true` while a YSF link is live — mutually exclusive with an IAX2
     /// call, an M17 session and a D-Star session (see
-    /// [`iax_station_connect_ysf`]). Receive only: there is no YSF transmit,
-    /// so a UI must not offer PTT while this is set.
+    /// [`iax_station_connect_ysf`]). Transceive: key it with
+    /// `iax_station_set_ptt`, exactly as D-Star.
     pub ysf_active: bool,
 }
 
@@ -2755,11 +2755,6 @@ fn dstar_state_json(station: &IaxStation) -> String {
 /// conventional default, so there is nothing sensible to assume. `options`
 /// is the YCS room request; pass NULL for a plain reflector.
 ///
-/// RECEIVE ONLY. There is no YSF transmit and no YSF PTT: a front-end must
-/// not offer a key affordance while [`IaxSnapshot::ysf_active`] is set. The
-/// blocker is named in `astar_console::ysf`'s module docs and is a vendored
-/// deframer, not unfinished work.
-///
 /// YSF is HARDWARE-ONLY for the same reason D-Star is — the vocoder is
 /// AMBE+2 on a DVSI `ThumbDV`. Poll [`IaxSnapshot::ysf_available`] and offer
 /// the affordance only when it is `true`, rather than calling this
@@ -2832,7 +2827,7 @@ pub unsafe extern "C" fn iax_station_ysf_disconnect(st: *mut IaxStation) -> c_in
 ///
 /// ```json
 /// {"link":"linked","last_heard":"AJ7HR","frames_rx":412,"receiving":true,
-///  "unsupported_mode":null,"backend":"thumbdv"}
+///  "unsupported_mode":null,"backend":"thumbdv","ptt":false,"rx_db":-31.2}
 /// ```
 ///
 /// `link` is one of `idle`/`linking`/`linked`/`unlinking`/`failed`.
@@ -2890,6 +2885,8 @@ fn ysf_state_json(station: &IaxStation) -> String {
             "receiving": s.receiving,
             "unsupported_mode": s.unsupported_mode,
             "backend": s.backend,
+            "ptt": s.ptt,
+            "rx_db": s.rx_dbfs,
         })
         .to_string()
     }

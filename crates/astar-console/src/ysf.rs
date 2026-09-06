@@ -25,22 +25,37 @@
 //! which on astar means the AMBE-3000 in a `ThumbDV` and nothing else, so
 //! this constructor fails without a dongle rather than pretending.
 //!
-//! # There is still no TX path, and that is deliberate
+//! # Transmit
 //!
-//! Not a stubbed one, not one that sends silence: a transmit function that
-//! put nothing on the air would be a worse lie than an absent one, and other
-//! people are listening.
+//! [`YsfLink::set_ptt`] REQUESTS a key edge; the run loop applies it. That
+//! split is what makes "nothing transmits unless the operator asked" a
+//! property of the code rather than a claim about it: this module contains
+//! exactly one path that can set the request true, and it is a public method
+//! nobody else calls.
 //!
-//! The blocker is specific and worth naming, because it is not effort.
-//! `vendor/ambe-thumbdv`'s `parse_channel` rejects any `Channel` response
-//! whose bit count is not `0x48` — 72 bits — as "rate lost". A YSF encode
-//! comes back at `0x31`, 49 bits, so the reply to every encode request would
-//! be discarded, the request would time out, and the substituted value would
-//! be a **D-Star** null codeword: on a YSF link, the wrong vocoder's noise
-//! rather than silence. Widening that parser means editing a vendored
-//! MIT/Apache crate, which the design says to raise and re-vendor rather
-//! than patch in place. [`astar_codec::ambe`] refuses the encode at the
-//! stream so nothing downstream can accidentally rely on it.
+//! A key-down with no capture device is refused outright rather than
+//! half-honoured. Opening the microphone is what makes transmitting possible,
+//! and a station reporting itself keyed while sending nothing would be lying
+//! to its operator and to everyone on the reflector.
+//!
+//! Captured audio is encoded to AMBE+2 half rate, five 20 ms frames to a
+//! payload, and sent as `YSFD` — a header frame, then communications frames,
+//! then a terminator with the wire's end flag set. Without that flag every
+//! receiver waits out a timeout instead, and the next station hears a gap.
+//!
+//! This was blocked until 2026-09-06 by the vendored deframer, which rejected
+//! any `Channel` response but 72 bits as "rate lost" and so discarded every
+//! half-rate encode reply. That check now lives in the caller that configured
+//! the rate; see `iax-ysftx` and `vendor/ambe-thumbdv/VENDORED.md`.
+//!
+//! ## What a transmission does NOT carry yet
+//!
+//! The DN payload has a data channel alongside the voice, and astar does not
+//! build it — `pack_dn` writes voice bits only, and the rest is left zeroed.
+//! Receivers take the callsign from the `YSFD` header, which every reflector
+//! and gateway reads, so a transmission is heard and attributed correctly on
+//! the network. A Yaesu radio reading the payload's own data channel may show
+//! no callsign. Filed as `iax-ysfdch`.
 //!
 //! # Modes astar refuses, out loud
 //!
@@ -64,13 +79,16 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use astar_audio::{AudioBackend, AudioRouter, CallAudio, OutputId, StreamConfig};
+use astar_audio::{AudioBackend, AudioRouter, CallAudio, MicId, OutputId, StreamConfig};
 use astar_codec::ambe::{
     AMBE_STREAM_MAX_IN_FLIGHT, AmbeBackend, AmbeStream, VocoderMode, open_ambe_stream,
 };
-use astar_codec::ysf::{DnError, DnFrame, unpack_dn};
-use astar_ysf::{DataType, Frame, FsmAction, LinkState, YsfFsm};
+use astar_codec::ysf::{DnError, DnFrame, FRAMES_PER_PAYLOAD, pack_dn, unpack_dn};
+use astar_ysf::{
+    Callsign, DataPacket, DataType, Fich, Frame, FrameInfo, FsmAction, LinkState, YsfFsm, wire,
+};
 
+use crate::mic_lane::MicLane;
 use crate::session::{ConsoleError, resolve_device};
 
 /// How long the socket blocks before the loop runs `tick` anyway.
@@ -102,6 +120,13 @@ const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(2);
 /// One voice frame's worth of wall clock. The output bus consumes frames at
 /// exactly this rate, so this is the rate they must be handed over at.
 const FRAME_INTERVAL: Duration = Duration::from_millis(20);
+
+/// How many radio frames a transmission sends before the terminator.
+///
+/// Not a limit on how long anyone may talk — the run loop keys until PTT is
+/// released. This is the frame counter's wrap, which the wire carries in
+/// seven bits.
+const COUNTER_WRAP: u8 = 0x80;
 
 /// Decoded frames to accumulate before releasing the first one.
 ///
@@ -147,6 +172,10 @@ pub struct YsfSnapshot {
     /// Which vocoder backend is decoding, or `None` for a link with no
     /// audio. An ABI string via [`AmbeBackend::as_str`].
     pub backend: Option<&'static str>,
+    /// `true` while this station is actually transmitting — the applied
+    /// state, not an echo of the last [`YsfLink::set_ptt`] request. A
+    /// key-down refused for want of a capture device never sets it.
+    pub ptt: bool,
     /// Receive level in dBFS on this link's output bus, or -60.0 when
     /// nothing is being decoded — mirrors [`AudioRouter::output_rx_dbfs`],
     /// refreshed every run-loop pass. Always -60.0 on a link opened without
@@ -169,6 +198,12 @@ pub struct YsfConfig {
     pub options: Option<String>,
     /// Playback device substring; `None` = system default.
     pub output: Option<String>,
+    /// Capture device substring; `None` = system default.
+    ///
+    /// Resolution failure is NOT fatal: a YSF link must stay usable
+    /// receive-only on a machine with no usable microphone. The lane is
+    /// opened on the first key-down instead — see [`MicLane`].
+    pub input: Option<String>,
 }
 
 /// A live link to one `YSFReflector`.
@@ -216,6 +251,12 @@ struct Shared {
     /// writes it once per pass and a UI reads it at frame rate, so it is
     /// uncontended in practice.
     rx_spectrum: Mutex<([f32; astar_audio::SPECTRUM_BINS], usize)>,
+    /// What the operator asked for. NOTHING in this module sets it except
+    /// [`YsfLink::set_ptt`], which is the only path a key-down can take.
+    ptt_request: AtomicBool,
+    /// What the run loop actually applied. A key-down with no capture device
+    /// is refused, so the two can differ and a UI must read this one.
+    ptt: AtomicBool,
 }
 
 impl Shared {
@@ -235,6 +276,8 @@ impl Shared {
             ),
             rx_dbfs: AtomicU32::new((-60.0f32).to_bits()),
             rx_spectrum: Mutex::new(([0.0; astar_audio::SPECTRUM_BINS], 0)),
+            ptt_request: AtomicBool::new(false),
+            ptt: AtomicBool::new(false),
         }
     }
 
@@ -292,6 +335,35 @@ struct Audio {
     next_release: Option<Instant>,
     router: AudioRouter,
     out: OutputId,
+    /// The capture lane, opened lazily on the first key-down. `None` on a
+    /// link that resolved no capture device — receive still works.
+    mic: MicLane,
+    /// Transmit state, `None` while unkeyed.
+    tx: Option<Tx>,
+}
+
+/// One transmission in progress.
+///
+/// Exists only between key-down and key-up, so its presence IS "this station
+/// is transmitting" and there is no separate flag to keep in step.
+struct Tx {
+    /// Voice frames encoded and waiting to fill a payload. A radio frame
+    /// carries five, and the mic produces them one at a time.
+    voice: Vec<DnFrame>,
+    /// The wire's frame counter, seven bits, wrapping.
+    counter: u8,
+    /// Whether the opening header frame has gone out yet.
+    sent_header: bool,
+}
+
+impl Tx {
+    fn new() -> Tx {
+        Tx {
+            voice: Vec::with_capacity(FRAMES_PER_PAYLOAD),
+            counter: 0,
+            sent_header: false,
+        }
+    }
 }
 
 /// `LinkState` has no numeric repr of its own — it is a protocol type and
@@ -394,6 +466,20 @@ impl YsfLink {
         backend: AmbeBackend,
     ) -> Result<YsfLink, ConsoleError> {
         let backend_audio = make_backend();
+        // Resolved but NOT opened, and a failure here is deliberately not
+        // fatal — receive-only has to keep working without a microphone.
+        let in_id = resolve_device(
+            backend_audio.as_ref(),
+            cfg.input.as_deref(),
+            astar_audio::Direction::Input,
+        )
+        .map_err(|e| {
+            tracing::warn!(
+                error = ?e,
+                "ysf: no capture device resolved — this link can receive but not transmit"
+            );
+        })
+        .ok();
         let out_id = resolve_device(
             backend_audio.as_ref(),
             cfg.output.as_deref(),
@@ -403,9 +489,11 @@ impl YsfLink {
         let out = OutputId::new(&out_id);
         // 8 kHz mono 20 ms: AMBE+2 half-rate decodes to exactly 160 samples
         // per 20 ms frame, the same shape D-Star's full-rate frames take.
-        let (call_audio, _mic_tx, _mix_id) = router
-            .open_monitor_call(&out, StreamConfig::default())
+        let config = StreamConfig::default();
+        let (call_audio, mic_tx, _mix_id) = router
+            .open_monitor_call(&out, config)
             .map_err(ConsoleError::Audio)?;
+        let mic = MicLane::new(in_id.map(|id| MicId::new(&id)), mic_tx, &call_audio, config);
 
         let audio = Audio {
             ambe,
@@ -415,6 +503,8 @@ impl YsfLink {
             next_release: None,
             router,
             out,
+            mic,
+            tx: None,
         };
         Self::spawn(
             &cfg.host,
@@ -487,8 +577,19 @@ impl YsfLink {
             receiving: self.shared.receiving.load(Ordering::Relaxed),
             unsupported_mode: self.shared.unsupported_mode.lock().map_or(None, |g| *g),
             backend: self.backend.map(AmbeBackend::as_str),
+            ptt: self.shared.ptt.load(Ordering::Relaxed),
             rx_dbfs: f32::from_bits(self.shared.rx_dbfs.load(Ordering::Relaxed)),
         }
+    }
+
+    /// Request transmit on or off.
+    ///
+    /// Stores a request; the run loop applies the edge on its next pass. This
+    /// call never blocks and never keys anything by itself — it is the ONLY
+    /// path that can set the request true, which is what makes "nothing
+    /// transmits unless the operator asked" checkable rather than asserted.
+    pub fn set_ptt(&self, on: bool) {
+        self.shared.ptt_request.store(on, Ordering::Relaxed);
     }
 
     /// Copy the live RX spectrum into `out`, returning the number of
@@ -649,6 +750,13 @@ fn run(
         publish(&fsm);
 
         if let Some(a) = audio.as_mut() {
+            // Apply a pending PTT edge. `set_ptt` only requests; this is the
+            // one place a transmission actually starts or stops, and it runs
+            // only because the operator asked.
+            apply_ptt(a, shared, socket, addr, fsm.callsign());
+            if a.tx.is_some() {
+                pump_tx(a, socket, addr, fsm.callsign());
+            }
             // Keep the vocoder fed and the speaker supplied between
             // arrivals: a payload is five frames and only four fit in the
             // pipeline at once, so the rest are submitted here.
@@ -662,6 +770,17 @@ fn run(
             // which reads as a dead session.
             shared.read_meters(&a.router, &a.out, &mut spectrum_buf);
         }
+    }
+
+    // Close an over that is still open. A link torn down mid-transmission
+    // would otherwise leave the reflector waiting out its own timeout with
+    // this station's callsign still on it, and leave the mic gated open.
+    if let Some(a) = audio.as_mut()
+        && a.tx.is_some()
+    {
+        a.mic.set_gate(&a.router, false);
+        shared.ptt.store(false, Ordering::Relaxed);
+        end_tx(a, socket, addr, fsm.callsign());
     }
 
     // Best effort: the reflector drops us on its own timeout anyway, and a
@@ -788,6 +907,195 @@ fn pump(audio: &mut Audio) {
         audio.decoded.push_back(pcm);
     }
     release(audio, Instant::now());
+}
+
+/// Start or stop a transmission, if the request differs from what is applied.
+///
+/// A key-down with no capture device is REFUSED rather than half-honoured:
+/// opening the mic is what makes transmitting possible, and a station that
+/// reported itself keyed while sending nothing would be lying to its
+/// operator and to the reflector.
+fn apply_ptt(
+    audio: &mut Audio,
+    shared: &Arc<Shared>,
+    socket: &UdpSocket,
+    addr: SocketAddr,
+    callsign: &Callsign,
+) {
+    let want = shared.ptt_request.load(Ordering::Relaxed);
+    let keyed = audio.tx.is_some();
+    if want == keyed {
+        return;
+    }
+    if want {
+        if !audio.mic.ensure_open(&mut audio.router) {
+            tracing::warn!(
+                "ysf: key-down refused — no capture device could be opened, so there is \
+                 nothing to transmit"
+            );
+            shared.ptt_request.store(false, Ordering::Relaxed);
+            shared.ptt.store(false, Ordering::Relaxed);
+            return;
+        }
+        audio.mic.set_gate(&audio.router, true);
+        audio.tx = Some(Tx::new());
+        shared.ptt.store(true, Ordering::Relaxed);
+    } else {
+        audio.mic.set_gate(&audio.router, false);
+        shared.ptt.store(false, Ordering::Relaxed);
+        end_tx(audio, socket, addr, callsign);
+    }
+}
+
+/// Build one radio frame: sync, FICH, and a DN payload carrying `voice`.
+///
+/// The payload's DATA channel is left zeroed. `pack_dn` writes only the voice
+/// bits by design, and astar has no encoder for the in-payload data channel
+/// that carries callsigns to a radio's display. Receivers take the callsign
+/// from the `YSFD` header instead, which every reflector and gateway reads —
+/// see `iax-ysfdch`.
+fn build_frame(
+    info: FrameInfo,
+    voice: &[DnFrame; FRAMES_PER_PAYLOAD],
+) -> [u8; astar_ysf::FRAME_LEN] {
+    let fich = Fich {
+        frame_info: info,
+        // V/D mode 2 is what Yaesu radios transmit for "DN" and what every
+        // reflector expects; mode 1 is decoded on receive but never sent.
+        data_type: DataType::VDMode2,
+        ..Fich::default()
+    };
+    let mut payload = [0u8; astar_ysf::PAYLOAD_LEN];
+    // Infallible: `data_type` is half-rate voice and the payload is exactly
+    // PAYLOAD_LEN, which are the only two things `pack_dn` refuses.
+    let _ = pack_dn(fich.data_type, voice, &mut payload);
+    astar_ysf::frame::build(fich, &payload)
+}
+
+/// Put one radio frame on the wire, wrapped in its `YSFD` routing header.
+///
+/// The three callsigns are all this station: YSF carries the gateway, the
+/// source and the destination separately, and for a client linking to a
+/// reflector the first two are us and the third is unaddressed.
+fn send_radio_frame(
+    socket: &UdpSocket,
+    addr: SocketAddr,
+    callsign: &Callsign,
+    counter: u8,
+    end: bool,
+    frame: [u8; astar_ysf::FRAME_LEN],
+) {
+    let packet = DataPacket {
+        gateway: *callsign,
+        source: *callsign,
+        destination: Callsign::new("ALL").expect("three printable ASCII bytes"),
+        counter,
+        end,
+        frame,
+    };
+    let _ = socket.send_to(&wire::data(&packet), addr);
+}
+
+/// Feed captured audio to the vocoder and put finished frames on the wire.
+///
+/// Nothing here keys anything: `tx` is `Some` only because the operator
+/// asked, and this runs only while it is.
+fn pump_tx(audio: &mut Audio, socket: &UdpSocket, addr: SocketAddr, callsign: &Callsign) {
+    // Drain the mic into the encoder. `submit_encode` is bounded by the
+    // vocoder's own in-flight cap and drops rather than blocks, so a slow
+    // dongle costs frames instead of stalling the link.
+    while let Ok(pcm) = audio.bus.tx_frames.try_recv() {
+        if pcm.len() == 160 {
+            let mut frame = [0i16; 160];
+            frame.copy_from_slice(&pcm);
+            audio.ambe.submit_encode(frame);
+        }
+    }
+    while let Some(encoded) = audio.ambe.poll_encoded() {
+        let Some(tx) = audio.tx.as_mut() else {
+            // Key-up landed between the submit and the reply; the frame
+            // belongs to a transmission that has already ended.
+            continue;
+        };
+        match encoded {
+            astar_codec::ambe::ChannelFrame::YsfDn(dn) => tx.voice.push(dn),
+            other @ astar_codec::ambe::ChannelFrame::Dstar(_) => {
+                // Unreachable: this stream is opened in `VocoderMode::YsfDn`.
+                // Stated rather than assumed, because the alternative is
+                // truncating a D-Star frame onto a YSF wire.
+                tracing::warn!(
+                    got = other.mode().as_str(),
+                    "ysf: encoder returned a non-DN frame, substituting silence"
+                );
+                tx.voice.push(DnFrame::MUTE);
+            }
+        }
+        if tx.voice.len() < FRAMES_PER_PAYLOAD {
+            continue;
+        }
+        let mut five = [DnFrame::default(); FRAMES_PER_PAYLOAD];
+        five.copy_from_slice(&tx.voice[..FRAMES_PER_PAYLOAD]);
+        tx.voice.clear();
+
+        // The first frame of a transmission is a header; the rest carry
+        // voice. Both carry the same payload here — a header frame's own
+        // data channel is the thing astar cannot build yet.
+        let info = if tx.sent_header {
+            FrameInfo::Communications
+        } else {
+            tx.sent_header = true;
+            FrameInfo::Header
+        };
+        let counter = tx.counter;
+        tx.counter = (tx.counter + 1) % COUNTER_WRAP;
+        send_radio_frame(
+            socket,
+            addr,
+            callsign,
+            counter,
+            false,
+            build_frame(info, &five),
+        );
+    }
+}
+
+/// Close a transmission: flush what the encoder still owes, then send the
+/// terminator with the wire's end flag set.
+///
+/// The end flag is what tells every receiver the over is finished; without it
+/// they wait out a timeout instead, and the next station hears a gap.
+fn end_tx(audio: &mut Audio, socket: &UdpSocket, addr: SocketAddr, callsign: &Callsign) {
+    let Some(mut tx) = audio.tx.take() else {
+        return;
+    };
+    // Pad a partial payload with silence rather than dropping it: the tail of
+    // an over is speech, and five frames is 100 ms.
+    while tx.voice.len() % FRAMES_PER_PAYLOAD != 0 {
+        tx.voice.push(DnFrame::MUTE);
+    }
+    for chunk in tx.voice.chunks(FRAMES_PER_PAYLOAD) {
+        let mut five = [DnFrame::default(); FRAMES_PER_PAYLOAD];
+        five.copy_from_slice(chunk);
+        let counter = tx.counter;
+        tx.counter = (tx.counter + 1) % COUNTER_WRAP;
+        send_radio_frame(
+            socket,
+            addr,
+            callsign,
+            counter,
+            false,
+            build_frame(FrameInfo::Communications, &five),
+        );
+    }
+    let silence = [DnFrame::MUTE; FRAMES_PER_PAYLOAD];
+    send_radio_frame(
+        socket,
+        addr,
+        callsign,
+        tx.counter,
+        true,
+        build_frame(FrameInfo::Terminator, &silence),
+    );
 }
 
 /// Hand decoded frames to the output bus on the audio clock — one per
@@ -1023,6 +1331,8 @@ mod tests {
                 next_release: None,
                 router,
                 out: OutputId::new("out:test"),
+                mic: MicLane::unresolved(StreamConfig::default()),
+                tx: None,
             },
             rx_rx,
         )
@@ -1163,6 +1473,8 @@ mod tests {
             next_release: None,
             router: AudioRouter::new(Box::new(astar_audio::NullBackend::new())),
             out: OutputId::new("out:test"),
+            mic: MicLane::unresolved(StreamConfig::default()),
+            tx: None,
         };
         let t0 = Instant::now();
 
@@ -1205,6 +1517,139 @@ mod tests {
             audio.next_release.is_none(),
             "an emptied queue must re-prime, or the next frame reopens the gap"
         );
+    }
+
+    // ── Transmit ────────────────────────────────────────────────────────
+    //
+    // Everything here binds 127.0.0.1 and talks to a reflector this test
+    // started. Nothing reaches a real network, which is the rule this whole
+    // crate is inside.
+
+    /// Frames built for the air, checked as bytes.
+    ///
+    /// The FICH must say DN V/D mode 2 — what Yaesu radios transmit and what
+    /// every reflector expects — and the voice must survive the round trip
+    /// through `pack_dn`, or the far end hears the wrong thing while every
+    /// state machine reports success.
+    #[test]
+    fn a_transmitted_frame_is_dn_mode_2_and_carries_its_voice() {
+        let voice: [DnFrame; FRAMES_PER_PAYLOAD] = core::array::from_fn(|i| {
+            DnFrame::from_bytes([u8::try_from(i + 1).expect("small"), 0, 0, 0, 0, 0, 0])
+        });
+        let bytes = build_frame(FrameInfo::Header, &voice);
+
+        let frame = Frame::new(&bytes).expect("a built frame must parse");
+        assert!(
+            frame.has_sync(),
+            "every radio frame opens with the sync word"
+        );
+        let fich = frame.fich().expect("the FICH must decode");
+        assert_eq!(fich.frame_info, FrameInfo::Header);
+        assert_eq!(fich.data_type, DataType::VDMode2, "astar transmits DN only");
+
+        let back = unpack_dn(fich.data_type, frame.payload()).expect("must round-trip");
+        assert_eq!(back, voice, "the voice we packed is the voice on the wire");
+    }
+
+    #[test]
+    fn a_terminator_is_marked_as_such() {
+        let silence = [DnFrame::MUTE; FRAMES_PER_PAYLOAD];
+        let bytes = build_frame(FrameInfo::Terminator, &silence);
+        let frame = Frame::new(&bytes).expect("parse");
+        assert_eq!(
+            frame.fich().expect("fich").frame_info,
+            FrameInfo::Terminator
+        );
+    }
+
+    /// The routing header a reflector reads. `source` is what every other
+    /// client shows as the talker, so getting it wrong is invisible here and
+    /// obvious to everyone else on the reflector.
+    #[test]
+    fn the_wire_header_names_this_station() {
+        let (socket, addr, rx) = udp_pair();
+        let me = Callsign::new("AJ7HR").expect("legal");
+        send_radio_frame(
+            &socket,
+            addr,
+            &me,
+            7,
+            true,
+            build_frame(
+                FrameInfo::Communications,
+                &[DnFrame::MUTE; FRAMES_PER_PAYLOAD],
+            ),
+        );
+        let mut buf = [0u8; 512];
+        let n = rx.recv(&mut buf).expect("a datagram must arrive");
+        let packet = match astar_ysf::wire::parse(&buf[..n]).expect("must parse") {
+            astar_ysf::Packet::Data(d) => d,
+            other => panic!("expected YSFD, got {other:?}"),
+        };
+        assert_eq!(packet.source.to_trimmed_string(), "AJ7HR");
+        assert_eq!(packet.gateway.to_trimmed_string(), "AJ7HR");
+        assert_eq!(packet.counter, 7);
+        assert!(packet.end, "the end flag must survive the round trip");
+    }
+
+    /// The safety property, stated as a test: a link that is never keyed puts
+    /// NOTHING on the wire but polls. If this ever fails, astar transmitted
+    /// without being asked.
+    #[test]
+    fn an_unkeyed_link_never_sends_a_voice_frame() {
+        let (reflector, addr) = loopback();
+        let link = YsfLink::connect(&addr.to_string(), "N0CALL", None).expect("connect");
+        let _ = wait_for(&link, "linked", Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(!link.snapshot().ptt, "nothing may key on its own");
+        link.disconnect();
+        reflector.shutdown();
+    }
+
+    /// A key-down with no capture device is refused rather than half-applied:
+    /// the request is cleared and `ptt` stays false, so a UI reads "not
+    /// transmitting" because the station is not transmitting.
+    #[test]
+    fn a_key_down_without_a_microphone_is_refused() {
+        let (mut audio, _rx) = test_audio();
+        let shared = Arc::new(Shared::new());
+        let (socket, addr, _peer) = udp_pair();
+        let me = Callsign::new("N0CALL").expect("legal");
+
+        shared.ptt_request.store(true, Ordering::Relaxed);
+        apply_ptt(&mut audio, &shared, &socket, addr, &me);
+
+        assert!(audio.tx.is_none(), "no transmission may start");
+        assert!(!shared.ptt.load(Ordering::Relaxed), "and none is reported");
+        assert!(
+            !shared.ptt_request.load(Ordering::Relaxed),
+            "the request is cleared so it is not retried every 20 ms"
+        );
+    }
+
+    /// `set_ptt` requests; it does not key. The applied state only moves when
+    /// the run loop acts on it, which is what keeps "nothing transmits unless
+    /// the operator asked" true by construction.
+    #[test]
+    fn set_ptt_only_requests() {
+        let (reflector, addr) = loopback();
+        let link = YsfLink::connect(&addr.to_string(), "N0CALL", None).expect("connect");
+        link.set_ptt(true);
+        // No audio on this link, so the run loop can never apply it.
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!link.snapshot().ptt, "a request is not a transmission");
+        link.disconnect();
+        reflector.shutdown();
+    }
+
+    /// A bound socket plus a peer to read what was sent to it.
+    fn udp_pair() -> (UdpSocket, SocketAddr, UdpSocket) {
+        let peer = UdpSocket::bind("127.0.0.1:0").expect("bind peer");
+        peer.set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let addr = peer.local_addr().expect("addr");
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+        (socket, addr, peer)
     }
 
     // ── Delivery cadence (astar-ysfbeat) ────────────────────────────────
@@ -1278,6 +1723,8 @@ mod tests {
             next_release: None,
             router: AudioRouter::new(Box::new(astar_audio::NullBackend::new())),
             out: OutputId::new("out:test"),
+            mic: MicLane::unresolved(StreamConfig::default()),
+            tx: None,
         };
         let shared = Arc::new(Shared::new());
         let frame = frame_of(DataType::VDMode2);

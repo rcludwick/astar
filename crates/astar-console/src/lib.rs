@@ -12,6 +12,9 @@ pub mod dtmf;
 #[cfg(feature = "m17")]
 pub mod m17;
 pub mod metering;
+/// Shared lazy capture lane (D-Star and YSF).
+#[cfg(any(feature = "dstar", feature = "ysf"))]
+mod mic_lane;
 pub mod parrot;
 pub mod session;
 pub mod state;
