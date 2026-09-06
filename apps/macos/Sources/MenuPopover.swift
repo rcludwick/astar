@@ -58,11 +58,15 @@
         /// ThumbDV is attached, because D-Star voice is AMBE and astar has no
         /// software vocoder to offer without one.
         private var availableNetworks: [Network] {
-            Network.available(m17: session.m17Available, dstar: session.dstarAvailable)
+            Network.available(
+                m17: session.m17Available, dstar: session.dstarAvailable,
+                ysf: session.ysfAvailable)
         }
 
         private var selectedNetwork: Network {
-            Network.resolve(networkRaw, m17: session.m17Available, dstar: session.dstarAvailable)
+            Network.resolve(
+                networkRaw, m17: session.m17Available, dstar: session.dstarAvailable,
+                ysf: session.ysfAvailable)
         }
 
         /// The network picker's binding, and the one place a network change
@@ -1562,10 +1566,11 @@
                 case .address(let value):
                     dispatchConnect(node: value, network: network, address: value)
                 }
-            case .m17, .dstar:
-                // Both reflector networks resolve their target engine-side
+            case .m17, .dstar, .ysf:
+                // Every reflector network resolves its target engine-side
                 // (`CallSession.connect(node:network:)` → `m17Target` /
-                // `dstarTarget`, directory first and address second) — this is
+                // `dstarTarget` / `ysfTarget`, directory first and address
+                // second) — this is
                 // only the same "unreachable via the disabled button, but
                 // refuse it on Enter too" guard as above.
                 guard session.canDial(node, network: network) else { return }

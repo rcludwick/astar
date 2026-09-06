@@ -200,6 +200,27 @@ final class FakeStation: StationDriving {
         callLog.append("dstarDisconnect")
     }
     func dstarState() throws -> DStarState? { dstarStateValue }
+
+    // System Fusion. `host` is recorded whole — `host:port` is one string
+    // across this ABI, and the port being folded into it is exactly the sort
+    // of thing a test should be able to see.
+    private(set) var ysfConnects: [(host: String, callsign: String, options: String?)] = []
+    private(set) var ysfDisconnects = 0
+    /// When set, `connectYSF` throws — the "no dongle attached" shape.
+    var ysfConnectError: Error?
+    /// What `ysfState()` reports; `nil` is "no link", the idle answer.
+    var ysfStateValue: YSFState?
+    func connectYSF(host: String, callsign: String, options: String?) throws {
+        waitForGateIfSet()
+        if let ysfConnectError { throw ysfConnectError }
+        ysfConnects.append((host, callsign, options))
+        callLog.append("connectYSF")
+    }
+    func ysfDisconnect() throws {
+        ysfDisconnects += 1
+        callLog.append("ysfDisconnect")
+    }
+    func ysfState() throws -> YSFState? { ysfStateValue }
 }
 
 /// A station whose device enumeration always throws, to verify CallSession's
@@ -248,6 +269,9 @@ private struct ThrowingStation: StationDriving {
     ) throws { throw Boom() }
     func dstarDisconnect() throws { throw Boom() }
     func dstarState() throws -> DStarState? { throw Boom() }
+    func connectYSF(host: String, callsign: String, options: String?) throws { throw Boom() }
+    func ysfDisconnect() throws { throw Boom() }
+    func ysfState() throws -> YSFState? { throw Boom() }
 }
 
 /// An in-memory audio store so persistence-path tests don't touch real defaults.

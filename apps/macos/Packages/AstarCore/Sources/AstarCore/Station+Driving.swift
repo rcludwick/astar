@@ -20,7 +20,8 @@ extension Station: StationDriving {
             denoiseChain: s.denoiseChain,
             dtmfPlayed: s.dtmfPlayed, dtmfTotal: s.dtmfTotal,
             m17Available: s.m17Available, m17Active: s.m17Active,
-            dstarAvailable: s.dstarAvailable, dstarActive: s.dstarActive
+            dstarAvailable: s.dstarAvailable, dstarActive: s.dstarActive,
+            ysfAvailable: s.ysfAvailable, ysfActive: s.ysfActive
         )
     }
 
@@ -39,6 +40,7 @@ extension Station: StationDriving {
     // sugar only — it doesn't affect conformance), so they need no adapter either.
     // connectDStar/dstarDisconnect/dstarState (iax-4c8e) likewise: the vendored
     // signatures are already the protocol's, defaulted arguments included.
+    // connectYSF/ysfDisconnect/ysfState the same, for the same reason.
 }
 
 /// Errors from the fallback `NullStation` (no real engine available).
@@ -72,6 +74,13 @@ public struct NullStation: StationDriving {
     /// No engine, so no session — the same answer the real station gives while
     /// idle, which keeps the talker line absent rather than wrong.
     public func dstarState() throws -> DStarState? { nil }
+    public func connectYSF(host: String, callsign: String, options: String?) throws {
+        throw NullStationError.noEngine
+    }
+    public func ysfDisconnect() throws {}
+    /// No engine, so no link — the same answer the real station gives while
+    /// idle, which keeps the last-heard line absent rather than wrong.
+    public func ysfState() throws -> YSFState? { nil }
     public func setCodecDirs(_ dirs: [String]) throws {}
     public func listInputs() throws -> [String] { [] }
     public func listOutputs() throws -> [String] { [] }
