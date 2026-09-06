@@ -12,7 +12,7 @@ inline. All 228 issues (164 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (94)
+## Open items (95)
 
 ### astar-uid — Audio devices need a stable identity, not their name
 *P2 medium · bug · labels: audio, macos, migration, cx:5*
@@ -542,6 +542,33 @@ and astar follows MMDVMHost.
 
 **Remaining: transmit — and it is blocked, not merely unwritten.** See
 iax-ysftx below.
+
+### iax-wavcadence — `--wav` captures less audio than the session received
+*P3 low · bug · labels: cli, audio, dstar, ysf, cx:3*
+
+Measured 2026-09-06 during the YSF receive checkpoint, on live traffic from
+KCWide. A `ysf-listen --wav` run of ~302 s wall clock produced a **226 s** WAV
+— a 25% shortfall — and the audio inside it came to 843 non-silent 20 ms
+frames where the 208 radio frames counted by a second, link-only client over
+the same window predict 1040 (81%).
+
+Two shortfalls of similar size, which is why this is filed against the capture
+harness rather than the vocoder: `WavBackend`'s output "device" pulls decoded
+audio on a background thread "at the stream's own cadence", and if that
+cadence runs slower than real time the file simply contains fewer slots than
+the session produced. The decoded audio that IS there looks right — speech
+levels, peak -10.0 dBFS, no clipping, talkers matching the `▶` lines.
+
+NOT YSF-specific: `crates/astar-cli/src/wav_backend.rs` is shared with
+`dstar-listen`, and this was extracted from it unchanged, so any D-Star `--wav`
+capture has the same behaviour and always has.
+
+**Unconfirmed as a defect.** The two clients ran in overlapping but not
+identical windows, so the frame comparison is indicative rather than exact.
+The cheap way to settle it: capture a known-length transmission into a local
+`ysf-parrot`/`m17-parrot` and compare the WAV's duration against the wall
+clock, with nothing else running. If the cadence is the cause, the fix is to
+drive the writer from a real-time clock rather than the pull loop's own pace.
 
 ### iax-ysftx — YSF transmit is blocked at the vendored deframer
 *P3 low · feature · labels: ysf, vendor, cx:3*
