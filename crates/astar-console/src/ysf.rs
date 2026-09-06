@@ -994,7 +994,7 @@ mod tests {
         fn submit_encode(&mut self, _pcm: [i16; 160]) {
             unreachable!("YSF has no transmit path");
         }
-        fn poll_encoded(&mut self) -> Option<[u8; 9]> {
+        fn poll_encoded(&mut self) -> Option<astar_codec::ambe::ChannelFrame> {
             None
         }
         fn in_flight_encoded(&self) -> usize {
@@ -1247,7 +1247,7 @@ mod tests {
         fn submit_encode(&mut self, _pcm: [i16; 160]) {
             unreachable!()
         }
-        fn poll_encoded(&mut self) -> Option<[u8; 9]> {
+        fn poll_encoded(&mut self) -> Option<astar_codec::ambe::ChannelFrame> {
             None
         }
         fn in_flight_encoded(&self) -> usize {

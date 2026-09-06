@@ -186,7 +186,16 @@ impl<T: Transport> ThumbDv<T> {
     ) -> Result<[u8; FRAME_BYTES], DeviceError> {
         let resp = Self::transact_internal(&mut self.transport, &speech_in(pcm))?;
         match resp {
-            Response::Channel(frame) => Ok(frame),
+            // This entry point is the full-rate (D-Star/DMR) one and returns a
+            // fixed nine-byte frame, so 72 bits is what it must see. A
+            // different count here means the chip's rate configuration was
+            // lost (§8.4) — the check the parser used to make, moved to the
+            // caller that actually knows what rate it asked for.
+            Response::Channel { bits, data } if bits as usize == FRAME_BYTES * 8 => Ok(data),
+            Response::Channel { bits, .. } => Err(DeviceError::Protocol(format!(
+                "rate lost: expected {} bits, device sent {bits}",
+                FRAME_BYTES * 8
+            ))),
             _ => Err(DeviceError::Protocol("expected Channel response".into())),
         }
     }

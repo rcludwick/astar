@@ -198,7 +198,7 @@ impl AmbeStream for FakeVocoder {
         ));
     }
 
-    fn poll_encoded(&mut self) -> Option<[u8; 9]> {
+    fn poll_encoded(&mut self) -> Option<astar_codec::ambe::ChannelFrame> {
         if self.never_answers || self.never_answers_encode {
             return None;
         }
@@ -213,7 +213,7 @@ impl AmbeStream for FakeVocoder {
             return None;
         }
         let (_, frame) = self.encode_queue.pop_front().expect("checked above");
-        Some(frame)
+        Some(astar_codec::ambe::ChannelFrame::Dstar(frame))
     }
 
     fn in_flight_encoded(&self) -> usize {

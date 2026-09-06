@@ -1523,7 +1523,14 @@ fn pump_tx(ctx: &mut TxCtx<'_>, tx: &mut TxState) {
         ctx.ambe.submit_encode(pcm);
     }
     while let Some(frame) = ctx.ambe.poll_encoded() {
-        tx.ready.push_back(frame);
+        // This session's stream is opened in `VocoderMode::Dstar`, so a
+        // frame of any other width cannot arrive — but substituting the null
+        // codeword beats truncating something that is not a D-Star frame onto
+        // the air.
+        tx.ready.push_back(frame.as_dstar().unwrap_or_else(|| {
+            tracing::warn!("dstar: encoder returned a non-D-Star frame, substituting silence");
+            astar_dstar::NULL_AMBE
+        }));
     }
     send_paced_voice_frames(ctx, tx, Instant::now());
 }
@@ -1635,7 +1642,10 @@ fn flush_tx_pipeline(
         let mut delivered = false;
         while let Some(frame) = ambe.poll_encoded() {
             delivered = true;
-            out.push(frame);
+            out.push(frame.as_dstar().unwrap_or_else(|| {
+                tracing::warn!("dstar: encoder returned a non-D-Star frame, substituting silence");
+                astar_dstar::NULL_AMBE
+            }));
         }
         if pending.is_empty() && ambe.in_flight_encoded() == 0 {
             return out;
@@ -2296,8 +2306,10 @@ mod tx_tests {
             let b = pcm[0].to_be_bytes();
             self.queue.push_back([b[0], b[1], 0, 0, 0, 0, 0, 0, 0]);
         }
-        fn poll_encoded(&mut self) -> Option<[u8; 9]> {
-            self.queue.pop_front()
+        fn poll_encoded(&mut self) -> Option<astar_codec::ambe::ChannelFrame> {
+            self.queue
+                .pop_front()
+                .map(astar_codec::ambe::ChannelFrame::Dstar)
         }
         fn in_flight_encoded(&self) -> usize {
             self.queue.len()
@@ -2323,7 +2335,7 @@ mod tx_tests {
         fn submit_encode(&mut self, _pcm: [i16; 160]) {
             self.in_flight += 1;
         }
-        fn poll_encoded(&mut self) -> Option<[u8; 9]> {
+        fn poll_encoded(&mut self) -> Option<astar_codec::ambe::ChannelFrame> {
             None
         }
         fn in_flight_encoded(&self) -> usize {
@@ -2638,8 +2650,10 @@ mod tx_tests {
             let b = pcm[0].to_be_bytes();
             self.queue.push_back([b[0], b[1], 0, 0, 0, 0, 0, 0, 0]);
         }
-        fn poll_encoded(&mut self) -> Option<[u8; 9]> {
-            self.queue.pop_front()
+        fn poll_encoded(&mut self) -> Option<astar_codec::ambe::ChannelFrame> {
+            self.queue
+                .pop_front()
+                .map(astar_codec::ambe::ChannelFrame::Dstar)
         }
         fn in_flight_encoded(&self) -> usize {
             self.queue.len()
