@@ -425,6 +425,14 @@ struct SharedState {
     tx_dbfs: AtomicU32,
     rx_dbfs: AtomicU32,
     input_dbfs: AtomicU32,
+    /// `(bins, count)` from the router's analyzers, refreshed every run-loop
+    /// pass. `count` stays 0 until a lane has produced a reading.
+    ///
+    /// D-Star had levels but no spectrum: `ConsoleSession::tx_spectrum` and
+    /// `rx_spectrum` dispatched only to IAX2 and M17, so a live D-Star
+    /// session drew empty bars and had since it shipped.
+    tx_spectrum: Mutex<([f32; astar_audio::SPECTRUM_BINS], usize)>,
+    rx_spectrum: Mutex<([f32; astar_audio::SPECTRUM_BINS], usize)>,
     /// Listener-side audio preferences, the same three
     /// [`crate::ConsoleSession`] fans out to every other network.
     ///
@@ -453,6 +461,8 @@ impl SharedState {
             tx_dbfs: AtomicU32::new((-60.0f32).to_bits()),
             rx_dbfs: AtomicU32::new((-60.0f32).to_bits()),
             input_dbfs: AtomicU32::new((-60.0f32).to_bits()),
+            tx_spectrum: Mutex::new(([0.0; astar_audio::SPECTRUM_BINS], 0)),
+            rx_spectrum: Mutex::new(([0.0; astar_audio::SPECTRUM_BINS], 0)),
             // Unity and off — the router's own defaults, so a session nobody
             // has configured sounds exactly as it did before this existed.
             // `dstar_adopt` overwrites these with the console's real values
@@ -736,6 +746,18 @@ impl DstarSession {
     /// `&self`, like [`crate::m17::M17Session::set_output_gain`], so
     /// [`crate::ConsoleSession`] can fan a preference out to whichever
     /// networks are live without needing a mutable borrow of each.
+    /// Copy the live TX spectrum into `out`, returning bins written.
+    #[must_use]
+    pub fn tx_spectrum(&self, out: &mut [f32]) -> usize {
+        copy_bins(&self.shared.tx_spectrum, out)
+    }
+
+    /// Copy the live RX spectrum into `out`, returning bins written.
+    #[must_use]
+    pub fn rx_spectrum(&self, out: &mut [f32]) -> usize {
+        copy_bins(&self.shared.rx_spectrum, out)
+    }
+
     pub fn set_output_gain(&self, gain: f32) {
         let gain = if gain.is_nan() {
             1.0
@@ -1980,9 +2002,25 @@ fn update_meters(router: &AudioRouter, mic: &MicLane, out: &OutputId, shared: &S
         if let Some(db) = router.mic_tx_dbfs(id) {
             shared.tx_dbfs.store(db.to_bits(), Ordering::Relaxed);
         }
+        let mut bins = [0.0f32; astar_audio::SPECTRUM_BINS];
+        if let Some(n) = router.mic_tx_spectrum(id, &mut bins)
+            && let Ok(mut slot) = shared.tx_spectrum.lock()
+        {
+            let n = n.min(astar_audio::SPECTRUM_BINS);
+            slot.0[..n].copy_from_slice(&bins[..n]);
+            slot.1 = n;
+        }
         if let Some(db) = router.mic_input_dbfs(id) {
             shared.input_dbfs.store(db.to_bits(), Ordering::Relaxed);
         }
+    }
+    let mut rx_bins = [0.0f32; astar_audio::SPECTRUM_BINS];
+    if let Some(n) = router.output_rx_spectrum(out, &mut rx_bins)
+        && let Ok(mut slot) = shared.rx_spectrum.lock()
+    {
+        let n = n.min(astar_audio::SPECTRUM_BINS);
+        slot.0[..n].copy_from_slice(&rx_bins[..n]);
+        slot.1 = n;
     }
     if let Some(db) = router.output_rx_dbfs(out) {
         shared.rx_dbfs.store(db.to_bits(), Ordering::Relaxed);
@@ -2149,6 +2187,16 @@ fn handle_dsvt(pkt: DsvtPacket, rx: &mut RxState<'_>) {
             }
         }
     }
+}
+
+/// Copy a mirrored bin array out under its mutex.
+fn copy_bins(slot: &Mutex<([f32; astar_audio::SPECTRUM_BINS], usize)>, out: &mut [f32]) -> usize {
+    let Ok(guard) = slot.lock() else {
+        return 0;
+    };
+    let n = guard.1.min(out.len());
+    out[..n].copy_from_slice(&guard.0[..n]);
+    n
 }
 
 #[cfg(test)]
