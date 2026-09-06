@@ -1871,6 +1871,7 @@ impl ConsoleSession {
         self.state.remote_ptt = false;
         self.state.ptt = false;
         self.state.rx_level_db = -60.0;
+        self.state.tx_level_db = -60.0;
     }
 
     /// `true` while a YSF link is live. Always `false` when the `ysf`
@@ -1995,6 +1996,14 @@ impl ConsoleSession {
         if let Some(m17) = self.m17.as_ref() {
             return m17.tx_spectrum(out);
         }
+        #[cfg(feature = "ysf")]
+        if let Some(ysf) = self.ysf.as_ref() {
+            return ysf.tx_spectrum(out);
+        }
+        #[cfg(feature = "dstar")]
+        if let Some(dstar) = self.dstar.as_ref() {
+            return dstar.tx_spectrum(out);
+        }
         0
     }
 
@@ -2017,6 +2026,10 @@ impl ConsoleSession {
         #[cfg(feature = "ysf")]
         if let Some(ysf) = self.ysf.as_ref() {
             return ysf.rx_spectrum(out);
+        }
+        #[cfg(feature = "dstar")]
+        if let Some(dstar) = self.dstar.as_ref() {
+            return dstar.rx_spectrum(out);
         }
         0
     }
@@ -2575,6 +2588,7 @@ impl ConsoleSession {
             // wrote, on the very next poll. A snapshot must never report a
             // station as transmitting when it is not.
             self.state.ptt = snap.ptt;
+            self.state.tx_level_db = snap.tx_dbfs;
             // The received level, from the link's own output bus. Without
             // this every meter on a live YSF session sits at the -60 floor
             // the `else` branch above leaves it at — audio playing, meters

@@ -176,6 +176,8 @@ pub struct YsfSnapshot {
     /// state, not an echo of the last [`YsfLink::set_ptt`] request. A
     /// key-down refused for want of a capture device never sets it.
     pub ptt: bool,
+    /// Transmit level in dBFS, or -60.0 while unkeyed.
+    pub tx_dbfs: f32,
     /// Receive level in dBFS on this link's output bus, or -60.0 when
     /// nothing is being decoded — mirrors [`AudioRouter::output_rx_dbfs`],
     /// refreshed every run-loop pass. Always -60.0 on a link opened without
@@ -242,6 +244,11 @@ struct Shared {
     spectrum_decay: AtomicU32,
     /// Receive level, refreshed by the run loop from the router.
     rx_dbfs: AtomicU32,
+    /// Transmit level, from the mic lane's own analyzer. -60 while unkeyed.
+    tx_dbfs: AtomicU32,
+    /// `(bins, count)` from [`AudioRouter::mic_tx_spectrum`], the transmit
+    /// counterpart of `rx_spectrum`.
+    tx_spectrum: Mutex<([f32; astar_audio::SPECTRUM_BINS], usize)>,
     /// `(bins, count)` from [`AudioRouter::output_rx_spectrum`], refreshed
     /// every run-loop pass. `count` stays 0 until the bus has produced a
     /// reading, mirroring the router's own "nothing to report yet" contract
@@ -275,7 +282,9 @@ impl Shared {
                 astar_audio::spectrum::DEFAULT_DECAY_DB_PER_SEC.to_bits(),
             ),
             rx_dbfs: AtomicU32::new((-60.0f32).to_bits()),
+            tx_dbfs: AtomicU32::new((-60.0f32).to_bits()),
             rx_spectrum: Mutex::new(([0.0; astar_audio::SPECTRUM_BINS], 0)),
+            tx_spectrum: Mutex::new(([0.0; astar_audio::SPECTRUM_BINS], 0)),
             ptt_request: AtomicBool::new(false),
             ptt: AtomicBool::new(false),
         }
@@ -300,15 +309,42 @@ impl Shared {
         );
     }
 
+    /// The decay, applied to the mic analyzer once the lane exists.
+    fn apply_mic_decay(&self, router: &AudioRouter, mic: &MicLane) {
+        if let Some(id) = mic.id.as_ref() {
+            router.set_mic_spectrum_decay(
+                id,
+                f32::from_bits(self.spectrum_decay.load(Ordering::Relaxed)),
+            );
+        }
+    }
+
     /// Pull the bus's meter and analyzer into the cells the control side
     /// reads. Called every run-loop pass, next to `apply_audio`, so the two
     /// directions of the same conversation with the router stay together.
-    fn read_meters(&self, router: &AudioRouter, out: &OutputId, buf: &mut [f32]) {
+    fn read_meters(&self, router: &AudioRouter, out: &OutputId, mic: &MicLane, buf: &mut [f32]) {
         if let Some(db) = router.output_rx_dbfs(out) {
             self.rx_dbfs.store(db.to_bits(), Ordering::Relaxed);
         }
         if let Some(n) = router.output_rx_spectrum(out, buf)
             && let Ok(mut slot) = self.rx_spectrum.lock()
+        {
+            let n = n.min(astar_audio::SPECTRUM_BINS);
+            slot.0[..n].copy_from_slice(&buf[..n]);
+            slot.1 = n;
+        }
+        // The transmit side, from the mic lane's own analyzers. `None` until
+        // the lane is open, which is the first key-down — so an unkeyed link
+        // reports the floor rather than a stale reading.
+        let Some(id) = mic.id.as_ref() else {
+            return;
+        };
+        self.tx_dbfs.store(
+            router.mic_tx_dbfs(id).unwrap_or(-60.0).to_bits(),
+            Ordering::Relaxed,
+        );
+        if let Some(n) = router.mic_tx_spectrum(id, buf)
+            && let Ok(mut slot) = self.tx_spectrum.lock()
         {
             let n = n.min(astar_audio::SPECTRUM_BINS);
             slot.0[..n].copy_from_slice(&buf[..n]);
@@ -327,6 +363,14 @@ struct Audio {
     /// and the vocoder accepts four, so this queue is not an optimisation —
     /// without it the fifth frame of every burst would be dropped.
     pending: VecDeque<DnFrame>,
+    /// Captured frames waiting to be submitted to the encoder.
+    ///
+    /// The exact counterpart of `pending` on the decode side, and necessary
+    /// for the same reason: `submit_encode` DROPS when the vocoder is at its
+    /// in-flight bound, so submitting a burst straight from the mic throws
+    /// away every frame past the fourth. Dropped mic frames are dropped
+    /// speech — the far end hears it as garbling.
+    mic_pending: VecDeque<[i16; 160]>,
     /// Decoded frames waiting to be released to the bus on the audio clock.
     /// See [`PRIME_FRAMES`] for why they are not handed over as they finish.
     decoded: VecDeque<[i16; 160]>,
@@ -499,6 +543,7 @@ impl YsfLink {
             ambe,
             bus: call_audio,
             pending: VecDeque::new(),
+            mic_pending: VecDeque::new(),
             decoded: VecDeque::new(),
             next_release: None,
             router,
@@ -578,6 +623,7 @@ impl YsfLink {
             unsupported_mode: self.shared.unsupported_mode.lock().map_or(None, |g| *g),
             backend: self.backend.map(AmbeBackend::as_str),
             ptt: self.shared.ptt.load(Ordering::Relaxed),
+            tx_dbfs: f32::from_bits(self.shared.tx_dbfs.load(Ordering::Relaxed)),
             rx_dbfs: f32::from_bits(self.shared.rx_dbfs.load(Ordering::Relaxed)),
         }
     }
@@ -600,6 +646,18 @@ impl YsfLink {
     #[must_use]
     pub fn rx_spectrum(&self, out: &mut [f32]) -> usize {
         let Ok(slot) = self.shared.rx_spectrum.lock() else {
+            return 0;
+        };
+        let n = slot.1.min(out.len());
+        out[..n].copy_from_slice(&slot.0[..n]);
+        n
+    }
+
+    /// Copy the live TX spectrum into `out`, returning bins written. `0`
+    /// before the mic lane has ever been opened.
+    #[must_use]
+    pub fn tx_spectrum(&self, out: &mut [f32]) -> usize {
+        let Ok(slot) = self.shared.tx_spectrum.lock() else {
             return 0;
         };
         let n = slot.1.min(out.len());
@@ -764,11 +822,12 @@ fn run(
             // The operator's volume and leveling, re-asserted every pass so
             // a change made mid-transmission is heard on the next frame.
             shared.apply_audio(&a.router, &a.out);
+            shared.apply_mic_decay(&a.router, &a.mic);
             // …and the other direction: the bus's meter and analyzer into
             // the cells a UI polls. Without this a YSF link plays audio
             // while every level and every spectrum bar sits at the floor,
             // which reads as a dead session.
-            shared.read_meters(&a.router, &a.out, &mut spectrum_buf);
+            shared.read_meters(&a.router, &a.out, &a.mic, &mut spectrum_buf);
         }
     }
 
@@ -1001,15 +1060,24 @@ fn send_radio_frame(
 /// Nothing here keys anything: `tx` is `Some` only because the operator
 /// asked, and this runs only while it is.
 fn pump_tx(audio: &mut Audio, socket: &UdpSocket, addr: SocketAddr, callsign: &Callsign) {
-    // Drain the mic into the encoder. `submit_encode` is bounded by the
-    // vocoder's own in-flight cap and drops rather than blocks, so a slow
-    // dongle costs frames instead of stalling the link.
+    // Take everything the mic has produced into OUR queue, not the
+    // vocoder's. `submit_encode` drops when it is at its in-flight bound, so
+    // handing it a burst discards every frame past the fourth — silently, and
+    // as missing speech at the far end.
     while let Ok(pcm) = audio.bus.tx_frames.try_recv() {
         if pcm.len() == 160 {
             let mut frame = [0i16; 160];
             frame.copy_from_slice(&pcm);
-            audio.ambe.submit_encode(frame);
+            audio.mic_pending.push_back(frame);
         }
+    }
+    // Then feed the vocoder only as fast as it will accept, exactly as the
+    // decode side does.
+    while audio.ambe.in_flight_encoded() < AMBE_STREAM_MAX_IN_FLIGHT {
+        let Some(frame) = audio.mic_pending.pop_front() else {
+            break;
+        };
+        audio.ambe.submit_encode(frame);
     }
     while let Some(encoded) = audio.ambe.poll_encoded() {
         let Some(tx) = audio.tx.as_mut() else {
@@ -1065,6 +1133,30 @@ fn pump_tx(audio: &mut Audio, socket: &UdpSocket, addr: SocketAddr, callsign: &C
 /// The end flag is what tells every receiver the over is finished; without it
 /// they wait out a timeout instead, and the next station hears a gap.
 fn end_tx(audio: &mut Audio, socket: &UdpSocket, addr: SocketAddr, callsign: &Callsign) {
+    if audio.tx.is_none() {
+        return;
+    }
+    // Drain what the encoder still owes BEFORE closing the over. Without
+    // this the last frames of every transmission are lost — and worse, they
+    // arrive during the NEXT one and are sent as that talker's audio.
+    let deadline = Instant::now() + FLUSH_DEADLINE;
+    loop {
+        pump_tx(audio, socket, addr, callsign);
+        let done = audio.mic_pending.is_empty() && audio.ambe.in_flight_encoded() == 0;
+        if done || Instant::now() >= deadline {
+            if !done {
+                tracing::warn!(
+                    pending = audio.mic_pending.len(),
+                    in_flight = audio.ambe.in_flight_encoded(),
+                    "ysf: encoder flush hit its {FLUSH_DEADLINE:?} deadline, ending the over anyway"
+                );
+            }
+            break;
+        }
+        thread::sleep(DRAIN_POLL_INTERVAL);
+    }
+    audio.mic_pending.clear();
+
     let Some(mut tx) = audio.tx.take() else {
         return;
     };
@@ -1276,6 +1368,9 @@ mod tests {
     struct FakeVocoder {
         submitted: Vec<ChannelFrame>,
         ready: VecDeque<[i16; 160]>,
+        /// Encode side: a submitted PCM frame becomes one DN frame carrying
+        /// its first sample, so a test can follow a frame through.
+        encoded: VecDeque<DnFrame>,
     }
 
     impl FakeVocoder {
@@ -1283,6 +1378,7 @@ mod tests {
             FakeVocoder {
                 submitted: Vec::new(),
                 ready: VecDeque::new(),
+                encoded: VecDeque::new(),
             }
         }
     }
@@ -1299,14 +1395,16 @@ mod tests {
         fn in_flight(&self) -> usize {
             self.ready.len()
         }
-        fn submit_encode(&mut self, _pcm: [i16; 160]) {
-            unreachable!("YSF has no transmit path");
+        fn submit_encode(&mut self, pcm: [i16; 160]) {
+            let tag = u8::try_from(pcm[0].unsigned_abs() & 0xFF).unwrap_or(0);
+            self.encoded
+                .push_back(DnFrame::from_bytes([tag, 0, 0, 0, 0, 0, 0]));
         }
         fn poll_encoded(&mut self) -> Option<astar_codec::ambe::ChannelFrame> {
-            None
+            self.encoded.pop_front().map(ChannelFrame::YsfDn)
         }
         fn in_flight_encoded(&self) -> usize {
-            0
+            self.encoded.len()
         }
     }
 
@@ -1327,6 +1425,7 @@ mod tests {
                 ambe: Box::new(FakeVocoder::new()),
                 bus: call_audio,
                 pending: VecDeque::new(),
+                mic_pending: VecDeque::new(),
                 decoded: VecDeque::new(),
                 next_release: None,
                 router,
@@ -1469,6 +1568,7 @@ mod tests {
                 preroll_lead: Arc::new(AtomicU32::new(0)),
             },
             pending: VecDeque::new(),
+            mic_pending: VecDeque::new(),
             decoded: VecDeque::new(),
             next_release: None,
             router: AudioRouter::new(Box::new(astar_audio::NullBackend::new())),
@@ -1592,6 +1692,59 @@ mod tests {
         assert!(packet.end, "the end flag must survive the round trip");
     }
 
+    /// The garble, as a test. `submit_encode` DROPS when the vocoder is at
+    /// its in-flight bound, so a burst of mic frames handed straight to it
+    /// loses everything past the fourth — and lost mic frames are lost
+    /// speech. The queue is what makes a burst survive.
+    #[test]
+    fn a_burst_of_mic_frames_is_queued_rather_than_dropped() {
+        const BURST: usize = 20;
+        const {
+            assert!(
+                BURST > AMBE_STREAM_MAX_IN_FLIGHT,
+                "the burst must exceed the bound, or this proves nothing"
+            );
+        }
+        let (mut audio, _rx) = test_audio();
+        let (socket, addr, peer) = udp_pair();
+        let me = Callsign::new("N0CALL").expect("legal");
+        audio.tx = Some(Tx::new());
+
+        // A burst arrives in one pass, as a jittery capture lane delivers.
+        let (tx_send, tx_recv) = channel::<Vec<i16>>();
+        audio.bus.tx_frames = tx_recv;
+        for i in 0..BURST {
+            tx_send
+                .send(vec![i16::try_from(i + 1).expect("small"); 160])
+                .expect("send");
+        }
+
+        // Drain fully, then account for every captured frame: on the wire,
+        // or still waiting to fill a payload. None may vanish.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            pump_tx(&mut audio, &socket, addr, &me);
+            if (audio.mic_pending.is_empty() && audio.ambe.in_flight_encoded() == 0)
+                || Instant::now() >= deadline
+            {
+                break;
+            }
+        }
+        assert!(audio.mic_pending.is_empty(), "the queue must drain");
+        assert_eq!(audio.ambe.in_flight_encoded(), 0);
+
+        let mut buf = [0u8; 512];
+        let mut on_the_wire = 0usize;
+        while peer.recv(&mut buf).is_ok() {
+            on_the_wire += FRAMES_PER_PAYLOAD;
+        }
+        assert_eq!(
+            on_the_wire + audio.tx.as_ref().map_or(0, |t| t.voice.len()),
+            BURST,
+            "every captured frame must reach the wire or still be waiting to fill a payload"
+        );
+    }
+
     /// The safety property, stated as a test: a link that is never keyed puts
     /// NOTHING on the wire but polls. If this ever fails, astar transmitted
     /// without being asked.
@@ -1645,7 +1798,7 @@ mod tests {
     /// A bound socket plus a peer to read what was sent to it.
     fn udp_pair() -> (UdpSocket, SocketAddr, UdpSocket) {
         let peer = UdpSocket::bind("127.0.0.1:0").expect("bind peer");
-        peer.set_read_timeout(Some(Duration::from_secs(2)))
+        peer.set_read_timeout(Some(Duration::from_millis(200)))
             .expect("timeout");
         let addr = peer.local_addr().expect("addr");
         let socket = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
@@ -1719,6 +1872,7 @@ mod tests {
                 preroll_lead: Arc::new(AtomicU32::new(0)),
             },
             pending: VecDeque::new(),
+            mic_pending: VecDeque::new(),
             decoded: VecDeque::new(),
             next_release: None,
             router: AudioRouter::new(Box::new(astar_audio::NullBackend::new())),
