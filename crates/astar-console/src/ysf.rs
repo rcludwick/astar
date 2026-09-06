@@ -100,7 +100,11 @@ const FLUSH_DEADLINE: Duration = Duration::from_millis(500);
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(2);
 
 /// What the control side can see of a link, without touching the thread.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` but not `Eq`: it carries a level in dBFS, and `f32` has no
+/// total equality. `DstarSnapshotState` derives the same pair for the same
+/// reason.
+#[derive(Debug, Clone, PartialEq)]
 pub struct YsfSnapshot {
     /// The link state's ABI string — `idle`, `linking`, `linked`,
     /// `unlinking`, `failed`. See [`LinkState::as_str`], which documents why
@@ -127,6 +131,11 @@ pub struct YsfSnapshot {
     /// Which vocoder backend is decoding, or `None` for a link with no
     /// audio. An ABI string via [`AmbeBackend::as_str`].
     pub backend: Option<&'static str>,
+    /// Receive level in dBFS on this link's output bus, or -60.0 when
+    /// nothing is being decoded — mirrors [`AudioRouter::output_rx_dbfs`],
+    /// refreshed every run-loop pass. Always -60.0 on a link opened without
+    /// audio, which has no bus to meter.
+    pub rx_dbfs: f32,
 }
 
 /// Operator-supplied configuration for a link that decodes audio.
@@ -177,6 +186,20 @@ struct Shared {
     output_gain: AtomicU32,
     rx_compress: AtomicBool,
     rx_compress_level: AtomicU32,
+    /// Peak-hold decay for the RX analyzer, pushed onto the bus by
+    /// `apply_audio` like the other listener preferences.
+    spectrum_decay: AtomicU32,
+    /// Receive level, refreshed by the run loop from the router.
+    rx_dbfs: AtomicU32,
+    /// `(bins, count)` from [`AudioRouter::output_rx_spectrum`], refreshed
+    /// every run-loop pass. `count` stays 0 until the bus has produced a
+    /// reading, mirroring the router's own "nothing to report yet" contract
+    /// rather than publishing a zeroed array as though it were real.
+    ///
+    /// A mutex rather than atomics because it is an array: the run loop
+    /// writes it once per pass and a UI reads it at frame rate, so it is
+    /// uncontended in practice.
+    rx_spectrum: Mutex<([f32; astar_audio::SPECTRUM_BINS], usize)>,
 }
 
 impl Shared {
@@ -191,6 +214,11 @@ impl Shared {
             output_gain: AtomicU32::new(1.0f32.to_bits()),
             rx_compress: AtomicBool::new(false),
             rx_compress_level: AtomicU32::new(0.5f32.to_bits()),
+            spectrum_decay: AtomicU32::new(
+                astar_audio::spectrum::DEFAULT_DECAY_DB_PER_SEC.to_bits(),
+            ),
+            rx_dbfs: AtomicU32::new((-60.0f32).to_bits()),
+            rx_spectrum: Mutex::new(([0.0; astar_audio::SPECTRUM_BINS], 0)),
         }
     }
 
@@ -207,6 +235,26 @@ impl Shared {
             out,
             f32::from_bits(self.rx_compress_level.load(Ordering::Relaxed)),
         );
+        router.set_output_spectrum_decay(
+            out,
+            f32::from_bits(self.spectrum_decay.load(Ordering::Relaxed)),
+        );
+    }
+
+    /// Pull the bus's meter and analyzer into the cells the control side
+    /// reads. Called every run-loop pass, next to `apply_audio`, so the two
+    /// directions of the same conversation with the router stay together.
+    fn read_meters(&self, router: &AudioRouter, out: &OutputId, buf: &mut [f32]) {
+        if let Some(db) = router.output_rx_dbfs(out) {
+            self.rx_dbfs.store(db.to_bits(), Ordering::Relaxed);
+        }
+        if let Some(n) = router.output_rx_spectrum(out, buf)
+            && let Ok(mut slot) = self.rx_spectrum.lock()
+        {
+            let n = n.min(astar_audio::SPECTRUM_BINS);
+            slot.0[..n].copy_from_slice(&buf[..n]);
+            slot.1 = n;
+        }
     }
 }
 
@@ -415,7 +463,31 @@ impl YsfLink {
             receiving: self.shared.receiving.load(Ordering::Relaxed),
             unsupported_mode: self.shared.unsupported_mode.lock().map_or(None, |g| *g),
             backend: self.backend.map(AmbeBackend::as_str),
+            rx_dbfs: f32::from_bits(self.shared.rx_dbfs.load(Ordering::Relaxed)),
         }
+    }
+
+    /// Copy the live RX spectrum into `out`, returning the number of
+    /// log-binned, peak-held dBFS bins written — the SAME values the mic
+    /// monitor and the IAX2/M17 paths produce, so one UI widget renders them
+    /// all. `0` before the bus has produced a reading, and always `0` on a
+    /// link opened without audio.
+    #[must_use]
+    pub fn rx_spectrum(&self, out: &mut [f32]) -> usize {
+        let Ok(slot) = self.shared.rx_spectrum.lock() else {
+            return 0;
+        };
+        let n = slot.1.min(out.len());
+        out[..n].copy_from_slice(&slot.0[..n]);
+        n
+    }
+
+    /// Set the RX analyzer's peak-hold decay in dB/second. Applied to the
+    /// live bus on the next run-loop pass.
+    pub fn set_spectrum_decay(&self, db_per_sec: f32) {
+        self.shared
+            .spectrum_decay
+            .store(db_per_sec.to_bits(), Ordering::Relaxed);
     }
 
     /// The link state as the protocol crate's own enum.
@@ -528,6 +600,8 @@ fn run(
     publish(&fsm);
 
     let mut buf = [0_u8; astar_ysf::reflector::MAX_DATAGRAM];
+    // Reused every pass, never reallocated.
+    let mut spectrum_buf = [0.0f32; astar_audio::SPECTRUM_BINS];
     while !shared.stop.load(Ordering::Relaxed) {
         match socket.recv_from(&mut buf) {
             Ok((n, from)) if from == addr => {
@@ -558,6 +632,11 @@ fn run(
             // The operator's volume and leveling, re-asserted every pass so
             // a change made mid-transmission is heard on the next frame.
             shared.apply_audio(&a.router, &a.out);
+            // …and the other direction: the bus's meter and analyzer into
+            // the cells a UI polls. Without this a YSF link plays audio
+            // while every level and every spectrum bar sits at the floor,
+            // which reads as a dead session.
+            shared.read_meters(&a.router, &a.out, &mut spectrum_buf);
         }
     }
 

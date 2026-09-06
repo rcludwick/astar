@@ -708,6 +708,10 @@ impl ConsoleSession {
         // iax-f2b8-fix Fix 6: forward to a live M17 session too — mirrors
         // Fix 4's pref-setter forwarding, but "live-only" (no persisted
         // cell), matching this setter's own no-op-when-idle contract above.
+        #[cfg(feature = "ysf")]
+        if let Some(ysf) = self.ysf.as_ref() {
+            ysf.set_spectrum_decay(db_per_sec);
+        }
         #[cfg(feature = "m17")]
         if let Some(m17) = self.m17.as_ref() {
             m17.set_spectrum_decay(db_per_sec);
@@ -1860,6 +1864,7 @@ impl ConsoleSession {
         // `Answered` for a station with no session at all.
         self.state.status = CallStatus::Idle;
         self.state.remote_ptt = false;
+        self.state.rx_level_db = -60.0;
     }
 
     /// `true` while a YSF link is live. Always `false` when the `ysf`
@@ -2002,6 +2007,10 @@ impl ConsoleSession {
         #[cfg(feature = "m17")]
         if let Some(m17) = self.m17.as_ref() {
             return m17.rx_spectrum(out);
+        }
+        #[cfg(feature = "ysf")]
+        if let Some(ysf) = self.ysf.as_ref() {
+            return ysf.rx_spectrum(out);
         }
         0
     }
@@ -2555,6 +2564,12 @@ impl ConsoleSession {
         if let Some(link) = self.ysf.as_ref() {
             let snap = link.snapshot();
             self.state.remote_ptt = snap.receiving;
+            // The received level, from the link's own output bus. Without
+            // this every meter on a live YSF session sits at the -60 floor
+            // the `else` branch above leaves it at — audio playing, meters
+            // dead. TX and input stay at the floor on purpose: YSF is
+            // receive-only, so there is nothing to meter on those.
+            self.state.rx_level_db = snap.rx_dbfs;
             // Fully qualified: the bare `LinkState` in this scope is M17's.
             self.state.status = match link.link_state() {
                 astar_ysf::LinkState::Idle | astar_ysf::LinkState::Linking => CallStatus::Dialing,
@@ -3379,6 +3394,58 @@ mod tests {
             "the mirror stops running on disconnect, so disconnect must reset it \
              or the snapshot reports a session that no longer exists"
         );
+        reflector.shutdown();
+    }
+
+    /// A link with no audio has no bus, so it must report the floor rather
+    /// than a stale or invented level — and the spectrum must report "no
+    /// reading yet" rather than a zeroed array a UI would draw as real bars.
+    #[cfg(feature = "ysf")]
+    #[test]
+    fn a_link_without_audio_meters_the_floor_and_no_spectrum() {
+        let (reflector, link) = loopback_ysf();
+        let mut bins = [1.0f32; astar_audio::SPECTRUM_BINS];
+        assert_eq!(link.rx_spectrum(&mut bins), 0, "no bus, no bins");
+        assert!((link.snapshot().rx_dbfs + 60.0).abs() < 1e-6);
+
+        let mut s = ConsoleSession::new();
+        s.ysf_adopt(link).expect("adopt");
+        assert_eq!(s.rx_spectrum(&mut bins), 0);
+        s.ysf_disconnect();
+        reflector.shutdown();
+    }
+
+    /// The level and the spectrum both have to be reset on teardown, for the
+    /// same reason `status` does: the mirror stops running, so whatever it
+    /// last wrote would otherwise stay on screen over a dead session.
+    #[cfg(feature = "ysf")]
+    #[test]
+    fn disconnect_returns_the_rx_meter_to_the_floor() {
+        let (reflector, link) = loopback_ysf();
+        let mut s = ConsoleSession::new();
+        s.ysf_adopt(link).expect("adopt");
+        let _ = s.snapshot();
+        s.ysf_disconnect();
+        assert!(
+            (s.snapshot().rx_level_db + 60.0).abs() < 1e-6,
+            "a disconnected station must meter silence, not its last reading"
+        );
+        reflector.shutdown();
+    }
+
+    /// The decay preference reaches a live YSF link, so one call from a
+    /// settings slider scrubs every visible spectrum rather than all but one.
+    #[cfg(feature = "ysf")]
+    #[test]
+    fn the_spectrum_decay_preference_reaches_a_live_ysf_link() {
+        let (reflector, link) = loopback_ysf();
+        let mut s = ConsoleSession::new();
+        s.ysf_adopt(link).expect("adopt");
+        // Reaching the link at all is what is under test; the value lands on
+        // the bus on the next run-loop pass, which a no-audio link has none
+        // of, so this asserts the fan-out does not panic or skip YSF.
+        s.set_spectrum_decay(42.0);
+        s.ysf_disconnect();
         reflector.shutdown();
     }
 
