@@ -37,14 +37,18 @@ register with the upstream peer before entering the main loop.
 ## Sample `node.toml`
 
 ```toml
-# Codec negotiation: ulaw_only (default) | allow_slin | prefer_slin | prefer_slin16
-# prefer_slin negotiates 16-bit linear audio (~128 kbps) with peers that
-# allow it (ASL3: `allow = slin`), falling back to ulaw.
-# prefer_slin16 negotiates 16 kHz wideband linear audio (~256 kbps) with peers
-# that allow it, falling back to slin, then ulaw. Switches the station's own
-# audio pipeline (capture/playback/mixing) to 16 kHz (iax-4348); a peer that
-# only offers slin/ulaw still gets a correct call — the codec edge resamples.
-#codec_policy = "prefer_slin"
+# Codec negotiation: prefer_slin16 (DEFAULT) | prefer_slin | allow_slin | ulaw_only
+# Omitting this key gives you prefer_slin16: 16 kHz wideband linear audio
+# (~256 kbps) with peers that allow it, falling back to slin, then ulaw, then
+# alaw. It switches the station's own audio pipeline (capture/playback/mixing)
+# to 16 kHz (iax-4348); a peer that only offers slin/ulaw still gets a correct
+# call — the codec edge resamples, and a ulaw-only ClearNode is answered in
+# ulaw, not rejected.
+# prefer_slin stops at 8 kHz 16-bit linear (~128 kbps) with peers that allow it
+# (ASL3: `allow = slin`), falling back to ulaw. allow_slin offers slin but only
+# uses it if the peer asks. ulaw_only is the pre-slin wire behaviour — set it
+# explicitly on a bandwidth-constrained link.
+#codec_policy = "ulaw_only"
 
 [listener]
 bind      = "0.0.0.0:4569"   # IAX2 UDP socket
@@ -134,7 +138,7 @@ Field notes:
 
 | Section | Field | Values |
 |---|---|---|
-| top-level | `codec_policy` | `"ulaw_only"` (default) \| `"allow_slin"` \| `"prefer_slin"` \| `"prefer_slin16"` (iax-31f7, iax-4348). Applies to both the inbound listener and (via the Station) outbound links; `prefer_slin16` also switches the station's audio pipeline to 16 kHz |
+| top-level | `codec_policy` | `"prefer_slin16"` (default) \| `"prefer_slin"` \| `"allow_slin"` \| `"ulaw_only"` (iax-31f7, iax-4348). Applies to both the inbound listener and (via the Station) outbound links; `prefer_slin16` also switches the station's audio pipeline to 16 kHz. A ulaw-only peer is still answered in ulaw; a peer with no codec in common is rejected with CAUSE `Unable to negotiate codec` |
 | `[listener]` | `answer` | `"auto"` (answer immediately) or `"manual"` (wait for `/answer`) |
 | `[listener]` | `auth` | `"required"`, `"optional"`, or `"off"` (case-insensitive) |
 | `[listener]` | `allowed_nodes` | Inbound node allowlist. Absent/empty = admit all; non-empty = reject callers not on the list ("not authorized") before answer |

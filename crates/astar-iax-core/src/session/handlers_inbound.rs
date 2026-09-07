@@ -28,14 +28,11 @@ use crate::frame::Subclass;
 use crate::ie::Ies;
 use crate::subclass::{IaxCommand, VoiceFormat};
 
-/// Pick the codec for the ACCEPT FORMAT IE. A deferential policy
-/// (`UlawOnly`/`AllowSlin`) honors the peer's stated FORMAT if we support it
-/// and it was offered in CAPABILITY; an asserting policy (`PreferSlin`/
-/// `PreferSlin16`, iax-d0cc) instead takes its own most-preferred codec common
-/// to both, so a wideband node pulls a capable caller up even when the caller
-/// prefers ulaw. Either way, fall to the first codec in our preference order
-/// common to both, else our preference (the peer offered nothing usable —
-/// ACCEPT still names a single format per RFC 5456 design decision 2).
+/// Asterisk's `AST_CAUSE_BEARERCAPABILITY_NOTAVAIL` (Q.931 cause 65), the
+/// CAUSECODE it pairs with "Unable to negotiate codec". Peers that key their
+/// retry logic off the number rather than the sentence need this IE present.
+const CAUSE_BEARERCAPABILITY_NOTAVAIL: u8 = 65;
+
 /// Codecs best-fidelity first, used only to degrade a request we cannot meet.
 /// Distinct from any policy's `preference_order`, which encodes what a node
 /// WANTS; this encodes what is least bad when the caller cannot have what it
@@ -47,11 +44,32 @@ const QUALITY_ORDER: &[VoiceFormat] = &[
     VoiceFormat::G711A,
 ];
 
+/// Pick the codec for the ACCEPT FORMAT IE, or `None` when the peer stated a
+/// CAPABILITY with nothing in it we can carry.
+///
+/// A deferential policy (`UlawOnly`/`AllowSlin`) honors the peer's stated
+/// FORMAT if we support it and it was offered in CAPABILITY; an asserting
+/// policy (`PreferSlin`/`PreferSlin16`, iax-d0cc) instead takes its own
+/// most-preferred codec common to both, so a wideband node pulls a capable
+/// caller up even when the caller prefers ulaw. Either way, fall to the first
+/// codec in our preference order common to both.
+///
+/// `None` means the intersection is empty and there is nothing honest to name
+/// in an ACCEPT (a `disallow=all / allow=gsm` ASL node, say — astar implements
+/// no GSM). The caller REJECTs with "Unable to negotiate codec"; naming a
+/// format the peer never offered just moves the failure somewhere unreadable.
+///
+/// One wrinkle worth stating: an explicit `CAPABILITY = 0` is indistinguishable
+/// on the wire from an absent CAPABILITY IE — [`CodecMask`] is a plain bitmask
+/// with no "was it there" bit — so it takes the same widening-to-our-own-mask
+/// path and connects rather than being rejected. That is the right way round:
+/// a peer that advertises nothing is far more often one that only sent FORMAT
+/// than one genuinely claiming to support no codec at all.
 fn choose_codec(
     offered: CodecMask,
     peer_pref: Option<VoiceFormat>,
     policy: CodecPolicy,
-) -> VoiceFormat {
+) -> Option<VoiceFormat> {
     let ours = policy.capability_mask();
     // If the peer advertised no CAPABILITY (offered empty) treat every codec
     // we support as acceptable — many peers send only a FORMAT.
@@ -80,7 +98,7 @@ fn choose_codec(
     if let Some(p) = peer_pref
         && common.contains(p)
     {
-        return p;
+        return Some(p);
     }
     // The peer asked for something we cannot carry. Degrade toward what it
     // wanted rather than to the front of our own list: a caller asking for
@@ -92,18 +110,20 @@ fn choose_codec(
     if peer_pref.is_some() {
         for &fmt in QUALITY_ORDER {
             if common.contains(fmt) {
-                return fmt;
+                return Some(fmt);
             }
         }
     }
     // No stated preference at all: our order decides, so a Prefer* policy
-    // pulls a silent caller up to wideband.
-    for &fmt in policy.preference_order() {
-        if common.contains(fmt) {
-            return fmt;
-        }
-    }
-    policy.preferred()
+    // pulls a silent caller up to wideband -- and if nothing at all is common,
+    // `None`. `common` is empty only when the peer DID state a CAPABILITY (an
+    // empty one was widened to our own mask above), so that is a real "no
+    // shared codec", never a silent peer.
+    policy
+        .preference_order()
+        .iter()
+        .find(|&&fmt| common.contains(fmt))
+        .copied()
 }
 
 impl Fsm {
@@ -218,6 +238,46 @@ impl Fsm {
             offered.preferred_codec,
             self.inbound_policy.codec_policy,
         );
+        let Some(chosen) = chosen else {
+            // Nothing in common. Asterisk answers this with a REJECT carrying
+            // CAUSE "Unable to negotiate codec"; do the same, with the same
+            // string, so an ASL operator reading their log sees the sentence
+            // they already know. The alternative -- ACCEPT a format the peer
+            // never offered -- is what produced calls that connect and then
+            // die with nothing readable anywhere.
+            const CAUSE: &str = "Unable to negotiate codec";
+            tracing::info!(
+                target: "astar_iax::negotiate",
+                caller = offered.calling_number.as_deref().unwrap_or("?"),
+                called = offered.called_number.as_deref().unwrap_or("?"),
+                capability = format_args!("0x{:04x}", offered.offered_codecs.get()),
+                requested = ?offered.preferred_codec,
+                policy = ?self.inbound_policy.codec_policy,
+                "inbound codec negotiation failed -- rejecting"
+            );
+            out.push(Action::SetPeerCall(peer_call));
+            out.push(Action::SendReliable(build_reject(
+                our_call,
+                peer_call,
+                Some(CAUSE),
+                Some(CAUSE_BEARERCAPABILITY_NOTAVAIL),
+            )));
+            // `Disconnected` is not cosmetic: it is the ONLY thing that tears
+            // the leg down. The runtime translates it to `CallEvent::Hangup`,
+            // which is what sets `terminated` in the leg loop, which is what
+            // makes the leg exit and signal `done_tx`, which is what frees the
+            // listener's call number and lets the Manager reap the slot.
+            // Without it a rejected peer keeps a thread, a call number and a
+            // pool slot forever -- an unauthenticated caller could exhaust
+            // `max_calls` on a default node just by offering GSM.
+            let reason = FailReason::Rejected {
+                cause: Some(CAUSE.to_string()),
+            };
+            out.push(Action::AppEvent(AppEvent::Disconnected {
+                reason: reason.clone(),
+            }));
+            return (SessionState::Failed(reason), std::mem::take(out));
+        };
         // The whole codec negotiation in one line, because when a peer links
         // and then drops immediately this is the first thing anyone needs and
         // it is otherwise invisible: what the caller said it could carry, what
@@ -363,14 +423,18 @@ impl Fsm {
                             our_call,
                             peer_call,
                             Some(cause),
+                            None,
                         )));
                         out.push(Action::CancelTimer(TimerKind::InboundTokenExpiry));
-                        (
-                            SessionState::Failed(FailReason::Rejected {
-                                cause: Some(cause.to_string()),
-                            }),
-                            out,
-                        )
+                        // Same teardown obligation as the codec reject above:
+                        // without `Disconnected` the leg never stops.
+                        let reason = FailReason::Rejected {
+                            cause: Some(cause.to_string()),
+                        };
+                        out.push(Action::AppEvent(AppEvent::Disconnected {
+                            reason: reason.clone(),
+                        }));
+                        (SessionState::Failed(reason), out)
                     }
                 } else {
                     let state = SessionState::CallTokenIssued(CallTokenIssuedData {
@@ -451,13 +515,18 @@ impl Fsm {
                                     our_call,
                                     peer_call,
                                     Some(cause),
+                                    None,
                                 )));
-                                (
-                                    SessionState::Failed(FailReason::Rejected {
-                                        cause: Some(cause.to_string()),
-                                    }),
-                                    out,
-                                )
+                                // Same teardown obligation as the codec reject:
+                                // without `Disconnected` a peer that fails auth
+                                // keeps its leg and call number forever.
+                                let reason = FailReason::Rejected {
+                                    cause: Some(cause.to_string()),
+                                };
+                                out.push(Action::AppEvent(AppEvent::Disconnected {
+                                    reason: reason.clone(),
+                                }));
+                                (SessionState::Failed(reason), out)
                             }
                         }
                         Subclass::Control(crate::subclass::ControlSubclass::Hangup)
@@ -1028,6 +1097,16 @@ mod inbound_handler_tests {
         assert!(matches!(f.state(), SessionState::NewReceived(_)));
     }
 
+    /// The old infallible shape of [`choose_codec`], so the matrix below reads
+    /// as the negotiation table it is. Negotiation failure has its own test.
+    fn chose(
+        offered: CodecMask,
+        peer_pref: Option<VoiceFormat>,
+        policy: crate::session::CodecPolicy,
+    ) -> VoiceFormat {
+        choose_codec(offered, peer_pref, policy).expect("a codec in common")
+    }
+
     #[test]
     fn choose_codec_prefers_peer_format_when_supported() {
         use crate::session::CodecPolicy;
@@ -1037,17 +1116,14 @@ mod inbound_handler_tests {
             .collect();
         // Peer prefers A and both support it -> A.
         assert_eq!(
-            choose_codec(both, Some(VoiceFormat::G711A), CodecPolicy::UlawOnly),
+            chose(both, Some(VoiceFormat::G711A), CodecPolicy::UlawOnly),
             VoiceFormat::G711A
         );
         // Peer prefers an unsupported codec -> our preference (offered).
-        assert_eq!(
-            choose_codec(both, None, CodecPolicy::UlawOnly),
-            VoiceFormat::G711U
-        );
+        assert_eq!(chose(both, None, CodecPolicy::UlawOnly), VoiceFormat::G711U);
         // Peer only offers A; our pref is U -> first common (A).
         assert_eq!(
-            choose_codec(
+            chose(
                 CodecMask::from_u32(VoiceFormat::G711A.as_u32()),
                 None,
                 CodecPolicy::UlawOnly
@@ -1056,7 +1132,7 @@ mod inbound_handler_tests {
         );
         // Peer offered nothing (no CAPABILITY) -> our pref.
         assert_eq!(
-            choose_codec(CodecMask::EMPTY, None, CodecPolicy::UlawOnly),
+            chose(CodecMask::EMPTY, None, CodecPolicy::UlawOnly),
             VoiceFormat::G711U
         );
     }
@@ -1070,27 +1146,18 @@ mod inbound_handler_tests {
         let wide_peer: CodecMask = [Slin16, Slin, G711U].into_iter().collect();
 
         // PreferSlin picks slin from a slin-capable peer even if peer prefers ulaw.
-        assert_eq!(choose_codec(slin_peer, None, CodecPolicy::PreferSlin), Slin);
+        assert_eq!(chose(slin_peer, None, CodecPolicy::PreferSlin), Slin);
         // Peer's explicit preference wins when we allow it.
-        assert_eq!(
-            choose_codec(slin_peer, Some(Slin), CodecPolicy::AllowSlin),
-            Slin
-        );
+        assert_eq!(chose(slin_peer, Some(Slin), CodecPolicy::AllowSlin), Slin);
         // AllowSlin without peer insistence stays on ulaw.
-        assert_eq!(choose_codec(slin_peer, None, CodecPolicy::AllowSlin), G711U);
+        assert_eq!(chose(slin_peer, None, CodecPolicy::AllowSlin), G711U);
         // UlawOnly never yields slin, even when the peer prefers it.
-        assert_eq!(
-            choose_codec(slin_peer, Some(Slin), CodecPolicy::UlawOnly),
-            G711U
-        );
+        assert_eq!(chose(slin_peer, Some(Slin), CodecPolicy::UlawOnly), G711U);
         // Mixed-capability fallback: PreferSlin against a ulaw-only peer.
-        assert_eq!(
-            choose_codec(ulaw_peer, None, CodecPolicy::PreferSlin),
-            G711U
-        );
+        assert_eq!(chose(ulaw_peer, None, CodecPolicy::PreferSlin), G711U);
         // Empty CAPABILITY (peer sent only FORMAT): honor peer pref if we can.
         assert_eq!(
-            choose_codec(CodecMask::EMPTY, Some(Slin), CodecPolicy::AllowSlin),
+            chose(CodecMask::EMPTY, Some(Slin), CodecPolicy::AllowSlin),
             Slin
         );
         // Empty CAPABILITY under an ASSERTING policy. The assert is only
@@ -1101,7 +1168,7 @@ mod inbound_handler_tests {
         // immediate dropped call rather than a clean REJECT. The stated FORMAT
         // is the only thing the caller actually told us.
         assert_eq!(
-            choose_codec(CodecMask::EMPTY, Some(G711U), CodecPolicy::PreferSlin16),
+            chose(CodecMask::EMPTY, Some(G711U), CodecPolicy::PreferSlin16),
             G711U,
             "no CAPABILITY is no evidence -- must not assert slin16 over a stated ulaw"
         );
@@ -1110,40 +1177,31 @@ mod inbound_handler_tests {
         // asking for it. (This assertion said Slin16 until 2026-09-02; the
         // override it pinned is what dropped Asterisk nodes on the live hub.)
         assert_eq!(
-            choose_codec(wide_peer, Some(G711U), CodecPolicy::PreferSlin16),
+            chose(wide_peer, Some(G711U), CodecPolicy::PreferSlin16),
             G711U
         );
         // PreferSlin16 picks slin16 from a wideband-capable peer.
-        assert_eq!(
-            choose_codec(wide_peer, None, CodecPolicy::PreferSlin16),
-            Slin16
-        );
+        assert_eq!(chose(wide_peer, None, CodecPolicy::PreferSlin16), Slin16);
         // Wideband policy against a narrowband peer falls back down the order.
-        assert_eq!(
-            choose_codec(ulaw_peer, None, CodecPolicy::PreferSlin16),
-            G711U
-        );
+        assert_eq!(chose(ulaw_peer, None, CodecPolicy::PreferSlin16), G711U);
 
         // iax-d0cc revisited 2026-09-02. A Prefer* node no longer overrides a
         // caller's stated FORMAT. Listing slin16 in CAPABILITY says the caller
         // CAN transcode it, not that it wants it on this link; an Asterisk
         // node lists it and then drops the call when handed it.
         assert_eq!(
-            choose_codec(wide_peer, Some(G711U), CodecPolicy::PreferSlin16),
+            chose(wide_peer, Some(G711U), CodecPolicy::PreferSlin16),
             G711U,
             "a stated ulaw must be honoured even by a wideband node"
         );
         assert_eq!(
-            choose_codec(slin_peer, Some(G711U), CodecPolicy::PreferSlin),
+            chose(slin_peer, Some(G711U), CodecPolicy::PreferSlin),
             G711U,
             "a stated ulaw must be honoured even by a slin-preferring node"
         );
         // The pull-up survives for the case it was actually for: a caller that
         // expressed no usable preference at all.
-        assert_eq!(
-            choose_codec(wide_peer, None, CodecPolicy::PreferSlin16),
-            Slin16
-        );
+        assert_eq!(chose(wide_peer, None, CodecPolicy::PreferSlin16), Slin16);
 
         // Captured off the live hub 2026-09-02. astar dials with
         // CAPABILITY=0x804c (ulaw|alaw|slin|slin16) and FORMAT=slin16.
@@ -1151,19 +1209,54 @@ mod inbound_handler_tests {
         assert_eq!(astar.get(), 0x0000_804c, "the mask astar really sends");
         // Against a wideband hub it gets what it asked for.
         assert_eq!(
-            choose_codec(astar, Some(Slin16), CodecPolicy::PreferSlin16),
+            chose(astar, Some(Slin16), CodecPolicy::PreferSlin16),
             Slin16
         );
         // Against a hub with no slin16 it must degrade to the slin BOTH ends
         // offered -- not all the way to 8-bit ulaw, which is what the hub
         // actually did to a real client and is the regression this pins.
         assert_eq!(
-            choose_codec(astar, Some(Slin16), CodecPolicy::AllowSlin),
+            chose(astar, Some(Slin16), CodecPolicy::AllowSlin),
             Slin,
             "a slin16 request degrades to slin, never to ulaw"
         );
     }
 
+    /// A peer whose CAPABILITY shares nothing with ours yields no codec at
+    /// all, under every policy. astar implements no GSM, so a
+    /// `disallow=all / allow=gsm` ASL node is exactly this case; the caller
+    /// (`emit_accept`) turns the `None` into a REJECT with a readable CAUSE
+    /// instead of an ACCEPT naming a codec the peer never offered.
+    #[test]
+    fn choose_codec_is_none_when_nothing_is_in_common() {
+        use crate::session::CodecPolicy;
+        const GSM: u32 = 0x2;
+        let gsm_only = CodecMask::from_u32(GSM);
+        for policy in [
+            CodecPolicy::UlawOnly,
+            CodecPolicy::AllowSlin,
+            CodecPolicy::PreferSlin,
+            CodecPolicy::PreferSlin16,
+        ] {
+            assert_eq!(
+                choose_codec(gsm_only, None, policy),
+                None,
+                "gsm-only CAPABILITY has nothing in common with {policy:?}"
+            );
+            assert_eq!(
+                choose_codec(gsm_only, VoiceFormat::from_u32(GSM), policy),
+                None,
+                "...and a stated gsm FORMAT does not conjure one either ({policy:?})"
+            );
+        }
+        // A peer that states NO capability is not this case: an empty
+        // CAPABILITY is widened to our own mask, so the call still proceeds.
+        assert_eq!(
+            choose_codec(CodecMask::EMPTY, None, CodecPolicy::UlawOnly),
+            Some(VoiceFormat::G711U),
+            "a silent CAPABILITY must never be read as an empty intersection"
+        );
+    }
     // --- shared frame helpers for Tasks 8-11 ------------------------------
     use crate::frame::{Frame, FullFrame};
     use crate::subclass::FrameType;

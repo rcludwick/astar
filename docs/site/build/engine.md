@@ -26,7 +26,7 @@ One cargo workspace, `resolver = "2"`, everything sharing a version
 |---|---|
 | `astar-iax-core` | IAX2 frames, the session state machine, RFC 5456 conformance |
 | `astar-iax` | The link layer and call manager on top of it |
-| `astar-codec` | Audio codecs and the jitter buffer. G.711 always on; GSM, Speex and iLBC behind feature flags; Codec 2 and AMBE loaders |
+| `astar-codec` | Audio codecs and the jitter buffer. G.711 µ-law/A-law and signed-linear (8/16 kHz) on the IAX2 path; Codec 2 for M17; AMBE via the ThumbDV dongle |
 | `astar-audio` | Device enumeration, capture/playback, resampling, metering |
 | `astar-ptt` | PTT backends — raw USB, tty, CM108 HID |
 | `astar-serial-sys` | The serial C ABI |

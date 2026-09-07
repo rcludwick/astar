@@ -128,7 +128,7 @@ native UI rather than a shared web shell.
 |---|---|
 | `astar-iax-core` | IAX2 wire framing + session FSM. No I/O. |
 | `astar-iax` | The high-level IAX2 client stack over `astar-iax-core`. |
-| `astar-codec` | G.711 / GSM / Speex / iLBC, Codec 2, plus the AMBE (ThumbDV) backend. |
+| `astar-codec` | G.711 µ-law/A-law and signed-linear (8/16 kHz), Codec 2, plus the AMBE (ThumbDV) backend. |
 | `astar-audio` | cpal device I/O, network-agnostic. |
 | `astar-station` | The multi-network station facade the clients drive. |
 | `astar-console` | Front-end-agnostic operator-console core. |
