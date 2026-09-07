@@ -534,13 +534,15 @@
                             talkTimerDot
                         }
                     }
-                    // Who is talking on the reflector, and anything they sent
-                    // as slow data (iax-4c8e). D-Star's own fields, so this
-                    // shows only on a D-Star call — and it is most of the
-                    // point of listening in: a reflector with no talker line
-                    // is an anonymous voice.
-                    if isInCall, session.activeCallNetwork == .dstar {
-                        dstarTalkerLine
+                    // Who last keyed up, on whichever digital network is
+                    // live — and, on D-Star, anything they sent as slow data.
+                    // It is most of the point of listening in: a reflector
+                    // with no talker line is an anonymous voice. AllStar is
+                    // excluded because IAX2 carries no talker identity at all
+                    // (`Network.isDigitalVoice`); a new network opts in there
+                    // and gets this line without touching the popover.
+                    if isInCall, session.activeCallNetwork?.isDigitalVoice == true {
+                        talkerLine
                     }
                 }
                 // astar-5e2c: the text column takes its ideal width BEFORE the
@@ -893,18 +895,29 @@
                 remembered.map { "Last used module \(String($0))" } ?? "No module chosen yet")
         }
 
-        /// The D-Star last-heard line: the talker's callsign, and the slow-data
-        /// message if one has arrived.
+        /// The last-heard line: whoever most recently keyed up on the live
+        /// digital network, and — on D-Star only, because only D-Star has one
+        /// — the slow-data message they sent with it.
         ///
-        /// **Last heard, not talking now.** The engine keeps both past
-        /// end-of-transmission on purpose, so this names whoever most recently
-        /// keyed up rather than whoever is keyed right now — the status dot
-        /// and the RX meter are what say that. Absent entirely until a header
-        /// arrives, because an empty "Hearing —" reads as a fault when the
-        /// truth is that the reflector has simply been quiet.
+        /// Network-agnostic by design. `session.lastHeard` is already the
+        /// active network's own talker (D-Star's header callsign, YSF's
+        /// frame-header callsign, M17's LSF source), so a network added later
+        /// lights this line up without a change here.
+        ///
+        /// **Last heard, not talking now.** The engine keeps every one of
+        /// those past end-of-transmission on purpose, so this names whoever
+        /// most recently keyed up rather than whoever is keyed right now —
+        /// the status dot and the RX meter are what say that. Absent entirely
+        /// until the first transmission, because an empty "Hearing —" reads
+        /// as a fault when the truth is that the reflector has simply been
+        /// quiet.
+        ///
+        /// **Attacker-controlled text.** Both lines are typed or keyed by
+        /// whoever is on the reflector. `Text` renders them verbatim and
+        /// interprets nothing, which is the whole requirement.
         @ViewBuilder
-        private var dstarTalkerLine: some View {
-            if let talker = session.dstarTalker {
+        private var talkerLine: some View {
+            if let talker = session.lastHeard {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Last heard \(talker)")
                         .font(.caption2)
@@ -918,7 +931,9 @@
                     // of view. `Text` renders it verbatim and interprets
                     // nothing, which is the whole requirement; the line limit
                     // stops a long one reflowing the status card.
-                    if let message = session.dstarSlowText, !message.isEmpty {
+                    if session.activeCallNetwork == .dstar,
+                        let message = session.dstarSlowText, !message.isEmpty
+                    {
                         Text(message)
                             .font(.caption2)
                             .foregroundStyle(.tertiary)

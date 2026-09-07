@@ -292,6 +292,14 @@ file you did not touch.
       and a `connectFailureMessage` arm
 - [ ] Address grammar: `ReflectorAddressDial.parse(_:defaultPort:)` if the
       network is reflector-shaped — one parser, a different default port
+- [ ] `Network.isDigitalVoice`: `true` if the protocol carries a talker
+      identity on the wire. That one flag is what puts the popover's
+      "Last heard" line on the network
+- [ ] `CallSession.lastHeard`: an arm in `refreshLastHeard()` returning this
+      network's own talker (`<net>State()?.talker` mirrored into a published
+      `<net>Talker`, cleared in a `clear<Net>State()` like the others). The
+      popover reads `lastHeard` and nothing else, so this is the whole of the
+      UI work — do not add a per-network line
 
 Model the connect arm on `connectM17`/`connectDStar` **exactly**: validate before
 touching state, claim the single-flight dial slot, generation-gate every

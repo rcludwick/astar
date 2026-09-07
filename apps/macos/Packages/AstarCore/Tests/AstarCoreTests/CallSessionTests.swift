@@ -200,6 +200,9 @@ final class FakeStation: StationDriving {
         callLog.append("dstarDisconnect")
     }
     func dstarState() throws -> DStarState? { dstarStateValue }
+    /// What `m17State()` reports; `nil` is "no session", the idle answer.
+    var m17StateValue: M17State?
+    func m17State() throws -> M17State? { m17StateValue }
 
     // System Fusion. `host` is recorded whole — `host:port` is one string
     // across this ABI, and the port being folded into it is exactly the sort
@@ -262,6 +265,7 @@ private struct ThrowingStation: StationDriving {
         throw Boom()
     }
     func m17Disconnect() throws { throw Boom() }
+    func m17State() throws -> M17State? { throw Boom() }
     func setCodecDirs(_ dirs: [String]) throws { throw Boom() }
     func connectDStar(
         host: String, port: UInt16, module: Character, callsign: String,
