@@ -291,7 +291,7 @@ public struct YSFState: Equatable, Sendable {
     /// Which vocoder is decoding. Always ``Backend/thumbdv`` — YSF voice is
     /// AMBE+2 and there is no software vocoder.
     public enum Backend: String, Sendable {
-        case thumbdv, soft
+        case thumbdv
     }
 
     /// A frame mode astar cannot decode.
@@ -407,7 +407,7 @@ public struct NXDNState: Equatable, Sendable {
     /// Which vocoder is decoding. Always ``Backend/thumbdv`` — NXDN voice is
     /// AMBE+2 and there is no software vocoder.
     public enum Backend: String, Sendable {
-        case thumbdv, soft
+        case thumbdv
     }
 
     public let link: Link
@@ -465,14 +465,15 @@ public struct NXDNState: Equatable, Sendable {
     /// document.
     ///
     /// An unrecognized `link` string means a newer engine is talking to an
-    /// older binding, and lands as ``Link/idle`` — the safe direction, since
-    /// a UI that believes the link is down offers nothing on it.
+    /// older binding, and lands as ``Link/failed`` — the same answer
+    /// ``DStarState``, ``YSFState`` and ``M17State`` give, and the safe
+    /// direction: a UI that believes the link is down offers nothing on it.
     init?(json: String) {
         guard let data = json.data(using: .utf8),
             let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let linkString = obj["link"] as? String
         else { return nil }
-        link = Link(rawValue: linkString) ?? .idle
+        link = Link(rawValue: linkString) ?? .failed
         lastHeard = obj["last_heard"] as? String
         lastHeardID = (obj["last_heard_id"] as? NSNumber)?.uint16Value
         framesRX = (obj["frames_rx"] as? NSNumber)?.uint64Value ?? 0
@@ -560,7 +561,7 @@ public struct DStarState: Equatable, Sendable {
     /// Which vocoder backed this session. Always ``Backend/thumbdv`` today —
     /// D-Star is hardware-only.
     public enum Backend: String, Sendable {
-        case thumbdv, soft
+        case thumbdv
     }
 
     public let link: Link

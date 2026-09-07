@@ -504,10 +504,11 @@ final class StationTests: XCTestCase {
 
     func testAnUnrecognisedNXDNLinkDecodesToTheSafeCase() throws {
         // A UI that believes the link is down will not offer anything on it.
-        // An unknown string must never be read as `linked`.
+        // An unknown string must never be read as `linked`. `failed` is what
+        // D-Star, YSF and M17 answer, so one decoder shape covers them all.
         let json = #"{"link":"quantum","frames_rx":0,"receiving":false,"ptt":false}"#
         let state = try XCTUnwrap(NXDNState(json: json))
-        XCTAssertEqual(state.link, .idle)
+        XCTAssertEqual(state.link, .failed)
     }
 
     func testEmptyNXDNStateJSONIsNil() {

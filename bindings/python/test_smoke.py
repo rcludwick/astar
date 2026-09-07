@@ -106,8 +106,10 @@ def test_new_snapshot_idle_ptt_event_free() -> None:
         # No session of any mode is live on a fresh station.
         assert snap.dstar_active is False, f"got {snap.dstar_active}"
         assert snap.ysf_active is False, f"got {snap.ysf_active}"
+        assert snap.nxdn_active is False, f"got {snap.nxdn_active}"
         assert isinstance(snap.dstar_available, bool)
         assert isinstance(snap.ysf_available, bool)
+        assert isinstance(snap.nxdn_available, bool)
 
         # set_ptt(True) while idle -> NOT_CONNECTED.
         try:
