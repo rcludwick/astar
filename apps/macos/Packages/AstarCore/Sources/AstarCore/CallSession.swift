@@ -1798,7 +1798,7 @@ public final class CallSession: ObservableObject {
     /// local `let` inside this function, handed to the engine by value and
     /// gone when the function returns: it is never assigned to a property,
     /// never published, and never logged. That is the whole reason
-    /// `credentialStore` is a store rather than a value held on the session.
+    /// `dmrPasswords` is a store rather than a value held on the session.
     ///
     /// Receive only: nothing here arms a transmit path, and none exists to
     /// arm. The engine call BLOCKS for a serial scan, a per-port dongle init
