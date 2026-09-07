@@ -26,6 +26,11 @@ public enum ReflectorNetwork: Hashable, Sendable {
     case ysf
     /// NXDN reflectors.
     case nxdn
+    /// DMR masters. Unlike every other case here a row is a *server*, one per
+    /// operator instance, not a reflector: the directory publishes 185 of
+    /// them across 111 distinct `system` slugs. See `DmrDial.family(ofSystem:)`
+    /// for why those slugs are not the engine's network names.
+    case dmr
     /// P25 reflectors.
     case p25
     /// URF (the XLX successor) reflectors.
@@ -43,6 +48,7 @@ public enum ReflectorNetwork: Hashable, Sendable {
         case .m17: return "m17"
         case .ysf: return "ysf"
         case .nxdn: return "nxdn"
+        case .dmr: return "dmr"
         case .p25: return "p25"
         case .urf: return "urf"
         case .other(let raw): return raw
@@ -57,6 +63,7 @@ public enum ReflectorNetwork: Hashable, Sendable {
         case "m17": self = .m17
         case "ysf": self = .ysf
         case "nxdn": self = .nxdn
+        case "dmr": self = .dmr
         case "p25": self = .p25
         case "urf": self = .urf
         default: self = .other(rawValue)
@@ -65,7 +72,7 @@ public enum ReflectorNetwork: Hashable, Sendable {
 
     /// The networks this build knows by name, in the order the settings
     /// summary line lists them. Excludes `other`, which is unbounded.
-    public static let known: [ReflectorNetwork] = [.dstar, .m17, .ysf, .nxdn, .p25, .urf]
+    public static let known: [ReflectorNetwork] = [.dstar, .m17, .ysf, .nxdn, .dmr, .p25, .urf]
 
     /// User-facing label. An unknown network gets its raw string uppercased —
     /// wrong-ish is better than blank, and blank is what "unknown" would give.
@@ -75,6 +82,7 @@ public enum ReflectorNetwork: Hashable, Sendable {
         case .m17: return "M17"
         case .ysf: return "YSF"
         case .nxdn: return "NXDN"
+        case .dmr: return "DMR"
         case .p25: return "P25"
         case .urf: return "URF"
         case .other(let raw): return raw.uppercased()
@@ -106,6 +114,7 @@ extension Network {
         case .dstar: return .dstar
         case .ysf: return .ysf
         case .nxdn: return .nxdn
+        case .dmr: return .dmr
         case .allstar, .hamlink: return nil
         }
     }
@@ -126,6 +135,7 @@ extension Network {
         case .dstar: return .dstar
         case .ysf: return .ysf
         case .nxdn: return .nxdn
+        case .dmr: return .dmr
         case .p25, .urf, .other: return nil
         }
     }

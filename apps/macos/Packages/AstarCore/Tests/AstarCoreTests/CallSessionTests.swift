@@ -248,6 +248,39 @@ final class FakeStation: StationDriving {
         callLog.append("nxdnDisconnect")
     }
     func nxdnState() throws -> NXDNState? { nxdnStateValue }
+
+    // DMR. Every argument is recorded separately — four of them make the
+    // TARGET (system, host+port, talkgroup, timeslot) and two are
+    // CREDENTIALS (the radio id and the master password), and a test has to
+    // be able to see that the right one went to the right place. The password
+    // is recorded here, in a fake, precisely because this is the only layer
+    // that is ever allowed to hold one.
+    private(set) var connectDMRCalls:
+        [(
+            system: String, host: String, port: UInt16, radioID: UInt32, callsign: String,
+            talkgroup: UInt32, timeslot: UInt8, password: String
+        )] = []
+    private(set) var dmrDisconnects = 0
+    /// When set, `connectDMR` throws — the "no dongle" / "master refused the
+    /// login" shape.
+    var dmrConnectError: Error?
+    /// What `dmrState()` reports; `nil` is "no link", the idle answer.
+    var dmrStateValue: DMRState?
+    func connectDMR(
+        system: String, host: String, port: UInt16, radioID: UInt32, callsign: String,
+        talkgroup: UInt32, timeslot: UInt8, password: String
+    ) throws {
+        waitForGateIfSet()
+        if let dmrConnectError { throw dmrConnectError }
+        connectDMRCalls.append(
+            (system, host, port, radioID, callsign, talkgroup, timeslot, password))
+        callLog.append("connectDMR")
+    }
+    func dmrDisconnect() throws {
+        dmrDisconnects += 1
+        callLog.append("dmrDisconnect")
+    }
+    func dmrState() throws -> DMRState? { dmrStateValue }
 }
 
 /// A station whose device enumeration always throws, to verify CallSession's
@@ -305,6 +338,12 @@ private struct ThrowingStation: StationDriving {
     ) throws { throw Boom() }
     func nxdnDisconnect() throws { throw Boom() }
     func nxdnState() throws -> NXDNState? { throw Boom() }
+    func connectDMR(
+        system: String, host: String, port: UInt16, radioID: UInt32, callsign: String,
+        talkgroup: UInt32, timeslot: UInt8, password: String
+    ) throws { throw Boom() }
+    func dmrDisconnect() throws { throw Boom() }
+    func dmrState() throws -> DMRState? { throw Boom() }
 }
 
 /// An in-memory audio store so persistence-path tests don't touch real defaults.

@@ -60,13 +60,15 @@
         private var availableNetworks: [Network] {
             Network.available(
                 m17: session.m17Available, dstar: session.dstarAvailable,
-                ysf: session.ysfAvailable, nxdn: session.nxdnAvailable)
+                ysf: session.ysfAvailable, nxdn: session.nxdnAvailable,
+                dmr: session.dmrAvailable)
         }
 
         private var selectedNetwork: Network {
             Network.resolve(
                 networkRaw, m17: session.m17Available, dstar: session.dstarAvailable,
-                ysf: session.ysfAvailable, nxdn: session.nxdnAvailable)
+                ysf: session.ysfAvailable, nxdn: session.nxdnAvailable,
+                dmr: session.dmrAvailable)
         }
 
         /// The network picker's binding, and the one place a network change
@@ -1622,11 +1624,11 @@
                 case .address(let value):
                     dispatchConnect(node: value, network: network, address: value)
                 }
-            case .m17, .dstar, .ysf, .nxdn:
+            case .m17, .dstar, .ysf, .nxdn, .dmr:
                 // Every reflector network resolves its target engine-side
                 // (`CallSession.connect(node:network:)` → `m17Target` /
-                // `dstarTarget` / `ysfTarget` / `nxdnTarget`, directory first
-                // and address second) — this is
+                // `dstarTarget` / `ysfTarget` / `nxdnTarget` / `dmrTarget`,
+                // directory first and address second) — this is
                 // only the same "unreachable via the disabled button, but
                 // refuse it on Enter too" guard as above.
                 guard session.canDial(node, network: network) else { return }
