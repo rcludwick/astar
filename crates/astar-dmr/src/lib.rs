@@ -5,17 +5,33 @@
 //!
 //! # Where this stands
 //!
-//! [`network`] only. It answers "which DMR do you mean" — the taxonomy, the
-//! independent/BrandMeister split, and the consent gate that split exists for.
-//! It has no I/O, no dependencies beyond `std`, and it cannot connect to
-//! anything.
+//! [`network`] answers "which DMR do you mean" — the taxonomy, the
+//! independent/BrandMeister split, and the consent gate that split exists
+//! for. It came first on purpose: DMR is the one network where the *address*
+//! is the hard part, because a talkgroup number names nothing on its own —
+//! TG 91 exists on several of these networks and is a different room on each
+//! — so what a target even is had to be settled before any wire code was
+//! written.
 //!
-//! The MMDVM/homebrew protocol, the AMBE+2 frame packing, the session and the
-//! talkgroup dial grammar are not here yet. That order is deliberate: DMR is
-//! the one network where the *address* is the hard part. A talkgroup number
-//! names nothing on its own — TG 91 exists on several of these networks and is
-//! a different room on each — so the thing that has to be right before any
-//! wire code is written is what a target even is.
+//! [`wire`] and [`fsm`] are that wire code, specified byte by byte in
+//! `docs/design/dmr-wire.md`: the homebrew handshake (`RPTL` → salt →
+//! `RPTK` → `RPTC`), the `DMRD` data packet, and a client-side link state
+//! machine over them. Neither does any I/O. [`master`] is the one module
+//! that does — a UDP socket and its run-loop thread — and it is a loopback
+//! *master*, the fixture the link is tested against, not a way to reach a
+//! network.
+//!
+//! One dependency beyond `std`, and only one: `sha2`, for the login digest.
+//! astar writes wire formats out from their definitions; it does not write
+//! its own crypto.
+//!
+//! **The 33-byte burst is carried, not decoded.** Voice on DMR is AMBE+2,
+//! which on astar means the AMBE-3000 in a `ThumbDV` and nothing else;
+//! [`wire::DataPacket::burst`] hands its bytes over intact and this crate
+//! makes no claim about what is inside them. The sync patterns, the embedded
+//! LC and the three 9-byte vocoder frames are `docs/design/dmr-wire.md`
+//! §5–§9's business and a later crate's. Transmit, the talkgroup dial
+//! grammar and the session layer are not here yet.
 //!
 //! # The identity this assumes
 //!
@@ -30,16 +46,37 @@
 //!
 //! Each network wants its own account and its own hotspot password. Those are
 //! connect-time in-args and nothing else: never held on a `Station`, never in a
-//! snapshot, an event, an error or a log. Nothing in this crate stores one, and
-//! nothing in it should learn how.
+//! snapshot, an event, an error or a log.
+//!
+//! One type in this crate touches a password at all — [`fsm::DmrFsm`], which
+//! takes it by value, spends it on the `RPTK` digest and nothing else, and
+//! never returns, formats or logs it. Its `Debug` is hand written for that
+//! reason and a test pins that the password cannot reach it. Nothing else
+//! here stores a secret, and nothing else should learn how.
 //!
 //! # On the protocol description
 //!
-//! When the wire lands here it will be established the same way YSF's was — by
-//! reading the deployed reference implementations (G4KLX's `MMDVMHost` and
-//! `DMRGateway`) as a specification and verifying each claim, never from
-//! recall, and never by copying code. Those projects are GPL-2.0 and this one
-//! is AGPL-3.0-only; the two do not mix.
+//! The wire details here — tags and lengths, the 302-byte config table, the
+//! `DMRD` layout and its bits byte, the handshake chain, the cadences — were
+//! established the same way YSF's and NXDN's were: by reading the deployed
+//! reference implementations as a *specification of the wire* and verifying
+//! each claim against them, never from recall and never by copying code.
+//! Every constant in this crate cites the file and function it was read out
+//! of, and `docs/design/dmr-wire.md` records the fetch, the disagreements
+//! between references, and how each was settled.
+//!
+//! | project | file(s) read | licence |
+//! |---|---|---|
+//! | `g4klx/DMRGateway` | `DMRNetwork.cpp`, `DMRNetwork.h` | GPL-2.0 |
+//! | `g4klx/MMDVMHost` | `DMRDefines.h`, `Sync.cpp`, and the FEC and LC sources | GPL-2.0 |
+//! | `nostar/DroidStar` | `dmr.cpp`, `dmr.h`, `serialambe.cpp` | GPL-3.0 |
+//! | `HBLink-org/hblink3` | `hblink.py`, `const.py`, `playback.py` | GPL-3.0 |
+//!
+//! Those projects are GPL-2.0 and GPL-3.0; this one is AGPL-3.0-only, and
+//! the licences do not mix. That is the practical reason as well as the
+//! honest one to write each algorithm out from its definition — generator
+//! polynomial, parity equations, field — rather than transcribing somebody's
+//! table.
 
 pub mod fsm;
 pub mod master;
