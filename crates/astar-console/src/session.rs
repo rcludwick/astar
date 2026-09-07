@@ -1803,17 +1803,22 @@ impl ConsoleSession {
     /// link back to `Idle` — see [`Self::m17`]'s docs.
     #[cfg(feature = "m17")]
     pub fn m17_disconnect(&mut self) {
+        // The route is released ONLY when this call actually tore an M17
+        // session down. `Station::disconnect` calls every network's
+        // disconnect in turn, so an unconditional release here would close
+        // the lanes out from under a live D-Star or System Fusion session
+        // that legitimately holds the route.
         if let Some(session) = self.m17.take() {
             session.disconnect();
+            let handles = self.release_voice_route();
+            drop(handles);
+            self.state.status = CallStatus::Idle;
+            self.state.ptt = false;
+            self.state.remote_ptt = false;
+            self.state.tx_level_db = -60.0;
+            self.state.rx_level_db = -60.0;
+            self.state.input_level_db = -60.0;
         }
-        let handles = self.release_voice_route();
-        drop(handles);
-        self.state.status = CallStatus::Idle;
-        self.state.ptt = false;
-        self.state.remote_ptt = false;
-        self.state.tx_level_db = -60.0;
-        self.state.rx_level_db = -60.0;
-        self.state.input_level_db = -60.0;
     }
 
     /// `true` while an M17 session is live (the mutual-exclusion check every
@@ -3492,6 +3497,36 @@ mod tests {
         );
 
         session.m17_disconnect();
+    }
+
+    /// `Station::disconnect` calls `m17_disconnect` before D-Star's and
+    /// YSF's, so a `m17_disconnect` that released the route unconditionally
+    /// would close the lanes out from under whichever of those holds it.
+    #[cfg(feature = "m17")]
+    #[test]
+    fn m17_disconnect_leaves_a_route_it_does_not_own_alone() {
+        let mut s = ConsoleSession::new();
+        // A route with no M17 session behind it — the shape a D-Star or YSF
+        // connect leaves the station in.
+        let _audio = s.open_voice_route(None, None, null).expect("route");
+
+        s.m17_disconnect();
+
+        let mgr = s.manager.as_ref().expect("engine survives");
+        assert_eq!(
+            mgr.router().output_count(),
+            1,
+            "the bus another network is listening on must stay open"
+        );
+        assert_eq!(mgr.router().mic_count(), 1, "so must its capture lane");
+        #[cfg(feature = "dstar")]
+        assert!(
+            matches!(
+                s.dstar_can_connect(),
+                Err(crate::session::ConsoleError::AlreadyConnected)
+            ),
+            "the reservation must survive: the route is still held"
+        );
     }
 
     #[cfg(feature = "m17")]

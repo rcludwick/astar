@@ -343,6 +343,10 @@ impl Drop for M17Session {
 struct RunLoopParams {
     socket: UdpSocket,
     fsm: SessionFsm,
+    /// The lane's two channel ends. Its `preroll_lead` cell is carried but
+    /// never read: it tells a media-clock ladder how many frames the VOX
+    /// pre-roll flush put ahead of the live stream, and M17 has no ladder —
+    /// its frame counter is a plain per-transmission sequence.
     call_audio: CallAudio,
     codec: Box<dyn Codec2Voice>,
     callsign: [u8; 6],
@@ -370,20 +374,22 @@ impl TxState {
         }
     }
 
-    /// Key-down edge: fresh random `StreamID`, counter restarts at 0. Also
-    /// drains and discards anything already sitting in `call_audio.tx_frames`
-    /// before resetting, so no leftover audio can open a fresh transmission
-    /// under a new `StreamID`.
+    /// Key-down edge: fresh random `StreamID`, counter restarts at 0.
     ///
-    /// The gate belongs to `ConsoleSession::set_ptt` now, not to this run
-    /// loop, and it opens up to one [`SOCKET_POLL_TIMEOUT`] tick before this
-    /// edge is observed. [`run_loop`] therefore drains and drops `tx_frames`
-    /// on every tick it is NOT transmitting, which is what keeps the amount
-    /// this discard can ever see down to a single tick — and what stops a
-    /// mic left open by the route (or a run-loop-forced unkey on a lost
-    /// link) from accumulating audio in the channel indefinitely.
-    fn key_down(&mut self, call_audio: &CallAudio) {
-        while call_audio.tx_frames.try_recv().is_ok() {}
+    /// It must NOT drain `call_audio.tx_frames`. The gate belongs to
+    /// `ConsoleSession::set_ptt` now, and it opens up to one
+    /// [`SOCKET_POLL_TIMEOUT`] tick BEFORE this edge is observed — so by the
+    /// time this runs the channel holds the VOX pre-roll ring (flushed by the
+    /// mic lane's own false→true gate edge, iax-2733) and the speech onset
+    /// that followed it. Draining here would throw both away and silently
+    /// turn pre-roll off for M17.
+    ///
+    /// Nothing STALE can be in the channel either, which is what makes the
+    /// no-drain safe: the lane emits nothing while the gate is closed, and
+    /// [`run_loop`] drains and drops every tick it is not transmitting, so
+    /// anything present at this edge arrived after the gate opened and is
+    /// legitimate audio for this transmission.
+    fn key_down(&mut self) {
         self.stream_id = rand::random();
         self.frame_no = 0;
         self.pending = None;
@@ -461,14 +467,20 @@ fn run_loop(p: RunLoopParams) {
         // 2. Drain any ready TX frames, pairing two 160-sample frames per
         //    54-byte stream packet.
         //
-        //    While NOT transmitting, drain and DROP instead. The gate is
-        //    `ConsoleSession::set_ptt`'s and it can be open while this loop
-        //    is not keyed — it opens up to one poll tick before the key-down
-        //    edge lands here, and it stays open after a run-loop-forced unkey
-        //    (link lost) until the operator physically releases PTT. Without
-        //    this the mic lane would pile audio into `tx_frames` unbounded
-        //    and the next transmission would open with somebody's stale
-        //    speech.
+        //    While NOT transmitting, drain and DROP instead — this is the
+        //    ONLY discard on the TX path; `TxState::key_down` deliberately
+        //    keeps what it finds. The gate is `ConsoleSession::set_ptt`'s and
+        //    it can be open while this loop is not keyed: it stays open after
+        //    a run-loop-forced unkey (link lost) until the operator releases
+        //    PTT, and without this the lane would pile audio into
+        //    `tx_frames` unbounded and the next transmission would open with
+        //    somebody's stale speech.
+        //
+        //    It cannot eat the pre-roll: `set_ptt` stores the PTT request
+        //    within nanoseconds of opening the gate, whereas the lane's
+        //    flush waits for its next capture callback (up to a frame, ~20
+        //    ms) — so any tick that can see flushed frames has already read
+        //    `want_key` as true and taken the `if` arm.
         if keyed {
             drain_tx_frames(&socket, callsign, codec.as_mut(), &mut tx, &call_audio);
         } else {
@@ -514,8 +526,9 @@ fn run_loop(p: RunLoopParams) {
 /// NOT touched here — `ConsoleSession::set_ptt` opened it before forwarding
 /// the key and closes it on key-up; this is the protocol edge only.
 ///
-/// Key-down: discards whatever is still queued in `call_audio.tx_frames`
-/// (see [`TxState::key_down`]) and starts a fresh random `StreamID`.
+/// Key-down: starts a fresh random `StreamID` and leaves whatever the lane
+/// already queued in place — that is the VOX pre-roll and the speech onset,
+/// and it is encoded first (see [`TxState::key_down`]).
 ///
 /// Key-up: drains whatever the lane already queued into ordinary packets
 /// ([`drain_tx_frames`]) — up to one [`SOCKET_POLL_TIMEOUT`] tick's worth of
@@ -537,7 +550,7 @@ fn apply_ptt_edge(
     want_key: bool,
 ) -> bool {
     if want_key {
-        tx.key_down(call_audio);
+        tx.key_down();
     } else {
         drain_tx_frames(socket, callsign, codec, tx, call_audio);
         send_voice_packet(
@@ -747,24 +760,66 @@ mod tests {
         (call_audio, tx_tx, rx_rx)
     }
 
+    /// Bind a connected sender plus the socket that receives from it, with a
+    /// read timeout so a missing packet fails the test instead of hanging.
+    fn loopback_pair() -> (UdpSocket, UdpSocket) {
+        let recv = UdpSocket::bind("127.0.0.1:0").expect("bind recv socket");
+        recv.set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+        let recv_addr = recv.local_addr().expect("recv addr");
+        let send = UdpSocket::bind("127.0.0.1:0").expect("bind send socket");
+        send.connect(recv_addr).expect("connect send socket");
+        (recv, send)
+    }
+
     #[test]
-    fn key_down_discards_stale_frames_left_in_the_channel() {
-        // Simulates the gate window `ConsoleSession::set_ptt` opens up to
-        // one poll tick before this run loop observes the key-down edge, or
-        // any other leftover-frame race: something pushed frames onto
-        // `tx_frames` before this key-down ever ran.
+    fn key_down_keeps_the_preroll_the_gate_already_flushed() {
+        // The regression this pins: `ConsoleSession::set_ptt` opens the mic
+        // lane's gate up to one poll tick BEFORE this run loop observes the
+        // key-down edge, and that false->true gate edge flushes the whole VOX
+        // look-back ring into `tx_frames` (iax-2733). If `key_down` drained
+        // the channel, that pre-roll and the speech onset behind it would be
+        // thrown away and pre-roll would be silently off for M17.
+        let (recv_sock, send_sock) = loopback_pair();
+
         let (call_audio, push, _rx) = fake_call_audio();
-        push.send(vec![1_i16; 160]).unwrap();
-        push.send(vec![2_i16; 160]).unwrap();
+        // Two frames = one complete 54-byte voice packet once paired.
+        push.send(vec![10_i16; 160]).unwrap();
+        push.send(vec![20_i16; 160]).unwrap();
 
+        let (mut codec, _backend) = astar_codec::codec2::open_codec2(&[])
+            .expect("a codec must be available under this crate's dev-dependency codec2-static");
         let mut tx = TxState::new();
-        tx.key_down(&call_audio);
+        let shared = SharedState::new();
 
+        let keyed = apply_ptt_edge(
+            &send_sock,
+            [0; 6],
+            codec.as_mut(),
+            &mut tx,
+            &shared,
+            &call_audio,
+            true, // key-down edge
+        );
+        assert!(keyed);
+        // Run-loop step 2 while keyed: exactly what the loop does next.
+        drain_tx_frames(&send_sock, [0; 6], codec.as_mut(), &mut tx, &call_audio);
+
+        let mut buf = [0u8; 128];
+        let (n, _) = recv_sock
+            .recv_from(&mut buf)
+            .expect("the frames queued before the key-down edge must be encoded and sent");
+        let pkt = StreamPacket::parse(&buf[..n]).expect("valid stream packet");
+        assert_eq!(
+            pkt.stream_id, tx.stream_id,
+            "sent under this transmission's id"
+        );
+        assert!(!pkt.is_last(), "an ordinary packet, not the EOS flush");
+        assert_eq!(pkt.frame_number, 0, "the pre-roll opens the transmission");
         assert!(
             call_audio.tx_frames.try_recv().is_err(),
-            "key_down must drain/discard anything already queued before a fresh transmission starts"
+            "both queued frames must have been consumed, none left behind"
         );
-        assert!(tx.pending.is_none());
     }
 
     #[test]
@@ -775,13 +830,7 @@ mod tests {
         // the unkey edge is observed. The fix must send them as an ordinary
         // (non-EOS) packet BEFORE the EOS-flushed final packet, not drop
         // them and not leak them into the next transmission.
-        let recv_sock = UdpSocket::bind("127.0.0.1:0").expect("bind recv socket");
-        recv_sock
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("set read timeout");
-        let recv_addr = recv_sock.local_addr().expect("recv addr");
-        let send_sock = UdpSocket::bind("127.0.0.1:0").expect("bind send socket");
-        send_sock.connect(recv_addr).expect("connect send socket");
+        let (recv_sock, send_sock) = loopback_pair();
 
         let (call_audio, push, _rx) = fake_call_audio();
         push.send(vec![10_i16; 160]).unwrap();
