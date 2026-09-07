@@ -559,6 +559,10 @@ pub fn config(id: RadioId, fields: &ConfigFields) -> [u8; CONFIG_LEN] {
     number(&mut out[55..58], u64::from(fields.height_m));
     text(&mut out[58..78], &fields.location);
     text(&mut out[78..97], &fields.description);
+    // One character, sent as-is. A non-printable byte here would be a
+    // corrupt config rather than a choice, so it falls back to the literal
+    // DroidStar sends; nothing is built on what the value means
+    // (`docs/design/dmr-wire.md` §10).
     out[97] = if fields.slots.is_ascii_graphic() {
         fields.slots
     } else {
