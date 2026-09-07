@@ -1692,8 +1692,9 @@ mod tests {
         tags
     }
 
-    /// The pre-roll regression, mirroring `crate::dstar`'s
-    /// `the_preroll_flushed_before_the_run_loop_sees_the_key_is_transmitted`.
+    /// The pre-roll regression, mirroring D-Star's
+    /// `the_preroll_flushed_before_the_run_loop_sees_the_key_is_transmitted`
+    /// in `astar-console/tests/dstar_session_pipeline.rs`.
     ///
     /// `ConsoleSession::set_ptt` opens the lane's gate and only THEN stores
     /// the PTT request, so the look-back ring the gate's false->true edge

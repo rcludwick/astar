@@ -1053,14 +1053,6 @@ impl Station {
                 callsign: callsign.to_string(),
                 options: options.map(str::to_string),
             };
-            // Refuse early and cheaply, holding the lock for a few
-            // instructions rather than for the whole dongle probe.
-            self.session
-                .lock()
-                .unwrap()
-                .ysf_can_connect()
-                .map_err(map_console_err)?;
-
             // Step 1, under the lock: open the ONE audio lane on the
             // station's router and reserve it. The reservation is also the
             // mutual-exclusion token for the gap before the adopt below —

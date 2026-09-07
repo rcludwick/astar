@@ -101,9 +101,15 @@ does not build it. The shape both share:
   come from `ConsoleSession::open_voice_route`, called by the station facade
   before the session constructor runs (§2.5's three-step connect).
 * A **test seam** that takes a fake vocoder and a fake audio backend.
-  `DstarSession::connect_with_stream` is the one to copy; M17 and YSF have
-  the same shape now. A `test_audio()` helper builds a `CallAudio` over a
-  `NullBackend` without a real `ConsoleSession`.
+  `DstarSession::connect_with_stream` is the one to copy; `YsfLink` has the
+  same shape (`connect_with_stream` beside `connect_with_audio`). M17 has no
+  seam of that kind — `M17Session::connect(cfg, audio)` is its only
+  constructor, because there is no dongle to fake.
+  There is no shared `CallAudio` test helper, and none is owed: M17 and
+  D-Star each build one in-module with a private `fake_call_audio()`, YSF's
+  private `test_audio()` does the same, and each integration test file
+  (`tests/m17_session.rs`, `tests/dstar_session*.rs`) carries its own
+  `route(backend)` that opens a real `AudioRouter` over a `NullBackend`.
 * `SharedState` — atomics and mutexes the run loop writes and the outside
   reads: link, talker, **the actually-applied `ptt`**, and its
   network-specific fields. **No** level meters, no spectrum, no audio
@@ -124,11 +130,12 @@ does not build it. The shape both share:
 forgot at least once.
 
 - [ ] `<net>: Option<<Net>Session>` field
-- [ ] `<net>_can_connect()` — mutual exclusion against IAX2 *and* every other
-      network, checked again at adopt because state can change while the
-      blocking connect runs, **and while the voice route is reserved**
-      (`voice_route.is_some()` refuses every other connect path for the gap
-      between opening the route and adopting the session)
+- [ ] `<net>_can_connect()` — the same exclusion question
+      `open_voice_route` answers for real, exposed so an embedder can ask
+      before it tries. Exclusion is re-checked at adopt because state can
+      change while a blocking connect runs, and the reserved route
+      (`voice_route.is_some()`) refuses every other connect path for the gap
+      between opening the route and adopting the session
 - [ ] `<net>_adopt(session)` — installs it. It does **not** seed audio
       preferences: those already reached the router when
       `open_voice_route` ran, via the one `push_prefs` block every path
@@ -169,8 +176,11 @@ live, and `open_voice_route` pushes the full set at connect through the same
 
 `Station::<net>_connect/_disconnect/_available/_state` in `astar-station`.
 
-* **The connect is three steps, and only the middle one leaves the lock.**
-  (1) Under the session lock: `can_connect()?`, then
+* **Which shape a connect takes is decided by one thing: how slow the
+  session constructor is.**
+
+  *A slow constructor — a dongle probe (D-Star, YSF).* Three steps, and only
+  the middle one leaves the lock. (1) Under the session lock:
   `open_voice_route(input, output, make_backend)` → a `CallAudio` (a cpal
   open, tens of ms — the IAX2 dial already does this under the lock).
   (2) Off the lock: the slow part — dongle probe / codec open / socket bind
@@ -178,7 +188,20 @@ live, and `open_voice_route` pushes the full set at connect through the same
   `<net>_adopt(session)`. Any failure in step 2 or 3 calls
   `release_voice_route()` and drops the returned stream handles off-lock.
   The reserved route is the mutual-exclusion token for the gap between 1 and
-  3 — see §2.4's `<net>_can_connect()` note.
+  3.
+
+  *A fast constructor — a socket bind and a software codec open (M17).* The
+  facade calls `ConsoleSession::m17_connect` and the whole thing happens
+  under the one lock: route, construct, install. No gap to guard, no
+  three-step dance to get wrong.
+
+  **Either way the exclusion gate is `open_voice_route`'s own check**, which
+  runs under the lock as the route is taken — against a live IAX2 call, an
+  IAX2 *link* (`Manager::call_count`), any other digital-voice session, and
+  any route already held. There is no separate pre-check step in the flow:
+  `<net>_can_connect()` exists as an embedder-facing query ("would a connect
+  be refused right now?"), useful for greying out a button, but it decides
+  nothing — the state can change between asking and acting.
 * Signature takes **primitives, not the console's config type** — that type only
   exists when the feature is compiled in, and the method must stay
   byte-identically callable either way.
@@ -334,7 +357,9 @@ validation; it reuses the engine recipe above and almost none of §6.
 1. Protocol crate + loopback reflector. Tests pass with no hardware.
 2. Vocoder, if new. Licence first, code second.
 3. Session module with `connect_with_stream`. Pipeline tests against loopback.
-4. Console wiring — **including the fan-out** — with the preference test.
+4. Console wiring: `<net>_connect`/`_adopt`/`_disconnect`/`_state` plus the
+   snapshot's `status`/`ptt`/`remote_ptt` mirror. There is no per-network
+   preference or meter fan-out any more (§2.4) — one router, one push.
 5. Station facade + features. `just ci`.
 6. C ABI + `just cbindgen`. Header must not drift.
 7. Swift binding + `just xcframework`.

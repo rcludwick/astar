@@ -71,6 +71,9 @@ current.
 - **A Discord server**, linked from the site header, the front page and the
   README.
 
+- **System Fusion (YSF): link a reflector, hear it, and transmit**, with the
+  ThumbDV in DN mode; `ysf-listen` and `ysf-parrot` for the bench.
+
 ### Changed
 
 - **Versions are real SemVer from here on**, this one included, and the app and
@@ -132,8 +135,8 @@ current.
   it — so a release that touched nothing else would not have rebuilt the
   page announcing it.
 
-- **VOX pre-roll and speech onset are no longer lost on M17/D-Star/YSF
-  key-down**, and YSF key-ups now appear in the timeline.
+- **VOX pre-roll and speech onset are no longer lost on D-Star/YSF key-down**,
+  and YSF key-ups now appear in the timeline.
 
 ## 0.1.9beta — 2026-08-29
 
