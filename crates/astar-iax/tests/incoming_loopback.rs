@@ -975,24 +975,83 @@ fn peer_with_no_common_codec_is_rejected_with_a_cause() {
         Some("Unable to negotiate codec"),
         "the CAUSE must be the sentence Asterisk itself uses"
     );
+    assert_eq!(
+        f.ies.causecode,
+        Some(65),
+        "Asterisk pairs that sentence with CAUSECODE 65 \
+         (AST_CAUSE_BEARERCAPABILITY_NOTAVAIL); peers key retry logic off the number"
+    );
 
     // The listener spawns the leg (and, in AutoAccept, hands the app a `Call`)
     // before the FSM has negotiated anything, so an event still arrives — but
-    // the leg must never come up: no Active state, no negotiated format.
+    // the leg must TEAR DOWN, not merely fail to come up. Everything downstream
+    // hangs off the Hangup: the leg thread exits, the listener frees the call
+    // number, and the Manager reaps the pool slot. Without it an unauthenticated
+    // caller could pin `max_calls` just by offering a codec we do not have.
     let ev = events
         .recv_timeout(Duration::from_secs(2))
         .expect("the leg is spawned before negotiation, so an event arrives");
-    let IncomingCallEvent::Answered { call, .. } = ev else {
+    let IncomingCallEvent::Answered {
+        call,
+        events: call_events,
+    } = ev
+    else {
         panic!("expected Answered in AutoAccept");
     };
-    let deadline = Instant::now() + Duration::from_millis(600);
-    while Instant::now() < deadline {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let hangup_cause = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match call_events.recv_timeout(remaining) {
+            Ok(astar_iax::CallEvent::Hangup { reason }) => break reason,
+            Ok(astar_iax::CallEvent::Answered { .. }) => {
+                panic!("a REJECTed leg must never report Answered")
+            }
+            Ok(_) => {}
+            Err(e) => panic!("no CallEvent::Hangup before deadline: {e}"),
+        }
+    };
+    assert!(
+        matches!(
+            hangup_cause,
+            astar_iax_core::session::FailReason::Rejected { cause: Some(ref c) }
+                if c == "Unable to negotiate codec"
+        ),
+        "the Hangup must carry the codec cause, not a bare timeout: {hangup_cause:?}"
+    );
+
+    // The leg reaches Hungup on its own — not via `Call::drop`, which would
+    // hide exactly the leak this pins. `call` is still alive right here.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut hungup = false;
+    while Instant::now() < deadline && !hungup {
         let snap = call.snapshot();
         assert!(!snap.is_active(), "a REJECTed leg must never reach Active");
         assert_eq!(
             snap.negotiated_format, None,
             "a REJECTed leg must never publish a negotiated codec"
         );
-        std::thread::sleep(Duration::from_millis(25));
+        hungup = matches!(snap.state, astar_iax::CallSnapshotState::Hungup);
+        std::thread::sleep(Duration::from_millis(20));
     }
+    assert!(hungup, "the leg must reach Hungup without being dropped");
+
+    // ...and the listener released the call number. A duplicate NEW from a live
+    // (addr, callno) pair is swallowed by the listener's `by_peer` map, so the
+    // ONLY way this second, identical NEW earns a second REJECT is if the first
+    // leg was properly reaped: `done_tx` -> `by_local_call.remove` ->
+    // `allocator.free`. If the slot leaked, no reply comes and this times out.
+    peer.send_to(
+        &new_datagram(offer(Some(GSM), Some(GSM)), PEER_CALL),
+        listener_addr,
+    )
+    .unwrap();
+    let second = recv_until(&peer, listener_addr, PEER_CALL, |f| {
+        matches!(f.subclass, Subclass::Iax(IaxCommand::Reject))
+    });
+    assert!(
+        second.is_some(),
+        "a second NEW from the same peer must get a fresh leg (and a fresh \
+         REJECT), proving the listener freed the call number"
+    );
+    drop(call);
 }

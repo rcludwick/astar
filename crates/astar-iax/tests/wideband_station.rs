@@ -974,3 +974,119 @@ fn ulaw_link_coexists_with_a_slin16_client_without_downgrading_it() {
         Some(VoiceFormat::G711U)
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 5: a peer ACCEPTing a format we never offered is hung up on, not
+// adopted (iax-c0de). The old gate was `CodecPolicy::is_encodable` — the four
+// formats the media path can code at all — so a `ulaw_only` station handed
+// `ACCEPT FORMAT=slin16` happily transmitted slin16, eight times the bandwidth
+// the operator had capped it at. The gate is now the policy's own CAPABILITY
+// mask, and a format outside it earns the same "Unable to negotiate codec"
+// the inbound half REJECTs with.
+// ---------------------------------------------------------------------------
+
+/// Fake callee: ACCEPT with `format`, then report the CAUSE of the first
+/// HANGUP the caller sends (or `None` if it never sends one).
+fn run_accept_then_report_hangup_cause(
+    peer: &UdpSocket,
+    format: VoiceFormat,
+    cause_tx: &std::sync::mpsc::Sender<Option<String>>,
+) {
+    const SERVER_CALL: u16 = 41;
+    let mut buf = [0u8; 4096];
+    let mut accepted = false;
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline {
+        let (n, src) = match peer.recv_from(&mut buf) {
+            Ok(v) => v,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            Err(_) => break,
+        };
+        let Ok(Frame::Full(ff)) = parse_lenient(&buf[..n]) else {
+            continue;
+        };
+        if matches!(ff.subclass, Subclass::Iax(IaxCommand::Ack)) {
+            continue;
+        }
+        let client_call = ff.source_call;
+        let _ = peer.send_to(&encode_ack(&ff, SERVER_CALL), src);
+        if is_hangup(&ff) {
+            let _ = cause_tx.send(ff.ies.cause.map(str::to_string));
+            return;
+        }
+        if matches!(ff.subclass, Subclass::Iax(IaxCommand::New)) && !accepted {
+            accepted = true;
+            let accept = encode_iax(
+                SERVER_CALL,
+                client_call,
+                0,
+                ff.oseqno.wrapping_add(1),
+                IaxCommand::Accept,
+                Ies {
+                    format: Some(format.as_u32()),
+                    ..Ies::empty()
+                },
+            );
+            let _ = peer.send_to(&accept, src);
+        }
+    }
+    let _ = cause_tx.send(None);
+}
+
+#[test]
+fn accept_of_a_format_we_never_offered_hangs_up_with_the_codec_cause() {
+    let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+    peer.set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    let peer_addr = peer.local_addr().unwrap();
+    let (cause_tx, cause_rx) = std::sync::mpsc::channel::<Option<String>>();
+    let peer_thread = thread::spawn(move || {
+        // slin16 is encodable — that is the whole point. It is simply not in a
+        // ulaw_only station's CAPABILITY.
+        run_accept_then_report_hangup_cause(&peer, VoiceFormat::Slin16, &cause_tx);
+    });
+
+    let backend = TestBackend {
+        mic: MicSinks::default(),
+        capture_output: String::new(),
+        rx_capture: Arc::new(Mutex::new(Vec::new())),
+    };
+    let mut mgr = Manager::with_policy(Box::new(backend), CodecPolicy::UlawOnly);
+    assert_eq!(mgr.pipeline_sample_rate(), 8_000);
+
+    let id = mgr
+        .dial(spec(5, "out:s", peer_addr, CodecPolicy::UlawOnly))
+        .expect("dial");
+
+    let cause = cause_rx
+        .recv_timeout(Duration::from_secs(8))
+        .expect("the peer thread reports");
+    assert_eq!(
+        cause.as_deref(),
+        Some("Unable to negotiate codec"),
+        "a ulaw_only station must hang up on ACCEPT FORMAT=slin16, with the \
+         same cause the inbound half rejects with"
+    );
+
+    // And it must never have gone active on a format it did not offer.
+    assert!(
+        !wait_negotiated(&mgr, id, VoiceFormat::Slin16),
+        "a ulaw_only station must never adopt slin16"
+    );
+    let snap = mgr.snapshot();
+    let call = snap.calls.iter().find(|c| c.id == id);
+    assert!(
+        call.is_none_or(|c| !c.is_active() && c.negotiated_format.is_none()),
+        "the call must not be active with a negotiated format: {call:?}"
+    );
+
+    let _ = mgr.hangup(id, None);
+    peer_thread.join().expect("peer thread joined");
+}
