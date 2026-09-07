@@ -338,6 +338,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "astar-nxdn"
+version = "0.1.11-beta"
+
+[[package]]
 name = "astar-ptt"
 version = "0.1.11-beta"
 dependencies = [
