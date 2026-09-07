@@ -1,6 +1,7 @@
 # NXDN — design
 
-**Status:** designed, not built. Engine item `iax-b9c2`, client item `astar-b8e4`.
+**Status:** in progress — see docs/superpowers/plans/2026-09-07-nxdn-network.md.
+Engine item `iax-b9c2`, client item `astar-b8e4`.
 **Read first:** `docs/design/adding-a-network.md`, then `ysf-network.md` — NXDN
 is the second AMBE+2 network and inherits most of YSF's answers.
 
@@ -39,9 +40,14 @@ NXDN uses **AMBE+2 half-rate** — the same family as YSF DN, on the same
 AMBE-3000. Once YSF has a RATEP word for half-rate AMBE+2, NXDN's vocoder work is
 frame packing and little else.
 
-Confirm the exact rate parameters against the reference implementation rather
-than assuming YSF's word transfers unchanged; "same family" is not "same
-configuration".
+**Ruled (2026-09-07, see `docs/design/nxdn-wire.md`): reuse
+`VocoderMode::YsfDn`. Do not add `VocoderMode::NxdnDn`.** `DroidStar`'s
+`serialambe.cpp: SerialAMBE::config_ambe` sends NXDN the same
+`AMBE3000_2450_0000` RATEP word and the same `packet_size = 7` it sends YSF —
+byte-identical to `astar_codec::ysf::ratep_dn()`'s output — and MMDVMHost
+regenerates NXDN's on-air AMBE with `CAMBEFEC::regenerateYSFDN(...)`. Same
+family *is* same configuration here; see the wire note for the full citation
+and the frame-packing detail this ruling still leaves to do.
 
 ## The protocol
 
