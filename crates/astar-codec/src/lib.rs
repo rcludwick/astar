@@ -31,6 +31,12 @@ pub mod ysf;
 /// [`ysf::DnFrame`] and [`ysf::ratep_dn`] rather than duplicating them.
 pub mod nxdn;
 
+/// DMR voice: the AMBE+2 full-rate frames inside an MMDVM/homebrew burst,
+/// and the AMBE-3000 rate word that configures a dongle to produce them.
+/// Same 72-bit channel width as D-Star and a DIFFERENT rate word — see the
+/// module doc. Pure bytes in and bytes out, so it is not `ambe-hw`-gated.
+pub mod dmr;
+
 /// slin (16-bit signed linear PCM) wire framing (iax-31f7).
 pub mod slin;
 

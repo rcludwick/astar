@@ -1030,10 +1030,11 @@ fn pump_tx(audio: &mut Audio, socket: &UdpSocket, addr: SocketAddr, callsign: &C
         };
         match encoded {
             astar_codec::ambe::ChannelFrame::YsfDn(dn) => tx.voice.push(dn),
-            other @ astar_codec::ambe::ChannelFrame::Dstar(_) => {
+            other @ (astar_codec::ambe::ChannelFrame::Dstar(_)
+            | astar_codec::ambe::ChannelFrame::Dmr(_)) => {
                 // Unreachable: this stream is opened in `VocoderMode::YsfDn`.
                 // Stated rather than assumed, because the alternative is
-                // truncating a D-Star frame onto a YSF wire.
+                // truncating a full-rate frame onto a YSF wire.
                 tracing::warn!(
                     got = other.mode().as_str(),
                     "ysf: encoder returned a non-DN frame, substituting silence"

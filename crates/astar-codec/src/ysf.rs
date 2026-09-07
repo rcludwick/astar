@@ -449,7 +449,11 @@ fn check(data_type: DataType, payload: &[u8]) -> Result<(), DnError> {
 /// Four bytes of documented header (AMBE-3000R users' manual §3), written
 /// out here because the vendored driver keeps its own builder private and
 /// `vendor/ambe-thumbdv` is a verbatim copy that must not grow functions.
-fn dvsi_packet(ptype: u8, fields: &[u8]) -> Vec<u8> {
+///
+/// `pub(crate)` so [`crate::dmr::ratep_dmr`] can build its own rate word
+/// from the same four bytes of header rather than spelling the framing out
+/// a third time.
+pub(crate) fn dvsi_packet(ptype: u8, fields: &[u8]) -> Vec<u8> {
     let mut packet = vec![0x61];
     let len = u16::try_from(fields.len()).expect("a DVSI packet's fields fit in 16 bits");
     packet.extend_from_slice(&len.to_be_bytes());
@@ -516,6 +520,11 @@ fn dvsi_bit_order() -> [usize; VOICE_BITS] {
 ///
 /// `ambe_thumbdv::channel_in` cannot be used for this — it hard-codes 72
 /// bits (`0x48`), which is what D-Star and DMR send. YSF DN sends `0x31`.
+///
+/// The width is all D-Star and DMR share, and it is only why `channel_in`
+/// is reusable between them: their RATEP words differ (2400 + 1200 against
+/// 2450 + 1150), so a dongle configured for one cannot decode the other's
+/// 72 bits. See [`crate::dmr::ratep_dmr`].
 #[must_use]
 pub fn channel_in_dn(frame: DnFrame) -> Vec<u8> {
     let mut bits = [0u8; VOICE_BYTES];

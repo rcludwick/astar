@@ -218,6 +218,7 @@ name = "astar-codec"
 version = "0.1.11-beta"
 dependencies = [
  "ambe-thumbdv",
+ "astar-dmr",
  "astar-nxdn",
  "astar-ysf",
  "codec2",

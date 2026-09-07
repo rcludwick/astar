@@ -62,13 +62,23 @@ pub trait AmbeVoice: Send {
 /// hardware: one `ThumbDV` is one physical link in one configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VocoderMode {
-    /// D-Star and DMR: AMBE+2 full-rate, 72-bit channel frames, FEC on.
+    /// D-Star: AMBE+2 at 2400 + 1200, 72-bit channel frames, FEC on.
+    ///
+    /// NOT DMR. [`Self::Dmr`] is the same 72 bits at a different rate word
+    /// (2450 + 1150), and five of the six RATEP words differ — a dongle
+    /// initialized for one cannot decode the other's frames, and will not
+    /// say so.
     #[default]
     Dstar,
     /// System Fusion DN (V/D modes 1 and 2): AMBE+2 half-rate, 49-bit
     /// channel frames, FEC off — YSF carries its own, and
     /// [`crate::ysf::unpack_dn`] has already stripped it.
     YsfDn,
+    /// DMR: AMBE+2 at 2450 + 1150, 72-bit channel frames, the chip's FEC
+    /// included in those 72 bits — which is exactly what an MMDVM/homebrew
+    /// burst carries, so nothing re-FECs and nothing permutes them. See
+    /// [`crate::dmr`] for the rate word and why it is not [`Self::Dstar`]'s.
+    Dmr,
 }
 
 impl VocoderMode {
@@ -76,7 +86,7 @@ impl VocoderMode {
     #[must_use]
     pub const fn channel_bytes(self) -> usize {
         match self {
-            Self::Dstar => 9,
+            Self::Dstar | Self::Dmr => 9,
             Self::YsfDn => crate::ysf::VOICE_BYTES,
         }
     }
@@ -88,7 +98,7 @@ impl VocoderMode {
     #[must_use]
     pub const fn channel_bits(self) -> usize {
         match self {
-            Self::Dstar => 72,
+            Self::Dstar | Self::Dmr => 72,
             Self::YsfDn => crate::ysf::VOICE_BITS,
         }
     }
@@ -100,6 +110,7 @@ impl VocoderMode {
         match self {
             Self::Dstar => "dstar",
             Self::YsfDn => "ysf-dn",
+            Self::Dmr => "dmr",
         }
     }
 }
@@ -115,10 +126,14 @@ impl VocoderMode {
 /// drop where it cannot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelFrame {
-    /// A 72-bit D-Star/DMR frame.
+    /// A 72-bit D-Star frame.
     Dstar([u8; 9]),
     /// A 49-bit YSF DN frame, FEC already stripped.
     YsfDn(crate::ysf::DnFrame),
+    /// A 72-bit DMR frame, the chip's FEC included — the nine bytes that go
+    /// into an MMDVM/homebrew burst unchanged. Same width as
+    /// [`Self::Dstar`], different vocoder configuration: see [`crate::dmr`].
+    Dmr([u8; 9]),
 }
 
 /// Rebuild the frame a stream in `mode` expects from a device response that
@@ -130,6 +145,14 @@ fn channel_frame_for(mode: VocoderMode, bits: u8, data: [u8; 9]) -> Option<Chann
     }
     Some(match mode {
         VocoderMode::Dstar => ChannelFrame::Dstar(data),
+        // Wrapped RAW, exactly as `Dstar` is, and deliberately NOT through
+        // a `dn_frame_from_channel`-style permutation: `DroidStar` applies
+        // `dvsi_interleave` in `ysf.cpp` and `nxdn.cpp` and never in
+        // `dmr.cpp`, which `::memcpy`s the chip's nine bytes straight into
+        // the burst. Permuting here would be the 2026-09-06 YSF garble in
+        // reverse -- invisible on receive, audible on transmit -- which is
+        // why `a_dmr_frame_off_the_chip_is_not_permuted` pins it.
+        VocoderMode::Dmr => ChannelFrame::Dmr(data),
         VocoderMode::YsfDn => {
             // `dn_frame_from_channel`, not `DnFrame::from_bytes`: the chip
             // emits its 49 bits in the AMBE-3000's own order, and a
@@ -154,6 +177,7 @@ impl ChannelFrame {
         match self {
             Self::Dstar(_) => VocoderMode::Dstar,
             Self::YsfDn(_) => VocoderMode::YsfDn,
+            Self::Dmr(_) => VocoderMode::Dmr,
         }
     }
 }
@@ -168,7 +192,24 @@ impl ChannelFrame {
     pub const fn as_dstar(self) -> Option<[u8; 9]> {
         match self {
             Self::Dstar(bytes) => Some(bytes),
-            Self::YsfDn(_) => None,
+            // A DMR frame is nine bytes too, and it is still the wrong nine
+            // bytes: it came off a chip configured for 2450 + 1150. Widening
+            // this to "any 72-bit frame" would put DMR audio on a D-Star
+            // link, sounding like static to everyone on it.
+            Self::YsfDn(_) | Self::Dmr(_) => None,
+        }
+    }
+
+    /// The nine bytes of a DMR frame, or `None` if this is not one.
+    ///
+    /// The mirror of [`Self::as_dstar`], and mutually exclusive with it for
+    /// the same reason: the widths match, the vocoder configurations do
+    /// not.
+    #[must_use]
+    pub const fn as_dmr(self) -> Option<[u8; 9]> {
+        match self {
+            Self::Dmr(bytes) => Some(bytes),
+            Self::Dstar(_) | Self::YsfDn(_) => None,
         }
     }
 
@@ -176,7 +217,7 @@ impl ChannelFrame {
     #[must_use]
     pub fn as_slice(&self) -> &[u8] {
         match self {
-            Self::Dstar(bytes) => &bytes[..],
+            Self::Dstar(bytes) | Self::Dmr(bytes) => &bytes[..],
             Self::YsfDn(dn) => &dn.as_bytes()[..],
         }
     }
@@ -901,6 +942,7 @@ fn hw_stream_init<T: ambe_thumbdv::Transport>(
     let ratep = match mode {
         VocoderMode::Dstar => ratep_dstar(),
         VocoderMode::YsfDn => crate::ysf::ratep_dn(),
+        VocoderMode::Dmr => crate::dmr::ratep_dmr(),
     };
     hw_stream_check_status(&hw_stream_transact(transport, &ratep)?, 0x0A)?;
     hw_stream_check_status(&hw_stream_transact(transport, &init_encdec())?, 0x0B)?;
@@ -945,6 +987,7 @@ fn null_frame(mode: VocoderMode) -> ChannelFrame {
     match mode {
         VocoderMode::Dstar => ChannelFrame::Dstar(NULL_AMBE_FRAME),
         VocoderMode::YsfDn => ChannelFrame::YsfDn(crate::ysf::DnFrame::MUTE),
+        VocoderMode::Dmr => ChannelFrame::Dmr(NULL_AMBE_FRAME),
     }
 }
 
@@ -1055,7 +1098,10 @@ fn hw_stream_write_decode<T: ambe_thumbdv::Transport>(
         return;
     }
     let packet = match frame {
-        ChannelFrame::Dstar(bytes) => ambe_thumbdv::channel_in(&bytes),
+        // `channel_in` hard-codes 72 bits (`0x48`), which is what both of
+        // these send; the rate word they were configured with is what makes
+        // the same packet mean two different things to the chip.
+        ChannelFrame::Dstar(bytes) | ChannelFrame::Dmr(bytes) => ambe_thumbdv::channel_in(&bytes),
         ChannelFrame::YsfDn(dn) => crate::ysf::channel_in_dn(dn),
     };
     match transport.send(&packet) {
@@ -1665,8 +1711,9 @@ pub(crate) mod test_support {
 mod hw_tests {
     use super::test_support::with_no_thumbdv;
     use super::{
-        AmbeBackend, AmbeStream, AmbeVoice, ChannelFrame, NULL_AMBE_FRAME, VocoderMode, open_ambe,
-        open_ambe_stream, open_hw_stream_with, open_hw_stream_with_handle, open_hw_with,
+        AmbeBackend, AmbeStream, AmbeVoice, ChannelFrame, NULL_AMBE_FRAME, VocoderMode,
+        channel_frame_for, open_ambe, open_ambe_stream, open_hw_stream_with,
+        open_hw_stream_with_handle, open_hw_with,
     };
     use ambe_thumbdv::{
         MockTransport, ThumbDv, channel_in, dcmode_off, ecmode_off, gain_zero, init_encdec,
@@ -1765,6 +1812,7 @@ mod hw_tests {
         let ratep = match mode {
             VocoderMode::Dstar => ratep_dstar(),
             VocoderMode::YsfDn => crate::ysf::ratep_dn(),
+            VocoderMode::Dmr => crate::dmr::ratep_dmr(),
         };
         m.expect(ratep, vec![hex("61 00 02 00 0A 00")]);
         m.expect(init_encdec(), vec![hex("61 00 02 00 0B 00")]);
@@ -2070,6 +2118,69 @@ mod hw_tests {
                 .len(),
             crate::ysf::VOICE_BYTES
         );
+    }
+
+    #[test]
+    fn dmr_is_a_seventy_two_bit_mode_of_its_own() {
+        assert_eq!(VocoderMode::Dmr.channel_bytes(), 9);
+        assert_eq!(VocoderMode::Dmr.channel_bits(), 72);
+        assert_eq!(VocoderMode::Dmr.as_str(), "dmr");
+        assert_eq!(ChannelFrame::Dmr([0u8; 9]).mode(), VocoderMode::Dmr);
+        assert_eq!(ChannelFrame::Dmr([1u8; 9]).as_dmr(), Some([1u8; 9]));
+        assert_eq!(ChannelFrame::Dstar([1u8; 9]).as_dmr(), None);
+        assert_eq!(ChannelFrame::Dmr([1u8; 9]).as_dstar(), None);
+    }
+
+    #[test]
+    fn a_dmr_stream_is_initialised_with_the_dmr_rate_word() {
+        // `scripted_init_mode` scripts `crate::dmr::ratep_dmr()` and
+        // `MockTransport` panics on any send that is not the one it expects
+        // next. Init runs on THIS thread (before the worker is spawned), so
+        // a `ratep_for` arm that silently reused `ratep_dstar()` fails here
+        // rather than in a garbled QSO.
+        let mock = scripted_init_mode(VocoderMode::Dmr);
+        let (stream, handle) = open_hw_stream_with_handle(mock, VocoderMode::Dmr)
+            .expect("the DMR init cookbook must complete");
+        drop(stream);
+        assert!(
+            join_with_timeout(handle, Duration::from_secs(2)),
+            "worker must exit once the handle is dropped"
+        );
+    }
+
+    #[test]
+    fn a_dmr_frame_off_the_chip_is_not_permuted() {
+        // The 2026-09-06 YSF root cause was `channel_frame_for` wrapping the
+        // chip's wire bytes without undoing the AMBE-3000 channel-bit
+        // permutation, so the permutation was applied twice on the round
+        // trip. DMR's 72-bit path has NO permutation -- DroidStar's ysf.cpp
+        // applies `dvsi_interleave` and its dmr.cpp never does -- so the
+        // bytes must survive the round trip untouched. Invisible on receive;
+        // audible as garble on transmit, which is why it is pinned here.
+        let wire: [u8; 9] = [0xDA, 0x40, 0x80, 0x13, 0x37, 0x00, 0xC3, 0x3C, 0x5A];
+        let frame = channel_frame_for(VocoderMode::Dmr, 72, wire).expect("a 72-bit frame");
+        assert_eq!(frame, ChannelFrame::Dmr(wire));
+
+        // ...and the same bytes go back out to the chip untouched, in a
+        // 72-bit (`0x48`) channel packet, the way D-Star's do.
+        let mut mock = scripted_init_mode(VocoderMode::Dmr);
+        mock.expect(channel_in(&wire), vec![speech_response(4242)]);
+        let (mut stream, handle) =
+            open_hw_stream_with_handle(mock, VocoderMode::Dmr).expect("DMR init");
+        stream.submit_decode(frame);
+        let pcm =
+            poll_until(&mut stream, Duration::from_secs(2)).expect("the decoded frame must return");
+        assert_eq!(pcm[0], 4242, "the chip must get its own bytes back");
+        drop(stream);
+        assert!(join_with_timeout(handle, Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn a_forty_nine_bit_response_is_refused_by_a_dmr_stream() {
+        // A mode mismatch is silent on this chip. `channel_frame_for`
+        // returning None is the only thing that makes it loud.
+        assert_eq!(channel_frame_for(VocoderMode::Dmr, 49, [0u8; 9]), None);
+        assert_eq!(channel_frame_for(VocoderMode::YsfDn, 72, [0u8; 9]), None);
     }
 
     #[test]
@@ -3362,6 +3473,21 @@ mod hw_hardware_tests {
         let _hw = hardware_lock();
         let (out, first) = hardware_vocoder_loopback(VocoderMode::Dstar);
         assert_loopback_is_a_tone(VocoderMode::Dstar, &out, &first);
+    }
+
+    /// DMR: 72-bit full-rate frames at a rate word of their own (2450 +
+    /// 1150), and — like D-Star, unlike DN — no channel-bit permutation on
+    /// the way back. Both claims are only observable on transmit, so this
+    /// is where a wrong `ratep_for` arm or a stray permutation shows up as
+    /// something other than a garbled QSO.
+    #[test]
+    fn hardware_dmr_encode_decode_loopback_preserves_a_tone() {
+        if !hardware_opted_in() {
+            return;
+        }
+        let _hw = hardware_lock();
+        let (out, first) = hardware_vocoder_loopback(VocoderMode::Dmr);
+        assert_loopback_is_a_tone(VocoderMode::Dmr, &out, &first);
     }
 }
 
