@@ -131,7 +131,8 @@ fn a_frame_from_one_peer_reaches_the_other_verbatim() {
         ber: 0,
         rssi: 0,
     };
-    a.send_to(&wire::data(&packet), addr).expect("send frame");
+    a.send_to(&wire::data(&packet).expect("ids in range"), addr)
+        .expect("send frame");
 
     let mut buf = [0u8; astar_dmr::master::MAX_DATAGRAM];
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -141,7 +142,7 @@ fn a_frame_from_one_peer_reaches_the_other_verbatim() {
             continue;
         };
         if &buf[..4] == b"DMRD" {
-            assert_eq!(&buf[..n], &wire::data(&packet));
+            assert_eq!(&buf[..n], &wire::data(&packet).expect("ids in range"));
             break;
         }
     }
@@ -173,7 +174,8 @@ fn a_frame_is_never_relayed_back_to_its_sender() {
         ber: 0,
         rssi: 0,
     };
-    sock.send_to(&wire::data(&packet), addr).expect("send");
+    sock.send_to(&wire::data(&packet).expect("ids in range"), addr)
+        .expect("send");
 
     let mut buf = [0u8; astar_dmr::master::MAX_DATAGRAM];
     while let Ok((n, _)) = sock.recv_from(&mut buf) {
@@ -210,7 +212,9 @@ fn an_unauthenticated_peer_cannot_inject_a_frame() {
         ber: 0,
         rssi: 0,
     };
-    stranger.send_to(&wire::data(&packet), addr).expect("send");
+    stranger
+        .send_to(&wire::data(&packet).expect("ids in range"), addr)
+        .expect("send");
 
     let mut buf = [0u8; astar_dmr::master::MAX_DATAGRAM];
     while let Ok((n, _)) = listener.recv_from(&mut buf) {
@@ -250,7 +254,7 @@ fn the_parrot_replays_a_transmission_to_its_sender() {
             ber: 0,
             rssi: 0,
         };
-        sent.push(wire::data(&packet).to_vec());
+        sent.push(wire::data(&packet).expect("ids in range").to_vec());
         sock.send_to(sent.last().expect("just pushed"), addr)
             .expect("send");
     }

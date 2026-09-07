@@ -298,11 +298,20 @@ impl DmrFsm {
         let Some(packet) = wire::parse(datagram) else {
             return FsmAction::None;
         };
-        if !matches!(self.state, LinkState::Idle | LinkState::Failed) {
+        // Only a packet this protocol has a reading for counts as the far
+        // end being alive. `Unknown` covers RPTSBKN, an RPTO echo, a
+        // trunking command and plain noise, and treating those as proof of
+        // life would let a stranger's junk hold a dead link open past
+        // LINK_TIMEOUT for as long as they cared to keep sending it.
+        let alive = matches!(
+            packet,
+            Packet::Ack { .. } | Packet::Pong { .. } | Packet::Nak { .. } | Packet::Data(_)
+        );
+        if alive && !matches!(self.state, LinkState::Idle | LinkState::Failed) {
             self.last_rx = Some(now);
         }
         match packet {
-            Packet::Ack { salt, .. } => self.on_ack(salt, now),
+            Packet::Ack { id, salt } => self.on_ack(id, salt, now),
             Packet::Nak { .. } => self.on_nak(),
             Packet::MasterClosing { .. } => {
                 if matches!(
@@ -328,7 +337,14 @@ impl DmrFsm {
 
     /// `RPTACK` — a salt, or a step of the chain acknowledged. Which one it
     /// is, the state says.
-    fn on_ack(&mut self, salt: Option<[u8; 4]>, now: Instant) -> FsmAction {
+    ///
+    /// After `RPTK` and after `RPTC` the four bytes are the master echoing
+    /// **our** id back (`hblink.py` joins `RPTACK` with `_peer_id`), so an
+    /// ack naming somebody else is not ours and must not advance the chain:
+    /// one master serves many peers on one port, and a fan-out mistake at
+    /// the far end would otherwise walk us into `Linked` on another
+    /// station's acknowledgement.
+    fn on_ack(&mut self, id: u32, salt: Option<[u8; 4]>, now: Instant) -> FsmAction {
         match self.state {
             LinkState::LoggingIn => {
                 let Some(salt) = salt else {
@@ -340,12 +356,12 @@ impl DmrFsm {
                 self.stage_since = Some(now);
                 FsmAction::Send(wire::auth(self.id, salt, &self.password).to_vec())
             }
-            LinkState::Authenticating => {
+            LinkState::Authenticating if id == self.id.get() => {
                 self.state = LinkState::Configuring;
                 self.stage_since = Some(now);
                 FsmAction::Send(wire::config(self.id, &self.fields).to_vec())
             }
-            LinkState::Configuring => {
+            LinkState::Configuring if id == self.id.get() => {
                 self.state = LinkState::Linked;
                 self.stage_since = None;
                 self.last_ping = Some(now);
@@ -557,6 +573,53 @@ mod tests {
     }
 
     #[test]
+    fn an_ack_that_is_truncated_or_names_another_station_does_not_advance_the_chain() {
+        // One master serves many peers on one port. A short RPTACK carries no
+        // id at all, and one carrying somebody else's is their receipt, not
+        // ours; either walking us on a step would put the whole handshake out
+        // of phase with the master's idea of it.
+        let now = Instant::now();
+        let mut f = fsm();
+        f.connect(now);
+        f.on_packet(&ack([0x0A, 0x7E, 0xD4, 0x98]), now);
+        assert_eq!(f.state(), LinkState::Authenticating);
+
+        assert_eq!(f.on_packet(&ack([1, 2, 3, 4])[..8], now), FsmAction::None);
+        assert_eq!(f.state(), LinkState::Authenticating);
+
+        let someone_else = ack(RadioId::new(3_153_592).expect("id").to_be_bytes());
+        assert_eq!(f.on_packet(&someone_else, now), FsmAction::None);
+        assert_eq!(f.state(), LinkState::Authenticating);
+
+        // Configuring is the same story, one step along.
+        let ours = ack(f.radio_id().to_be_bytes());
+        assert!(matches!(f.on_packet(&ours, now), FsmAction::Send(_)));
+        assert_eq!(f.state(), LinkState::Configuring);
+        assert_eq!(f.on_packet(&someone_else, now), FsmAction::None);
+        assert_eq!(f.state(), LinkState::Configuring);
+        assert_eq!(f.on_packet(&ours, now), FsmAction::Linked);
+    }
+
+    #[test]
+    fn junk_does_not_hold_a_dead_link_open() {
+        // A datagram this protocol has no reading for is not proof the master
+        // is alive. If it were, anybody who could reach the socket could keep
+        // a link that died sixty seconds ago showing as up.
+        let t0 = Instant::now();
+        let mut f = linked(t0);
+        for offset in [10, 20, 30, 40, 50, 59] {
+            assert_eq!(
+                f.on_packet(b"RPTSBKN   ", t0 + Duration::from_secs(offset)),
+                FsmAction::None
+            );
+        }
+        assert_eq!(
+            f.tick(t0 + Duration::from_secs(60)),
+            FsmAction::Failed(FailureStage::Timeout)
+        );
+    }
+
+    #[test]
     fn a_master_close_fails_the_link_as_closed() {
         let now = Instant::now();
         let mut f = linked(now);
@@ -678,23 +741,29 @@ mod tests {
             ber: 0,
             rssi: 0,
         };
-        match f.on_packet(&wire::data(&mine), now) {
+        match f.on_packet(&wire::data(&mine).expect("ids in range"), now) {
             FsmAction::Data(d) => assert_eq!(d.src_id, 4242),
             other => panic!("expected data, got {other:?}"),
         }
 
         let mut wrong_tg = mine.clone();
         wrong_tg.dst_id = 91;
-        assert_eq!(f.on_packet(&wire::data(&wrong_tg), now), FsmAction::None);
+        assert_eq!(
+            f.on_packet(&wire::data(&wrong_tg).expect("ids in range"), now),
+            FsmAction::None
+        );
 
         let mut wrong_slot = mine.clone();
         wrong_slot.slot = Timeslot::Ts1;
-        assert_eq!(f.on_packet(&wire::data(&wrong_slot), now), FsmAction::None);
+        assert_eq!(
+            f.on_packet(&wire::data(&wrong_slot).expect("ids in range"), now),
+            FsmAction::None
+        );
 
         let mut private = mine.clone();
         private.call_type = wire::CallType::Private;
         private.dst_id = f.radio_id().get();
-        match f.on_packet(&wire::data(&private), now) {
+        match f.on_packet(&wire::data(&private).expect("ids in range"), now) {
             FsmAction::Data(d) => assert_eq!(d.call_type, wire::CallType::Private),
             other => panic!("a private call addressed to us is ours: {other:?}"),
         }
@@ -721,7 +790,10 @@ mod tests {
             ber: 0,
             rssi: 0,
         };
-        assert_eq!(f.on_packet(&wire::data(&frame), now), FsmAction::None);
+        assert_eq!(
+            f.on_packet(&wire::data(&frame).expect("ids in range"), now),
+            FsmAction::None
+        );
     }
 
     #[test]

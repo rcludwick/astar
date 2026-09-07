@@ -393,7 +393,10 @@ pub enum Packet {
     Ack {
         /// The four bytes read as a big-endian id.
         id: u32,
-        /// The same four bytes read as a salt, when they are there at all.
+        /// The same four bytes read as a salt. `None` never comes out of
+        /// [`parse`] — an `RPTACK` too short to carry them is not parsed as
+        /// an ack at all — but the shape stays optional so a caller that
+        /// synthesises one cannot pretend to a salt it does not have.
         salt: Option<[u8; 4]>,
     },
     /// `MSTNAK`. Which stage it arrived at is the whole diagnosis.
@@ -433,14 +436,16 @@ pub fn parse(datagram: &[u8]) -> Option<Packet> {
     if datagram.starts_with(TAG_DATA) {
         return parse_data(datagram);
     }
-    if datagram.starts_with(TAG_ACK) {
-        // A bare six-byte RPTACK names nothing. Reporting id 0 is safe
-        // rather than lossy: `RadioId` refuses 0, so it can never be
-        // mistaken for a peer.
-        let salt = four(datagram, 6);
+    if datagram.starts_with(TAG_ACK) && len >= ACK_LEN {
+        // The four bytes are reported as both a salt and an id; only the
+        // state machine knows which this one is. A shorter RPTACK carries
+        // neither, so it is not an acknowledgement of anything and must not
+        // be allowed to advance a handshake -- it falls through to
+        // `Unknown` rather than parsing with an invented id.
+        let salt = four(datagram, 6)?;
         return Some(Packet::Ack {
-            id: salt.map_or(0, u32::from_be_bytes),
-            salt,
+            id: u32::from_be_bytes(salt),
+            salt: Some(salt),
         });
     }
     if datagram.starts_with(TAG_NAK) && len >= NAK_LEN {
@@ -629,9 +634,42 @@ pub fn close(id: RadioId) -> [u8; CLOSE_LEN] {
     out
 }
 
+/// Why a [`DataPacket`] could not be written to the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataError {
+    /// `src_id` is past the 24 bits its field holds.
+    SourceTooLarge,
+    /// `dst_id` is past the 24 bits its field holds.
+    DestinationTooLarge,
+}
+
+impl std::fmt::Display for DataError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SourceTooLarge => write!(f, "source id is past {RADIO_ID_MAX} — 24 bits"),
+            Self::DestinationTooLarge => {
+                write!(f, "destination id is past {RADIO_ID_MAX} — 24 bits")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DataError {}
+
 /// Builds a `DMRD` at the full 55 bytes.
-#[must_use]
-pub fn data(packet: &DataPacket) -> [u8; DATA_LEN] {
+///
+/// # Errors
+/// [`DataError`] if either id is past the 24 bits its field holds. Truncating
+/// silently — which is what writing the low three bytes and saying nothing
+/// would do — would send a frame **addressed to somebody else**: a
+/// destination of `0x0100_0059` would go out as TG 89.
+pub fn data(packet: &DataPacket) -> Result<[u8; DATA_LEN], DataError> {
+    if packet.src_id > RADIO_ID_MAX {
+        return Err(DataError::SourceTooLarge);
+    }
+    if packet.dst_id > RADIO_ID_MAX {
+        return Err(DataError::DestinationTooLarge);
+    }
     let mut out = [0u8; DATA_LEN];
     out[..4].copy_from_slice(TAG_DATA);
     out[4] = packet.seq;
@@ -648,7 +686,7 @@ pub fn data(packet: &DataPacket) -> [u8; DATA_LEN] {
     out[20..53].copy_from_slice(&packet.burst);
     out[53] = packet.ber;
     out[54] = packet.rssi;
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -790,6 +828,22 @@ mod tests {
     }
 
     #[test]
+    fn a_truncated_ack_is_not_an_ack() {
+        // Six to nine bytes of "RPTACK" carry neither a salt nor an id, so
+        // they acknowledge nothing. Parsing them as an ack with an invented
+        // id would let a stray datagram advance a handshake.
+        for len in 6..ACK_LEN {
+            let mut short = [0u8; ACK_LEN];
+            short[..6].copy_from_slice(b"RPTACK");
+            assert_eq!(
+                parse(&short[..len]),
+                Some(Packet::Unknown(short[..len].to_vec())),
+                "an {len}-byte RPTACK must not parse as an ack"
+            );
+        }
+    }
+
+    #[test]
     fn a_nak_a_pong_and_a_master_close_are_recognised() {
         let mut nak = [0u8; 10];
         nak[..6].copy_from_slice(b"MSTNAK");
@@ -833,7 +887,7 @@ mod tests {
         // CDMRNetwork::write lays out tag(4) seq(1) src(3) dst(3) peer(4)
         // bits(1) stream(4) burst(33) ber(1) rssi(1).
         let packet = sample_data();
-        let bytes = data(&packet);
+        let bytes = data(&packet).expect("ids in range");
         assert_eq!(bytes.len(), 55);
         assert_eq!(&bytes[..4], b"DMRD");
         assert_eq!(bytes[4], 7);
@@ -853,18 +907,18 @@ mod tests {
         // and hblink.py: `'unit' if (_bits & 0x40) else 'group'`.
         let mut p = sample_data();
         p.call_type = CallType::Group;
-        assert_eq!(data(&p)[15] & 0x40, 0x00);
+        assert_eq!(data(&p).expect("ids in range")[15] & 0x40, 0x00);
         p.call_type = CallType::Private;
-        assert_eq!(data(&p)[15] & 0x40, 0x40);
+        assert_eq!(data(&p).expect("ids in range")[15] & 0x40, 0x40);
     }
 
     #[test]
     fn the_timeslot_bit_is_set_for_ts2_only() {
         let mut p = sample_data();
         p.slot = Timeslot::Ts1;
-        assert_eq!(data(&p)[15] & 0x80, 0x00);
+        assert_eq!(data(&p).expect("ids in range")[15] & 0x80, 0x00);
         p.slot = Timeslot::Ts2;
-        assert_eq!(data(&p)[15] & 0x80, 0x80);
+        assert_eq!(data(&p).expect("ids in range")[15] & 0x80, 0x80);
     }
 
     #[test]
@@ -873,11 +927,11 @@ mod tests {
         // with 5-4 clear; anything else -> 0x20 | dataType.
         let mut p = sample_data();
         p.frame_type = FrameType::VoiceSync;
-        assert_eq!(data(&p)[15] & 0x3F, 0x10);
+        assert_eq!(data(&p).expect("ids in range")[15] & 0x3F, 0x10);
         p.frame_type = FrameType::Voice { n: 3 };
-        assert_eq!(data(&p)[15] & 0x3F, 0x03);
+        assert_eq!(data(&p).expect("ids in range")[15] & 0x3F, 0x03);
         p.frame_type = FrameType::DataSync { data_type: 0x02 };
-        assert_eq!(data(&p)[15] & 0x3F, 0x22);
+        assert_eq!(data(&p).expect("ids in range")[15] & 0x3F, 0x22);
         for want in [
             FrameType::VoiceSync,
             FrameType::Voice { n: 5 },
@@ -885,7 +939,7 @@ mod tests {
             FrameType::Reserved { low: 0x0D },
         ] {
             p.frame_type = want;
-            let Some(Packet::Data(back)) = parse(&data(&p)) else {
+            let Some(Packet::Data(back)) = parse(&data(&p).expect("ids in range")) else {
                 panic!("data")
             };
             assert_eq!(back.frame_type, want);
@@ -898,7 +952,7 @@ mod tests {
         // length, so a relay can arrive without G4KLX's two trailing bytes.
         // Refusing it would silence a whole class of master over a field
         // astar does not use.
-        let bytes = data(&sample_data());
+        let bytes = data(&sample_data()).expect("ids in range");
         let Some(Packet::Data(short)) = parse(&bytes[..53]) else {
             panic!("data")
         };
@@ -915,10 +969,31 @@ mod tests {
         // extension"). That is YO8RZZ's trunking work, not the homebrew
         // protocol TGIF speaks; astar sends 55, accepts 53 or 55, and reads
         // nothing else as a DMRD.
-        let mut long = data(&sample_data()).to_vec();
+        let mut long = data(&sample_data()).expect("ids in range").to_vec();
         long.extend_from_slice(&[0u8; 16]);
         assert_eq!(long.len(), 71);
         assert_eq!(parse(&long), None);
+    }
+
+    #[test]
+    fn an_id_past_twenty_four_bits_is_refused_rather_than_truncated() {
+        // Writing the low three bytes and saying nothing would put a frame on
+        // the air addressed to somebody else: 0x0100_0059 as a destination
+        // would go out as TG 89.
+        let mut p = sample_data();
+        p.src_id = 0x0100_0000;
+        assert_eq!(data(&p), Err(DataError::SourceTooLarge));
+
+        let mut p = sample_data();
+        p.dst_id = 0x0100_0059;
+        assert_eq!(data(&p), Err(DataError::DestinationTooLarge));
+
+        let mut p = sample_data();
+        p.src_id = RADIO_ID_MAX;
+        p.dst_id = RADIO_ID_MAX;
+        let bytes = data(&p).expect("the widest legal pair");
+        assert_eq!(&bytes[5..8], &[0xFF, 0xFF, 0xFF]);
+        assert_eq!(&bytes[8..11], &[0xFF, 0xFF, 0xFF]);
     }
 
     #[test]
@@ -926,7 +1001,7 @@ mod tests {
         // Both DMRGateway and DroidStar memcpy a host-order uint32 in and
         // out, so there is no wire byte order to honour -- only equality.
         let p = sample_data();
-        let Some(Packet::Data(back)) = parse(&data(&p)) else {
+        let Some(Packet::Data(back)) = parse(&data(&p).expect("ids in range")) else {
             panic!("data")
         };
         assert_eq!(back.stream_id, [0xDE, 0xAD, 0xBE, 0xEF]);

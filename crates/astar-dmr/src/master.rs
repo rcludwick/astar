@@ -585,12 +585,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn two_peers_get_two_different_salts() {
+    fn successive_salts_differ() {
         // A constant salt would make one recorded digest authenticate
         // forever, and would hide a client that ignored the salt entirely.
+        //
+        // Asserted over a run rather than on one pair: two four-byte salts
+        // collide by chance once in 2^32, which as a single assertion is a
+        // flake waiting to happen. Sixteen samples all coming back equal is
+        // not chance, it is a broken generator.
         let a: SocketAddr = "127.0.0.1:60001".parse().expect("v4");
         let b: SocketAddr = "127.0.0.1:60002".parse().expect("v4");
-        assert_ne!(mint_salt(a), mint_salt(b));
-        assert_ne!(mint_salt(a), mint_salt(a));
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..16 {
+            seen.insert(mint_salt(a));
+            seen.insert(mint_salt(b));
+        }
+        assert!(
+            seen.len() > 16,
+            "salts are not varying: {} distinct out of 32",
+            seen.len()
+        );
     }
 }
