@@ -1155,13 +1155,18 @@ mod tests {
     }
 
     #[test]
-    fn two_errors_in_one_deinterleaved_column_are_refused_rather_than_miscorrected() {
+    fn no_two_bit_pattern_is_miscorrected_and_only_a_doubled_column_is_refused() {
         // Where the product code's limit actually is, and which check finds
-        // it. Two errors in one *row* are two different columns' problem, one
-        // each, and the column pass -- which runs first -- repairs them
-        // outright. Two errors in one *column* are past Hamming (13,9,3), and
-        // when one of them sits in a column-parity row the row pass never
-        // touches, nothing can repair it. The reference extracts the payload
+        // it -- established exhaustively rather than by two hand-picked
+        // flips, because the interesting claim is about every pattern.
+        //
+        // All 19_110 two-bit patterns, and not one comes back as a DIFFERENT
+        // full LC: the answer is always the right one or no answer. Two
+        // errors in one *row* are two different columns' problem, one each,
+        // and the column pass -- which runs first -- repairs them outright.
+        // Two errors in one *column* are past Hamming (13,9,3), and when one
+        // of them sits in a column-parity row the row pass never touches,
+        // nothing can repair it. The reference extracts the payload
         // regardless; this returns None, and it is the final column re-check
         // that says so.
         let lc: [u8; 12] = [
@@ -1171,7 +1176,7 @@ mod tests {
         bptc19696_encode(&lc, &mut clean);
 
         // raw[(a * 181) mod 196] is where deinterleaved bit `a` landed, so a
-        // pattern that is neighbouring in the matrix is scattered in the
+        // pattern that is neighbouring in the matrix is scattered across the
         // burst -- which is the whole point of the interleave.
         let flip = |positions: [usize; 2]| {
             let mut raw = burst_to_raw(&clean);
@@ -1184,11 +1189,36 @@ mod tests {
             bptc19696_decode(&burst)
         };
 
-        // Row 0, columns 0 and 1. The matrix is 13 x 15 starting at index 1,
-        // so row r column c is deinterleaved index 1 + 15 * r + c.
+        // The matrix is 13 x 15 starting at index 1, so deinterleaved index
+        // `a` is row (a - 1) / 15, column (a - 1) % 15. Index 0 is the unused
+        // R(3) bit and belongs to no row or column. Rows 0..8 are the ones
+        // the row pass covers; rows 9..12 are column parity.
+        let mut refused = 0usize;
+        for a in 0..196usize {
+            for b in (a + 1)..196 {
+                let Some(got) = flip([a, b]) else {
+                    refused += 1;
+                    assert!(a >= 1, "({a}, {b}): index 0 is in no column");
+                    assert_eq!(
+                        (a - 1) % 15,
+                        (b - 1) % 15,
+                        "({a}, {b}) was refused from two different columns"
+                    );
+                    assert!(
+                        (a - 1) / 15 >= 9 || (b - 1) / 15 >= 9,
+                        "({a}, {b}): two data rows are repairable by the row pass"
+                    );
+                    continue;
+                };
+                assert_eq!(got, lc, "({a}, {b}) came back as another LC");
+            }
+        }
+        assert_eq!(refused, 240, "the refused two-bit patterns");
+
+        // The two named examples the exhaustive loop above generalises.
+        // Row 0, columns 0 and 1:
         assert_eq!(flip([1, 2]), Some(lc), "one error per column is repairable");
-        // Column 0, rows 3 and 9. Row 9 is column parity: the row pass covers
-        // rows 0..8 only, so it cannot see this one at all.
+        // Column 0, rows 3 and 9, and row 9 is column parity:
         assert_eq!(flip([1 + 15 * 3, 1 + 15 * 9]), None);
     }
 

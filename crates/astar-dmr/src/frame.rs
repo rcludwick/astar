@@ -441,7 +441,9 @@ pub fn full_lc(burst: &[u8; BURST_LEN], data_type: u8) -> Option<LinkControl> {
 ///
 /// It refuses to start mid-sequence, and a run that does not arrive as
 /// 1-3-3-2 is dropped rather than decoded from whatever is held: a
-/// plausible-looking wrong source id is worse than no talker at all.
+/// plausible-looking wrong source id is worse than no talker at all. Feed it
+/// every burst of the timeslot — [`push`](Self::push) recognises the ones
+/// that carry a sync pattern instead of an EMB and ends the run on them.
 #[derive(Debug)]
 pub struct EmbeddedLcAssembler {
     raw: [bool; 128],
@@ -464,8 +466,28 @@ impl EmbeddedLcAssembler {
         }
     }
 
-    /// Feed one burst. Returns the LC on the fragment that completes it.
+    /// Feed one burst — **any** burst of the timeslot, sync or voice.
+    /// Returns the LC on the fragment that completes it.
+    ///
+    /// Bursts carrying a sync pattern are not fragments and are rejected
+    /// before their middle field is read at all, because a sync pattern read
+    /// as an EMB is not reliably nonsense: QR(16,7,6) over
+    /// `MS_SOURCED_AUDIO_SYNC`'s EMB nibbles decodes as a valid
+    /// `cc = 7, lcss = 3` continuation, and over `MS_SOURCED_DATA_SYNC`'s as
+    /// a valid `cc = 13, lcss = 2` *last fragment*. Without this guard a
+    /// stream truncated after burst D, followed by the next stream's
+    /// voice-LC-header burst, would push 32 bits of the sync pattern into the
+    /// fourth slot and hand the result to BPTC(128,77) — which is then the
+    /// only thing standing between the operator and a wrong talker. Dropping
+    /// a torn sequence has to be by construction, not by probability.
     pub fn push(&mut self, burst: &[u8; BURST_LEN]) -> Option<LinkControl> {
+        // Burst A and every signalling burst put a sync pattern where the EMB
+        // would be. Neither carries a fragment, and both end whatever run was
+        // in progress.
+        if sync_of(burst) != Sync::None {
+            self.reset();
+            return None;
+        }
         // No readable EMB means no LCSS, and an LCSS guessed from a failed
         // QR check is how the wrong fragment lands in the right slot.
         let Some(emb) = emb(burst) else {
@@ -805,6 +827,128 @@ mod tests {
             );
             assert_eq!(assembler.push(&burst), None);
         }
+    }
+
+    /// A burst carrying one 32-bit slice of `raw` and the EMB that says where
+    /// it belongs.
+    fn fragment_burst(raw: &[bool; 128], n: usize, lcss: u8) -> [u8; BURST_LEN] {
+        let mut burst = [0u8; BURST_LEN];
+        let mut fragment = [false; 32];
+        fragment.copy_from_slice(&raw[n * 32..(n + 1) * 32]);
+        write_embedded_fragment(&mut burst, &fragment);
+        write_emb(
+            &mut burst,
+            Emb {
+                colour_code: 1,
+                pi: false,
+                lcss,
+            },
+        );
+        burst
+    }
+
+    /// A real voice-LC-header burst: MS data sync, slot type, full LC.
+    fn voice_lc_header_burst() -> [u8; BURST_LEN] {
+        let mut burst = [0u8; BURST_LEN];
+        let mut payload = [0u8; 12];
+        payload[..9].copy_from_slice(&lc().to_bytes());
+        let parity = crate::fec::rs129_parity(&lc().to_bytes());
+        payload[9] = parity[2] ^ VOICE_LC_HEADER_CRC_MASK[0];
+        payload[10] = parity[1] ^ VOICE_LC_HEADER_CRC_MASK[1];
+        payload[11] = parity[0] ^ VOICE_LC_HEADER_CRC_MASK[2];
+        crate::fec::bptc19696_encode(&payload, &mut burst);
+        write_sync(&mut burst, Sync::MsData);
+        write_slot_type(
+            &mut burst,
+            SlotType {
+                colour_code: 1,
+                data_type: DT_VOICE_LC_HEADER,
+            },
+        );
+        burst
+    }
+
+    #[test]
+    fn a_sync_pattern_read_as_an_emb_is_not_reliably_nonsense() {
+        // Why the guard in push() has to exist. Six of the eight patterns fail
+        // the QR(16,7,6) check in the EMB nibble positions, and two do not:
+        // MS_SOURCED_AUDIO_SYNC reads as a valid continuation and
+        // MS_SOURCED_DATA_SYNC -- which every signalling burst carries -- as a
+        // valid LAST fragment, the one LCSS that triggers a decode.
+        let mut audio = [0u8; BURST_LEN];
+        write_sync(&mut audio, Sync::MsAudio);
+        assert_eq!(
+            emb(&audio),
+            Some(Emb {
+                colour_code: 7,
+                pi: false,
+                lcss: 3
+            })
+        );
+        assert_eq!(
+            emb(&voice_lc_header_burst()),
+            Some(Emb {
+                colour_code: 13,
+                pi: false,
+                lcss: 2
+            })
+        );
+        for sync in [
+            Sync::BsAudio,
+            Sync::BsData,
+            Sync::DirectSlot1Audio,
+            Sync::DirectSlot1Data,
+            Sync::DirectSlot2Audio,
+            Sync::DirectSlot2Data,
+        ] {
+            let mut burst = [0u8; BURST_LEN];
+            write_sync(&mut burst, sync);
+            assert_eq!(emb(&burst), None, "{sync:?}");
+        }
+    }
+
+    #[test]
+    fn a_sync_burst_ends_a_run_rather_than_being_taken_for_a_fragment() {
+        // The scenario the guard is for. A run in progress, then the next
+        // transmission starts: burst A carries a sync pattern, and two of the
+        // eight read back through QR(16,7,6) as a valid LCSS. Whether the
+        // resulting matrix happens to fail BPTC(128,77) depends on the LC,
+        // which is no guarantee at all -- so the count of fragments held is
+        // what this asserts, not just the absence of an answer.
+        let raw = crate::fec::bptc12877_encode(&lc().to_bytes());
+        let mut assembler = EmbeddedLcAssembler::new();
+
+        assert_eq!(assembler.push(&fragment_burst(&raw, 0, 1)), None);
+        assert_eq!(assembler.held, 1);
+        let mut audio = [0u8; BURST_LEN];
+        write_sync(&mut audio, Sync::MsAudio);
+        assert_eq!(assembler.push(&audio), None);
+        assert_eq!(
+            assembler.held, 0,
+            "MS_SOURCED_AUDIO_SYNC reads as lcss = 3 and must not be taken \
+             for the second fragment"
+        );
+
+        // Now the worse one: three fragments held, and the next stream's
+        // voice-LC-header burst arrives carrying MS_SOURCED_DATA_SYNC, which
+        // reads as lcss = 2 -- the LAST fragment, the one that decodes.
+        for (n, lcss) in [(0usize, 1u8), (1, 3), (2, 3)] {
+            assert_eq!(assembler.push(&fragment_burst(&raw, n, lcss)), None);
+        }
+        assert_eq!(assembler.held, 3);
+        assert_eq!(assembler.push(&voice_lc_header_burst()), None);
+        assert_eq!(
+            assembler.held, 0,
+            "a signalling burst must not fill the fourth slot"
+        );
+
+        // A clean B-E after all that still decodes, so the guard cost nothing.
+        let mut got = None;
+        for (n, lcss) in [(0usize, 1u8), (1, 3), (2, 3), (3, 2)] {
+            got = assembler.push(&fragment_burst(&raw, n, lcss)).or(got);
+        }
+        assert_eq!(got, Some(lc()));
+        assert_eq!(assembler.held, 0);
     }
 
     #[test]
