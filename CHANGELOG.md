@@ -102,6 +102,10 @@ current.
 
 ### Fixed
 
+- **The app dials as a slin16 station again whichever network it used first.**
+  Digital voice now rides a 16 kHz station through an exact 8↔16 kHz bridge
+  instead of pinning the engine to 8 kHz.
+
 - **Failures say what actually went wrong.** A dial that failed used to read
   something like "astarstation error -7: audio error" — a number and a
   category, neither of which tells you what to do about it. The engine knew

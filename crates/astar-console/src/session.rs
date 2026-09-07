@@ -2627,7 +2627,7 @@ impl ConsoleSession {
     /// the rest of the process.
     ///
     /// "Idle" is strict: no pooled calls, no inbound listener, no voice
-    /// route, no digital session. A live `WireGuard` transport with no
+    /// route, no digital session, no live registration. A live `WireGuard` transport with no
     /// pending config left to replay it from also blocks the rebuild — a
     /// fresh engine would come up on plain UDP and the dial would leave the
     /// tunnel without saying so. In both cases the old (capped) behaviour
@@ -2658,6 +2658,9 @@ impl ConsoleSession {
             && self.active.is_none()
             && self.inbound.is_none()
             && self.voice_route.is_none()
+            // A live registration took a clone of THIS engine's net stack; a
+            // rebuild would leave it running on an orphaned transport.
+            && self.reg_handle.is_none()
             && !self.m17_is_active()
             && !self.dstar_is_active()
             && !self.ysf_is_active();

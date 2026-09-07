@@ -9,7 +9,7 @@ use astar_console::{
     CallStatus, ConsoleConfig, ConsoleSession, ConsoleState, LinkConnectSpec, OperatingMode,
     RegisterOutcome,
 };
-use astar_iax::{CallMode, LinkEvent, LinkMode, LinkRoster};
+use astar_iax::{CallMode, CodecPolicy, IncomingCallPolicy, LinkEvent, LinkMode, LinkRoster};
 use astar_iax_core::session::auth::Secret;
 
 use crate::config::NodeConfig;
@@ -358,6 +358,25 @@ impl Station {
         if let Ok(mut s) = self.session.lock() {
             s.set_station_policy(self.config.codec_policy);
         }
+    }
+
+    /// Default an inbound policy's codec policy to the station's own
+    /// (iax-4348). `IncomingCallPolicy::codec_policy` has no "unset" state, so
+    /// "the caller did not choose" is read as the library default
+    /// (`UlawOnly`); anything else the caller set is left alone, which keeps
+    /// asymmetric inbound/outbound policy available.
+    ///
+    /// Without this a `prefer_slin16` station drops to 8 kHz the moment the
+    /// listener starts — `start_inbound` pins `station_policy` from the
+    /// inbound policy — and then STAYS there, because a listening engine is
+    /// never idle enough to rebuild. Worse, on an engine already up at 16 kHz
+    /// the 8 kHz leg the listener builds is refused outright at adopt
+    /// ("listener/station sample-rate mismatch").
+    fn inbound_policy(&self, mut policy: IncomingCallPolicy) -> IncomingCallPolicy {
+        if policy.codec_policy == CodecPolicy::default() {
+            policy.codec_policy = self.config.codec_policy;
+        }
+        policy
     }
 
     /// Select the capture/playback devices applied to the next [`Station::connect`]
@@ -1228,7 +1247,7 @@ impl Station {
         let mut sess = self.session.lock().unwrap();
         sess.start_inbound_with_allowlist(
             cfg.bind,
-            cfg.policy,
+            self.inbound_policy(cfg.policy),
             cfg.answer,
             cfg.max_calls,
             cfg.allowlist,
@@ -1363,7 +1382,7 @@ impl Station {
                     let mut sess = self.session.lock().unwrap();
                     sess.start_inbound_with_allowlist(
                         cfg.bind,
-                        crate::config::clone_policy(&cfg.policy),
+                        self.inbound_policy(crate::config::clone_policy(&cfg.policy)),
                         cfg.answer,
                         cfg.max_calls,
                         cfg.allowlist.clone(),

@@ -607,7 +607,7 @@ fn drain_tx_frames(
 ) {
     while let Ok(frame) = call_audio.tx_frames.try_recv() {
         let Some(pcm) = frame_to_array(&frame) else {
-            continue; // defensive: StreamConfig::default() guarantees len 160
+            continue; // defensive: the route's 8 kHz edge guarantees len 160
         };
         if let Some(first) = tx.pending.take() {
             let frame_no = tx.next_frame_no();

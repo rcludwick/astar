@@ -100,6 +100,9 @@ struct RateBridge {
     /// Anti-alias cascade run at `from` before a downsample; empty upward.
     aa: Vec<Biquad>,
     rs: Resampler1,
+    /// Samples one input frame is expected to carry — the framing this whole
+    /// recipe depends on.
+    in_frame: usize,
     /// Resampled-but-not-yet-framed output. The interpolator holds back a
     /// few warm-up samples, so the first pass runs short; this lets every
     /// call emit a full frame instead of propagating a short one.
@@ -118,6 +121,7 @@ impl RateBridge {
             // Chunk = one 20 ms input frame: with the integer 8↔16 kHz
             // ratio, one frame in yields exactly one frame out.
             rs: Resampler1::with_chunk(from, to, frame_len(from))?,
+            in_frame: frame_len(from),
             fifo: Vec::new(),
             out_frame: frame_len(to),
         })
@@ -127,6 +131,15 @@ impl RateBridge {
     /// which case the frame is dropped rather than the route poisoned.
     #[allow(clippy::cast_possible_truncation)]
     fn convert(&mut self, pcm: &[i16]) -> Option<Vec<i16>> {
+        // One frame in, one frame out is the whole contract: an off-size
+        // input would still convert, but the FIFO would slide and the
+        // cadence would drift a sample at a time. Nothing in this crate
+        // produces one — say so loudly in a debug build.
+        debug_assert_eq!(
+            pcm.len(),
+            self.in_frame,
+            "rate bridge fed an off-size frame"
+        );
         let mut f: Vec<f32> = pcm.iter().map(|&s| f32::from(s) / 32768.0).collect();
         for bq in &mut self.aa {
             bq.process(&mut f);
@@ -150,13 +163,26 @@ impl Bridge {
     /// Stop both threads and wait for them. Bounded by [`POLL`]: the flag is
     /// set for both before either is joined, and each wakes to check it at
     /// least that often even with no traffic at all.
-    fn join(self) {
+    fn join(mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        for t in self.threads {
+        // Taken, not moved out: `Bridge` implements `Drop` (which only sets
+        // the same flag again, harmlessly).
+        for t in std::mem::take(&mut self.threads) {
             if t.join().is_err() {
                 tracing::warn!("voice route: a rate-bridge thread panicked");
             }
         }
+    }
+}
+
+impl Drop for Bridge {
+    /// Belt and braces for the path that never calls [`Bridge::join`] — a
+    /// `VoiceRoute` dropped rather than released (a panic unwinding through
+    /// the session, say). The threads are not joined here (a `Drop` must not
+    /// block), but they stop within one [`POLL`] instead of spinning for the
+    /// life of the process.
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
     }
 }
 
@@ -267,8 +293,17 @@ impl VoiceRoute {
                 session_hz = SESSION_RATE,
                 "voice route: rate-bridging the digital session onto the station bus"
             );
-            let (a, b) = spawn_bridge(bus_audio, config.sample_rate)?;
-            (a, Some(b))
+            match spawn_bridge(bus_audio, config.sample_rate) {
+                Ok((a, b)) => (a, Some(b)),
+                Err(e) => {
+                    // The bus was opened a line ago and nothing owns it yet:
+                    // give it back, or a failed open leaks the output device
+                    // AND leaves a dead lane in the mixer.
+                    router.remove_from_bus(&out, mix_id);
+                    drop(router.close_output(&out));
+                    return Err(e);
+                }
+            }
         };
         let mut route = VoiceRoute {
             out,

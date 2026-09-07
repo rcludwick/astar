@@ -152,12 +152,22 @@ pub struct StationConfig {
     /// `None` = the live `AllStarLink` portal. Set only to point at a staging or
     /// stub portal (e.g. an offline test harness); not exposed across the C-ABI.
     pub portal_base: Option<String>,
-    /// Codec negotiation policy for OUTBOUND calls placed by this station
-    /// (iax-31f7). Default `UlawOnly`. **Outbound-only**: this field feeds
-    /// `connect`/`connect_wt` only. Inbound calls take their codec policy from
-    /// `node.policy.codec_policy` (or `NodeConfig::default()`'s
-    /// `IncomingCallPolicy::default()`, also `UlawOnly`) — set that field
-    /// directly if a caller wants asymmetric inbound/outbound policy.
+    /// The station's codec negotiation policy (iax-31f7, iax-4348). Default
+    /// `UlawOnly`. Three things at once, and they are deliberately one field:
+    ///
+    /// * **It pins the station's audio pipeline rate**, at construction,
+    ///   before anything can build the engine — 16 kHz for a policy that can
+    ///   offer slin16, else 8 kHz. The rate is fixed when the engine is built
+    ///   and every dial's policy is capped to it, so a `prefer_slin16` station
+    ///   only really offers slin16 if this is known first. It is what makes
+    ///   the app and `astar-server` slin16 stations whichever network — IAX2,
+    ///   M17, D-Star or System Fusion — happens to start first.
+    /// * **It is the policy for OUTBOUND calls** (`connect`/`connect_wt`).
+    /// * **It is the DEFAULT for inbound calls.** `enable_inbound` and
+    ///   `set_mode(Node)` fill it into the inbound policy whenever the caller
+    ///   left `node.policy.codec_policy` at its own `UlawOnly` default. Set
+    ///   that field to anything else for an asymmetric inbound/outbound
+    ///   policy; it is then honoured as given.
     pub codec_policy: CodecPolicy,
 }
 

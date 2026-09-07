@@ -7,9 +7,11 @@
 #![allow(clippy::too_many_lines)]
 
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use astar_iax::{IncomingAuthPolicy, IncomingCallPolicy};
+use astar_console::ConsoleSession;
+use astar_iax::{CodecPolicy, IncomingAuthPolicy, IncomingCallPolicy};
 use astar_iax_core::Subclass;
 use astar_iax_core::frame::{Frame, FullFrame, encode, parse_lenient};
 use astar_iax_core::ie::Ies;
@@ -515,5 +517,78 @@ fn each_concurrent_inbound_call_fires_a_fresh_answered_event() {
     assert_eq!(
         answered_events, 2,
         "each concurrent caller must fire its own Answered edge (got {answered_events})"
+    );
+}
+
+// ---- iax-4348: the node inherits the station's codec policy ----------------
+//
+// `StationConfig.codec_policy` pins the station's pipeline rate at
+// construction, and the inbound policy defaults to it. Before that default
+// existed, `IncomingCallPolicy::default()`'s `UlawOnly` reached
+// `start_inbound`, which sets `station_policy` from it — so a prefer_slin16
+// node dropped to 8 kHz the moment its listener came up, and stayed there
+// (a listening engine is never idle enough to rebuild). And on an engine
+// already at 16 kHz, the 8 kHz leg the listener built was refused at adopt
+// with "listener/station sample-rate mismatch" — a node that answered
+// nothing.
+
+#[test]
+fn a_prefer_slin16_node_adopts_a_ulaw_caller_on_its_16k_pipeline() {
+    let policy = IncomingCallPolicy {
+        auth: IncomingAuthPolicy::Off,
+        // codec_policy deliberately left at its own default: this is the
+        // caller who never chose, and must inherit the station's.
+        ..IncomingCallPolicy::default()
+    };
+    let cfg = StationConfig {
+        mode: OperatingMode::Node,
+        codec_policy: CodecPolicy::PreferSlin16,
+        node: Some(NodeConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            policy,
+            answer: AnswerPolicy::Auto,
+            register: None,
+            max_calls: 20,
+            allowlist: None,
+        }),
+        ..StationConfig::default()
+    };
+    let session = Arc::new(Mutex::new(ConsoleSession::new()));
+    let station = Station::with_shared_session(
+        cfg,
+        Arc::clone(&session),
+        Box::new(|| Box::new(astar_audio::NullBackend::new())),
+    );
+    let addr = station.node_bind_addr().expect("node listener bound");
+    assert_eq!(
+        session.lock().unwrap().pipeline_sample_rate(),
+        16_000,
+        "starting the listener must not drop a prefer_slin16 station to 8 kHz"
+    );
+
+    // A µ-law-only caller: the far end's narrow capability must not be able
+    // to change what the STATION's own bus runs at.
+    let (peer, _pa) = peer_socket();
+    peer.send_to(&new_datagram(valid_new_ies(), PEER_CALL), addr)
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut answered = false;
+    while Instant::now() < deadline && !answered {
+        let snap = station.snapshot();
+        pump_acks(&peer, addr, PEER_CALL);
+        if snap.status == CallStatus::Answered {
+            answered = true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        answered,
+        "the µ-law caller must be adopted, not refused for a rate mismatch"
+    );
+    assert_eq!(
+        session.lock().unwrap().pipeline_sample_rate(),
+        16_000,
+        "the station's pipeline stays 16 kHz across an adopted 8 kHz-codec leg"
     );
 }
