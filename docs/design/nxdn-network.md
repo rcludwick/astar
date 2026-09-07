@@ -55,9 +55,11 @@ As with YSF: **read the reference, do not recall the wire format.** Build
 
 1. `crates/astar-nxdn` — framing, link FSM, loopback reflector.
 2. NXDN frame packing against the existing AMBE+2 path.
-3. `crates/astar-console/src/nxdn.rs` — session, `SharedState`, `apply_audio`,
-   `connect_with_stream`.
-4. `ConsoleSession` §2.4 wiring, **audio fan-out included**.
+3. `crates/astar-console/src/nxdn.rs` — session, `SharedState` (link/talker/
+   `ptt` only), `connect_with_audio`/`connect_with_stream` taking a
+   `CallAudio` from the station's voice route (adding-a-network.md §2.3) —
+   the session owns no `AudioRouter`.
+4. `ConsoleSession` §2.4 wiring.
 5. Station facade, features, C ABI, `just cbindgen`, Swift binding,
    `Network.nxdn`.
 

@@ -29,8 +29,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use astar_audio::{
-    AudioBackend, AudioError, DeviceId, DeviceInfo, Direction, InputSink, OutputSource,
-    StreamConfig, StreamHandle,
+    AudioBackend, AudioError, AudioRouter, CallAudio, DeviceId, DeviceInfo, Direction, InputSink,
+    MicId, OutputId, OutputSource, StreamConfig, StreamHandle,
 };
 use astar_codec::ambe::{AMBE_STREAM_MAX_IN_FLIGHT, AmbeBackend, AmbeStream};
 use astar_console::{DstarConfig, DstarSession};
@@ -292,6 +292,44 @@ impl AudioBackend for PushPullBackend {
         *self.output_tap.lock().unwrap() = Some(source);
         Ok(Box::new(NullHandle))
     }
+}
+
+/// Build the ONE audio lane a [`DstarSession`] is now handed. The session no
+/// longer owns a router, a mic or a bus — `ConsoleSession`'s `VoiceRoute`
+/// does that in production, and this file owns it here — so a test that wants
+/// to transmit keys the returned `MicId`'s gate itself, exactly as
+/// `ConsoleSession::set_ptt` does.
+///
+/// Returns the router (which MUST be kept alive: it owns the streams), the
+/// session's channel ends, and the mic whose gate is the PTT.
+fn route(backend: Box<dyn AudioBackend>) -> (AudioRouter, CallAudio, MicId) {
+    let mic = MicId::new(
+        backend
+            .default_input()
+            .expect("the test backend has an input")
+            .id
+            .as_str(),
+    );
+    let out = OutputId::new(
+        backend
+            .default_output()
+            .expect("the test backend has an output")
+            .id
+            .as_str(),
+    );
+    let mut router = AudioRouter::new(backend);
+    let (audio, mic_tx, _mix) = router
+        .open_monitor_call(&out, StreamConfig::default())
+        .expect("bus");
+    router
+        .open_mic_lane(
+            &mic,
+            mic_tx,
+            Arc::clone(&audio.preroll_lead),
+            StreamConfig::default(),
+        )
+        .expect("mic");
+    (router, audio, mic)
 }
 
 /// Push a constant-level PCM "tone" straight into the stashed mic sink (the
@@ -563,6 +601,10 @@ struct Fixture {
     mic_sink: MicSink,
     output_tap: OutputTap,
     stats: Arc<Mutex<VocoderStats>>,
+    /// The lane the session rides. Kept alive for the fixture's lifetime —
+    /// it owns the streams — and it is what [`Fixture::key`] gates.
+    router: AudioRouter,
+    mic: MicId,
     /// `None` when the session is pointed at a hand-rolled stand-in
     /// reflector (see `FakeReflector`) rather than the real loopback one.
     _reflector: Option<astar_dstar::ReflectorHandle>,
@@ -606,25 +648,20 @@ impl Fixture {
         let stats = Arc::new(Mutex::new(VocoderStats::default()));
         let mic_sink: MicSink = Arc::new(Mutex::new(None));
         let output_tap: OutputTap = Arc::new(Mutex::new(None));
-        let sink_for_backend = Arc::clone(&mic_sink);
-        let tap_for_backend = Arc::clone(&output_tap);
         let cfg = DstarConfig {
             host: reflector_addr.ip().to_string(),
             port: reflector_addr.port(),
             module: b'A',
             callsign: "N0CALL".into(),
-            output: None,
-            input: None,
             reflector_callsign: reflector_callsign.map(str::to_string),
         };
+        let (router, audio, mic) = route(Box::new(PushPullBackend {
+            mic_sink: Arc::clone(&mic_sink),
+            output_tap: Arc::clone(&output_tap),
+        }));
         let session = DstarSession::connect_with_stream(
             cfg,
-            &move || {
-                Box::new(PushPullBackend {
-                    mic_sink: Arc::clone(&sink_for_backend),
-                    output_tap: Arc::clone(&tap_for_backend),
-                }) as Box<dyn AudioBackend>
-            },
+            audio,
             Box::new(vocoder(&stats)),
             AmbeBackend::Hardware,
         )
@@ -636,6 +673,8 @@ impl Fixture {
             mic_sink,
             output_tap,
             stats,
+            router,
+            mic,
             _reflector: handle,
         };
         assert!(
@@ -652,6 +691,23 @@ impl Fixture {
     /// Mutable access for [`DstarSession::set_ptt`] (iax-2f6b).
     fn session_mut(&mut self) -> &mut DstarSession {
         self.session.as_mut().expect("session is live")
+    }
+
+    /// Key or unkey the way `ConsoleSession::set_ptt` does: the lane's gate
+    /// FIRST in BOTH directions, then the session's protocol edge. On
+    /// key-down that is what puts the pre-roll and the speech onset into
+    /// `tx_frames` before the run loop ever sees the edge; on key-up it is
+    /// what stops the lane capturing before the session drains its tail.
+    fn key(&mut self, on: bool) {
+        self.router.set_gate(&self.mic, on);
+        self.session_mut().set_ptt(on);
+    }
+
+    /// Arm the lane's VOX look-back ring. `ConsoleSession` pushes this from
+    /// the operator's `vox_preroll_ms` preference when it opens the route;
+    /// a lane built by [`route`] starts with it disabled.
+    fn set_preroll_ms(&self, ms: u32) {
+        self.router.set_mic_preroll_ms(&self.mic, ms);
     }
 
     /// Takes the session out and disconnects it directly, bypassing
@@ -912,7 +968,7 @@ fn the_tx_header_addresses_the_configured_reflector_and_module() {
     });
     let listener = f.talker("N7WIRE");
 
-    f.session_mut().set_ptt(true);
+    f.key(true);
     assert!(
         wait_until(|| f.session().state().ptt, 1_000),
         "set_ptt(true) must be applied by the run-loop"
@@ -932,7 +988,7 @@ fn the_tx_header_addresses_the_configured_reflector_and_module() {
         "RPT1 must name that reflector's gateway"
     );
 
-    f.session_mut().set_ptt(false);
+    f.key(false);
     assert!(
         wait_until(|| !f.session().state().ptt, 1_000),
         "set_ptt(false) must be applied by the run-loop"
@@ -960,7 +1016,7 @@ fn keying_ptt_emits_header_then_voice_and_unkey_emits_one_terminating_frame() {
     let listener = f.talker("N7WIRE");
 
     assert!(!f.session().state().ptt, "must start unkeyed");
-    f.session_mut().set_ptt(true);
+    f.key(true);
     assert!(
         wait_until(|| f.session().state().ptt, 1_000),
         "set_ptt(true) must be applied by the run-loop"
@@ -989,7 +1045,7 @@ fn keying_ptt_emits_header_then_voice_and_unkey_emits_one_terminating_frame() {
     // 200 ms = 10 complete 20 ms frames.
     push_mic_level(&f.mic_sink, LEVEL, 200);
 
-    f.session_mut().set_ptt(false);
+    f.key(false);
     assert!(
         wait_until(|| !f.session().state().ptt, 1_000),
         "set_ptt(false) must be applied by the run-loop"
@@ -1030,6 +1086,93 @@ fn keying_ptt_emits_header_then_voice_and_unkey_emits_one_terminating_frame() {
     );
 }
 
+/// The VOX pre-roll must survive the window between the gate opening and the
+/// run loop noticing the key.
+///
+/// `ConsoleSession::set_ptt` opens the lane's gate and only THEN stores the
+/// PTT request, and the run loop applies that request once per pass — so the
+/// lane's look-back ring (and the speech onset behind it) lands in
+/// `tx_frames` while the loop still reads as unkeyed. The unkeyed
+/// drain-and-drop therefore has to run on the SAME pass that read the
+/// request, before anything can block. Behind the 50 ms idle socket read it
+/// ate exactly the audio it exists to protect: the operator's first syllable,
+/// silently, on every over.
+///
+/// The sleep before the key is what puts the run loop inside that idle read,
+/// which is where a real operator's key-down lands almost every time.
+#[test]
+fn the_preroll_flushed_before_the_run_loop_sees_the_key_is_transmitted() {
+    /// Speech captured BEFORE the key: held in the lane's look-back ring.
+    const PREROLL: i16 = 6_000;
+    /// Speech captured after it.
+    const LIVE: i16 = 11_000;
+
+    let mut f = Fixture::start(|s| FakeVocoder::new(Duration::from_millis(2), s));
+    let listener = f.talker("W1AW");
+    f.set_preroll_ms(200);
+
+    // 100 ms of speech while unkeyed: five 20 ms frames into the ring, none
+    // of them anywhere near the wire yet.
+    push_mic_level(&f.mic_sink, PREROLL, 100);
+    // Settle the run loop into its idle socket read, so the key below lands
+    // mid-pass — after that pass has already read `ptt_request` as false.
+    thread::sleep(Duration::from_millis(80));
+
+    f.key(true);
+    // The capture callback that observes the gate's false->true edge and
+    // flushes the ring ahead of the live audio. This is the delivery that
+    // used to be eaten.
+    push_mic_level(&f.mic_sink, LIVE, 100);
+
+    assert!(
+        wait_until(|| f.session().state().ptt, 1_000),
+        "set_ptt(true) must be applied by the run-loop"
+    );
+    // Long enough for the 20 ms pacer to put all ten frames out.
+    thread::sleep(Duration::from_millis(300));
+    f.key(false);
+    assert!(
+        wait_until(|| !f.session().state().ptt, 1_000),
+        "set_ptt(false) must be applied by the run-loop"
+    );
+
+    let sent = listener.drain_quiet(300);
+    let levels: Vec<i16> = sent
+        .iter()
+        .filter_map(|bytes| match DsvtPacket::parse(bytes) {
+            Ok(DsvtPacket::Voice { ambe, .. }) => Some(decoded_tx_level(&ambe)),
+            _ => None,
+        })
+        .collect();
+    let near = |want: i16| {
+        levels
+            .iter()
+            .any(|l| (i32::from(*l) - i32::from(want)).abs() <= 2)
+    };
+    assert!(
+        near(PREROLL),
+        "the pre-roll flushed at the gate edge never reached the wire — the unkeyed drain ate \
+         the operator's speech onset. levels transmitted: {levels:?}"
+    );
+    assert!(
+        near(LIVE),
+        "the live audio after the key must be transmitted too, levels: {levels:?}"
+    );
+    // Ordering: the pre-roll leads the live stream, as the lane flushed it.
+    let first_preroll = levels
+        .iter()
+        .position(|l| (i32::from(*l) - i32::from(PREROLL)).abs() <= 2)
+        .expect("checked above");
+    let first_live = levels
+        .iter()
+        .position(|l| (i32::from(*l) - i32::from(LIVE)).abs() <= 2)
+        .expect("checked above");
+    assert!(
+        first_preroll < first_live,
+        "the pre-roll must lead the live stream, got {levels:?}"
+    );
+}
+
 /// Cadence (iax-2f6b review findings 8/12): DSVT voice frames must egress on
 /// the 20 ms frame clock `astar_dstar::tx` documents, NOT in bursts at
 /// whatever rate the run loop happens to wake up.
@@ -1047,7 +1190,7 @@ fn transmitted_voice_frames_are_paced_on_the_20ms_frame_clock() {
     let mut f = Fixture::start(|s| FakeVocoder::new(Duration::from_millis(2), s));
     let listener = f.talker("N7WIRE");
 
-    f.session_mut().set_ptt(true);
+    f.key(true);
     assert!(wait_until(|| f.session().state().ptt, 1_000), "must key");
     let _header = listener.recv_packet();
 
@@ -1107,13 +1250,13 @@ fn a_second_keying_never_transmits_the_previous_overs_leftover_audio() {
 
     // First over: key, speak, and stall the encoder so the unkey flush is
     // truncated by FLUSH_DEADLINE with frames still owed.
-    f.session_mut().set_ptt(true);
+    f.key(true);
     assert!(wait_until(|| f.session().state().ptt, 1_000), "must key");
     let _first_header = listener.recv_packet();
     stall.store(true, Ordering::Relaxed);
     push_mic_level(&f.mic_sink, FIRST, 160);
     thread::sleep(Duration::from_millis(60));
-    f.session_mut().set_ptt(false);
+    f.key(false);
     assert!(
         wait_until(|| !f.session().state().ptt, 2_000),
         "unkey must complete even with the encoder stalled (FLUSH_DEADLINE)"
@@ -1126,7 +1269,7 @@ fn a_second_keying_never_transmits_the_previous_overs_leftover_audio() {
     thread::sleep(Duration::from_millis(50));
 
     // Second over.
-    f.session_mut().set_ptt(true);
+    f.key(true);
     assert!(
         wait_until(|| f.session().state().ptt, 1_000),
         "must key a second time"
@@ -1140,7 +1283,7 @@ fn a_second_keying_never_transmits_the_previous_overs_leftover_audio() {
         panic!("the second keying must start with its own header");
     };
     push_mic_level(&f.mic_sink, SECOND, 200);
-    f.session_mut().set_ptt(false);
+    f.key(false);
     assert!(
         wait_until(|| !f.session().state().ptt, 2_000),
         "second unkey must complete"
@@ -1190,7 +1333,7 @@ fn a_sustained_transmission_drops_no_mic_frames() {
     });
     let listener = f.talker("N7WIRE");
 
-    f.session_mut().set_ptt(true);
+    f.key(true);
     assert!(wait_until(|| f.session().state().ptt, 1_000), "must key");
     let _header = listener.recv_packet();
 
@@ -1200,7 +1343,7 @@ fn a_sustained_transmission_drops_no_mic_frames() {
         thread::sleep(Duration::from_millis(u64::from(CHUNK_MS)));
     }
 
-    f.session_mut().set_ptt(false);
+    f.key(false);
     assert!(
         wait_until(|| !f.session().state().ptt, 2_000),
         "unkey must complete"
@@ -1302,7 +1445,7 @@ fn losing_the_link_while_keyed_forces_an_unkey_and_stops_transmitting() {
         FakeVocoder::new(Duration::from_millis(2), s)
     });
 
-    f.session_mut().set_ptt(true);
+    f.key(true);
     assert!(wait_until(|| f.session().state().ptt, 1_000), "must key");
     push_mic_level(&f.mic_sink, 9_000, 200);
     assert!(
@@ -1365,7 +1508,7 @@ fn keying_is_refused_while_the_link_is_not_up() {
     );
     let before = reflector.voice_frames_seen();
 
-    f.session_mut().set_ptt(true);
+    f.key(true);
     thread::sleep(Duration::from_millis(250));
     assert!(
         !f.session().state().ptt,
@@ -1376,7 +1519,7 @@ fn keying_is_refused_while_the_link_is_not_up() {
         before,
         "a refused key-down must put nothing on the wire"
     );
-    f.session_mut().set_ptt(false);
+    f.key(false);
 }
 
 /// A backend with NO capture device at all (and whose `open_input` fails
@@ -1422,9 +1565,14 @@ impl AudioBackend for OutputOnlyBackend {
 /// The TX work made `connect` resolve AND open a capture device
 /// unconditionally, so a user who denied mic permission — or has no input
 /// device at all — could no longer even LISTEN to a reflector, a capability
-/// that worked before. Connect must succeed, audio must decode and play, and
-/// a key request must simply be refused (no header, no orphan stream) rather
-/// than failing the whole session.
+/// that worked before. Connect must succeed and audio must decode and play
+/// over a lane that has an output bus and no mic lane at all.
+///
+/// The other half — that a key request is REFUSED on such a machine — is no
+/// longer this session's decision and no longer testable here: the lane
+/// knows whether a capture device exists, so `ConsoleSession::set_ptt`
+/// refuses with `NoCaptureDevice` and forwards nothing. See
+/// `session.rs`'s `keying_a_receive_only_route_is_refused_for_dstar`.
 #[test]
 fn a_session_with_no_capture_device_still_connects_and_receives() {
     const LEVEL: i16 = 11_000;
@@ -1435,23 +1583,25 @@ fn a_session_with_no_capture_device_still_connects_and_receives() {
 
     let stats = Arc::new(Mutex::new(VocoderStats::default()));
     let output_tap: OutputTap = Arc::new(Mutex::new(None));
-    let tap_for_backend = Arc::clone(&output_tap);
     let cfg = DstarConfig {
         host: reflector_addr.ip().to_string(),
         port: reflector_addr.port(),
         module: b'A',
         callsign: "N0CALL".into(),
-        output: None,
-        input: None,
         reflector_callsign: None,
     };
-    let mut session = DstarSession::connect_with_stream(
+    // The receive-only shape of a `VoiceRoute`: an output bus, no mic lane.
+    let backend = Box::new(OutputOnlyBackend {
+        output_tap: Arc::clone(&output_tap),
+    });
+    let out = OutputId::new(backend.default_output().expect("an output").id.as_str());
+    let mut router = AudioRouter::new(backend);
+    let (audio, _mic_tx, _mix) = router
+        .open_monitor_call(&out, StreamConfig::default())
+        .expect("the output bus opens even with no capture device");
+    let session = DstarSession::connect_with_stream(
         cfg,
-        &move || {
-            Box::new(OutputOnlyBackend {
-                output_tap: Arc::clone(&tap_for_backend),
-            }) as Box<dyn AudioBackend>
-        },
+        audio,
         Box::new(FakeVocoder::new(Duration::from_millis(2), &stats)),
         AmbeBackend::Hardware,
     )
@@ -1474,13 +1624,6 @@ fn a_session_with_no_capture_device_still_connects_and_receives() {
         "a session with no capture device must still decode and play received audio"
     );
 
-    // And PTT is refused rather than half-applied.
-    session.set_ptt(true);
-    thread::sleep(Duration::from_millis(200));
-    assert!(
-        !session.state().ptt,
-        "with no capture device there is nothing to transmit — the key must be refused"
-    );
     session.disconnect();
     drop(handle);
 }
@@ -1495,7 +1638,7 @@ fn half_duplex_ignores_inbound_traffic_while_transmitting() {
     let mut f = Fixture::start(|s| FakeVocoder::new(Duration::from_millis(2), s));
     let talker = f.talker("AJ7HR");
 
-    f.session_mut().set_ptt(true);
+    f.key(true);
     assert!(
         wait_until(|| f.session().state().ptt, 1_000),
         "must key before sending inbound traffic"
@@ -1514,7 +1657,7 @@ fn half_duplex_ignores_inbound_traffic_while_transmitting() {
         "inbound DSVT traffic must be ignored entirely while transmitting"
     );
 
-    f.session_mut().set_ptt(false);
+    f.key(false);
     assert!(
         wait_until(|| !f.session().state().ptt, 1_000),
         "set_ptt(false) must be applied"
@@ -1550,7 +1693,7 @@ fn disconnect_while_keyed_flushes_and_terminates_the_stream() {
     let mut f = Fixture::start(|s| FakeVocoder::new(Duration::from_millis(2), s));
     let listener = f.talker("N7WIRE");
 
-    f.session_mut().set_ptt(true);
+    f.key(true);
     assert!(
         wait_until(|| f.session().state().ptt, 1_000),
         "must key before disconnecting while keyed"
@@ -1597,7 +1740,7 @@ fn unkey_terminates_even_when_the_encoder_never_answers() {
     let mut f = Fixture::start(FakeVocoder::wedged_encode);
     let listener = f.talker("N7WIRE");
 
-    f.session_mut().set_ptt(true);
+    f.key(true);
     assert!(
         wait_until(|| f.session().state().ptt, 1_000),
         "must key before pushing audio into the wedged encoder"
@@ -1610,7 +1753,7 @@ fn unkey_terminates_even_when_the_encoder_never_answers() {
     // `wait_until`'s 1s budget gives that comfortable margin without hanging
     // the test if the bound were ever broken.
     let before_unkey = Instant::now();
-    f.session_mut().set_ptt(false);
+    f.key(false);
     assert!(
         wait_until(|| !f.session().state().ptt, 2_000),
         "unkey must still complete (bounded by FLUSH_DEADLINE) even when the encoder never answers"
@@ -1647,78 +1790,6 @@ fn unkey_terminates_even_when_the_encoder_never_answers() {
 
 // ---- iax-dstaraudio: the listener-side preferences reach a D-Star session ---
 
-/// The operator's volume must reach a live D-Star session.
-///
-/// It did not. `ConsoleSession`'s three listener-side setters — output gain,
-/// RX compression, RX compression level — each had an IAX2 arm and an M17 arm
-/// and no D-Star arm, so a D-Star session played at the router's unity default
-/// while every other network sat at whatever the operator had chosen. Heard on
-/// air as "D-Star is louder than it should be", which is what an ignored
-/// attenuation sounds like.
-///
-/// Two halves, and the bug needed both: a session adopted AFTER the preference
-/// was set has to inherit it, and one already running has to follow a change.
-#[test]
-fn the_listener_side_preferences_reach_a_dstar_session() {
-    use astar_console::ConsoleSession;
-
-    let reflector = Reflector::bind_parrot("127.0.0.1:0".parse().unwrap()).expect("bind reflector");
-    let reflector_addr = reflector.local_addr();
-    let handle = reflector.run();
-
-    let mut console = ConsoleSession::new();
-    // Chosen BEFORE the session exists — the ordering that shipped broken.
-    console.set_output_gain(0.25);
-    console.set_rx_compress(true);
-    console.set_rx_compression_level(0.75);
-
-    let stats = Arc::new(Mutex::new(VocoderStats::default()));
-    let output_tap: OutputTap = Arc::new(Mutex::new(None));
-    let tap_for_backend = Arc::clone(&output_tap);
-    let cfg = DstarConfig {
-        host: reflector_addr.ip().to_string(),
-        port: reflector_addr.port(),
-        module: b'A',
-        callsign: "N0CALL".into(),
-        output: None,
-        input: None,
-        reflector_callsign: None,
-    };
-    let session = DstarSession::connect_with_stream(
-        cfg,
-        &move || {
-            Box::new(OutputOnlyBackend {
-                output_tap: Arc::clone(&tap_for_backend),
-            }) as Box<dyn AudioBackend>
-        },
-        Box::new(FakeVocoder::new(Duration::from_millis(2), &stats)),
-        AmbeBackend::Hardware,
-    )
-    .expect("connect to the loopback reflector");
-    console.dstar_adopt(session).expect("adopt the session");
-
-    let (gain, compress, level) = console
-        .dstar_session_audio_prefs()
-        .expect("a live session reports its preferences");
-    assert!(
-        (gain - 0.25).abs() < 1e-6,
-        "an adopted session inherits the volume already chosen, not unity"
-    );
-    assert!(compress, "and the RX leveling toggle");
-    assert!((level - 0.75).abs() < 1e-6, "and its strength");
-
-    // And a change made mid-QSO follows.
-    console.set_output_gain(2.0);
-    let (gain, _, _) = console.dstar_session_audio_prefs().expect("still live");
-    assert!(
-        (gain - 2.0).abs() < 1e-6,
-        "a later change reaches the live session"
-    );
-
-    console.dstar_disconnect();
-    handle.shutdown();
-}
-
 // ---- iax-4c8e: the ConsoleSession snapshot mirrors D-Star -------------------
 
 /// A `ConsoleState` snapshot must report a live D-Star session the same way it
@@ -1751,17 +1822,21 @@ fn the_console_snapshot_tracks_a_dstar_session_and_its_link() {
         port: reflector_addr.port(),
         module: b'A',
         callsign: "N0CALL".into(),
-        output: None,
-        input: None,
         reflector_callsign: None,
     };
-    let session = DstarSession::connect_with_stream(
-        cfg,
-        &move || {
+    // The three-step connect the facade performs: reserve the lane, build
+    // the session off it, adopt. `dstar_adopt` refuses a session that
+    // arrives without a route reserved on its behalf.
+    let audio = console
+        .open_voice_route(None, None, move || {
             Box::new(OutputOnlyBackend {
                 output_tap: Arc::clone(&tap_for_backend),
             }) as Box<dyn AudioBackend>
-        },
+        })
+        .expect("the voice route opens");
+    let session = DstarSession::connect_with_stream(
+        cfg,
+        audio,
         Box::new(FakeVocoder::new(Duration::from_millis(2), &stats)),
         AmbeBackend::Hardware,
     )

@@ -23,8 +23,8 @@ rather than loudly, which is the recurring theme of this document.
 |---|---|---|---|
 | 1 | Protocol | `crates/astar-<net>/` | Framing, link FSM, headers. No I/O, no audio. |
 | 2 | Vocoder | `crates/astar-codec/` | Encode/decode. Feature-gated; licence-sensitive. |
-| 3 | Session | `crates/astar-console/src/<net>.rs` | Socket + audio + vocoder + run loop. |
-| 4 | Console wiring | `crates/astar-console/src/session.rs` | Adopt, disconnect, exclusion, state mirror, **preference fan-out**. |
+| 3 | Session | `crates/astar-console/src/<net>.rs` | Socket + vocoder + run loop. Audio arrives as a `CallAudio`; it owns no router. |
+| 4 | Console wiring | `crates/astar-console/src/session.rs` | Adopt, disconnect, exclusion, state mirror, **opening/releasing the voice route**. |
 | 5 | Station facade | `crates/astar-station/src/station.rs` | `<net>_connect` / `_disconnect` / `_available` / `_state`. |
 | 6 | Features | `crates/*/Cargo.toml` | The chain from `astar-sys` down. |
 | 7 | C ABI | `crates/astar-sys/src/ffi.rs` | Entry points, snapshot fields, error code. |
@@ -85,23 +85,44 @@ Per-network designs: `ysf-network.md`, `nxdn-network.md`, `p25-network.md`,
 
 ### 2.3 Session module
 
-`crates/astar-console/src/dstar.rs` and `m17.rs`. This owns the socket, the audio
-router lanes, the vocoder stream and a run-loop thread. The shape both share:
+`crates/astar-console/src/dstar.rs` and `m17.rs`. **One audio lane** (see
+`docs/superpowers/implemented/2026-09-06-one-audio-lane-design.md`): the
+station's single `AudioRouter`, owned for the session's lifetime by the
+`Manager` a `ConsoleSession` already holds, is where every meter and every
+spectrum is computed, once, for every network. A session takes its audio, it
+does not build it. The shape both share:
 
-* `<Net>Config` — primitive fields only (host, port, module, callsign, devices).
-* `<Net>Session::connect(cfg, backend_factory)` — **blocking**, and for hardware
-  it blocks for seconds (a serial scan plus a per-port init). It must run with no
-  session lock held; see §5.4.
+* `<Net>Config` — primitive fields only (host, port, module, callsign) and
+  **no** `input`/`output`/audio preferences — those belong to the voice
+  route, not the session.
+* `<Net>Session::connect(cfg, audio: CallAudio)` — **blocking**, and for
+  hardware it blocks for seconds (a serial scan plus a per-port init). It
+  must run with no session lock held; see §5.4. The `CallAudio` channel ends
+  come from `ConsoleSession::open_voice_route`, called by the station facade
+  before the session constructor runs (§2.5's three-step connect).
 * A **test seam** that takes a fake vocoder and a fake audio backend.
-  `DstarSession::connect_with_stream` is the one to copy; M17 has no equivalent
-  and is the poorer for it. Provide one, or the session layer is untestable and
-  every test that wants it has to reach for hardware — which §5.1 forbids.
-* `SharedState` — atomics and mutexes the run loop writes and the outside reads:
-  link, talker, PTT, the three level meters, **and the listener-side audio
-  preferences**.
-* `apply_audio(&self, router, out)` — pushes those preferences onto the router.
-  Call it once at connect *before the thread starts* and again every tick. It is
-  three atomic loads; it needs no dirty-flag tracking.
+  `DstarSession::connect_with_stream` is the one to copy; `YsfLink` has the
+  same shape (`connect_with_stream` beside `connect_with_audio`). M17 has no
+  seam of that kind — `M17Session::connect(cfg, audio)` is its only
+  constructor, because there is no dongle to fake.
+  There is no shared `CallAudio` test helper, and none is owed: M17 and
+  D-Star each build one in-module with a private `fake_call_audio()`, YSF's
+  private `test_audio()` does the same, and each integration test file
+  (`tests/m17_session.rs`, `tests/dstar_session*.rs`) carries its own
+  `route(backend)` that opens a real `AudioRouter` over a `NullBackend`.
+* `SharedState` — atomics and mutexes the run loop writes and the outside
+  reads: link, talker, **the actually-applied `ptt`**, and its
+  network-specific fields. **No** level meters, no spectrum, no audio
+  preferences — a session no longer owns any of that; `ConsoleSession`
+  reads it straight from the router (§2.4).
+* **Drain the capture channel while unkeyed, before any blocking read.** The
+  run loop must drain `CallAudio`'s capture receiver immediately after
+  checking the PTT request and before it blocks on the socket — otherwise
+  pre-roll queued while receive-only gets transmitted on the next key-down.
+  This bug was found twice in review (M17, then D-Star and YSF the same
+  way); each network's session carries a wire-level regression test pinning
+  it. It is the one piece of audio plumbing a session still owns, because
+  only the run loop knows when it is and is not transmitting.
 
 ### 2.4 Console wiring — the layer that bites
 
@@ -109,34 +130,78 @@ router lanes, the vocoder stream and a run-loop thread. The shape both share:
 forgot at least once.
 
 - [ ] `<net>: Option<<Net>Session>` field
-- [ ] `<net>_can_connect()` — mutual exclusion against IAX2 *and* every other
-      network, checked again at adopt because state can change while the
-      blocking connect runs
-- [ ] `<net>_adopt(session)` — installs it, **and seeds it with the operator's
-      current audio preferences**
-- [ ] `<net>_disconnect()`
+- [ ] `<net>_can_connect()` — the same exclusion question
+      `open_voice_route` answers for real, exposed so an embedder can ask
+      before it tries. Exclusion is re-checked at adopt because state can
+      change while a blocking connect runs, and the reserved route
+      (`voice_route.is_some()`) refuses every other connect path for the gap
+      between opening the route and adopting the session
+- [ ] `<net>_adopt(session)` — installs it. It does **not** seed audio
+      preferences: those already reached the router when
+      `open_voice_route` ran, via the one `push_prefs` block every path
+      shares (§ "Preferences" below)
+- [ ] `<net>_disconnect()` — release the voice route (`release_voice_route`)
+      after stopping the session, and only inside the `if let Some(session)`
+      that found one to stop
 - [ ] `<net>_is_active()` / `<net>_state()`
-- [ ] Snapshot mirror: `ptt`, `remote_ptt`, the three level meters, and
-      **`status` mapped to `CallStatus`** — `Linked → Answered`,
-      `Connecting → Dialing`, `Failed → Hangup`. This is what lets a front-end
-      run **one** connection state machine for every network instead of a
-      per-network special case. Get it wrong and the UI shows "Not connected"
-      on a working link.
+- [ ] Snapshot mirror: `ptt`, `remote_ptt`, and **`status` mapped to
+      `CallStatus`** — `Linked → Answered`, `Connecting → Dialing`,
+      `Failed → Hangup`. This is what lets a front-end run **one** connection
+      state machine for every network instead of a per-network special case.
+      Get it wrong and the UI shows "Not connected" on a working link. The
+      three level meters are **not** part of this mirror any more — see
+      below.
 - [ ] `<net>_active` / `<net>_available` flags on `ConsoleState`
-- [ ] **The audio-preference fan-out.** `set_output_gain`, `set_rx_compress`,
-      `set_rx_compression_level` each need an arm for the new network.
 
-> **This is the trap.** D-Star shipped in 0.1.8beta missing all three arms. The
-> operator's volume never reached a D-Star session, so it played at the router's
-> unity default while every other network sat where it had been set — heard on
-> air as "D-Star is louder than it should be". It reads as a missing per-network
-> level and it is a missing `if let`. `the_listener_side_preferences_reach_a_dstar_session`
-> pins it; write the equivalent for the new network **before** going on air.
+**Meters and preferences no longer have a per-network arm — that is the
+point.** `ConsoleSession::snapshot` computes `tx_level_db` / `input_level_db`
+/ `rx_level_db` / `tx_spectrum` / `rx_spectrum` from one `meter_ids()` block
+(the IAX2 call's routed mic + bus via `Manager`, else the live
+`VoiceRoute`'s, else the `-60` floor) — a network that forgets to wire its
+meters is no longer a possible bug, because no network wires meters.
+Likewise every preference setter (`set_output_gain`, `set_rx_compress`,
+`set_rx_compression_level`, …) pushes straight to the router when a route is
+live, and `open_voice_route` pushes the full set at connect through the same
+`push_prefs` the IAX2 dial uses — there is no per-network fan-out to forget.
+
+> **What this replaced.** D-Star shipped in 0.1.8beta missing three
+> per-network preference arms: the operator's volume never reached a D-Star
+> session, so it played at the router's unity default while every other
+> network sat where it had been set — heard on air as "D-Star is louder than
+> it should be". That whole class of bug is what the one-audio-lane refactor
+> (2026-09-06) removed by construction; see
+> `docs/superpowers/implemented/2026-09-06-one-audio-lane-design.md`.
 
 ### 2.5 Station facade
 
 `Station::<net>_connect/_disconnect/_available/_state` in `astar-station`.
 
+* **Which shape a connect takes is decided by one thing: how slow the
+  session constructor is.**
+
+  *A slow constructor — a dongle probe (D-Star, YSF).* Three steps, and only
+  the middle one leaves the lock. (1) Under the session lock:
+  `open_voice_route(input, output, make_backend)` → a `CallAudio` (a cpal
+  open, tens of ms — the IAX2 dial already does this under the lock).
+  (2) Off the lock: the slow part — dongle probe / codec open / socket bind
+  — `<Net>Session::connect(cfg, audio)`. (3) Under the lock again:
+  `<net>_adopt(session)`. Any failure in step 2 or 3 calls
+  `release_voice_route()` and drops the returned stream handles off-lock.
+  The reserved route is the mutual-exclusion token for the gap between 1 and
+  3.
+
+  *A fast constructor — a socket bind and a software codec open (M17).* The
+  facade calls `ConsoleSession::m17_connect` and the whole thing happens
+  under the one lock: route, construct, install. No gap to guard, no
+  three-step dance to get wrong.
+
+  **Either way the exclusion gate is `open_voice_route`'s own check**, which
+  runs under the lock as the route is taken — against a live IAX2 call, an
+  IAX2 *link* (`Manager::call_count`), any other digital-voice session, and
+  any route already held. There is no separate pre-check step in the flow:
+  `<net>_can_connect()` exists as an embedder-facing query ("would a connect
+  be refused right now?"), useful for greying out a button, but it decides
+  nothing — the state can change between asking and acting.
 * Signature takes **primitives, not the console's config type** — that type only
   exists when the feature is compiled in, and the method must stay
   byte-identically callable either way.
@@ -292,7 +357,9 @@ validation; it reuses the engine recipe above and almost none of §6.
 1. Protocol crate + loopback reflector. Tests pass with no hardware.
 2. Vocoder, if new. Licence first, code second.
 3. Session module with `connect_with_stream`. Pipeline tests against loopback.
-4. Console wiring — **including the fan-out** — with the preference test.
+4. Console wiring: `<net>_connect`/`_adopt`/`_disconnect`/`_state` plus the
+   snapshot's `status`/`ptt`/`remote_ptt` mirror. There is no per-network
+   preference or meter fan-out any more (§2.4) — one router, one push.
 5. Station facade + features. `just ci`.
 6. C ABI + `just cbindgen`. Header must not drift.
 7. Swift binding + `just xcframework`.

@@ -12,13 +12,12 @@ pub mod dtmf;
 #[cfg(feature = "m17")]
 pub mod m17;
 pub mod metering;
-/// Shared lazy capture lane (D-Star and YSF).
-#[cfg(any(feature = "dstar", feature = "ysf"))]
-mod mic_lane;
 pub mod parrot;
 pub mod session;
 pub mod state;
 pub mod tracer;
+/// The one audio lane every digital-voice session runs on.
+mod voice_route;
 #[cfg(feature = "ysf")]
 pub mod ysf;
 
@@ -38,7 +37,7 @@ pub use astar_codec::ambe::AmbeBackend;
 #[cfg(feature = "dstar")]
 pub use astar_dstar::LinkState as DstarLinkState;
 #[cfg(feature = "m17")]
-pub use m17::{M17Config, M17Prefs, M17Session, M17SnapshotState};
+pub use m17::{M17Config, M17Session, M17SnapshotState};
 pub use metering::{Gain, Level, MeteringBackend, peak_to_dbfs};
 pub use parrot::{LocalParrot, ParrotPhase, ParrotShared, calibrate_mic};
 #[cfg(feature = "dstar")]

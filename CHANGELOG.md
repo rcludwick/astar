@@ -71,6 +71,9 @@ current.
 - **A Discord server**, linked from the site header, the front page and the
   README.
 
+- **System Fusion (YSF): link a reflector, hear it, and transmit**, with the
+  ThumbDV in DN mode; `ysf-listen` and `ysf-parrot` for the bench.
+
 ### Changed
 
 - **Versions are real SemVer from here on**, this one included, and the app and
@@ -92,6 +95,10 @@ current.
   Device names are unchanged across the cpal upgrade, so saved input and
   output selections still resolve; cpal 0.18 also finds output devices 0.15
   did not enumerate.
+
+- **One audio lane**: M17, D-Star and System Fusion now share the station's
+  single audio router; level meters and spectrum are computed once at the
+  microphone and the speaker for every network.
 
 ### Fixed
 
@@ -127,6 +134,9 @@ current.
   never matched `CHANGELOG.md` — the file the site renders is a symlink to
   it — so a release that touched nothing else would not have rebuilt the
   page announcing it.
+
+- **VOX pre-roll and speech onset are no longer lost on D-Star/YSF key-down**,
+  and YSF key-ups now appear in the timeline.
 
 ## 0.1.9beta — 2026-08-29
 

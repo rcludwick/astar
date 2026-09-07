@@ -24,11 +24,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use astar_audio::{
-    AudioBackend, AudioError, DeviceId, DeviceInfo, Direction, InputSink, NullBackend,
-    OutputSource, StreamConfig, StreamHandle,
+    AudioBackend, AudioError, AudioRouter, CallAudio, DeviceId, DeviceInfo, Direction, InputSink,
+    MicId, NullBackend, OutputId, OutputSource, StreamConfig, StreamHandle,
 };
 use astar_console::{
-    AnswerPolicy, CallStatus, ConsoleConfig, ConsoleSession, M17Config, M17Prefs, M17Session,
+    AnswerPolicy, CallStatus, ConsoleConfig, ConsoleSession, M17Config, M17Session,
 };
 use astar_iax::{CodecPolicy, IncomingAuthPolicy, IncomingCallPolicy, IncomingDecisionPolicy};
 use astar_iax_core::Subclass;
@@ -239,25 +239,47 @@ fn run_ackn_then_silent_reflector(sock: &UdpSocket) {
     }
 }
 
-// ---- config helper ---------------------------------------------------------
+// ---- audio-lane helper -----------------------------------------------------
 
-/// Unity/off defaults — byte-identical to the router's own bare defaults, so
-/// tests that don't care about Fix 4's pref-passthrough behavior see the same
-/// starting state as before that fix existed.
-fn default_prefs() -> M17Prefs {
-    M17Prefs {
-        input_gain: 1.0,
-        output_gain: 1.0,
-        denoise: false,
-        compress: false,
-        compress_level: 0.90,
-        tx_trim: 1.0,
-        rx_compress: false,
-        rx_compress_level: 0.90,
-        vox_preroll_ms: 0,
-        calibrated: None,
-    }
+/// Build the ONE audio lane an [`M17Session`] is now handed. The session no
+/// longer owns a router, a mic or a bus — `ConsoleSession`'s `VoiceRoute`
+/// does that in production, and this test owns it here — so a test that wants
+/// to transmit keys the returned `MicId`'s gate itself, exactly as
+/// `ConsoleSession::set_ptt` does.
+///
+/// Returns the router (which MUST be kept alive: it owns the streams), the
+/// session's channel ends, and the mic whose gate is the PTT.
+fn route(backend: Box<dyn AudioBackend>) -> (AudioRouter, CallAudio, MicId) {
+    let mic = MicId::new(
+        backend
+            .default_input()
+            .expect("the test backend has an input")
+            .id
+            .as_str(),
+    );
+    let out = OutputId::new(
+        backend
+            .default_output()
+            .expect("the test backend has an output")
+            .id
+            .as_str(),
+    );
+    let mut router = AudioRouter::new(backend);
+    let (audio, mic_tx, _mix) = router
+        .open_monitor_call(&out, StreamConfig::default())
+        .expect("bus");
+    router
+        .open_mic_lane(
+            &mic,
+            mic_tx,
+            Arc::clone(&audio.preroll_lead),
+            StreamConfig::default(),
+        )
+        .expect("mic");
+    (router, audio, mic)
 }
+
+// ---- config helper ---------------------------------------------------------
 
 fn cfg(addr: SocketAddr) -> M17Config {
     M17Config {
@@ -265,8 +287,6 @@ fn cfg(addr: SocketAddr) -> M17Config {
         port: addr.port(),
         module: b'A',
         callsign: "N0CALL".to_string(),
-        input: None,
-        output: None,
         codec_dirs: Vec::new(),
         keepalive_timeout: Duration::from_secs(30),
     }
@@ -279,21 +299,12 @@ fn connect_key_talk_hear_yourself_disconnect() {
     let (addr, _reflector) = spawn_reflector(run_parrot_reflector);
 
     let mic_sink: MicSink = Arc::new(Mutex::new(None));
-    let backend_slot = Arc::new(Mutex::new(Some(PushBackend {
+    let (router, audio, mic) = route(Box::new(PushBackend {
         mic_sink: Arc::clone(&mic_sink),
         output_tap: Arc::new(Mutex::new(None)),
-    })));
-    let make_backend = move || -> Box<dyn AudioBackend> {
-        Box::new(
-            backend_slot
-                .lock()
-                .unwrap()
-                .take()
-                .expect("backend factory called exactly once"),
-        )
-    };
+    }));
 
-    let mut s = M17Session::connect(cfg(addr), default_prefs(), &make_backend).expect("connect");
+    let mut s = M17Session::connect(cfg(addr), audio).expect("connect");
 
     assert!(
         wait_until(|| s.state().link == LinkState::Linked, 2_000),
@@ -301,6 +312,10 @@ fn connect_key_talk_hear_yourself_disconnect() {
         s.state().link
     );
 
+    // The gate is the route's, not the session's: `ConsoleSession::set_ptt`
+    // opens it before forwarding the key to the network, and this test does
+    // the same by hand.
+    router.set_gate(&mic, true);
     s.set_ptt(true);
     assert!(
         wait_until(|| s.state().ptt, 1_000),
@@ -317,6 +332,7 @@ fn connect_key_talk_hear_yourself_disconnect() {
     );
 
     s.set_ptt(false);
+    router.set_gate(&mic, false);
     assert!(
         wait_until(|| !s.state().ptt, 1_000),
         "set_ptt(false) must be applied by the run-loop"
@@ -329,8 +345,8 @@ fn connect_key_talk_hear_yourself_disconnect() {
 fn nack_fails_the_link() {
     let (addr, _reflector) = spawn_reflector(run_nack_reflector);
 
-    let s = M17Session::connect(cfg(addr), default_prefs(), &|| Box::new(NullBackend::new()))
-        .expect("connect");
+    let (_router, audio, _mic) = route(Box::new(NullBackend::new()));
+    let s = M17Session::connect(cfg(addr), audio).expect("connect");
 
     assert!(
         wait_until(|| s.state().link == LinkState::Failed, 2_000),
@@ -350,8 +366,8 @@ fn silence_times_out() {
     // doesn't have to wait out the real 30s default.
     short_cfg.keepalive_timeout = Duration::from_millis(300);
 
-    let s = M17Session::connect(short_cfg, default_prefs(), &|| Box::new(NullBackend::new()))
-        .expect("connect");
+    let (_router, audio, _mic) = route(Box::new(NullBackend::new()));
+    let s = M17Session::connect(short_cfg, audio).expect("connect");
 
     assert!(
         wait_until(|| s.state().link == LinkState::Linked, 2_000),
@@ -361,109 +377,6 @@ fn silence_times_out() {
         wait_until(|| s.state().link == LinkState::Failed, 3_000),
         "300ms of silence past the shortened keepalive_timeout must fail the link, got {:?}",
         s.state().link
-    );
-
-    s.disconnect();
-}
-
-// ---- Fix 4: audio DSP prefs actually reach the M17 router (iax-f2b8-fix) ---
-//
-// Before this fix, M17Session::connect never saw ConsoleSession's stored
-// input/output gain (or denoise/compress/tx_trim/preroll/calibrated), and
-// none of those had a live-update path into the M17 router either — Rob's
-// live on-air report was that the RX volume slider had no effect on M17.
-// `M17SnapshotState::applied_mic_gain`/`applied_output_gain` are read back
-// FROM the router itself every run-loop tick (not just echoed from the pref
-// atomics), so asserting on them proves the value round-tripped through the
-// real router, not just that a setter was called.
-
-#[test]
-fn m17_connect_applies_the_given_prefs_onto_the_router() {
-    let (addr, _reflector) = spawn_reflector(run_parrot_reflector);
-    let prefs = M17Prefs {
-        input_gain: 1.6,
-        output_gain: 0.4,
-        denoise: true,
-        compress: true,
-        compress_level: 0.5,
-        tx_trim: 1.3,
-        rx_compress: true,
-        rx_compress_level: 0.65,
-        vox_preroll_ms: 40,
-        calibrated: None,
-    };
-
-    let s =
-        M17Session::connect(cfg(addr), prefs, &|| Box::new(NullBackend::new())).expect("connect");
-
-    // Polled (not a bare post-connect assert): the synchronous apply lands on
-    // the router before the thread starts, but `applied_*_gain` is only
-    // read back from the router on the run-loop's OWN first tick, so there's
-    // an inherent race between `connect()` returning and that first tick.
-    assert!(
-        wait_until(|| (s.state().applied_output_gain - 0.4).abs() < 0.01, 1_000),
-        "output gain from the connect-time prefs must reach the router, got {}",
-        s.state().applied_output_gain
-    );
-    assert!(
-        (s.state().applied_mic_gain - 1.6).abs() < 0.01,
-        "input gain from the connect-time prefs must reach the router, got {}",
-        s.state().applied_mic_gain
-    );
-    assert!(
-        s.state().applied_rx_compress,
-        "rx compression from the connect-time prefs must reach the router (iax-a4e7)"
-    );
-    assert!(
-        (s.state().applied_rx_compress_level - 0.65).abs() < 0.01,
-        "rx compression level from the connect-time prefs must reach the router, got {}",
-        s.state().applied_rx_compress_level
-    );
-
-    s.disconnect();
-}
-
-#[test]
-fn m17_session_live_setters_reach_the_router_after_connect() {
-    let (addr, _reflector) = spawn_reflector(run_parrot_reflector);
-    let s = M17Session::connect(cfg(addr), default_prefs(), &|| Box::new(NullBackend::new()))
-        .expect("connect");
-
-    assert!(
-        wait_until(|| (s.state().applied_output_gain - 1.0).abs() < 0.01, 1_000),
-        "must start at the default unity gain, got {}",
-        s.state().applied_output_gain
-    );
-
-    // AFTER connect: a live pref change must reach the router within one
-    // run-loop poll tick (~50ms; wait_until gives it generous headroom).
-    s.set_output_gain(1.7);
-    assert!(
-        wait_until(|| (s.state().applied_output_gain - 1.7).abs() < 0.01, 1_000),
-        "a LIVE set_output_gain must reach the router, got {}",
-        s.state().applied_output_gain
-    );
-
-    s.set_mic_gain(0.3);
-    assert!(
-        wait_until(|| (s.state().applied_mic_gain - 0.3).abs() < 0.01, 1_000),
-        "a LIVE set_mic_gain must reach the router, got {}",
-        s.state().applied_mic_gain
-    );
-
-    s.set_rx_compress(true);
-    s.set_rx_compression_level(0.42);
-    assert!(
-        wait_until(|| s.state().applied_rx_compress, 1_000),
-        "a LIVE set_rx_compress must reach the router (iax-a4e7)"
-    );
-    assert!(
-        wait_until(
-            || (s.state().applied_rx_compress_level - 0.42).abs() < 0.01,
-            1_000
-        ),
-        "a LIVE set_rx_compression_level must reach the router, got {}",
-        s.state().applied_rx_compress_level
     );
 
     s.disconnect();
@@ -499,22 +412,12 @@ fn m17_session_interops_with_a_real_reflector_and_a_far_client() {
     assert_eq!(&buf[..n], b"ACKN");
 
     let mic_sink: MicSink = Arc::new(Mutex::new(None));
-    let backend_slot = Arc::new(Mutex::new(Some(PushBackend {
+    let (router, audio, mic) = route(Box::new(PushBackend {
         mic_sink: Arc::clone(&mic_sink),
         output_tap: Arc::new(Mutex::new(None)),
-    })));
-    let make_backend = move || -> Box<dyn AudioBackend> {
-        Box::new(
-            backend_slot
-                .lock()
-                .unwrap()
-                .take()
-                .expect("backend factory called exactly once"),
-        )
-    };
+    }));
 
-    let mut s =
-        M17Session::connect(cfg(reflector_addr), default_prefs(), &make_backend).expect("connect");
+    let mut s = M17Session::connect(cfg(reflector_addr), audio).expect("connect");
 
     assert!(
         wait_until(|| s.state().link == LinkState::Linked, 2_000),
@@ -522,6 +425,7 @@ fn m17_session_interops_with_a_real_reflector_and_a_far_client() {
         s.state().link
     );
 
+    router.set_gate(&mic, true);
     s.set_ptt(true);
     assert!(
         wait_until(|| s.state().ptt, 1_000),
@@ -556,6 +460,7 @@ fn m17_session_interops_with_a_real_reflector_and_a_far_client() {
     );
 
     s.set_ptt(false);
+    router.set_gate(&mic, false);
     assert!(
         wait_until(|| !s.state().ptt, 1_000),
         "set_ptt(false) must be applied by the run-loop"
@@ -609,10 +514,9 @@ fn m17_session_connects_to_a_reflector_bound_on_ipv6_loopback_only() {
     let reflector_addr = reflector.local_addr();
     let handle = reflector.run();
 
-    let s = M17Session::connect(cfg(reflector_addr), default_prefs(), &|| {
-        Box::new(NullBackend::new())
-    })
-    .expect("connect to an IPv6-only reflector");
+    let (_router, audio, _mic) = route(Box::new(NullBackend::new()));
+    let s =
+        M17Session::connect(cfg(reflector_addr), audio).expect("connect to an IPv6-only reflector");
 
     assert!(
         wait_until(|| s.state().link == LinkState::Linked, 2_000),
@@ -645,8 +549,9 @@ fn m17_session_connects_via_localhost_to_a_dual_stack_reflector() {
     ));
     c.host = "localhost".to_string();
 
-    let s = M17Session::connect(c, default_prefs(), &|| Box::new(NullBackend::new()))
-        .expect("connect via \"localhost\" to a dual-stack reflector");
+    let (_router, audio, _mic) = route(Box::new(NullBackend::new()));
+    let s =
+        M17Session::connect(c, audio).expect("connect via \"localhost\" to a dual-stack reflector");
 
     assert!(
         wait_until(|| s.state().link == LinkState::Linked, 2_000),
@@ -701,22 +606,12 @@ fn m17_session_hears_itself_via_a_real_parrot_reflector() {
 
     let mic_sink: MicSink = Arc::new(Mutex::new(None));
     let output_tap: OutputTap = Arc::new(Mutex::new(None));
-    let backend_slot = Arc::new(Mutex::new(Some(PushBackend {
+    let (router, audio, mic) = route(Box::new(PushBackend {
         mic_sink: Arc::clone(&mic_sink),
         output_tap: Arc::clone(&output_tap),
-    })));
-    let make_backend = move || -> Box<dyn AudioBackend> {
-        Box::new(
-            backend_slot
-                .lock()
-                .unwrap()
-                .take()
-                .expect("backend factory called exactly once"),
-        )
-    };
+    }));
 
-    let mut s =
-        M17Session::connect(cfg(reflector_addr), default_prefs(), &make_backend).expect("connect");
+    let mut s = M17Session::connect(cfg(reflector_addr), audio).expect("connect");
 
     assert!(
         wait_until(|| s.state().link == LinkState::Linked, 2_000),
@@ -724,6 +619,7 @@ fn m17_session_hears_itself_via_a_real_parrot_reflector() {
         s.state().link
     );
 
+    router.set_gate(&mic, true);
     s.set_ptt(true);
     assert!(
         wait_until(|| s.state().ptt, 1_000),
@@ -735,6 +631,7 @@ fn m17_session_hears_itself_via_a_real_parrot_reflector() {
     push_mic_tone(&mic_sink, 400.0, 200);
 
     s.set_ptt(false);
+    router.set_gate(&mic, false);
     assert!(
         wait_until(|| !s.state().ptt, 1_000),
         "set_ptt(false) must be applied by the run-loop — this flushes the EOS-marked packet \
@@ -813,26 +710,18 @@ fn disconnect_while_keyed_flushes_eos_before_disc() {
     let (addr, recorded, _reflector) = spawn_recording_reflector();
 
     let mic_sink: MicSink = Arc::new(Mutex::new(None));
-    let backend_slot = Arc::new(Mutex::new(Some(PushBackend {
+    let (router, audio, mic) = route(Box::new(PushBackend {
         mic_sink: Arc::clone(&mic_sink),
         output_tap: Arc::new(Mutex::new(None)),
-    })));
-    let make_backend = move || -> Box<dyn AudioBackend> {
-        Box::new(
-            backend_slot
-                .lock()
-                .unwrap()
-                .take()
-                .expect("backend factory called exactly once"),
-        )
-    };
+    }));
 
-    let mut s = M17Session::connect(cfg(addr), default_prefs(), &make_backend).expect("connect");
+    let mut s = M17Session::connect(cfg(addr), audio).expect("connect");
     assert!(
         wait_until(|| s.state().link == LinkState::Linked, 2_000),
         "must link before keying"
     );
 
+    router.set_gate(&mic, true);
     s.set_ptt(true);
     assert!(
         wait_until(|| s.state().ptt, 1_000),
@@ -951,7 +840,7 @@ fn iax2_connect_is_refused_while_m17_is_live() {
     let mut session = ConsoleSession::new();
 
     session
-        .m17_connect(Box::new(NullBackend::new()), cfg(addr))
+        .m17_connect(Box::new(NullBackend::new()), cfg(addr), None, None)
         .expect("m17 connect");
     assert!(
         wait_until(|| session.snapshot().status == CallStatus::Answered, 2_000),
@@ -988,7 +877,7 @@ fn m17_connect_is_refused_while_an_iax2_call_is_live() {
 
     let (addr, _reflector) = spawn_reflector(run_parrot_reflector);
     let err = session
-        .m17_connect(Box::new(NullBackend::new()), cfg(addr))
+        .m17_connect(Box::new(NullBackend::new()), cfg(addr), None, None)
         .expect_err("M17 connect must be refused while an IAX2 call is live");
     assert!(
         matches!(err, astar_console::ConsoleError::AlreadyConnected),
@@ -1009,7 +898,7 @@ fn snapshot_mirrors_the_m17_lifecycle_and_reports_capability_flags() {
     assert!(!idle.m17_active);
 
     session
-        .m17_connect(Box::new(NullBackend::new()), cfg(addr))
+        .m17_connect(Box::new(NullBackend::new()), cfg(addr), None, None)
         .expect("m17 connect");
 
     // Dialing while Connecting, Answered once Linked; m17_active true
@@ -1033,7 +922,7 @@ fn snapshot_holds_hangup_until_m17_disconnect_is_called() {
     let (addr, _reflector) = spawn_reflector(run_nack_reflector);
     let mut session = ConsoleSession::new();
     session
-        .m17_connect(Box::new(NullBackend::new()), cfg(addr))
+        .m17_connect(Box::new(NullBackend::new()), cfg(addr), None, None)
         .expect("m17 connect");
 
     assert!(
@@ -1075,7 +964,7 @@ fn iax2_connect_after_m17_disconnect_starts_clean_with_dialing_status() {
     let (addr, _reflector) = spawn_reflector(run_nack_reflector);
     let mut session = ConsoleSession::new();
     session
-        .m17_connect(Box::new(NullBackend::new()), cfg(addr))
+        .m17_connect(Box::new(NullBackend::new()), cfg(addr), None, None)
         .expect("m17 connect");
 
     assert!(
@@ -1230,7 +1119,7 @@ fn inbound_offer_is_busy_rejected_while_m17_is_live() {
     let (mut session, addr) = session_listening(AnswerPolicy::Auto);
 
     session
-        .m17_connect(Box::new(NullBackend::new()), cfg(m17_addr))
+        .m17_connect(Box::new(NullBackend::new()), cfg(m17_addr), None, None)
         .expect("m17 connect");
     assert!(
         wait_until(|| session.snapshot().status == CallStatus::Answered, 2_000),
@@ -1294,7 +1183,7 @@ fn parked_offer_answer_is_refused_once_m17_is_live() {
     // NOW bring up M17 — after the offer already parked.
     let (m17_addr, _m17_reflector) = spawn_reflector(run_parrot_reflector);
     session
-        .m17_connect(Box::new(NullBackend::new()), cfg(m17_addr))
+        .m17_connect(Box::new(NullBackend::new()), cfg(m17_addr), None, None)
         .expect("m17 connect");
     assert!(
         wait_until(|| session.snapshot().status == CallStatus::Answered, 2_000),
