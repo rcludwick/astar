@@ -91,6 +91,8 @@ const VD2_DIBITS: usize = 100;
 const VD2_COLS: usize = 5;
 /// Bytes into the coder: ten of plaintext, two of CRC, one of flush tail.
 const VD2_CODED: usize = DCH_LEN + 2 + 1;
+/// Bytes of the assembled V/D mode 2 DCH field: five per block, five blocks.
+const VD2_FIELD: usize = BLOCKS * VD2_SLOT;
 
 /// Bytes of each CSD field in each block, and so nine per payload.
 const CSD_SLOT: usize = 9;
@@ -100,6 +102,8 @@ const CSD_DIBITS: usize = 180;
 const CSD_COLS: usize = 9;
 /// Bytes into the coder: twenty of plaintext, two of CRC, one of flush tail.
 const CSD_CODED: usize = CSD_LEN + 2 + 1;
+/// Bytes of one assembled CSD field: nine per block, five blocks.
+const CSD_FIELD: usize = BLOCKS * CSD_SLOT;
 
 // ── The scrambler ───────────────────────────────────────────────────────
 
@@ -227,7 +231,7 @@ fn scatter<const N: usize>(
 /// Touches only the five DCH slots, leaving the voice channel exactly as it
 /// was — so a caller may pack voice and data in either order.
 pub fn write_vd2(payload: &mut [u8; PAYLOAD_LEN], dch: &[u8; DCH_LEN]) {
-    let field = encode_field::<DCH_LEN, VD2_CODED, 25>(dch, VD2_DIBITS, VD2_COLS);
+    let field = encode_field::<DCH_LEN, VD2_CODED, VD2_FIELD>(dch, VD2_DIBITS, VD2_COLS);
     scatter(payload, 0, VD2_SLOT, &field);
 }
 
@@ -237,8 +241,8 @@ pub fn write_vd2(payload: &mut [u8; PAYLOAD_LEN], dch: &[u8; DCH_LEN]) {
 /// channel looks like, and the reason a receiver must not act on one.
 #[must_use]
 pub fn read_vd2(payload: &[u8; PAYLOAD_LEN]) -> Option<[u8; DCH_LEN]> {
-    let field: [u8; 25] = gather(payload, 0, VD2_SLOT);
-    decode_field::<DCH_LEN, VD2_CODED, 25>(&field, VD2_DIBITS, VD2_COLS)
+    let field: [u8; VD2_FIELD] = gather(payload, 0, VD2_SLOT);
+    decode_field::<DCH_LEN, VD2_CODED, VD2_FIELD>(&field, VD2_DIBITS, VD2_COLS)
 }
 
 /// The ten bytes a client puts in frame `frame_number`'s data channel.
@@ -276,9 +280,9 @@ pub fn vd2_dch(frame_number: u8, source: &Callsign, gateway: &Callsign) -> [u8; 
 ///
 /// This overwrites the whole payload. A header frame carries no voice.
 pub fn write_csd(payload: &mut [u8; PAYLOAD_LEN], csd1: &[u8; CSD_LEN], csd2: &[u8; CSD_LEN]) {
-    let first = encode_field::<CSD_LEN, CSD_CODED, 45>(csd1, CSD_DIBITS, CSD_COLS);
+    let first = encode_field::<CSD_LEN, CSD_CODED, CSD_FIELD>(csd1, CSD_DIBITS, CSD_COLS);
     scatter(payload, 0, CSD_SLOT, &first);
-    let second = encode_field::<CSD_LEN, CSD_CODED, 45>(csd2, CSD_DIBITS, CSD_COLS);
+    let second = encode_field::<CSD_LEN, CSD_CODED, CSD_FIELD>(csd2, CSD_DIBITS, CSD_COLS);
     scatter(payload, CSD_SLOT, CSD_SLOT, &second);
 }
 
@@ -286,11 +290,11 @@ pub fn write_csd(payload: &mut [u8; PAYLOAD_LEN], csd1: &[u8; CSD_LEN], csd2: &[
 /// pass their CRC — half a header is not a header.
 #[must_use]
 pub fn read_csd(payload: &[u8; PAYLOAD_LEN]) -> Option<([u8; CSD_LEN], [u8; CSD_LEN])> {
-    let first: [u8; 45] = gather(payload, 0, CSD_SLOT);
-    let second: [u8; 45] = gather(payload, CSD_SLOT, CSD_SLOT);
+    let first: [u8; CSD_FIELD] = gather(payload, 0, CSD_SLOT);
+    let second: [u8; CSD_FIELD] = gather(payload, CSD_SLOT, CSD_SLOT);
     Some((
-        decode_field::<CSD_LEN, CSD_CODED, 45>(&first, CSD_DIBITS, CSD_COLS)?,
-        decode_field::<CSD_LEN, CSD_CODED, 45>(&second, CSD_DIBITS, CSD_COLS)?,
+        decode_field::<CSD_LEN, CSD_CODED, CSD_FIELD>(&first, CSD_DIBITS, CSD_COLS)?,
+        decode_field::<CSD_LEN, CSD_CODED, CSD_FIELD>(&second, CSD_DIBITS, CSD_COLS)?,
     ))
 }
 
@@ -341,6 +345,11 @@ mod tests {
         // width must cover exactly the dibits it is asked for.
         assert_eq!(VD2_CODED * 8, VD2_DIBITS + 4);
         assert_eq!(CSD_CODED * 8, CSD_DIBITS + 4);
+        // The assembled fields hold exactly the coder's output.
+        assert_eq!(VD2_FIELD, 25);
+        assert_eq!(VD2_FIELD * 8, VD2_DIBITS * 2);
+        assert_eq!(CSD_FIELD, 45);
+        assert_eq!(CSD_FIELD * 8, CSD_DIBITS * 2);
     }
 
     #[test]
@@ -439,38 +448,65 @@ mod tests {
         assert_ne!(a, b, "the two blocks must be independent");
     }
 
+    /// Reads a hex string into a fixed field.
+    fn hex<const N: usize>(text: &str) -> [u8; N] {
+        let bytes = text.as_bytes();
+        assert_eq!(bytes.len(), N * 2, "expected {N} bytes of hex");
+        let mut out = [0u8; N];
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = u8::from_str_radix(&text[i * 2..i * 2 + 2], 16).expect("hex");
+        }
+        out
+    }
+
+    /// The known-answer test, and it is only worth the name because these
+    /// bytes did not come from this module.
+    ///
+    /// They were produced on 2026-09-07 by an independent re-implementation
+    /// of the recipe in `docs/design/ysf-dch.md` — whitening, CRC-16 over the
+    /// *whitened* bytes, zero tail byte, rate-1/2 convolutional code, dibit
+    /// interleave, then the 5-byte (V/D mode 2) or 9+9-byte (header) scatter
+    /// across the five payload blocks — written from the specification rather
+    /// than from this code, and it agreed byte for byte.
+    ///
+    /// Composing the expectation out of this crate's own `crc`, `conv` and
+    /// `dibit_interleave` would only prove `write_vd2` calls them in some
+    /// order. These constants are what catches the whole chain being
+    /// self-consistently wrong — a CRC computed before the whitening instead
+    /// of after being the classic way for that to happen.
     #[test]
     fn a_known_answer_from_the_published_recipe() {
-        // Derived, not captured: the recipe in `docs/design/ysf-dch.md` run
-        // by hand for a single frame — whiten, CRC the whitened bytes, zero
-        // tail, convolve, interleave — and compared against the module. If
-        // the chain is ever reordered (CRC before whitening is the classic
-        // slip) this is what fails.
-        let dch = *b"AJ7HR     ";
-        let mut coded = [0u8; VD2_CODED];
-        for (slot, (&byte, &mask)) in coded
-            .iter_mut()
-            .zip(dch.iter().zip(WHITENING_REFERENCE.iter()))
-        {
-            *slot = byte ^ mask;
-        }
-        let expected_crc = crc::crc16(&coded[..DCH_LEN]);
-        coded[DCH_LEN] = u8::try_from(expected_crc >> 8).unwrap_or(0);
-        coded[DCH_LEN + 1] = u8::try_from(expected_crc & 0xFF).unwrap_or(0);
-
-        let mut convolved = [0u8; 25];
-        conv::encode(&coded, &mut convolved, VD2_DIBITS);
-        let mut expected = [0u8; 25];
-        for i in 0..VD2_DIBITS {
-            let n = conv::dibit_interleave(i, VD2_COLS);
-            conv::set_bit(&mut expected, n, conv::bit(&convolved, i * 2));
-            conv::set_bit(&mut expected, n + 1, conv::bit(&convolved, i * 2 + 1));
-        }
+        let mut payload = [0u8; PAYLOAD_LEN];
+        write_vd2(&mut payload, b"AJ7HR     ");
+        let field: [u8; VD2_FIELD] = gather(&payload, 0, VD2_SLOT);
+        assert_eq!(
+            field,
+            hex::<VD2_FIELD>("EBE8236E5494967A06F32545D5742D2C0F17E08B3BCAF1D964"),
+            "V/D mode 2 data channel for \"AJ7HR     \""
+        );
 
         let mut payload = [0u8; PAYLOAD_LEN];
-        write_vd2(&mut payload, &dch);
-        let field: [u8; 25] = gather(&payload, 0, VD2_SLOT);
-        assert_eq!(field, expected);
+        write_csd(
+            &mut payload,
+            b"**********AJ7HR     ",
+            b"AJ7HR     AJ7HR     ",
+        );
+        let first: [u8; CSD_FIELD] = gather(&payload, 0, CSD_SLOT);
+        let second: [u8; CSD_FIELD] = gather(&payload, CSD_SLOT, CSD_SLOT);
+        assert_eq!(
+            first,
+            hex::<CSD_FIELD>(
+                "F3F8F0C014531181A8B8A5E078E69026FF8EE5A32CD36CF1169C75431F043EE8A5C9938F25A83635570E2681BF"
+            ),
+            "CSD1 for \"**********AJ7HR     \""
+        );
+        assert_eq!(
+            second,
+            hex::<CSD_FIELD>(
+                "F0A350C013AC7F31A8B21CDAB8E6921A948EE5A2353FACF110A146031F037FE525C99F8A1368363994D5A68183"
+            ),
+            "CSD2 for \"AJ7HR     AJ7HR     \""
+        );
     }
 
     #[test]

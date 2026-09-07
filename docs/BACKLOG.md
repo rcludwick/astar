@@ -602,6 +602,12 @@ a real Header frame at key-down, cycles FN 0..=6 with FT 6 filling each
 frame's data channel, and closes with a real Terminator carrying callsigns
 rather than five frames of silence.
 
+**Known fragility, and it is reference parity.** One Header frame opens an
+over, and a reflector will not relay a stream it never opened — so a single
+lost `YSFD` datagram at key-down drops the whole transmission. `MMDVMHost`
+and `DroidStar` have exactly the same exposure and nobody repeats the header;
+worth knowing before blaming the DCH if an over goes missing again.
+
 **What still needs Rob's radio.** Whether a Yaesu handheld actually shows the
 callsign, and whether KC-Wide's monitor picks the over up. Everything here is
 verified against the references and by round-trip, known-answer and
