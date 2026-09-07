@@ -42,10 +42,12 @@
 //! to write the algorithms out from their definitions instead of
 //! transcribing them.
 
+pub mod frame;
 pub mod fsm;
 pub mod reflector;
 pub mod wire;
 
+pub use frame::{BLOCK_LEN, BLOCKS, FrameKind, Lich, NetFrame, SACCH_LEN};
 pub use fsm::{FsmAction, INITIAL_POLLS, LINK_TIMEOUT, LinkState, NxdnFsm, POLL_INTERVAL};
 pub use reflector::{Reflector, ReflectorHandle};
 pub use wire::{

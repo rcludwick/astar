@@ -25,6 +25,12 @@ pub mod ambe;
 /// bytes in and bytes out — no hardware, so it is not `ambe-hw`-gated.
 pub mod ysf;
 
+/// NXDN voice: the four AMBE+2 half-rate frames inside a 33-byte network
+/// frame. `astar-nxdn` carries the two 14-byte blocks; this is the layer
+/// that reads them. Same 49-bit frame as YSF DN, so it reuses
+/// [`ysf::DnFrame`] and [`ysf::ratep_dn`] rather than duplicating them.
+pub mod nxdn;
+
 /// slin (16-bit signed linear PCM) wire framing (iax-31f7).
 pub mod slin;
 
