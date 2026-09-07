@@ -130,7 +130,18 @@ impl VoiceRoute {
         if let Some(id) = self.mic.as_ref() {
             router.set_gate(id, false);
             router.unbind_mic(id);
-            handles.extend(router.close_mic(id));
+            if let Some(handle) = router.close_mic(id) {
+                handles.push(handle);
+            } else {
+                // `unbind_mic` above cleared the destination, so the router
+                // has no reason to refuse — unless something re-bound the
+                // lane under us. Say so rather than leak a capture device
+                // silently (see the output-bus branch below).
+                tracing::warn!(
+                    mic = id.as_str(),
+                    "voice route: capture lane still bound at release — stream left open"
+                );
+            }
         }
         router.remove_from_bus(&self.out, self.mix_id);
         if let Some(handle) = router.close_output(&self.out) {

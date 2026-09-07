@@ -514,13 +514,26 @@ impl AudioRouter {
     /// Close a mic lane: drop the slot and hand back its stream handle. The
     /// stream closes when the handle drops — a caller holding a lock can
     /// carry it out and drop it later, because a `CoreAudio` stream drop can
-    /// stall briefly. `None` if the mic isn't open.
+    /// stall briefly.
     ///
-    /// Any destination still bound to the lane simply stops receiving; the
-    /// caller is expected to have unbound it. `Manager` never calls this —
-    /// the IAX2 lifecycle keeps its lanes until the router drops.
+    /// `None` if the mic isn't open OR still has a destination bound — a lane
+    /// somebody is still transmitting through must not be pulled from under
+    /// them, exactly as [`Self::close_output`] refuses a bus that still
+    /// carries a lane. Unbind first ([`Self::unbind_mic`]) to close a lane you
+    /// own. `Manager` never calls this — the IAX2 lifecycle keeps its lanes
+    /// until the router drops.
     #[must_use]
     pub fn close_mic(&mut self, mic: &MicId) -> Option<Box<dyn StreamHandle>> {
+        let bound = self.mics.get(mic).is_some_and(|slot| {
+            slot.dest
+                .lock()
+                .expect("dest mutex poisoned")
+                .as_ref()
+                .is_some()
+        });
+        if bound {
+            return None;
+        }
         self.mics.remove(mic).map(|slot| slot.handle)
     }
 
@@ -1862,6 +1875,7 @@ mod tests {
             )
             .expect("open");
         assert_eq!(router.mic_count(), 1);
+        router.unbind_mic(&mic);
         let handle = router.close_mic(&mic);
         assert!(
             handle.is_some(),
@@ -1873,6 +1887,35 @@ mod tests {
             router.mic_tx_dbfs(&mic).is_none(),
             "a closed lane has no meter"
         );
+    }
+
+    /// A mic lane whose destination is still bound belongs to whoever bound
+    /// it: closing it would drop the capture stream mid-transmission. The
+    /// refusal mirrors `close_output`'s.
+    #[test]
+    fn close_mic_refuses_while_the_lane_is_bound() {
+        let mut router = AudioRouter::new(Box::new(NullBackend::new()));
+        let mic = MicId::new("in:test");
+        let (tx, _rx) = channel::<Vec<i16>>();
+        router
+            .open_mic_lane(
+                &mic,
+                tx,
+                Arc::new(AtomicU32::new(0)),
+                StreamConfig::default(),
+            )
+            .expect("open");
+        assert!(
+            router.close_mic(&mic).is_none(),
+            "a bound lane must not be closed out from under its owner"
+        );
+        assert_eq!(router.mic_count(), 1, "and the slot stays in place");
+        router.unbind_mic(&mic);
+        assert!(
+            router.close_mic(&mic).is_some(),
+            "unbinding first hands the stream back"
+        );
+        assert_eq!(router.mic_count(), 0);
     }
 
     #[test]

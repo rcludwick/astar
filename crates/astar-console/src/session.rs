@@ -789,11 +789,19 @@ impl ConsoleSession {
     }
 
     /// The real gate for opening a voice route: nothing else may be live.
-    /// (`dstar_can_connect`/`ysf_can_connect` are the facade's cheap
-    /// pre-checks and guard the same set from the other direction.)
+    /// This is THE exclusion check — every network's connect path runs it,
+    /// and `dstar_can_connect`/`ysf_can_connect` only answer the same
+    /// question for an embedder that wants to ask before it tries.
+    ///
+    /// An IAX2 *link* is checked through `Manager::call_count`, not through
+    /// `active`: links live in the Manager's call table and never set
+    /// `active`, so without this a route would `open_mic_lane` the very mic a
+    /// Transceive link is keyed through, overwrite its destination, and close
+    /// its capture stream at release.
     fn can_open_voice_route(&self) -> Result<(), ConsoleError> {
         if self.active.is_some()
             || self.voice_route.is_some()
+            || self.manager.as_ref().is_some_and(|m| m.call_count() > 0)
             || self.m17_is_active()
             || self.dstar_is_active()
             || self.ysf_is_active()
@@ -1890,15 +1898,18 @@ impl ConsoleSession {
         }
     }
 
-    /// The cheap mutual-exclusion pre-check for a D-Star connect, applied
-    /// BEFORE the route is opened — so a caller that wants to build the
-    /// [`DstarSession`] outside this session's mutex can refuse early,
-    /// without having opened a `ThumbDV` first. [`Self::open_voice_route`]
-    /// applies the same guard for real when the route is actually taken;
-    /// this one just saves the work.
+    /// An embedder-facing query: *would a D-Star connect be refused right
+    /// now?* — answered without opening anything, so a front-end can grey a
+    /// button out, or a caller that builds the [`DstarSession`] outside this
+    /// session's mutex can decide not to scan for a `ThumbDV` at all.
     ///
-    /// It is NOT the check [`Self::dstar_adopt`] runs: by then the route is
-    /// held on this session's own behalf, so an adopt requires
+    /// It is NOT a step of the facade's connect flow. The gate that actually
+    /// excludes is [`Self::open_voice_route`]'s own check, which runs under
+    /// the lock as the route is taken; asking here first saves work but
+    /// decides nothing, because the state can change in between.
+    ///
+    /// It is also NOT the check [`Self::dstar_adopt`] runs: by then the route
+    /// is held on this session's own behalf, so an adopt requires
     /// `voice_route` to be `Some` where this requires it to be `None`.
     ///
     /// # Errors
@@ -2042,7 +2053,8 @@ impl ConsoleSession {
     /// the lane's channel ends.
     ///
     /// # Errors
-    /// [`ConsoleError::AlreadyConnected`] per [`Self::ysf_can_connect`];
+    /// [`ConsoleError::AlreadyConnected`] from [`Self::open_voice_route`]
+    /// while any other network holds the lane;
     /// [`ConsoleError::Device`]/[`ConsoleError::Audio`] if the OUTPUT device
     /// cannot be resolved or opened; otherwise whatever
     /// [`YsfLink::connect_with_audio`] returns.
@@ -2069,9 +2081,12 @@ impl ConsoleSession {
         }
     }
 
-    /// The mutual-exclusion guard on its own, so a caller building the link
-    /// OUTSIDE this session's mutex can refuse early — before scanning for a
-    /// dongle. Same reasoning as [`Self::dstar_can_connect`].
+    /// An embedder-facing query: *would a System Fusion connect be refused
+    /// right now?* — answered without opening anything, so a front-end can
+    /// grey a button out, or a caller building the link OUTSIDE this
+    /// session's mutex can decide not to scan for a dongle. Not a step of the
+    /// facade's connect flow: [`Self::open_voice_route`]'s own check is the
+    /// gate. Same reasoning as [`Self::dstar_can_connect`].
     ///
     /// # Errors
     /// [`ConsoleError::AlreadyConnected`] while any other network is live.
@@ -2335,6 +2350,9 @@ impl ConsoleSession {
     /// link's opaque call id (`CallId::as_raw`, as reported in the roster).
     ///
     /// # Errors
+    /// [`ConsoleError::AlreadyConnected`] while a digital-voice route is held
+    /// — routing a link's mic through the `Manager` would re-bind and un-gate
+    /// the very lane M17/D-Star/YSF is transmitting on;
     /// [`ConsoleError::Link`] on a dial/link failure; [`ConsoleError::Device`]
     /// if no default output (or, for Transceive, input) device exists.
     pub fn link_connect(
@@ -2342,6 +2360,9 @@ impl ConsoleSession {
         spec: LinkConnectSpec,
         backend: Box<dyn AudioBackend>,
     ) -> Result<u64, ConsoleError> {
+        if self.voice_route.is_some() {
+            return Err(ConsoleError::AlreadyConnected);
+        }
         let manager = self.ensure_engine_checked(|| backend)?;
         let out_id = manager
             .default_output()
@@ -2409,8 +2430,13 @@ impl ConsoleSession {
     /// switching away releases it (Manager mode routing).
     ///
     /// # Errors
+    /// [`ConsoleError::AlreadyConnected`] while a digital-voice route is held
+    /// (switching TO Transceive routes a mic — see [`Self::link_connect`]);
     /// [`ConsoleError::Link`] if no link is registered for `node` (or no engine).
     pub fn link_set_mode(&mut self, node: &str, mode: LinkMode) -> Result<(), ConsoleError> {
+        if self.voice_route.is_some() {
+            return Err(ConsoleError::AlreadyConnected);
+        }
         let id = self.link_call_id(node)?;
         let manager = self.manager.as_mut().expect("engine checked");
         manager
@@ -4195,6 +4221,69 @@ mod tests {
         assert!(
             !s.key_voice_route(true),
             "keying without a capture device is refused"
+        );
+    }
+
+    fn loopback_link_spec(node: &str, mode: LinkMode) -> LinkConnectSpec {
+        LinkConnectSpec {
+            node: node.to_string(),
+            // Loopback only: nothing listens, the dial just pools a call.
+            peer: "127.0.0.1:4569".parse().expect("loopback"),
+            mode,
+            caller_id: "1999".into(),
+            secret: String::new(),
+            shape: CallMode::Standard,
+            permanent: false,
+        }
+    }
+
+    /// An IAX2 link lives in the `Manager`'s call table and never sets
+    /// `active`, so the voice-route gate has to ask the Manager. Without
+    /// that, opening a route would re-open the link's own mic lane, overwrite
+    /// its destination, and close its capture stream at release.
+    #[test]
+    fn a_live_link_refuses_a_voice_route() {
+        let mut s = ConsoleSession::new();
+        s.link_connect(loopback_link_spec("55553", LinkMode::Transceive), null())
+            .expect("the dial pools a link over the null backend");
+        assert!(
+            matches!(
+                s.open_voice_route(None, None, null),
+                Err(ConsoleError::AlreadyConnected)
+            ),
+            "a route must not steal the lane a live link is keyed through"
+        );
+        s.link_disconnect("55553").expect("tear the link down");
+        assert!(
+            s.open_voice_route(None, None, null).is_ok(),
+            "and the lane is free again once the link is gone"
+        );
+    }
+
+    /// The other direction: `link_connect` routes the default mic through the
+    /// `Manager`, which would un-gate and re-bind a lane a digital-voice
+    /// session is mid-transmission on.
+    #[test]
+    fn a_held_voice_route_refuses_link_connect() {
+        let mut s = ConsoleSession::new();
+        let _audio = s.open_voice_route(None, None, null).expect("route");
+        assert!(
+            matches!(
+                s.link_connect(loopback_link_spec("55553", LinkMode::Transceive), null()),
+                Err(ConsoleError::AlreadyConnected)
+            ),
+            "a link must not be dialed while a voice route holds the lane"
+        );
+        assert!(
+            matches!(
+                s.link_set_mode("55553", LinkMode::Transceive),
+                Err(ConsoleError::AlreadyConnected)
+            ),
+            "nor may a mode switch route a mic behind the route's back"
+        );
+        assert!(
+            s.link_roster().is_none_or(|r| r.links.is_empty()),
+            "and nothing was registered"
         );
     }
 
