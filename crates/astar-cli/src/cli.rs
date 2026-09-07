@@ -258,8 +258,11 @@ OPTIONS:
     --radio-id <u32>    This station's DMR radio ID from radioid.net, 24 bits
                          (required). A registration, not a default: 0 and
                          anything past 16777215 are refused.
-    --tg <u32>          Talkgroup to join (required). A master routes by the
-                         room you joined, so there is no default to guess.
+    --tg <u32>          Talkgroup to join (required), 24 bits. A master routes
+                         by the room you joined, so there is no default to
+                         guess; 0 and anything past 16777215 are refused,
+                         because a DMRD destination id truncates rather than
+                         fails.
     --ts <1|2>          Timeslot. Defaults to 2, the hotspot convention — a
                          convention, not a specification.
     --wav <path>        Write decoded audio as an 8 kHz s16 mono WAV file at

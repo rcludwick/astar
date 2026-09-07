@@ -99,7 +99,11 @@ const BIT_DATA_SYNC: u8 = 0x20;
 const BIT_LOW_NIBBLE: u8 = 0x0F;
 
 /// The largest value a `DMRD` source or destination id can hold: 24 bits.
-const RADIO_ID_MAX: u32 = 0x00FF_FFFF;
+///
+/// Public because it bounds more than a radio ID: a talkgroup is a `DMRD`
+/// *destination* id and has the same 24 bits behind it, so `Station` and
+/// `astar-cli` check theirs against this rather than restating the literal.
+pub const RADIO_ID_MAX: u32 = 0x00FF_FFFF;
 
 /// A radio ID as it goes on the wire: the low 24 bits address a station in a
 /// `DMRD` and all 32 identify the peer in the handshake.

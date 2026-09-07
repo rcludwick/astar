@@ -166,8 +166,14 @@ dmr-test:
 # The parrot is a MASTER: it binds and waits, and performs the real
 # RPTL/RPTK/RPTC handshake, so a client that gets the digest wrong fails here
 # rather than against somebody's network.
-dmr-parrot port="62031" password="passw0rd":
-    cargo run -p astar-dmr --example dmr_parrot -- --port {{port}} --password {{password}}
+#
+# Neither half takes a password on the command line: a secret in argv is
+# readable by every process on the machine and lands in shell history. The
+# parrot reads ASTAR_DMR_PARROT_PASSWORD and falls back to its own built-in
+# loopback default (which is what the ASTAR_DMR_PASSWORD above matches); the
+# listener reads ASTAR_DMR_PASSWORD and has no default at all.
+dmr-parrot port="62031":
+    cargo run -p astar-dmr --example dmr_parrot -- --port {{port}}
 
 # Log in to a DMR master, join a talkgroup on a timeslot, and decode the voice
 # on it. RECEIVE ONLY — this command has no PTT, because astar has no DMR

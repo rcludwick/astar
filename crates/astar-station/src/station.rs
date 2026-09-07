@@ -1406,7 +1406,8 @@ impl Station {
     /// # Errors
     /// [`StationError::Dmr`] for an empty system, an ungated
     /// BrandMeister target, a zero or over-wide radio id, an empty callsign,
-    /// a zero talkgroup, a timeslot that is not 1 or 2, an empty password,
+    /// a zero or over-wide talkgroup, a timeslot that is not 1 or 2, an empty
+    /// password,
     /// when the `dmr` feature isn't compiled in, and for every
     /// vocoder-availability failure (the message names the specific port when
     /// a dongle is merely busy). [`StationError::AlreadyConnected`] while
@@ -1491,6 +1492,17 @@ impl Station {
             return Err(StationError::Dmr(
                 "talkgroup must be set: a master routes by the room you joined".into(),
             ));
+        }
+        // And a talkgroup is a `DMRD` DESTINATION id, which is the same 24
+        // bits the source id gets — so the same bound, from the same
+        // constant, asked in the same place. Without it a wider number
+        // reached the wire silently truncated: TG 16,777,217 would have
+        // joined room 1, which is somebody else's room.
+        if talkgroup > astar_dmr::RADIO_ID_MAX {
+            return Err(StationError::Dmr(format!(
+                "talkgroup {talkgroup} is past the {} a DMRD destination id holds — 24 bits",
+                astar_dmr::RADIO_ID_MAX
+            )));
         }
         // Secret-free by construction: the refusal names the field, never the
         // value.

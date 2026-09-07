@@ -309,6 +309,31 @@ fn an_independent_network_is_not_gated() {
     assert!(!message.contains(PASSWORD));
 }
 
+/// A talkgroup is a `DMRD` destination id: 24 bits, the same width the
+/// source id has. A wider number cannot go on the wire, and the field it
+/// would be written into truncates rather than complains — TG 16,777,217
+/// would join room 1, somebody else's room — so it is refused here, before
+/// the feature gate, exactly as an over-wide radio id is.
+#[test]
+fn a_station_refuses_a_talkgroup_past_twenty_four_bits() {
+    let station = test_station();
+    let e = station.dmr_connect(
+        "tgif",
+        "127.0.0.1",
+        62031,
+        3_153_591,
+        "KC0ABC",
+        0x0100_0000,
+        2,
+        PASSWORD.into(),
+    );
+    let Err(StationError::Dmr(message)) = e else {
+        panic!("a refusal")
+    };
+    assert!(message.contains("24 bits"), "{message:?}");
+    assert!(!message.contains(PASSWORD));
+}
+
 #[test]
 fn a_station_refuses_a_timeslot_that_is_not_one_or_two() {
     let station = test_station();

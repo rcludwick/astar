@@ -206,6 +206,7 @@ dependencies = [
  "astar-audio",
  "astar-codec",
  "astar-console",
+ "astar-dmr",
  "astar-dstar",
  "astar-iax",
  "astar-iax-core",

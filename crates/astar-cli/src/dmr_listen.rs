@@ -73,8 +73,15 @@ const DEFAULT_TIMESLOT: u8 = 2;
 /// The largest value a radio ID can take: 24 bits. `astar_dmr::RadioId` is the
 /// one definition of this rule and `Station::dmr_connect` asks it on every
 /// connect; this restates the bound only to fail before an audio device or a
-/// dongle is opened, with a message naming the flag.
-const RADIO_ID_MAX: u32 = 0x00FF_FFFF;
+/// dongle is opened, with a message naming the flag. Taken FROM the engine's
+/// constant rather than written out again, so there is one 24 in the tree.
+const RADIO_ID_MAX: u32 = astar_dmr::RADIO_ID_MAX;
+/// The largest value a talkgroup can take, which is the same bound for the
+/// same reason: a talkgroup is a `DMRD` DESTINATION id and the field is 24
+/// bits wide. A wider number does not fail on the wire, it TRUNCATES — TG
+/// 16,777,217 would join room 1, which is somebody else's room — so it is
+/// refused here and again in `Station::dmr_connect`.
+const TALKGROUP_MAX: u32 = astar_dmr::RADIO_ID_MAX;
 /// The environment variable the master password is read from. Named here so
 /// the reader in `main` and the usage text cannot drift apart.
 pub const PASSWORD_ENV: &str = "ASTAR_DMR_PASSWORD";
@@ -206,6 +213,13 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
     if talkgroup == 0 {
         return Err(format!(
             "--tg must not be 0 — a master routes by the room you joined\n\n{DMR_LISTEN_USAGE}"
+        ));
+    }
+    if talkgroup > TALKGROUP_MAX {
+        return Err(format!(
+            "--tg must fit 24 bits (at most {TALKGROUP_MAX}) — a talkgroup is a DMRD destination \
+             id, and a larger number is silently truncated into somebody else's \
+             room\n\n{DMR_LISTEN_USAGE}"
         ));
     }
 
@@ -689,6 +703,40 @@ mod tests {
             "0",
         ]);
         assert!(e.contains("--tg"), "{e}");
+    }
+
+    /// A talkgroup is a `DMRD` destination id: 24 bits, exactly as the radio
+    /// id is. Past that it truncates rather than fails, so a number that
+    /// cannot be the room the operator meant is refused before a dongle or an
+    /// audio device is opened.
+    #[test]
+    fn a_talkgroup_that_does_not_fit_twenty_four_bits_is_an_error() {
+        let e = err(&[
+            "m.example",
+            "--system",
+            "tgif",
+            "--callsign",
+            "KC0ABC",
+            "--radio-id",
+            "3153591",
+            "--tg",
+            "16777216",
+        ]);
+        assert!(e.contains("--tg") && e.contains("24 bits"), "{e}");
+        // And the largest one that DOES fit is accepted, so the bound is the
+        // field's and not one off it.
+        let o = opts(&[
+            "m.example",
+            "--system",
+            "tgif",
+            "--callsign",
+            "KC0ABC",
+            "--radio-id",
+            "3153591",
+            "--tg",
+            "16777215",
+        ]);
+        assert_eq!(o.talkgroup, TALKGROUP_MAX);
     }
 
     /// A directory row's `system` is a server name, not one of the engine's

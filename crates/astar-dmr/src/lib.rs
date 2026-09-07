@@ -107,6 +107,6 @@ pub use fsm::{
 pub use master::{Master, MasterHandle};
 pub use network::{ALL, DmrNetwork, NetworkClass, dialable};
 pub use wire::{
-    BURST_LEN, CallType, ConfigFields, DATA_LEN, DataError, DataPacket, FrameType, Packet, RadioId,
-    RadioIdError, Timeslot,
+    BURST_LEN, CallType, ConfigFields, DATA_LEN, DataError, DataPacket, FrameType, Packet,
+    RADIO_ID_MAX, RadioId, RadioIdError, Timeslot,
 };
