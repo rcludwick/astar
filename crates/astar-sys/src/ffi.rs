@@ -3458,40 +3458,48 @@ fn dmr_state_json(station: &IaxStation) -> String {
         let Some(s) = station.inner.dmr_state() else {
             return "{}".to_string();
         };
-        // The engine names the slot `ts1`/`ts2`; the number is what an
-        // operator reads and what the Swift binding types. An unrecognised
-        // label would be a new engine variant rather than a slot, and 0 says
-        // "not 1 or 2" instead of guessing one a caller might act on.
-        let timeslot: u8 = s
-            .timeslot
-            .strip_prefix("ts")
-            .and_then(|n| n.parse().ok())
-            .unwrap_or(0);
-        // Built through serde_json rather than `format!` for the same reason
-        // the YSF and NXDN renderers are: `last_heard` is attacker-supplied —
-        // it is derived from whatever the transmitting station put on the
-        // wire — so a quote or backslash in it must not be able to break out
-        // of the string.
-        serde_json::json!({
-            "link": s.link_state,
-            "failure": s.failure,
-            "last_heard": s.last_heard,
-            "last_heard_id": s.last_heard_id,
-            "talkgroup": s.talkgroup,
-            "timeslot": timeslot,
-            "frames_rx": s.frames_rx,
-            "receiving": s.receiving,
-            "backend": s.backend,
-            "ptt": s.ptt,
-            "rx_db": s.rx_dbfs,
-        })
-        .to_string()
+        dmr_snapshot_json(&s).to_string()
     }
     #[cfg(not(feature = "dmr"))]
     {
         let _ = station;
         "{}".to_string()
     }
+}
+
+/// The document one snapshot renders as.
+///
+/// Split from [`dmr_state_json`] so a test can render a snapshot it built
+/// itself: without a link the function above returns `{}`, and a promise about
+/// the fields of a document that has none is no promise at all.
+#[cfg(feature = "dmr")]
+fn dmr_snapshot_json(s: &astar_station::DmrSnapshot) -> serde_json::Value {
+    // The engine names the slot `ts1`/`ts2`; the number is what an operator
+    // reads and what the Swift binding types. An unrecognised label would be a
+    // new engine variant rather than a slot, and 0 says "not 1 or 2" instead
+    // of guessing one a caller might act on.
+    let timeslot: u8 = s
+        .timeslot
+        .strip_prefix("ts")
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    // Built through serde_json rather than `format!` for the same reason the
+    // YSF and NXDN renderers are: `last_heard` is attacker-supplied — it is
+    // derived from whatever the transmitting station put on the wire — so a
+    // quote or backslash in it must not be able to break out of the string.
+    serde_json::json!({
+        "link": s.link_state,
+        "failure": s.failure,
+        "last_heard": s.last_heard,
+        "last_heard_id": s.last_heard_id,
+        "talkgroup": s.talkgroup,
+        "timeslot": timeslot,
+        "frames_rx": s.frames_rx,
+        "receiving": s.receiving,
+        "backend": s.backend,
+        "ptt": s.ptt,
+        "rx_db": s.rx_dbfs,
+    })
 }
 
 #[cfg(test)]
@@ -3587,11 +3595,64 @@ mod dmr_tests {
         unsafe { iax_station_free(st) };
     }
 
+    /// A snapshot with every field populated, so the assertions below are
+    /// about a real document rather than the `{}` an idle station renders.
+    ///
+    /// `last_heard` carries the quote-and-backslash payload on purpose: it is
+    /// the one attacker-supplied field here — a talker's id as it came off the
+    /// wire — and the renderer's whole reason for going through `serde_json`
+    /// instead of `format!` is that it cannot break out of the string.
+    #[cfg(feature = "dmr")]
+    fn populated_snapshot() -> astar_station::DmrSnapshot {
+        astar_station::DmrSnapshot {
+            link_state: "linked",
+            failure: None,
+            last_heard: Some("4242\" , \"password\": \"hunter2".to_string()),
+            last_heard_id: Some(4242),
+            talkgroup: 31_313,
+            timeslot: "ts2",
+            frames_rx: 97,
+            receiving: true,
+            backend: Some("thumbdv"),
+            ptt: false,
+            tx_dbfs: -60.0,
+            rx_dbfs: -31.2,
+        }
+    }
+
     #[test]
     fn the_state_json_has_no_field_that_could_hold_a_secret() {
         // The ABI is the widest surface a secret could escape through and the
         // hardest to audit later. There is no password field, and this test
         // is the thing that notices if one is ever added.
+        //
+        // Asserted against a POPULATED snapshot: the no-link document is
+        // `{}`, and "`{}` contains no password" is a promise about nothing.
+        // The idle case is covered separately, by
+        // `dmr_state_json_is_empty_without_a_link`.
+        #[cfg(feature = "dmr")]
+        {
+            let value = dmr_snapshot_json(&populated_snapshot());
+            let object = value.as_object().expect("a JSON object");
+            assert!(!object.is_empty(), "the fixture must render fields");
+            for name in object.keys() {
+                let lowered = name.to_ascii_lowercase();
+                for forbidden in ["password", "passphrase", "secret", "pass", "salt", "digest"] {
+                    assert!(
+                        !lowered.contains(forbidden),
+                        "the DMR state JSON has a field named {name:?}"
+                    );
+                }
+            }
+            // And the one field a talker controls cannot smuggle a key in by
+            // being quoted out of: it stays one JSON string, whatever is in
+            // it.
+            assert_eq!(
+                object.get("last_heard").and_then(serde_json::Value::as_str),
+                populated_snapshot().last_heard.as_deref()
+            );
+        }
+        // The rendered document itself, through the same path the ABI uses.
         let st = station();
         let json = dmr_state_json(unsafe { &*st });
         for forbidden in ["password", "passphrase", "secret", "pass"] {

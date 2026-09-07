@@ -428,9 +428,12 @@ pub enum Packet {
 
 /// Parses a received datagram.
 ///
-/// Returns `None` only for something that is not a datagram this protocol
-/// has: too short to carry a tag, or a known tag at a length that makes it
-/// unreadable. Anything else comes back as [`Packet::Unknown`].
+/// Returns `None` for two things and no others: a datagram too short to carry
+/// a tag at all, and a `DMRD` whose length is neither of the two a burst can
+/// be. A known CONTROL tag arriving too short to read does NOT answer `None`
+/// — it falls through to [`Packet::Unknown`], which is the point: an
+/// `RPTACK` with no salt in it must be reported as something seen rather
+/// than parsed with an invented id and allowed to advance a handshake.
 #[must_use]
 pub fn parse(datagram: &[u8]) -> Option<Packet> {
     if datagram.len() < 4 {

@@ -75,6 +75,14 @@
 //! put malformed bursts on a live network under the operator's own
 //! registration.
 //!
+//! One thing Task 12 inherits: `run_ptt_step` — the one place a request is
+//! dropped and cleared — runs only inside `if let Some(a) = audio`, so a link
+//! opened WITHOUT audio latches `ptt_request` and never clears it. Harmless
+//! while nothing reads it (the snapshot's `ptt` is a constant false), and
+//! invisible: an audio-less link is the loopback tests' shape, not an
+//! operator's. Whoever builds transmit must move the clear out of that arm or
+//! decide deliberately that an audio-less link cannot be keyed.
+//!
 //! # Half-duplex
 //!
 //! The `ThumbDV` is one physical link with one AMBE-3000 behind it, so this

@@ -103,9 +103,10 @@
     /// answer to "did I enter that" does not require re-typing a secret to find
     /// out.
     ///
-    /// The password is written straight through to `KeychainCredentialStore`
-    /// alongside the AllStarLink account, is never pre-filled (an empty box
-    /// means "unchanged", exactly as it does for the portal password), and is
+    /// The password is written straight through to `KeychainDmrPasswordStore`
+    /// — its OWN Keychain item, one per system, not the one the AllStarLink
+    /// account lives in — is never pre-filled (an empty box means
+    /// "unchanged", exactly as it does for the portal password), and is
     /// dropped from view state the moment this panel goes away.
     struct DmrPasswordView: View {
         struct SystemChoice: Identifiable, Equatable {
