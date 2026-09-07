@@ -140,6 +140,19 @@ fn push_mic_tone(mic_sink: &MicSink, freq_hz: f32, ms: u32) {
     }
 }
 
+/// [`push_mic_tone`] at an explicit lane rate — a 16 kHz station's mic lane
+/// captures 16 kHz, so a test that drives it must speak 16 kHz too.
+#[allow(clippy::cast_precision_loss)]
+fn push_mic_tone_at(mic_sink: &MicSink, freq_hz: f32, ms: u32, rate: u32) {
+    let n = (rate * ms / 1_000) as usize;
+    let tone: Vec<f32> = (0..n)
+        .map(|i| 0.6 * (std::f32::consts::TAU * freq_hz * i as f32 / rate as f32).sin())
+        .collect();
+    if let Some(sink) = mic_sink.lock().unwrap().as_mut() {
+        sink.write(&tone, 0.0);
+    }
+}
+
 /// Pulls up to `n` samples from the stashed `OutputTap` (the router's real
 /// `OutputBus`, mirroring what the cpal output thread would pull) and returns
 /// their peak amplitude (`0.0..=1.0`, via `astar_audio::peak`) — proof
@@ -1206,4 +1219,73 @@ fn parked_offer_answer_is_refused_once_m17_is_live() {
     );
 
     session.m17_disconnect();
+}
+
+// ---- the slin16 station (iax-4348 / the rate-pin fix) ----------------------
+//
+// astar and astar-server are slin16 stations: the codec policy is pinned
+// before anything builds the engine, so the ONE bus runs at 16 kHz and the
+// digital-voice sessions ride it through `VoiceRoute`'s rate bridge. This is
+// the end-to-end proof that they do: a real parrot reflector, a 16 kHz mic
+// lane, and the session's own transmission decoded back onto a 16 kHz bus.
+// Before the bridge, an M17 session on a 16 kHz station either could not
+// exist (the engine was pinned to 8 kHz by whichever path built it first) or
+// fed 160-sample frames onto a 320-sample bus.
+
+#[test]
+fn a_slin16_station_hears_itself_via_a_real_parrot_reflector() {
+    let reflector =
+        Reflector::bind_parrot("127.0.0.1:0".parse().unwrap()).expect("bind parrot reflector");
+    let reflector_addr = reflector.local_addr();
+    let handle = reflector.run();
+
+    let mic_sink: MicSink = Arc::new(Mutex::new(None));
+    let output_tap: OutputTap = Arc::new(Mutex::new(None));
+    let backend = PushBackend {
+        mic_sink: Arc::clone(&mic_sink),
+        output_tap: Arc::clone(&output_tap),
+    };
+
+    let mut session = ConsoleSession::new();
+    // What `Station::new` now does from `StationConfig.codec_policy`.
+    session.set_station_policy(CodecPolicy::PreferSlin16);
+    session
+        .m17_connect(Box::new(backend), cfg(reflector_addr), None, None)
+        .expect("m17 connect on a 16 kHz station");
+    assert_eq!(
+        session.pipeline_sample_rate(),
+        16_000,
+        "a prefer_slin16 station must stay 16 kHz through an M17 session"
+    );
+
+    assert!(
+        wait_until(|| session.snapshot().status == CallStatus::Answered, 2_000),
+        "must link to the parrot reflector before keying"
+    );
+
+    session.set_ptt(true).expect("key");
+    assert!(
+        wait_until(|| session.snapshot().ptt, 1_000),
+        "set_ptt(true) must be applied by the run-loop"
+    );
+    // 400 ms of 400 Hz at the LANE's rate: the TX half of the bridge has to
+    // hand Codec 2 valid 160-sample 8 kHz frames out of this, or nothing
+    // encodes and the parrot has nothing to echo.
+    push_mic_tone_at(&mic_sink, 400.0, 400, 16_000);
+    session.set_ptt(false).expect("unkey");
+    assert!(
+        wait_until(|| !session.snapshot().ptt, 1_000),
+        "set_ptt(false) flushes the EOS-marked packet the parrot waits for"
+    );
+
+    // And the RX half: the echoed stream decodes to 8 kHz PCM, is upsampled
+    // to the bus rate, and lands audible on the 16 kHz output bus.
+    assert!(
+        wait_until(|| pull_output_peak(&output_tap, 16_000) > 0.01, 3_000),
+        "the parrot's echo of our own transmission must decode to non-silent \
+         PCM on the 16 kHz bus"
+    );
+
+    session.m17_disconnect();
+    handle.shutdown();
 }

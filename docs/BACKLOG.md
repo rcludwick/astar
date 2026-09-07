@@ -1573,3 +1573,27 @@ paths were being built. Now that both are stable (D-Star and YSF transmit
 both shipped 2026-09-06), extract one `astar-codec` type both sessions hold
 instead of parallel hand-rolled queues, so a pacing fix lands once instead
 of twice.
+
+### iax-ratebridge-shared — One `FrameRateBridge` for the 8↔16 kHz edge
+*P3 low · chore · labels: audio, codec, refactor, cx:2*
+
+The exact 8↔16 kHz framing recipe now exists twice: `EdgeAudio` in
+`crates/astar-iax/src/codec_edge.rs` (bus rate ↔ negotiated wire rate) and
+`RateBridge` in `crates/astar-console/src/voice_route.rs` (bus rate ↔ the
+digital codecs' fixed 8 kHz). Both are the same four moving parts —
+`Resampler1::with_chunk` at one 20 ms frame per pass so an integer ratio
+yields one frame out per frame in, a FIFO that pops exactly one output frame
+per call (left-padding only through the interpolator's warm-up), a 4th-order
+Butterworth anti-alias cascade at the source rate ahead of any downsample, and
+the i16↔f32 scaling around them — and each carries its own copy of the `//
+iax-62ac` reasoning about why short frames must never reach a fixed cadence.
+A drift fix or a filter change has to land in both, and the second copy is
+easy to miss.
+
+Hoist it into `astar-audio` as one `FrameRateBridge { from, to }` with a
+`convert(&[i16]) -> Vec<i16>` that is exactly one frame in, one frame out, and
+have both callers hold one. `astar-iax` is frozen for this, so it wants doing
+deliberately rather than opportunistically; the tests that pin the property
+(`codec_edge`'s `cross_rate_*_emits_exactly_one_*_frame_*` pair and
+`voice_route`'s `a_16k_bridge_frames_exactly_and_keeps_pitch_both_ways`)
+should move with it.

@@ -9,7 +9,7 @@ use astar_console::{
     CallStatus, ConsoleConfig, ConsoleSession, ConsoleState, LinkConnectSpec, OperatingMode,
     RegisterOutcome,
 };
-use astar_iax::{CallMode, LinkEvent, LinkMode, LinkRoster};
+use astar_iax::{CallMode, CodecPolicy, IncomingCallPolicy, LinkEvent, LinkMode, LinkRoster};
 use astar_iax_core::session::auth::Secret;
 
 use crate::config::NodeConfig;
@@ -291,6 +291,7 @@ impl Station {
             #[cfg(feature = "m17")]
             codec2_probe_cache: Mutex::new(None),
         };
+        station.pin_station_policy();
         if configured_mode == OperatingMode::Node {
             let _ = station.set_mode(OperatingMode::Node);
         }
@@ -332,10 +333,50 @@ impl Station {
             #[cfg(feature = "m17")]
             codec2_probe_cache: Mutex::new(None),
         };
+        station.pin_station_policy();
         if configured_mode == OperatingMode::Node {
             let _ = station.set_mode(OperatingMode::Node);
         }
         station
+    }
+
+    /// Pin the session's station codec policy from [`StationConfig`] at
+    /// construction (iax-4348), BEFORE any path can build the engine.
+    ///
+    /// The pipeline sample rate is fixed when the `Manager` is built and
+    /// every dial's codec policy is capped to it, so a `prefer_slin16`
+    /// station — which the macOS app and `astar-server` both configure — only
+    /// actually offers slin16 if the policy is known first. It used to be
+    /// learned from the first IAX2 `connect` or `start_inbound`; a digital
+    /// session (M17/D-Star/System Fusion) reaching the engine before either
+    /// of those pinned the whole station to 8 kHz for the rest of the
+    /// process, and the node dialed narrowband with nothing in the log.
+    ///
+    /// Idempotent and safe on a shared session: an engine that is already
+    /// busy keeps its rate (the session logs the mismatch).
+    fn pin_station_policy(&self) {
+        if let Ok(mut s) = self.session.lock() {
+            s.set_station_policy(self.config.codec_policy);
+        }
+    }
+
+    /// Default an inbound policy's codec policy to the station's own
+    /// (iax-4348). `IncomingCallPolicy::codec_policy` has no "unset" state, so
+    /// "the caller did not choose" is read as the library default
+    /// (`UlawOnly`); anything else the caller set is left alone, which keeps
+    /// asymmetric inbound/outbound policy available.
+    ///
+    /// Without this a `prefer_slin16` station drops to 8 kHz the moment the
+    /// listener starts — `start_inbound` pins `station_policy` from the
+    /// inbound policy — and then STAYS there, because a listening engine is
+    /// never idle enough to rebuild. Worse, on an engine already up at 16 kHz
+    /// the 8 kHz leg the listener builds is refused outright at adopt
+    /// ("listener/station sample-rate mismatch").
+    fn inbound_policy(&self, mut policy: IncomingCallPolicy) -> IncomingCallPolicy {
+        if policy.codec_policy == CodecPolicy::default() {
+            policy.codec_policy = self.config.codec_policy;
+        }
+        policy
     }
 
     /// Select the capture/playback devices applied to the next [`Station::connect`]
@@ -1206,7 +1247,7 @@ impl Station {
         let mut sess = self.session.lock().unwrap();
         sess.start_inbound_with_allowlist(
             cfg.bind,
-            cfg.policy,
+            self.inbound_policy(cfg.policy),
             cfg.answer,
             cfg.max_calls,
             cfg.allowlist,
@@ -1341,7 +1382,7 @@ impl Station {
                     let mut sess = self.session.lock().unwrap();
                     sess.start_inbound_with_allowlist(
                         cfg.bind,
-                        crate::config::clone_policy(&cfg.policy),
+                        self.inbound_policy(crate::config::clone_policy(&cfg.policy)),
                         cfg.answer,
                         cfg.max_calls,
                         cfg.allowlist.clone(),

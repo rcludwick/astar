@@ -111,6 +111,9 @@ current.
 
 - **A rejected inbound call — bad CALLTOKEN, failed auth, or no common codec —
   no longer leaves a call number and a `max_calls` slot held forever.**
+- **The app dials as a slin16 station again whichever network it used first.**
+  Digital voice now rides a 16 kHz station through an exact 8↔16 kHz bridge
+  instead of pinning the engine to 8 kHz.
 
 - **Failures say what actually went wrong.** A dial that failed used to read
   something like "astarstation error -7: audio error" — a number and a

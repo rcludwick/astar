@@ -290,6 +290,19 @@ fn push_mic_tone(mic_sink: &MicSink, freq_hz: f32, ms: u32) {
     }
 }
 
+/// [`push_mic_tone`] at an explicit lane rate — a 16 kHz station's mic lane
+/// captures 16 kHz, so a test that drives it must speak 16 kHz too.
+#[allow(clippy::cast_precision_loss)]
+fn push_mic_tone_at(mic_sink: &MicSink, freq_hz: f32, ms: u32, rate: u32) {
+    let n = (rate * ms / 1_000) as usize;
+    let tone: Vec<f32> = (0..n)
+        .map(|i| 0.6 * (std::f32::consts::TAU * freq_hz * i as f32 / rate as f32).sin())
+        .collect();
+    if let Some(sink) = mic_sink.lock().unwrap().as_mut() {
+        sink.write(&tone, 0.0);
+    }
+}
+
 // ---- the tests --------------------------------------------------------------
 
 #[test]
@@ -840,4 +853,82 @@ fn disconnect_mid_dialing_iax2_call_lets_a_fresh_iax2_connect_succeed() {
         .expect("a fresh IAX2 connect must succeed once disconnect() cleared the Dialing call");
 
     station.disconnect();
+}
+
+// ---- the slin16 station (iax-4348 / the rate-pin fix) ----------------------
+//
+// `StationConfig.codec_policy` is applied to the session at CONSTRUCTION, so
+// the station's audio pipeline runs at the configured rate whichever network
+// happens to build the engine first. The macOS app configures
+// `prefer_slin16`, and so does astar-server's `codec_policy` — before this,
+// an M17/D-Star/System Fusion session reaching the engine first pinned the
+// whole station to 8 kHz for the rest of the process and every later IAX2
+// dial was silently capped back to plain slin.
+
+fn slin16_station_with_push_pull_backend() -> (Station, Arc<Mutex<ConsoleSession>>, MicSink) {
+    let mic_sink: MicSink = Arc::new(Mutex::new(None));
+    let sink_for_backend = Arc::clone(&mic_sink);
+    let session = Arc::new(Mutex::new(ConsoleSession::new()));
+    let station = Station::with_shared_session(
+        StationConfig {
+            codec_policy: CodecPolicy::PreferSlin16,
+            ..StationConfig::default()
+        },
+        Arc::clone(&session),
+        Box::new(move || {
+            Box::new(PushPullBackend {
+                mic_sink: Arc::clone(&sink_for_backend),
+            }) as Box<dyn AudioBackend>
+        }),
+    );
+    (station, session, mic_sink)
+}
+
+#[test]
+fn a_prefer_slin16_station_runs_m17_on_a_16k_pipeline() {
+    let (addr, _reflector) = spawn_parrot_reflector();
+    let (station, session, mic_sink) = slin16_station_with_push_pull_backend();
+
+    // The policy is pinned at construction, before anything builds an engine.
+    assert!(
+        !session.lock().unwrap().has_engine(),
+        "constructing a Station must not build the engine"
+    );
+
+    station
+        .m17_connect(&addr.ip().to_string(), addr.port(), 'A', "N0CALL")
+        .expect("m17 connect");
+    assert_eq!(
+        session.lock().unwrap().pipeline_sample_rate(),
+        16_000,
+        "a prefer_slin16 StationConfig must give M17 a 16 kHz pipeline, \
+         not the 8 kHz default the first engine build used to pick"
+    );
+    assert!(
+        wait_until(|| station.snapshot().status == CallStatus::Answered, 2_000),
+        "must link before keying"
+    );
+
+    // And the audio still works across the rate bridge: key, talk at the
+    // 16 kHz lane rate, and let the parrot echo it back onto the 16 kHz bus.
+    station.set_ptt(true).expect("key");
+    assert!(wait_until(|| station.snapshot().ptt, 1_000), "must key");
+    push_mic_tone_at(&mic_sink, 400.0, 400, 16_000);
+    station.set_ptt(false).expect("unkey");
+    assert!(wait_until(|| !station.snapshot().ptt, 1_000), "must unkey");
+
+    let mut bins = [0.0_f32; astar_audio::SPECTRUM_BINS];
+    assert!(
+        wait_until(
+            || {
+                let n = station.rx_spectrum(&mut bins);
+                n == astar_audio::SPECTRUM_BINS
+                    && bins.iter().copied().fold(f32::MIN, f32::max) > -30.0
+            },
+            3_000
+        ),
+        "the parrot's echo must decode and reach the 16 kHz output bus"
+    );
+
+    station.m17_disconnect();
 }
