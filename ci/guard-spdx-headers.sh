@@ -30,6 +30,14 @@ cd "$ROOT"
 missing=""
 checked=0
 
+# A plain file (not process substitution) so the loop body runs in the
+# current shell under both bash and a POSIX `sh` — `< <(...)` is a bashism
+# `sh` rejects outright, and piping into the loop would run it in a subshell
+# where `missing`/`checked` never escape.
+file_list="$(mktemp)"
+trap 'rm -f "$file_list"' EXIT
+git ls-files '*.rs' '*.swift' '*.sh' '*.py' >"$file_list"
+
 while IFS= read -r f; do
   case "$f" in
     vendor/* | harness/asterisk_parity/c_iaxclient/vendored/*) continue ;;
@@ -38,13 +46,13 @@ while IFS= read -r f; do
   # Only the first 10 lines: the header belongs at the top of the file, not
   # buried in a string literal or a test fixture halfway down.
   if ! head -n 10 "$f" | grep -q 'SPDX-License-Identifier: AGPL-3.0-only'; then
-    missing="${missing}${f}"$'\n'
+    missing="$(printf '%s%s\n' "$missing" "$f")"
   fi
-done < <(git ls-files '*.rs' '*.swift' '*.sh' '*.py')
+done <"$file_list"
 
 if [ -n "$missing" ]; then
   echo "FAIL: source file(s) with no AGPL-3.0-only SPDX header in the first 10 lines:" >&2
-  printf '%s' "$missing" >&2
+  printf '%s\n' "$missing" >&2
   echo "      Add these three lines at the top (after a shebang or a" >&2
   echo "      swift-tools-version line, if present):" >&2
   echo >&2
