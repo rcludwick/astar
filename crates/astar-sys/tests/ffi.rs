@@ -123,6 +123,8 @@ fn snapshot_fills_idle_state() {
         ysf_active: true,
         nxdn_available: true,
         nxdn_active: true,
+        dmr_available: true,
+        dmr_active: true,
     };
     let rc = unsafe { iax_station_snapshot(st, std::ptr::from_mut(&mut state)) };
     assert_eq!(rc, IAX_OK);
@@ -144,6 +146,9 @@ fn snapshot_fills_idle_state() {
     // iax-b9c2: and for NXDN. `nxdn_available` is skipped for the same reason
     // the other two are — it is the same one ThumbDV probe.
     assert!(!state.nxdn_active);
+    // iax-d4f7: and for DMR. `dmr_available` is skipped for the same reason
+    // again — one dongle, one probe, one answer.
+    assert!(!state.dmr_active);
     assert_eq!(state.rtt_ms, -1);
     // iax-5c30: idle (no active call) reports the silence floor.
     assert!((state.input_db + 60.0).abs() < 1e-3);
@@ -193,6 +198,8 @@ fn null_guards_return_err_null() {
         ysf_active: false,
         nxdn_available: false,
         nxdn_active: false,
+        dmr_available: false,
+        dmr_active: false,
     };
     assert_eq!(
         unsafe { iax_station_snapshot(ptr::null_mut(), std::ptr::from_mut(&mut state)) },
@@ -337,6 +344,8 @@ fn mint_token_without_portal_is_portal_err() {
         ysf_active: false,
         nxdn_available: false,
         nxdn_active: false,
+        dmr_available: false,
+        dmr_active: false,
     };
     assert_eq!(
         unsafe { iax_station_snapshot(st, std::ptr::from_mut(&mut state)) },
