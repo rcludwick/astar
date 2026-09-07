@@ -75,7 +75,13 @@ current.
 
 - **astar-server prefers signed 16-bit linear by default** and rejects a peer
   with no usable codec instead of accepting one it cannot decode; µ-law-only
-  nodes are still accepted.
+  nodes are still accepted. The reject carries Asterisk's own CAUSE and
+  CAUSECODE, and — like the two older inbound rejects, which had the same bug —
+  it now tears the call leg down instead of leaving it holding a call number
+  and a slot against `max_calls`. In the other direction, a peer that answers
+  with a format the station never offered is hung up on rather than transmitted
+  to: a `ulaw_only` node no longer ends up sending wideband because the far end
+  asked for it.
 
 - **Versions are real SemVer from here on**, this one included, and the app and
   the Rust workspace now spell a release identically — they had been carrying

@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Audio codecs for IAX2. G.711 always-on; GSM/Speex/iLBC behind feature flags."
+description = "Audio codecs for astar: G.711 mu-law/A-law and signed-linear for IAX2, Codec 2 for M17, AMBE via ThumbDV."
 
 [lints]
 workspace = true

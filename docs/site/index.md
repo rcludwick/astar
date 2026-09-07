@@ -46,7 +46,7 @@ native front-end over it rather than a shared web shell.
 
 | Network | Transport | Voice codec | Dials | Identifies as |
 |---|---|---|---|---|
-| AllStarLink | IAX2 (RFC 5456), UDP 4569 | µ-law / GSM / signed-linear, negotiated | Node numbers | Node number, via the allstarlink.org portal |
+| AllStarLink | IAX2 (RFC 5456), UDP 4569 | µ-law / A-law / signed-linear (8 or 16 kHz), negotiated | Node numbers | Node number, via the allstarlink.org portal |
 | M17 | UDP 17000 | Codec 2 3200 | Reflector + module | Callsign |
 | D-Star *(needs a dongle)* | DExtra, UDP 30001 | AMBE+2, on the dongle | XLX/XRF reflector + module | Callsign |
 

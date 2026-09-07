@@ -149,18 +149,24 @@ audio pipeline — capture, playback and mixing — to 16 kHz.
 FORMAT a caller asks for whenever the node can carry it, so a ClearNode or an
 ASL3 peer that only speaks µ-law gets µ-law on a `prefer_slin16` node, and it
 can share a conference with a wideband client — each leg resamples at its own
-codec edge. What the default changes is the caller that *asks* for slin16 (the
-astar clients always do): it is answered in slin16 instead of being quietly
-downgraded.
+codec edge. A caller that asks for µ-law gets µ-law even if it lists slin16 in
+its CAPABILITY — the peer's stated FORMAT wins when it is in the common set,
+because listing a codec says the peer *can* transcode it, not that it wants it
+on this link. What the default changes is the caller that actually *asks* for
+slin16 (the astar clients always do): it is answered in slin16 instead of being
+quietly downgraded.
 
 Set `codec_policy = "ulaw_only"` to pin the old behaviour — worth doing on a
 bandwidth-constrained link, since each wideband leg costs roughly twice a slin
 leg and eight times a µ-law one.
 
 A peer with *no* codec in common with the policy is rejected at call setup with
-CAUSE `Unable to negotiate codec`, the same as Asterisk. astar implements
-µ-law, A-law, slin and slin16 and no others, so a `disallow=all / allow=gsm`
-peer lands here.
+CAUSE `Unable to negotiate codec` and CAUSECODE 65, the same as Asterisk. astar
+implements µ-law, A-law, slin and slin16 and no others, so a
+`disallow=all / allow=gsm` peer lands here. The same applies in the other
+direction: if a node this server dials answers with a format the policy never
+offered, the link is hung up with that cause rather than transmitting outside
+the operator's cap.
 
 ## `[announce]` — voice and CW announcements
 
