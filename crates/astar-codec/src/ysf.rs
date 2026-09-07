@@ -521,7 +521,7 @@ fn dvsi_bit_order() -> [usize; VOICE_BITS] {
 /// `ambe_thumbdv::channel_in` cannot be used for this — it hard-codes 72
 /// bits (`0x48`), which is what D-Star and DMR send. YSF DN sends `0x31`.
 ///
-/// The width is all D-Star and DMR share, and it is only why `channel_in`
+/// The width is all D-Star and DMR share, and it is the only reason `channel_in`
 /// is reusable between them: their RATEP words differ (2400 + 1200 against
 /// 2450 + 1150), so a dongle configured for one cannot decode the other's
 /// 72 bits. See [`crate::dmr::ratep_dmr`].

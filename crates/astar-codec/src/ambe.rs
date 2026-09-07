@@ -987,6 +987,13 @@ fn null_frame(mode: VocoderMode) -> ChannelFrame {
     match mode {
         VocoderMode::Dstar => ChannelFrame::Dstar(NULL_AMBE_FRAME),
         VocoderMode::YsfDn => ChannelFrame::YsfDn(crate::ysf::DnFrame::MUTE),
+        // A deliberate stand-in, not a verified DMR silence frame: this is
+        // D-Star's null codeword handed to a chip configured for 2450 + 1150,
+        // which is the cross-mode reuse the paragraph above warns about. It
+        // is tolerable only because nothing transmits DMR yet. The transmit
+        // task owes a silence frame read out of the reference
+        // (`MMDVMHost/DMRDefines.h`'s silence pattern), and the hardware
+        // session is the arbiter if the two disagree.
         VocoderMode::Dmr => ChannelFrame::Dmr(NULL_AMBE_FRAME),
     }
 }
