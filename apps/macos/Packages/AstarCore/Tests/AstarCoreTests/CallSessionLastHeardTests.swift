@@ -39,6 +39,9 @@ final class CallSessionLastHeardTests: XCTestCase {
                 network: .m17, id: "M17-002", name: "M17-002",
                 dial: .m17(
                     host: "89.240.4.99", port: 17_001, callsign: "M17-002", modules: [])),
+            DirectoryEntry(
+                network: .nxdn, id: "100", name: "NXDN 100",
+                dial: .nxdn(host: "nxdn.example", port: 41_400)),
         ])
     }
 
@@ -46,21 +49,26 @@ final class CallSessionLastHeardTests: XCTestCase {
         let fake = FakeStation()
         fake.snapshotToReturn = CallSnapshot(
             status: .idle, ptt: false, remotePTT: false, txDB: -60, rxDB: -60, rttMS: nil,
-            m17Available: true, dstarAvailable: true, ysfAvailable: true)
+            m17Available: true, dstarAvailable: true, ysfAvailable: true,
+            nxdnAvailable: true)
         let session = CallSession(station: fake, userDefaults: scratchDefaults())
         session.operatorCallsign = "AJ7HR"
         session.m17Callsign = "AJ7HR"
+        session.nxdnRadioID = "1234"
         session.reflectorIndex = index
         session.poll()  // adopt the capability flags from the snapshot
         return (session, fake)
     }
 
-    private func live(m17: Bool = false, dstar: Bool = false, ysf: Bool = false) -> CallSnapshot {
+    private func live(
+        m17: Bool = false, dstar: Bool = false, ysf: Bool = false, nxdn: Bool = false
+    ) -> CallSnapshot {
         CallSnapshot(
             status: .answered, ptt: false, remotePTT: false, txDB: -60, rxDB: -20, rttMS: nil,
             m17Available: true, m17Active: m17,
             dstarAvailable: true, dstarActive: dstar,
-            ysfAvailable: true, ysfActive: ysf)
+            ysfAvailable: true, ysfActive: ysf,
+            nxdnAvailable: true, nxdnActive: nxdn)
     }
 
     // MARK: - One property, every network
@@ -88,6 +96,21 @@ final class CallSessionLastHeardTests: XCTestCase {
         XCTAssertEqual(session.m17Talker, "N0CALL")
         XCTAssertEqual(session.m17Link, .linked)
         XCTAssertEqual(session.lastHeard, "N0CALL")
+    }
+
+    /// NXDN's last heard is a NUMBER, not a callsign — an `NXDND` frame
+    /// carries `srcId` and no callsign at all — and it reaches the same one
+    /// line as everybody else's.
+    func testAnNXDNLastHeardReachesTheSharedProperty() throws {
+        let (session, fake) = session()
+        try session.connect(node: "100", network: .nxdn)
+        fake.snapshotToReturn = live(nxdn: true)
+        fake.nxdnStateValue = NXDNState(
+            link: .linked, lastHeard: "4242", lastHeardID: 4242, framesRX: 12)
+        session.poll()
+
+        XCTAssertEqual(session.nxdnLastHeard, "4242")
+        XCTAssertEqual(session.lastHeard, "4242")
     }
 
     // D-Star is not exercised here: `DStarState`'s only initializer is the

@@ -52,6 +52,13 @@ pub enum StationError {
     /// link carries frames and reports who is talking, and the vocoder is
     /// the missing half.
     Ysf(String),
+    /// An NXDN error (iax-b9c2) — secret-free, human-readable. Returned when
+    /// the `nxdn` feature isn't compiled in, when a callsign/radio id/
+    /// talkgroup is not one the wire can carry, and for every
+    /// vocoder-availability failure during connect. Receive only for now:
+    /// `Station::set_ptt` refuses a key-down while an NXDN link is live (see
+    /// `astar_console::nxdn`'s Transmit section).
+    Nxdn(String),
 }
 
 impl std::fmt::Display for StationError {
@@ -78,6 +85,7 @@ impl std::fmt::Display for StationError {
             Self::M17(msg) => write!(f, "m17 error: {msg}"),
             Self::Dstar(msg) => write!(f, "dstar error: {msg}"),
             Self::Ysf(msg) => write!(f, "ysf error: {msg}"),
+            Self::Nxdn(msg) => write!(f, "nxdn error: {msg}"),
         }
     }
 }

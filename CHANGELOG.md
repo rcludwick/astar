@@ -65,6 +65,13 @@ the same thing whichever network is live.
   inbound call naming the caller, what it can carry, what it asked for and
   what was accepted.
 
+- **NXDN: link a talkgroup and hear it.** Point astar at an NXDNReflector
+  talkgroup and it decodes the AMBE+2 on it through the same ThumbDV D-Star
+  and Fusion use — the network switcher, the directory's 297 NXDN rows,
+  and last-heard. Receive only for now: astar has no
+  NXDN transmit path yet and says so instead of offering a PTT button that
+  would do nothing.
+
 ### Changed
 
 - **astar-server prefers signed 16-bit linear by default** and rejects a peer

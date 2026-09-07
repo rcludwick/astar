@@ -173,7 +173,10 @@ public enum ConfigMerge {
         summary.settingsApplied = archive.settings?.count ?? 0
         summary.interfaceApplied = archive.interface?.count ?? 0
         summary.callsignApplied = archive.callsign?.isEmpty == false
-        summary.radioIDApplied = archive.radioID?.isEmpty == false
+        // One line for both numbers: the summary tells the operator their
+        // identity landed, not which of the two fields did.
+        summary.radioIDApplied =
+            archive.radioID?.isEmpty == false || archive.nxdnRadioID?.isEmpty == false
         return summary
     }
 }

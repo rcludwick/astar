@@ -715,6 +715,32 @@ already publishes these reflectors with a `dial.kind`.
 
 **Design:** `docs/design/nxdn-network.md`.
 
+**Progress 2026-09-07 — RECEIVE IS BUILT.** `crates/astar-nxdn` carries the
+protocol (framing, link FSM, a loopback reflector with a parrot mode);
+`astar-codec` reuses `VocoderMode::YsfDn` rather than adding an
+`NxdnDn` — `DroidStar` and `MMDVMHost` both configure the AMBE-3000 for NXDN
+exactly as they do for YSF DN, so the frame packing is shared rather than
+duplicated (see the design doc's "The vocoder" section for the citation).
+`astar-console::nxdn` decodes onto the station's shared audio lane; the
+Station facade, C ABI, node key guard, Swift binding and `Network.nxdn` are
+all in, receive-only, per `astar-b8e4`. `astar-cli nxdn-listen` is the
+hardware checkpoint, mirroring `ysf-listen`.
+
+**Verified: loopback and unit tests, bytes proven. Unverified: audio.** The
+protocol crate's own loopback reflector and the feature-gated suites
+(`just nxdn-test`) all pass — framing, the link FSM, and frame packing are
+proven bytes-in-bytes-out. Whether the AMBE+2 decode is *intelligible speech*
+needs a `ThumbDV` on a live reflector and has not been run; that is Rob's
+checkpoint, not an agent's. KC-Wide's NXDN TG 31313 is the local target.
+
+**Remaining: transmit, and the identity range-check placement.** Transmit is
+Tasks 9–10 of `docs/superpowers/plans/2026-09-07-nxdn-network.md`, fenced
+until Rob confirms a clean YSF parrot round trip on the fixed build (the DN
+encode/packing path is shared between the two networks). Separately, where
+the reserved NXDN-id-range check lives (app-only today, not pushed into the
+engine) is an open, deliberately un-decided question — see "The identity
+question is not closed" in the design doc.
+
 ### iax-c9f4 — Hams Over IP engine backend: SIP/RTP client (G.711)
 *P3 low · feature · labels: hoip, protocol, cx:4*
 
@@ -1621,3 +1647,32 @@ deliberately rather than opportunistically; the tests that pin the property
 (`codec_edge`'s `cross_rate_*_emits_exactly_one_*_frame_*` pair and
 `voice_route`'s `a_16k_bridge_frames_exactly_and_keeps_pitch_both_ways`)
 should move with it.
+
+### iax-linkfail-idle — a lost reflector link reports Idle, never Failed
+*P3 low · bug · labels: m17, dstar, ysf, nxdn, cx:2*
+
+Found 2026-09-07 in the NXDN whole-branch review, and inherited verbatim from
+the YSF and D-Star run loops. When the link FSM times out, the run loop breaks
+out before `publish()` runs and the post-loop store writes `LinkState::Idle`,
+so `Failed` is only ever published from the initial-send failure. The
+console maps `Idle | Linking` to `CallStatus::Dialing`, so a reflector that
+goes away leaves the popover saying *connecting* with no thread behind it,
+and `*-listen`'s `link_state == "failed"` exit path is unreachable. Fix all
+three (four) networks together: publish `Failed` on `FsmAction::Timeout`
+before leaving the loop, and pin it with a scripted-reflector test that
+stops answering polls.
+
+### astar-nxdn-polish — small NXDN follow-ups from the whole-branch review
+*P4 backlog · task · labels: nxdn, app, cx:1*
+
+From the 2026-09-07 review, none blocking: `receiving` is set for data
+(non-voice) frames (`nxdn.rs`, store `!end && !packet.data`); a refused
+`ptt_request` latches on an audio-less link (settle with the transmit task);
+`canDial` and `nxdnTarget` disagree on a directory row whose id is not a
+valid NXDN id (`CallSession.swift`, one line); a typed talkgroup only checks
+`> 0` where the directory path enforces `1…65519` (`ReflectorAddressDial`);
+no UI gate for a missing NXDN ID (Connect enabled, refused on press); no
+`connectFailureMessage` arm for `IAX_ERR_NXDN`/`IAX_ERR_YSF` (the engine's
+detail does reach the operator, the framing does not); `message_type` in
+`astar-nxdn::frame` is returned unmasked where Layer 3 masks `0x3F`;
+`read_bit`/`write_bit` duplicated between `astar-codec`'s `ysf` and `nxdn`.

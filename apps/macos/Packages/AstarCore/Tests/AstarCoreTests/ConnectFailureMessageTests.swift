@@ -101,6 +101,23 @@ final class ConnectFailureMessageTests: XCTestCase {
             message, "Couldn’t connect to XLX836 A: ThumbDV at /dev/cu.usbserial-A1 is busy.")
     }
 
+    /// The NXDN refusals are `ConnectError`s, so they reach the popover
+    /// through `localizedDescription`. Each has to name the remedy: an id
+    /// that is missing, an id the wire cannot carry, and — the one worth
+    /// spelling out — that it is not the DMR number.
+    func testTheNXDNIdentityRefusalsNameTheRemedy() {
+        let missing = CallSession.ConnectError.missingRadioID.localizedDescription
+        XCTAssertTrue(missing.contains("NXDN ID"), missing)
+        XCTAssertTrue(missing.contains("Settings"), missing)
+
+        let range = CallSession.ConnectError.radioIDOutOfRange.localizedDescription
+        XCTAssertTrue(range.contains("65519"), range)
+        XCTAssertTrue(range.contains("DMR"), "the two numbers must not be confused: \(range)")
+
+        let target = CallSession.ConnectError.badNXDNTarget.localizedDescription
+        XCTAssertTrue(target.contains("talkgroup"), target)
+    }
+
     /// Non-StationError errors keep the existing `localizedDescription`
     /// behavior — `ConnectError.needsAccount` already has good wording.
     func testNonStationErrorKeepsLocalizedDescription() {

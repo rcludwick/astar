@@ -21,6 +21,7 @@ members = [
     "crates/astar-dmr",
     "crates/astar-dstar",
     "crates/astar-ysf",
+    "crates/astar-nxdn",
     "apps/gui",
 ]
 exclude = [

@@ -129,6 +129,34 @@ public protocol StationDriving {
     /// parses JSON. Poll the snapshot for meters; call this at UI rate.
     func ysfState() throws -> YSFState?
 
+    // MARK: NXDN
+
+    /// Link to an NXDNReflector and decode the audio on it, mutually
+    /// exclusive with every other network. Mirrors
+    /// `Station.connectNXDN(host:callsign:radioID:talkgroup:)` 1:1 — `host`
+    /// is `host:port`, because NXDN publishes a port per reflector.
+    ///
+    /// `radioID` is the operator's own NXDN number and `talkgroup` the TG to
+    /// join; both are 16-bit because NXDN addresses stations by number, not
+    /// by callsign, and a reflector relays exactly one talkgroup.
+    ///
+    /// RECEIVE ONLY: there is no NXDN transmit path, so nothing should offer
+    /// PTT while a link is live.
+    ///
+    /// HARDWARE-ONLY, from the same ThumbDV D-Star and YSF need, so callers
+    /// gate on `CallSnapshot.nxdnAvailable` rather than calling
+    /// speculatively. Blocks for a serial scan plus a per-port dongle init;
+    /// call it off the main thread.
+    func connectNXDN(host: String, callsign: String, radioID: UInt16, talkgroup: UInt16) throws
+    /// Disconnect the live NXDN link, if any. Idempotent — a no-op while idle.
+    func nxdnDisconnect() throws
+    /// The live NXDN link's own state — link, the last id heard, and whether
+    /// a transmission is in progress — or `nil` when none is active.
+    ///
+    /// Costlier than `readSnapshot()`: it crosses the ABI with a buffer and
+    /// parses JSON. Poll the snapshot for meters; call this at UI rate.
+    func nxdnState() throws -> NXDNState?
+
     // Audio device selection + gain. Mirrors `Station`'s methods 1:1; a `nil`
     // device selects the system default for that direction.
     func listInputs() throws -> [String]

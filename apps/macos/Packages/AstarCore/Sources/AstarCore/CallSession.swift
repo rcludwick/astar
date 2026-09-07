@@ -100,6 +100,31 @@ public final class CallSession: ObservableObject {
     /// This is the sentence that explains it.
     @Published public private(set) var ysfUnsupportedMode: YSFState.UnsupportedMode?
 
+    /// Whether the engine can link NXDN: mirrors the snapshot's
+    /// `nxdnAvailable` flag. Gates the NXDN picker segment
+    /// (`Network.available(m17:dstar:ysf:nxdn:)`).
+    ///
+    /// Hardware, not a build — and the SAME hardware `dstarAvailable` and
+    /// `ysfAvailable` report, read through the same probe, so all three
+    /// always agree. NXDN voice is AMBE+2 from the same ThumbDV.
+    @Published public private(set) var nxdnAvailable = false
+
+    /// The id of the most recently heard NXDN transmission, or `nil`.
+    ///
+    /// A NUMBER, not a callsign: an `NXDND` frame carries `srcId` and no
+    /// callsign at all. **Last heard, not talking now** — it persists past
+    /// end-of-transmission (`nxdnReceiving` is what says whether a
+    /// transmission is in progress). Cleared when the link ends.
+    @Published public private(set) var nxdnLastHeard: String?
+
+    /// `true` while an NXDN transmission is in progress. Like YSF's and
+    /// unlike AllStar's `receiving`, this is not inferred from audio level —
+    /// the frame header says so directly.
+    @Published public private(set) var nxdnReceiving = false
+
+    /// The NXDN link's state, or `nil` when no link is live.
+    @Published public private(set) var nxdnLink: NXDNState.Link?
+
     /// The MY callsign of the most recently heard D-Star transmission, or
     /// `nil` until one arrives. **Last heard, not talking now** — it persists
     /// past end-of-transmission by design (`receiving` is what says whether
@@ -406,7 +431,7 @@ public final class CallSession: ObservableObject {
     /// Whether `network` needs the operator's callsign before it can dial.
     /// Both reflector networks transmit it; AllStar dials as the user's node.
     public static func requiresCallsign(_ network: Network) -> Bool {
-        network == .m17 || network == .dstar || network == .ysf
+        network == .m17 || network == .dstar || network == .ysf || network == .nxdn
     }
 
     /// The operator's DMR radio ID — the numeric half of the identity model.
@@ -436,6 +461,34 @@ public final class CallSession: ObservableObject {
         }
     }
     private static let dmrRadioIDKey = "dmr.radioId"
+
+    /// The operator's NXDN id — a **third** identity field, and deliberately
+    /// not the DMR one.
+    ///
+    /// NXDN addresses stations by a 16-bit number (`NXDNGateway/
+    /// NXDNNetwork.cpp` packs `unsigned short srcId, dstId`). A registered
+    /// DMR ID is six or seven digits and does not fit, so reusing it would
+    /// mean truncating — putting somebody else's number on the air. astar
+    /// asks for this one separately instead, and refuses to dial without it.
+    ///
+    /// Stored as digits under `nxdn.radioId`; `NxdnID` holds the range.
+    /// Adding it does not move `ConfigVersion`: an older reader ignores a key
+    /// it does not know and a newer one treats it as unset, which is exactly
+    /// the tolerance a version bump would spend for nothing.
+    @Published public var nxdnRadioID: String = "" {
+        didSet {
+            let clean = NxdnID.sanitized(nxdnRadioID)
+            // Re-entrancy guard first, for the same reason `dmrRadioID` has
+            // one: the assignment below re-enters `didSet`.
+            guard clean == nxdnRadioID else {
+                nxdnRadioID = clean
+                return
+            }
+            guard nxdnRadioID != oldValue else { return }
+            prefs.set(nxdnRadioID, forKey: Self.nxdnRadioIDKey)
+        }
+    }
+    private static let nxdnRadioIDKey = "nxdn.radioId"
 
     /// Backing store for the preferences this session owns outright — the
     /// callsign, the radio ID, the M17 audio overrides. Injected (defaults to
@@ -583,6 +636,8 @@ public final class CallSession: ObservableObject {
         // written by hand (or by an older build) is not a trusted source.
         self.dmrRadioID = RadioID.sanitized(
             userDefaults.string(forKey: Self.dmrRadioIDKey) ?? "")
+        self.nxdnRadioID = NxdnID.sanitized(
+            userDefaults.string(forKey: Self.nxdnRadioIDKey) ?? "")
     }
 
     /// The reflector directory's name lookup, as of the last load or sync.
@@ -629,6 +684,10 @@ public final class CallSession: ObservableObject {
         case .m17: return M17Dial.parse(raw) != nil
         case .dstar: return DStarDial.parse(raw) != nil
         case .ysf: return YSFDial.parse(raw) != nil
+        // The talkgroup is not optional in fact, only in the grammar: an
+        // address with none is a target with the room missing, and Connect
+        // stays off rather than dialling something that could never link.
+        case .nxdn: return NXDNDial.parse(raw)?.talkgroup != nil
         case .allstar, .hamlink: return DialTarget.parse(raw) != nil
         }
     }
@@ -751,6 +810,20 @@ public final class CallSession: ObservableObject {
             {
                 clearYSFState()
             }
+            if nxdnAvailable != snap.nxdnAvailable { nxdnAvailable = snap.nxdnAvailable }
+            // Same arrangement as YSF's above, for the same reason: NXDN's own
+            // fields cost an ABI crossing and a JSON parse, so they are asked
+            // for only while a link is live.
+            if snap.nxdnActive {
+                let state = try? station.nxdnState()
+                if nxdnLastHeard != state?.lastHeard { nxdnLastHeard = state?.lastHeard }
+                if nxdnReceiving != (state?.receiving ?? false) {
+                    nxdnReceiving = state?.receiving ?? false
+                }
+                if nxdnLink != state?.link { nxdnLink = state?.link }
+            } else if nxdnLink != nil || nxdnLastHeard != nil || nxdnReceiving {
+                clearNXDNState()
+            }
             // Fold the three per-network talkers into the one property the UI
             // reads. Done here, after every source has been advanced, so a
             // single poll can never publish a `lastHeard` from the network
@@ -856,6 +929,13 @@ public final class CallSession: ObservableObject {
                 setActiveCallNetwork(nil)
                 clearYSFState()
             }
+            // And the same for NXDN, for the same reasons.
+            if activeCallNetwork == .nxdn, snap.status == .hangup || snap.status == .idle,
+                lastPolledStatus != .hangup, lastPolledStatus != .idle
+            {
+                setActiveCallNetwork(nil)
+                clearNXDNState()
+            }
             lastPolledStatus = snap.status
             // "Receiving" = far end keyed (when the node reports it) OR live rx
             // audio activity (the reliable signal for most AllStar nodes). The
@@ -959,6 +1039,23 @@ public final class CallSession: ObservableObject {
         /// dongle as ``dstarUnavailable``, and a separate case so the message
         /// can name the network the operator actually chose.
         case ysfUnavailable
+        /// The NXDN dial field's text names nothing in the directory and does
+        /// not parse as `host[:port]/talkgroup` either — including a bare
+        /// address with no talkgroup, which is a target with the room
+        /// missing rather than a target astar may guess at.
+        case badNXDNTarget
+        /// NXDN was dialled with no vocoder present. Same shape and the same
+        /// dongle as ``dstarUnavailable``, and a separate case so the message
+        /// can name the network the operator actually chose.
+        case nxdnUnavailable
+        /// NXDN was dialled with no NXDN id configured. Its own case rather
+        /// than `missingCallsign` because it is its own credential: NXDN
+        /// addresses stations by number and transmits no callsign at all.
+        case missingRadioID
+        /// The configured NXDN id is not one a station may transmit as —
+        /// `0`, or above the `65519` the standard reserves. Refused rather
+        /// than clamped: a number nobody registered is somebody else's.
+        case radioIDOutOfRange
 
         public var errorDescription: String? {
             switch self {
@@ -994,6 +1091,20 @@ public final class CallSession: ObservableObject {
                 return
                     "System Fusion needs a ThumbDV vocoder dongle attached — "
                     + "astar has no software AMBE decoder."
+            case .badNXDNTarget:
+                return
+                    "Enter an NXDN talkgroup, or an address as host:port/talkgroup "
+                    + "(for example nxdn.example:41400/100)."
+            case .nxdnUnavailable:
+                return
+                    "NXDN needs a ThumbDV vocoder dongle attached — "
+                    + "astar has no software AMBE decoder."
+            case .missingRadioID:
+                return "Enter your NXDN ID in Settings to connect via NXDN."
+            case .radioIDOutOfRange:
+                return
+                    "An NXDN ID is a number from \(NxdnID.minimum) to \(NxdnID.maximum) — "
+                    + "it isn’t your DMR radio ID."
             }
         }
     }
@@ -1039,6 +1150,8 @@ public final class CallSession: ObservableObject {
             try connectDStar(target: node)
         case .ysf:
             try connectYSF(target: node)
+        case .nxdn:
+            try connectNXDN(target: node)
         }
     }
 
@@ -1327,6 +1440,113 @@ public final class CallSession: ObservableObject {
             })
     }
 
+    /// Turn the NXDN dial field's text into a host, port and talkgroup —
+    /// **directory first, address second**, the same order and the same
+    /// reason as `m17Target`, `dstarTarget` and `ysfTarget`.
+    ///
+    /// The talkgroup is what makes this different from `ysfTarget`. An
+    /// NXDNReflector registers a client only when the poll names the
+    /// reflector's own id and drops every frame addressed elsewhere, so a
+    /// target without one could never link — silence with the link light on.
+    /// The directory carries it as the row's **id** (the feed's NXDN rows are
+    /// talkgroup numbers, "100", not callsigns); a typed address has to spell
+    /// it out, and one that does not is refused rather than guessed at.
+    private func nxdnTarget(_ target: String) throws -> (
+        host: String, port: UInt16, talkgroup: UInt16
+    ) {
+        switch resolveReflector(target, network: .nxdn) {
+        case .ready(let reflector):
+            // The id IS the talkgroup for this network. A row whose id is not
+            // a number astar can transmit to is a row it cannot dial —
+            // `notDialable` is the honest answer, not a guessed number.
+            guard let talkgroup = NxdnID.value(reflector.entry.id) else {
+                throw ConnectError.reflectorNotDialable(reflector.entry.id)
+            }
+            return (host: reflector.host, port: reflector.port, talkgroup: talkgroup)
+        case .needsModule(let entry):
+            // Unreachable for NXDN — `addressesModule` is false for this
+            // network, so the resolver never asks for one — but stated rather
+            // than silently treated as dialable.
+            throw ConnectError.needsModule(entry.id)
+        case .notDialable(let entry):
+            throw ConnectError.reflectorNotDialable(entry.id)
+        case .notInDirectory:
+            guard let parsed = NXDNDial.parse(target), let talkgroup = parsed.talkgroup else {
+                throw ConnectError.badNXDNTarget
+            }
+            return (host: parsed.host, port: parsed.port, talkgroup: talkgroup)
+        }
+    }
+
+    /// The operator's own NXDN id, or the reason astar will not dial without
+    /// one.
+    ///
+    /// NXDN source and destination ids are 16-bit on the wire
+    /// (`NXDNGateway/NXDNNetwork.cpp`: `writeData(..., unsigned short srcId,
+    /// unsigned short dstId, ...)`), which a registered DMR ID is not — six
+    /// or seven digits do not fit in sixteen bits. So this reads its own
+    /// field rather than truncating `dmrRadioID` into somebody else's number.
+    private func nxdnRadioIDValue() throws -> UInt16 {
+        let digits = NxdnID.sanitized(nxdnRadioID)
+        guard !digits.isEmpty else { throw ConnectError.missingRadioID }
+        guard let value = NxdnID.value(digits) else {
+            throw ConnectError.radioIDOutOfRange
+        }
+        return value
+    }
+
+    /// The `.nxdn` arm of `connect(node:network:)`.
+    ///
+    /// Structured exactly like `connectYSF` — validate before touching any
+    /// state, claim the single-flight dial slot, generation-gate every write
+    /// after the engine call — because the races are the same races and two
+    /// connect paths guarding them differently is how one ends up not
+    /// guarding them at all.
+    ///
+    /// Receive only: nothing here arms a transmit path, and none exists to
+    /// arm. The engine call BLOCKS for a serial scan plus a per-port dongle
+    /// init before it touches the network, so every caller runs this off the
+    /// main thread.
+    private func connectNXDN(target: String) throws {
+        let parsed = try nxdnTarget(target)
+        let callsign = operatorCallsign.trimmingCharacters(in: .whitespaces)
+        guard !callsign.isEmpty else {
+            throw ConnectError.missingCallsign
+        }
+        let radioID = try nxdnRadioIDValue()
+        guard nxdnAvailable else {
+            throw ConnectError.nxdnUnavailable
+        }
+        let generation = try claimDial()
+        try? station.disconnect()
+        setDialedNode(target)
+        recordedRecentForCall = false
+        dialAwaitingAnswer = false
+        setLastDialFailure(nil)
+        do {
+            try station.connectNXDN(
+                host: "\(parsed.host):\(parsed.port)", callsign: callsign,
+                radioID: radioID, talkgroup: parsed.talkgroup)
+        } catch {
+            testPostEngineCallHook?()
+            releaseDial(
+                generation: generation,
+                onCurrent: { setDialedNode(nil) },
+                onStale: {})
+            throw error
+        }
+        testPostEngineCallHook?()
+        releaseDial(
+            generation: generation,
+            onCurrent: { setActiveCallNetwork(.nxdn) },
+            // A disconnect superseded us while the dongle was initialising:
+            // the link we just made is nobody's. Tear it down.
+            onStale: {
+                try? station.nxdnDisconnect()
+                try? station.disconnect()
+            })
+    }
+
     /// Dial `node` over the WebTransceiver path, optionally overriding the dialed
     /// address. When `address` is a non-empty "host:port" (IP or hostname), the WT
     /// token is minted exactly as usual but the call dials `address` directly
@@ -1458,13 +1678,13 @@ public final class CallSession: ObservableObject {
     /// a key request while `txDisabled` is forced to unkeyed.
     /// Whether the live network can transmit at all.
     ///
-    /// Every network astar dials can, as of the YSF transmit path. Kept
-    /// rather than deleted because the answer was `false` for Fusion until
-    /// 2026-09-06 and will be `false` again for the next receive-only network
-    /// — and because the two places that consult it, the PTT control and the
-    /// key choke point, are the two that must never disagree.
+    /// `false` for NXDN, which astar can hear but not yet key into. Kept as a
+    /// computed property rather than a constant because the answer was
+    /// `false` for Fusion until 2026-09-06 and is `false` for NXDN now — and
+    /// because the two places that consult it, the PTT control and the key
+    /// choke point, are the two that must never disagree.
     public var canTransmit: Bool {
-        true
+        activeCallNetwork != .nxdn
     }
 
     public func setPTT(_ on: Bool) throws {
@@ -1565,6 +1785,10 @@ public final class CallSession: ObservableObject {
                 try? station.ysfDisconnect()
                 clearYSFState()
             }
+            if activeCallNetwork == .nxdn {
+                try? station.nxdnDisconnect()
+                clearNXDNState()
+            }
             try station.disconnect()
             setDialedNode(nil)
             setActiveCallNetwork(nil)
@@ -1596,6 +1820,16 @@ public final class CallSession: ObservableObject {
         refreshLastHeard()
     }
 
+    /// Drop the last-heard NXDN fields, on every path a link can end by — for
+    /// the same reason `clearYSFState` exists: an id left on screen after the
+    /// link is gone is a claim about the present that is no longer true.
+    private func clearNXDNState() {
+        nxdnLastHeard = nil
+        nxdnReceiving = false
+        nxdnLink = nil
+        refreshLastHeard()
+    }
+
     /// Drop the last-heard M17 fields, for the same reason `clearDStarState`
     /// and `clearYSFState` exist: a callsign left on screen after the session
     /// is gone is a claim about the present that is no longer true.
@@ -1622,6 +1856,7 @@ public final class CallSession: ObservableObject {
         case .dstar: value = dstarTalker
         case .ysf: value = ysfLastHeard
         case .m17: value = m17Talker
+        case .nxdn: value = nxdnLastHeard
         case .allstar, .hamlink, nil: value = nil
         }
         if lastHeard != value { lastHeard = value }

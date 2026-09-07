@@ -754,6 +754,7 @@ impl Station {
         // session — `detach()` below never touches `self.dstar` either.
         self.dstar_disconnect();
         self.ysf_disconnect();
+        self.nxdn_disconnect();
         if self.mode() == OperatingMode::Node {
             // Node mode: hang up the active inbound-adopted call but keep the
             // listener running for the next caller (the session retains its
@@ -1188,6 +1189,160 @@ impl Station {
     #[must_use]
     pub fn ysf_state(&self) -> Option<astar_console::YsfSnapshot> {
         self.session.lock().unwrap().ysf_state()
+    }
+
+    /// Link to an `NXDNReflector` talkgroup and decode the audio on it
+    /// (iax-b9c2).
+    ///
+    /// `host` is `host:port`. NXDN addresses stations by NUMBER: `radio_id`
+    /// is this station's registration and `talkgroup` is the TG to join —
+    /// the reflector answers only polls carrying its own
+    /// (`NXDNReflector.cpp`: `if (id == tg)`), so a wrong or zero talkgroup
+    /// is a link that never comes up rather than one that comes up quiet.
+    ///
+    /// Primitive args rather than an `astar_console::NxdnConfig` for the same
+    /// reason [`Station::ysf_connect`] takes them: that type only exists when
+    /// the feature is compiled in, and this method must stay byte-identically
+    /// callable either way.
+    ///
+    /// **Receive only.** [`Station::set_ptt`] refuses a key-down while an
+    /// NXDN link is live — see `astar_console::nxdn`'s Transmit section for
+    /// why a refusal beats a key that silently does nothing.
+    ///
+    /// Mutually exclusive with an IAX2 call and with every other digital
+    /// network. One `ThumbDV`, one link.
+    ///
+    /// # Blocking
+    /// The `ThumbDV` probe/init and the socket bind both run with the session
+    /// mutex NOT held, exactly as `ysf_connect` does and for the same reason:
+    /// every `Station` method takes that mutex, and the contract is
+    /// poll-and-snapshot.
+    ///
+    /// # Errors
+    /// [`StationError::Nxdn`] for an empty callsign, a zero radio id, a zero
+    /// talkgroup, when the `nxdn` feature isn't compiled in, and for every
+    /// vocoder-availability failure (the message names the specific port when
+    /// a dongle is merely busy). [`StationError::AlreadyConnected`] while
+    /// another network is live.
+    pub fn nxdn_connect(
+        &self,
+        host: &str,
+        callsign: &str,
+        radio_id: u16,
+        talkgroup: u16,
+    ) -> Result<(), StationError> {
+        // Validated BEFORE the `#[cfg]` block, so the refusals hold
+        // identically with the feature off — an operator who mistypes gets
+        // the same answer either way, and no lane is opened for a connect
+        // that cannot succeed.
+        if callsign.is_empty() {
+            return Err(StationError::Nxdn("callsign must not be empty".into()));
+        }
+        // A radio id is a registration, not a default. Zero is what an unset
+        // field looks like, and a transmission claiming it would claim
+        // somebody else's number — or nobody's.
+        if radio_id == 0 {
+            return Err(StationError::Nxdn(
+                "radio id must be set: NXDN addresses stations by number, and 0 is not a \
+                 registration"
+                    .into(),
+            ));
+        }
+        // `NXDNReflector.cpp` registers a client only when the poll's TG
+        // matches its own, and `Reflectors.h: CNXDNReflector::isEmpty` is
+        // `m_id == 0` — so a zero talkgroup is a link that can never come
+        // up, refused here rather than left to time out.
+        if talkgroup == 0 {
+            return Err(StationError::Nxdn(
+                "talkgroup must be set: a reflector answers only polls carrying its own".into(),
+            ));
+        }
+        #[cfg(feature = "nxdn")]
+        {
+            let (input, output) = self.selected_devices();
+            let cfg = astar_console::NxdnConfig {
+                host: host.to_string(),
+                callsign: callsign.to_string(),
+                radio_id,
+                talkgroup,
+            };
+            // Step 1, under the lock: open the ONE audio lane on the
+            // station's router and reserve it. The reservation is also the
+            // mutual-exclusion token for the gap before the adopt below —
+            // every other connect path refuses while it is held — and the
+            // pref push, so the link starts at the operator's chosen volume
+            // rather than the router's unity default.
+            let audio = {
+                let mut s = self.session.lock().unwrap();
+                s.open_voice_route(input.as_deref(), output.as_deref(), || {
+                    (self.make_backend)()
+                })
+                .map_err(map_console_err)?
+            };
+
+            // Step 2, deliberately OFF the session mutex: the `ThumbDV`
+            // candidate-port scan and init cookbook, then the socket bind —
+            // seconds, on a flaky dongle. Holding the mutex across that
+            // blocks every snapshot/state poll for the whole window.
+            let link = match astar_console::NxdnLink::connect_with_audio(&cfg, audio) {
+                Ok(l) => l,
+                Err(e) => {
+                    // The lane opened but the link did not: give it back, or
+                    // the station stays reserved forever. Dropped off the
+                    // lock — a CoreAudio stream drop can stall.
+                    let handles = self.session.lock().unwrap().release_voice_route();
+                    drop(handles);
+                    return Err(map_console_err(e));
+                }
+            };
+
+            // Step 3: re-take the lock only to install (and to re-check
+            // exclusion, since the state could have changed while it was
+            // released).
+            self.session
+                .lock()
+                .unwrap()
+                .nxdn_adopt(link)
+                .map_err(map_console_err)
+        }
+        #[cfg(not(feature = "nxdn"))]
+        {
+            let _ = host;
+            Err(StationError::Nxdn("nxdn support not compiled".into()))
+        }
+    }
+
+    /// Disconnect the live NXDN link, if any. No-op when none is active (and
+    /// when the `nxdn` feature isn't compiled in).
+    pub fn nxdn_disconnect(&self) {
+        #[cfg(feature = "nxdn")]
+        {
+            self.session.lock().unwrap().nxdn_disconnect();
+        }
+    }
+
+    /// `true` when NXDN voice is available: the `nxdn` feature is compiled in
+    /// AND a `ThumbDV` is attached. The same cached probe
+    /// [`Station::dstar_available`] and [`Station::ysf_available`] read — one
+    /// dongle, one answer.
+    #[must_use]
+    pub fn nxdn_available(&self) -> bool {
+        #[cfg(feature = "nxdn")]
+        {
+            astar_console::nxdn_available()
+        }
+        #[cfg(not(feature = "nxdn"))]
+        {
+            false
+        }
+    }
+
+    /// A poll-cheap snapshot of the live NXDN link, or `None`. Only compiled
+    /// when the `nxdn` feature is enabled.
+    #[cfg(feature = "nxdn")]
+    #[must_use]
+    pub fn nxdn_state(&self) -> Option<astar_console::NxdnSnapshot> {
+        self.session.lock().unwrap().nxdn_state()
     }
 
     /// A poll-cheap snapshot of the live D-Star session's state (iax-a9d4
@@ -2252,6 +2407,7 @@ impl Drop for Station {
         self.m17_disconnect();
         self.dstar_disconnect();
         self.ysf_disconnect();
+        self.nxdn_disconnect();
         // Stop monitor mode (releases the input device).
         self.monitor_stop();
         // Stop outbound registration (sends REGREL, joins the thread).
@@ -2287,6 +2443,7 @@ fn map_console_err(e: astar_console::ConsoleError) -> StationError {
         C::M17(m) => StationError::M17(m),
         C::Dstar(m) => StationError::Dstar(m),
         C::Ysf(m) => StationError::Ysf(m),
+        C::Nxdn(m) => StationError::Nxdn(m),
         C::NoCaptureDevice => StationError::Audio("no capture device: cannot transmit".into()),
     }
 }

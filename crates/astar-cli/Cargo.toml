@@ -60,6 +60,19 @@ ysf = [
     "astar-codec/ambe-hw",
     "dep:ctrlc",
 ]
+# NXDN receive-only listen mode (iax-b9c2), OFF by default for the same
+# reason `ysf` is: NXDN voice is AMBE+2 half-rate on the same AMBE-3000, so
+# this pulls `astar-codec/ambe-hw` and the vendored ThumbDV driver. astar has
+# no NXDN transmit path yet, so this command deliberately has no PTT.
+nxdn = [
+    "dep:astar-station",
+    "astar-station/nxdn",
+    "dep:astar-console",
+    "astar-console/nxdn",
+    "dep:astar-codec",
+    "astar-codec/ambe-hw",
+    "dep:ctrlc",
+]
 dstar = [
     "dep:astar-station",
     "astar-station/dstar",

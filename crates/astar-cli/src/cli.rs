@@ -21,6 +21,9 @@ COMMANDS:
     parrot         Call a parrot/echo extension and loop audio back.
     ysf-listen     Link to a YSFReflector and decode RX audio (receive only;
                    requires a ThumbDV dongle and `--features ysf`).
+    nxdn-listen    Link to an NXDNReflector talkgroup and decode RX audio
+                   (receive only; requires a ThumbDV dongle and
+                   `--features nxdn`).
     dstar-listen   Link to a D-Star DExtra reflector module, decode RX
                    audio, and key manual TX from stdin (built with
                    `--features dstar`).
@@ -172,6 +175,45 @@ then a \"▶ <callsign>\" line per received transmission.
 astar decodes DN — V/D modes 1 and 2, what Yaesu radios transmit. A reflector
 sending VW (full-rate voice) or data frames prints a \"!!\" line saying so
 rather than producing silence with no explanation. Ctrl-C unlinks cleanly.
+";
+
+/// `nxdn-listen` usage. Only compiled with `--features nxdn`.
+#[cfg(feature = "nxdn")]
+pub const NXDN_LISTEN_USAGE: &str = "\
+astar-cli nxdn-listen — link to an NXDNReflector talkgroup and decode RX audio
+
+USAGE:
+    astar-cli nxdn-listen [OPTIONS] <host> --radio-id <id> --tg <tg>
+
+ARGS:
+    <host>      Reflector host, or host:port. 41400 is the port the large
+                 majority of the directory's NXDN rows publish, and is used
+                 when none is given; the reflector's own always wins.
+
+OPTIONS:
+    --port <u16>        Reflector UDP port. Equivalent to host:port; giving
+                         both is an error if they disagree.
+    --callsign <CS>     This station's callsign (required). Rides in the
+                         poll, not in a voice frame — NXDN addresses
+                         stations by number on the wire.
+    --radio-id <u16>    This station's NXDN radio id, 1-65535 (required).
+                         A registration, not a default: 0 is refused.
+    --tg <u16>          Talkgroup to join, 1-65535 (required). An
+                         NXDNReflector answers only polls carrying its own
+                         talkgroup, so a wrong or missing one links to
+                         nothing.
+    --wav <path>        Write decoded audio as an 8 kHz s16 mono WAV file at
+                         <path> instead of playing it on the default output
+                         device.
+    -h, --help          Print this help and exit.
+
+RECEIVE ONLY. This command has no PTT; astar has no NXDN transmit path yet.
+
+NXDN is hardware-only: a ThumbDV USB dongle must be attached (AMBE+2, no
+software fallback). Links, prints \"linked <host>:<port> (backend: thumbdv)\",
+then a \"▶ <id>\" line per received transmission — a numeric id, not a
+callsign, because NXDN carries no callsign on the wire for anyone but the
+polling client itself. Ctrl-C unlinks cleanly.
 ";
 
 /// Resolve `host` (optionally `host:port`) to a `SocketAddr`, defaulting the

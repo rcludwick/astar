@@ -218,6 +218,7 @@ name = "astar-codec"
 version = "0.1.11-beta"
 dependencies = [
  "ambe-thumbdv",
+ "astar-nxdn",
  "astar-ysf",
  "codec2",
  "libloading 0.9.0",
@@ -247,6 +248,7 @@ dependencies = [
  "astar-iax",
  "astar-iax-core",
  "astar-m17",
+ "astar-nxdn",
  "astar-ptt",
  "astar-wireguard",
  "astar-ysf",
@@ -336,6 +338,10 @@ version = "0.1.11-beta"
 dependencies = [
  "rand 0.10.2",
 ]
+
+[[package]]
+name = "astar-nxdn"
+version = "0.1.11-beta"
 
 [[package]]
 name = "astar-ptt"

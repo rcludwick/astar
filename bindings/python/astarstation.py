@@ -241,6 +241,8 @@ class _IaxState(ctypes.Structure):
         ("dstar_active", c_bool),  # a D-Star session is live
         ("ysf_available", c_bool),  # ysf feature + a ThumbDV attached now
         ("ysf_active", c_bool),  # a YSF link is live
+        ("nxdn_available", c_bool),  # nxdn feature + a ThumbDV attached now (iax-b9c2)
+        ("nxdn_active", c_bool),  # an NXDN link is live (receive-only: never offer PTT)
     ]
 
 
@@ -306,6 +308,8 @@ class Snapshot:
     dstar_active: bool  # a D-Star session is currently live (iax-4c8e)
     ysf_available: bool  # ysf feature compiled in AND a ThumbDV attached now
     ysf_active: bool  # a YSF link is currently live
+    nxdn_available: bool  # nxdn feature compiled in AND a ThumbDV attached now
+    nxdn_active: bool  # an NXDN link is currently live (receive-only: never key)
 
 
 @dataclass(frozen=True)
@@ -938,6 +942,8 @@ class Station:
             dstar_active=bool(out.dstar_active),
             ysf_available=bool(out.ysf_available),
             ysf_active=bool(out.ysf_active),
+            nxdn_available=bool(out.nxdn_available),
+            nxdn_active=bool(out.nxdn_active),
         )
 
     def next_event(self) -> Event | None:

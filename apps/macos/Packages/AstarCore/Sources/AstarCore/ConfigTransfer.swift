@@ -40,7 +40,8 @@ public enum ConfigTransfer {
             defaultSetupID: setupStore.loadDefaultID(),
             directory: session.directoryAll(),
             callsign: session.operatorCallsign.isEmpty ? nil : session.operatorCallsign,
-            radioID: session.dmrRadioID.isEmpty ? nil : session.dmrRadioID)
+            radioID: session.dmrRadioID.isEmpty ? nil : session.dmrRadioID,
+            nxdnRadioID: session.nxdnRadioID.isEmpty ? nil : session.nxdnRadioID)
     }
 
     public static func archive(
@@ -110,6 +111,9 @@ public enum ConfigTransfer {
         }
         if let radioID = archive.radioID, !radioID.isEmpty {
             session.dmrRadioID = radioID
+        }
+        if let nxdnRadioID = archive.nxdnRadioID, !nxdnRadioID.isEmpty {
+            session.nxdnRadioID = nxdnRadioID
         }
         return summary
     }

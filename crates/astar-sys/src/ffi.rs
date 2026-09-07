@@ -329,6 +329,24 @@ pub struct IaxState {
     /// [`iax_station_connect_ysf`]). Transceive: key it with
     /// `iax_station_set_ptt`, exactly as D-Star.
     pub ysf_active: bool,
+    /// `true` when NXDN voice is available: the `nxdn` feature is compiled in
+    /// AND a `ThumbDV` is attached right now. NXDN voice is AMBE+2 — the same
+    /// 49-bit frame YSF DN carries, off the same dongle — so this is the same
+    /// cached probe [`Self::dstar_available`] and [`Self::ysf_available`]
+    /// read, and all three move together.
+    pub nxdn_available: bool,
+    /// `true` while an NXDN link is live — mutually exclusive with an IAX2
+    /// call, an M17 session, a D-Star session and a YSF link (see
+    /// [`iax_station_connect_nxdn`]).
+    ///
+    /// RECEIVE ONLY: there is no NXDN transmit path, so a key is refused
+    /// rather than queued and a UI must not offer PTT while this is set.
+    ///
+    /// Feature-INDEPENDENT, exactly as [`Self::dstar_active`] and
+    /// [`Self::ysf_active`] are: `astar-server` refuses remote keying while a
+    /// digital-voice link holds the dongle and must read that without
+    /// compiling the feature.
+    pub nxdn_active: bool,
 }
 
 /// The kind of a drained lifecycle event (see [`iax_station_next_event`]).
@@ -428,6 +446,12 @@ pub const IAX_ERR_DSTAR: c_int = -19;
 /// not being compiled in. Read `iax_station_last_error` for which.
 pub const IAX_ERR_YSF: c_int = -20;
 
+/// NXDN error (iax-b9c2): a link that could not be made, a callsign/radio
+/// id/talkgroup the wire cannot carry, a refused key (NXDN is receive-only —
+/// see `astar_console::nxdn`'s Transmit section), or the `nxdn` feature not
+/// being compiled in. Read `iax_station_last_error` for which.
+pub const IAX_ERR_NXDN: c_int = -21;
+
 /// Number of log-spaced dBFS bins [`iax_station_mic_spectrum`] writes when
 /// monitoring (iax-e73e). Size the `out` array to (at least) this; a larger
 /// buffer is fine (the extra entries are left untouched). A literal here so
@@ -482,6 +506,7 @@ fn err_code(e: &StationError) -> c_int {
         StationError::M17(_) => IAX_ERR_M17,
         StationError::Dstar(_) => IAX_ERR_DSTAR,
         StationError::Ysf(_) => IAX_ERR_YSF,
+        StationError::Nxdn(_) => IAX_ERR_NXDN,
     }
 }
 
@@ -522,6 +547,8 @@ fn fill_state(s: &astar_station::ConsoleState) -> IaxState {
         dstar_active: s.dstar_active,
         ysf_available: s.ysf_available,
         ysf_active: s.ysf_active,
+        nxdn_available: s.nxdn_available,
+        nxdn_active: s.nxdn_active,
     }
 }
 
@@ -1955,6 +1982,7 @@ pub unsafe extern "C" fn iax_error_text(code: c_int) -> *const c_char {
         IAX_ERR_RESOLVE => b"node resolution failed\0",
         IAX_ERR_AUDIO => b"audio error\0",
         IAX_ERR_YSF => b"ysf error\0",
+        IAX_ERR_NXDN => b"nxdn error\0",
         IAX_ERR_IAX => b"iax error\0",
         IAX_ERR_SERIAL => b"serial error\0",
         IAX_ERR_UTF8 => b"argument was not valid utf-8\0",
@@ -2989,6 +3017,244 @@ fn ysf_state_json(station: &IaxStation) -> String {
     {
         let _ = station;
         "{}".to_string()
+    }
+}
+
+/// Link to an `NXDNReflector` and decode the audio on it (iax-b9c2).
+///
+/// `host` is `host:port` — NXDN reflectors publish a port per reflector, so
+/// there is nothing conventional to assume. `callsign` is this station's own,
+/// sent in the registration poll; `radio_id` is its registered NXDN number
+/// and `talkgroup` the TG to join. Both are plain scalars here: NXDN
+/// addresses stations by NUMBER, and parsing an operator's typing into one is
+/// the caller's job, not the ABI's.
+///
+/// NXDN is HARDWARE-ONLY for the same reason D-Star and YSF are — the vocoder
+/// is AMBE+2 on a DVSI `ThumbDV`. Poll [`IaxState::nxdn_available`] and offer
+/// the affordance only when it is `true`, rather than calling this
+/// speculatively.
+///
+/// **RECEIVE ONLY today.** There is no NXDN transmit path: a key-down is
+/// REFUSED, not queued, so a UI must not offer PTT while this link is live.
+/// See `astar_console::nxdn`'s Transmit section for why a refusal beats a key
+/// that silently does nothing.
+///
+/// `host` and `callsign` are required (NULL/non-UTF-8 → [`IAX_ERR_NULL`] /
+/// [`IAX_ERR_UTF8`]). A zero `radio_id` or `talkgroup` is [`IAX_ERR_NXDN`]:
+/// zero is what an unset field looks like, not a registration. Returns
+/// [`IAX_OK`], [`IAX_ERR_ALREADY_CONNECTED`] (any other network is live),
+/// [`IAX_ERR_NXDN`], or [`IAX_ERR_PANIC`].
+///
+/// NOTE: this performs blocking work — a serial-port scan plus, per candidate
+/// port and baud rate, an open and a multi-transaction dongle init, then a
+/// socket bind and thread spawn. It can take on the order of a second. Call
+/// it off any UI thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_connect_nxdn(
+    st: *mut IaxStation,
+    host: *const c_char,
+    callsign: *const c_char,
+    radio_id: u16,
+    talkgroup: u16,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let host = match unsafe { req_str(host) } {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        let callsign = match unsafe { req_str(callsign) } {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        result_code(
+            station,
+            station
+                .inner
+                .nxdn_connect(host, callsign, radio_id, talkgroup),
+        )
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Disconnect the live NXDN link, if any. Idempotent — a no-op while idle.
+/// Returns [`IAX_OK`], [`IAX_ERR_NULL`], or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_nxdn_disconnect(st: *mut IaxStation) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        station.inner.nxdn_disconnect();
+        IAX_OK
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Write the live NXDN link's state as JSON into the caller buffer `buf` of
+/// `len` bytes (NUL-terminated, truncate-safe; same contract as
+/// [`iax_station_dstar_state`] — returns the byte length the full JSON needs,
+/// excluding the NUL, so a `len == 0` call is a sizing query).
+///
+/// ```json
+/// {"link":"linked","last_heard":"4242","last_heard_id":4242,"frames_rx":97,
+///  "receiving":true,"backend":"thumbdv","ptt":false,"rx_db":-31.2}
+/// ```
+///
+/// `link` is one of `idle`/`linking`/`linked`/`unlinking`/`failed`.
+///
+/// `last_heard` is a NUMBER rendered as a string, not a callsign: an `NXDND`
+/// datagram carries `srcId` and no callsign at all, so identifying the sender
+/// is a directory lookup astar does not hold. `last_heard_id` is that same id
+/// unformatted, for a caller that has a directory. Both are read from the
+/// header in clear, need no vocoder, and PERSIST past end-of-transmission —
+/// they are "most recently heard", not "currently transmitting". `receiving`
+/// is the one that says whether a transmission is in progress, and
+/// `frames_rx` is a liveness counter: a link that is up and silent and one
+/// that is receiving look identical from `link` alone.
+///
+/// `ptt` is always `false`: NXDN is receive-only today and a key is refused.
+///
+/// Every field is credential-free: numbers, counters and a level.
+///
+/// Writes `{}` when no link is active or the `nxdn` feature isn't compiled
+/// in. Returns [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_nxdn_state(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let json = nxdn_state_json(station);
+        unsafe { fill_buf(&json, buf, len) }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Render the live NXDN link's state as JSON, or `"{}"` when there is none.
+/// Split out of [`iax_station_nxdn_state`] so it is reachable from tests
+/// without an FFI buffer dance.
+fn nxdn_state_json(station: &IaxStation) -> String {
+    #[cfg(feature = "nxdn")]
+    {
+        let Some(s) = station.inner.nxdn_state() else {
+            return "{}".to_string();
+        };
+        // Built through serde_json rather than `format!` for the same reason
+        // the YSF renderer is: `last_heard` is attacker-supplied — it is
+        // derived from whatever the transmitting station put on the wire — so
+        // a quote or backslash in it must not be able to break out of the
+        // string.
+        serde_json::json!({
+            "link": s.link_state,
+            "last_heard": s.last_heard,
+            "last_heard_id": s.last_heard_id,
+            "frames_rx": s.frames_rx,
+            "receiving": s.receiving,
+            "backend": s.backend,
+            "ptt": s.ptt,
+            "rx_db": s.rx_dbfs,
+        })
+        .to_string()
+    }
+    #[cfg(not(feature = "nxdn"))]
+    {
+        let _ = station;
+        "{}".to_string()
+    }
+}
+
+#[cfg(test)]
+mod nxdn_tests {
+    //! Offline coverage of the NXDN entry points (iax-b9c2): the no-link
+    //! document, the error code's identity, and the NULL guards. No socket,
+    //! no dongle — a fresh station has no link, which is exactly the state
+    //! these pin.
+    use super::*;
+    use std::ptr;
+
+    /// A station built with every config string unset — the same shape
+    /// `tests/ffi.rs` uses, but reachable from inside the crate so the
+    /// private `nxdn_state_json` is too.
+    fn station() -> *mut IaxStation {
+        let cfg = IaxConfig {
+            input: ptr::null(),
+            output: ptr::null(),
+            portal_user: ptr::null(),
+            portal_pass: ptr::null(),
+            portal_node: ptr::null(),
+            secret: ptr::null(),
+            codec_policy: ptr::null(),
+        };
+        let st = unsafe { iax_station_new(std::ptr::from_ref(&cfg)) };
+        assert!(!st.is_null());
+        st
+    }
+
+    #[test]
+    fn nxdn_state_json_is_empty_without_a_link() {
+        let st = station();
+        assert_eq!(nxdn_state_json(unsafe { &*st }), "{}");
+        unsafe { iax_station_free(st) };
+    }
+
+    #[test]
+    fn nxdn_has_its_own_error_code_and_text() {
+        // iax_error_text returns a static string per code — the engine's
+        // classification does not cross the ABI, so the app writes its own
+        // message. See docs/design/adding-a-network.md.
+        assert_eq!(IAX_ERR_NXDN, -21);
+        assert_ne!(IAX_ERR_NXDN, IAX_ERR_YSF);
+        let text = unsafe { std::ffi::CStr::from_ptr(iax_error_text(IAX_ERR_NXDN)) };
+        assert_eq!(text.to_str().expect("utf8"), "nxdn error");
+    }
+
+    #[test]
+    fn a_null_station_is_refused_by_every_nxdn_entry_point() {
+        assert_eq!(
+            unsafe {
+                iax_station_connect_nxdn(ptr::null_mut(), c"x".as_ptr(), c"y".as_ptr(), 1, 1)
+            },
+            IAX_ERR_NULL
+        );
+        assert_eq!(
+            unsafe { iax_station_nxdn_disconnect(ptr::null_mut()) },
+            IAX_ERR_NULL
+        );
+        assert_eq!(
+            unsafe { iax_station_nxdn_state(ptr::null_mut(), ptr::null_mut(), 0) },
+            IAX_ERR_NULL
+        );
+    }
+
+    /// A zero radio id or talkgroup is refused BEFORE any hardware is
+    /// touched, so this holds with or without a dongle attached — and with
+    /// or without the feature compiled in.
+    #[test]
+    fn a_zero_radio_id_or_talkgroup_is_refused() {
+        let st = station();
+        assert_eq!(
+            unsafe {
+                iax_station_connect_nxdn(st, c"127.0.0.1:41400".as_ptr(), c"N0CALL".as_ptr(), 0, 1)
+            },
+            IAX_ERR_NXDN
+        );
+        assert_eq!(
+            unsafe {
+                iax_station_connect_nxdn(st, c"127.0.0.1:41400".as_ptr(), c"N0CALL".as_ptr(), 1, 0)
+            },
+            IAX_ERR_NXDN
+        );
+        unsafe { iax_station_free(st) };
     }
 }
 

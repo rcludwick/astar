@@ -20,6 +20,13 @@ workspace = true
 # other people's implementations. That is exactly the code that must be
 # under test on every run, not behind a flag nobody turns on.
 astar-ysf = { path = "../astar-ysf" }
+# NXDN protocol primitives (iax-nxdn). Same reasoning as `astar-ysf` above,
+# and the same conclusion: pure `std`, no third-party crates, no licensing
+# question, and deliberately NOT behind a feature. The bit layout in
+# `nxdn.rs` — two 49-bit AMBE+2 frames per 14-byte block, at bit offsets 0
+# and 49 — was read out of other people's implementations, so it is exactly
+# the code that must be under test on every `just ci` run.
+astar-nxdn = { path = "../astar-nxdn", version = "0.1.11-beta" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 codec2 = { workspace = true, optional = true }

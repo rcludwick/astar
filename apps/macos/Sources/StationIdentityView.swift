@@ -14,8 +14,9 @@
     /// under an "M17" heading, which said two wrong things at once: that it was
     /// M17's, and that it was part of an AllStarLink account. It is neither —
     /// M17 sends it in every frame, D-Star puts it in every header, YSF carries
-    /// it in every data packet, and AllStarLink is the one network that never
-    /// transmits it at all, because there you dial as a node number.
+    /// it in every data packet, NXDN names it in the poll that registers the
+    /// link, and AllStarLink is the one network that never transmits it at
+    /// all, because there you dial as a node number.
     ///
     /// The DMR radio ID used to sit beside it here. It moved down below the
     /// AllStarLink account (`DmrSettingsView`, astar-a7c5): it is one
@@ -45,8 +46,9 @@
                             .accessibilityLabel("Your callsign")
                     }
                     Text(
-                        "Transmitted by M17, D-Star and YSF. AllStarLink doesn’t use it — "
-                            + "there you dial as your node number."
+                        "Transmitted by M17, D-Star and YSF, and named in the NXDN link. "
+                            + "AllStarLink doesn’t use it — there you dial as your node "
+                            + "number."
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)

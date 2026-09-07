@@ -121,6 +121,8 @@ fn snapshot_fills_idle_state() {
         dstar_active: true,
         ysf_available: true,
         ysf_active: true,
+        nxdn_available: true,
+        nxdn_active: true,
     };
     let rc = unsafe { iax_station_snapshot(st, std::ptr::from_mut(&mut state)) };
     assert_eq!(rc, IAX_OK);
@@ -139,6 +141,9 @@ fn snapshot_fills_idle_state() {
     // whether a dongle is plugged into the machine running this test is not
     // ours to pin.
     assert!(!state.ysf_active);
+    // iax-b9c2: and for NXDN. `nxdn_available` is skipped for the same reason
+    // the other two are — it is the same one ThumbDV probe.
+    assert!(!state.nxdn_active);
     assert_eq!(state.rtt_ms, -1);
     // iax-5c30: idle (no active call) reports the silence floor.
     assert!((state.input_db + 60.0).abs() < 1e-3);
@@ -186,6 +191,8 @@ fn null_guards_return_err_null() {
         dstar_active: false,
         ysf_available: false,
         ysf_active: false,
+        nxdn_available: false,
+        nxdn_active: false,
     };
     assert_eq!(
         unsafe { iax_station_snapshot(ptr::null_mut(), std::ptr::from_mut(&mut state)) },
@@ -328,6 +335,8 @@ fn mint_token_without_portal_is_portal_err() {
         dstar_active: false,
         ysf_available: false,
         ysf_active: false,
+        nxdn_available: false,
+        nxdn_active: false,
     };
     assert_eq!(
         unsafe { iax_station_snapshot(st, std::ptr::from_mut(&mut state)) },
@@ -1709,6 +1718,67 @@ fn ysf_entry_points_refuse_a_null_station() {
         unsafe { iax_station_ysf_state(ptr::null_mut(), ptr::null_mut(), 0) },
         IAX_ERR_NULL
     );
+}
+
+// --- iax-b9c2: the NXDN state document, offline ---
+
+/// No link, no document — `{}`, exactly as YSF and M17 report it, and the
+/// same two-call sizing contract.
+#[test]
+fn nxdn_state_is_an_empty_object_while_idle() {
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(ptr::from_ref(&cfg)) };
+    assert!(!st.is_null());
+
+    let needed = unsafe { iax_station_nxdn_state(st, ptr::null_mut(), 0) };
+    assert_eq!(needed, 2, "`{{}}` is two bytes, excluding the NUL");
+
+    let mut buf = [0 as std::ffi::c_char; 64];
+    let n = unsafe { iax_station_nxdn_state(st, buf.as_mut_ptr(), buf.len()) };
+    assert_eq!(n, 2);
+    let got = unsafe { CStr::from_ptr(buf.as_ptr()) }
+        .to_str()
+        .expect("the document is always UTF-8");
+    assert_eq!(got, "{}");
+
+    unsafe { iax_station_free(st) };
+}
+
+/// Disconnecting with nothing linked is a no-op, not an error — a UI that
+/// tears down unconditionally on view-disappear must not see a failure.
+#[test]
+fn nxdn_disconnect_while_idle_is_ok() {
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(ptr::from_ref(&cfg)) };
+    assert_eq!(unsafe { iax_station_nxdn_disconnect(st) }, IAX_OK);
+    assert_eq!(
+        unsafe { iax_station_nxdn_disconnect(st) },
+        IAX_OK,
+        "and it is idempotent"
+    );
+    unsafe { iax_station_free(st) };
+}
+
+/// A NULL host or callsign is a NULL error, not a panic and not a connect
+/// attempt. Both are required; `radio_id`/`talkgroup` are plain scalars and
+/// cannot be NULL at all.
+#[test]
+fn nxdn_connect_requires_a_host_and_a_callsign() {
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(ptr::from_ref(&cfg)) };
+    let call = CString::new("N0CALL").unwrap();
+    assert_eq!(
+        unsafe { iax_station_connect_nxdn(st, ptr::null(), call.as_ptr(), 1, 1) },
+        IAX_ERR_NULL,
+        "a NULL host must be refused"
+    );
+    let host = CString::new("127.0.0.1:41400").unwrap();
+    assert_eq!(
+        unsafe { iax_station_connect_nxdn(st, host.as_ptr(), ptr::null(), 1, 1) },
+        IAX_ERR_NULL,
+        "a NULL callsign must be refused"
+    );
+    unsafe { iax_station_free(st) };
 }
 
 /// A NULL host or callsign is a NULL error, not a panic and not a connect

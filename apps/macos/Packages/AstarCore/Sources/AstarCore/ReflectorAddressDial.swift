@@ -95,6 +95,66 @@ public enum YSFDial {
     }
 }
 
+/// NXDN's address grammar: `host[:port]`, optionally followed by the
+/// talkgroup — `host[:port]/TG` or `host[:port] TG`.
+///
+/// The talkgroup is part of the target, not a preference. An NXDNReflector
+/// relays exactly one talkgroup: its poll registers a client only when the
+/// poll names the reflector's own id, and it drops every data frame whose
+/// `dstId` is something else. So a bare address is a target with the room
+/// missing, exactly as `XLX836` is for D-Star — see `CallSession.nxdnTarget`,
+/// which refuses one rather than guessing a number.
+///
+/// The directory is the normal way in and carries the talkgroup already: the
+/// feed's 297 NXDN rows are `dial: {kind: "nxdn", host, port}` with the row's
+/// **id** as the talkgroup ("100"), no callsigns and no modules. That is why
+/// `ReflectorDial.addressesModule` is false here and the module picker
+/// correctly never appears.
+public enum NXDNDial {
+    /// The port the overwhelming majority of NXDNReflectors listen on. A
+    /// sensible fallback for an address someone typed without one, and never
+    /// a substitute for the directory row's own.
+    public static let defaultPort: UInt16 = 41400
+
+    /// Classify `host[:port]`, with an optional talkgroup after a `/` or a
+    /// space. `nil` for anything that does not fit.
+    ///
+    /// A separator followed by something that is not a talkgroup number is a
+    /// REJECTION, not something to ignore. `XLX836 A` is a D-Star dial that
+    /// happens to look like a hostname, and silently dropping the ` A` would
+    /// link the operator to whatever DNS made of `XLX836`.
+    public static func parse(_ raw: String) -> (host: String, port: UInt16, talkgroup: UInt16?)? {
+        let text = raw.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return nil }
+
+        // `host[:port]` contains neither a `/` nor a space (a host has no
+        // internal whitespace, a port is digits only), so the FIRST of either
+        // is unambiguously where the talkgroup starts — whichever was typed.
+        var addressPart = Substring(text)
+        var talkgroup: UInt16?
+        if let separator = text.firstIndex(where: { $0 == "/" || $0 == " " }) {
+            addressPart = text[..<separator]
+            let rest = text[text.index(after: separator)...]
+                .trimmingCharacters(in: .whitespaces)
+            guard !rest.isEmpty, rest.allSatisfy({ $0.isASCII && $0.isNumber }),
+                let parsed = UInt16(rest), parsed > 0
+            else { return nil }
+            talkgroup = parsed
+        }
+
+        let parts = addressPart.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count <= 2 else { return nil }
+        let host = String(parts[0])
+        guard !host.isEmpty, !host.contains(where: \.isWhitespace) else { return nil }
+
+        if parts.count == 2 {
+            guard let port = UInt16(parts[1]), port > 0 else { return nil }
+            return (host: host, port: port, talkgroup: talkgroup)
+        }
+        return (host: host, port: defaultPort, talkgroup: talkgroup)
+    }
+}
+
 /// D-Star's address grammar: the shared one, on the DExtra port.
 ///
 /// The design doc used to say there is no `DStarDial` type, and while D-Star
