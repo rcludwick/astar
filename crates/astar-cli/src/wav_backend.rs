@@ -39,7 +39,7 @@ const HEADER_PATCH_INTERVAL: Duration = Duration::from_secs(1);
 /// opened it so two commands' captures are told apart in a device list.
 fn wav_device(label: &str) -> DeviceInfo {
     DeviceInfo {
-        id: DeviceId::new(&format!("{label}-wav")),
+        id: DeviceId::new(format!("{label}-wav")),
         name: format!("{label} --wav"),
         direction: Direction::Output,
         channels: 1,

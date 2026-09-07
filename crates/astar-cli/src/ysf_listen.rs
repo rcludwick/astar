@@ -445,6 +445,9 @@ mod tests {
             receiving: false,
             unsupported_mode: None,
             backend: Some("thumbdv"),
+            ptt: false,
+            tx_dbfs: -60.0,
+            rx_dbfs: -60.0,
         }
     }
 
