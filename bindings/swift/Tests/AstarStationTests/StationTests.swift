@@ -473,4 +473,73 @@ final class StationTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(DStarState(json: odd)).link, .failed)
     }
 
+    // MARK: - NXDN (iax-b9c2)
+
+    func testNXDNStateDecodesTheEngineJSON() throws {
+        let json = """
+            {"link":"linked","last_heard":"4242","last_heard_id":4242,"frames_rx":97,\
+            "receiving":true,"backend":"thumbdv","ptt":false,"rx_db":-31.2}
+            """
+        let state = try XCTUnwrap(NXDNState(json: json))
+        XCTAssertEqual(state.link, .linked)
+        XCTAssertEqual(state.lastHeard, "4242")
+        XCTAssertEqual(state.lastHeardID, 4242)
+        XCTAssertEqual(state.framesRX, 97)
+        XCTAssertTrue(state.receiving)
+        XCTAssertEqual(state.backend, .thumbdv)
+        XCTAssertFalse(state.ptt, "NXDN is receive-only: ptt is always false")
+    }
+
+    func testNXDNStateTreatsAMissingLastHeardAsNil() throws {
+        let json = """
+            {"link":"linking","last_heard":null,"last_heard_id":null,"frames_rx":0,\
+            "receiving":false,"backend":null,"ptt":false,"rx_db":-60.0}
+            """
+        let state = try XCTUnwrap(NXDNState(json: json))
+        XCTAssertEqual(state.link, .linking)
+        XCTAssertNil(state.lastHeard, "JSON null must decode as nil, not the string \"null\"")
+        XCTAssertNil(state.lastHeardID)
+        XCTAssertNil(state.backend, "a link opened without audio names no backend")
+    }
+
+    func testAnUnrecognisedNXDNLinkDecodesToTheSafeCase() throws {
+        // A UI that believes the link is down will not offer anything on it.
+        // An unknown string must never be read as `linked`.
+        let json = #"{"link":"quantum","frames_rx":0,"receiving":false,"ptt":false}"#
+        let state = try XCTUnwrap(NXDNState(json: json))
+        XCTAssertEqual(state.link, .idle)
+    }
+
+    func testEmptyNXDNStateJSONIsNil() {
+        XCTAssertNil(NXDNState(json: "{}"), "the no-link document decodes as nil")
+    }
+
+    func testFreshStationHasNoNXDNLink() throws {
+        let station = try Station()
+        XCTAssertNil(try station.nxdnState())
+        XCTAssertFalse(try station.snapshot().nxdnActive)
+    }
+
+    func testNXDNDisconnectIsIdempotentWhileIdle() throws {
+        let station = try Station()
+        XCTAssertNoThrow(try station.nxdnDisconnect())
+        XCTAssertNoThrow(try station.nxdnDisconnect())
+    }
+
+    /// A zero radio id or talkgroup is refused before any hardware is touched,
+    /// so this holds with or without a dongle attached.
+    func testConnectNXDNRejectsAZeroRadioIDOrTalkgroup() throws {
+        let station = try Station()
+        for (radioID, talkgroup) in [(UInt16(0), UInt16(1)), (UInt16(1), UInt16(0))] {
+            XCTAssertThrowsError(
+                try station.connectNXDN(
+                    host: "127.0.0.1:41400", callsign: "N0CALL", radioID: radioID,
+                    talkgroup: talkgroup)
+            ) { error in
+                // IAX_ERR_NXDN == -21
+                XCTAssertEqual((error as? StationError)?.code, -21)
+            }
+        }
+    }
+
 }

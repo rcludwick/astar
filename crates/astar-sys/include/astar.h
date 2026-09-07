@@ -595,6 +595,28 @@ typedef struct {
    * `iax_station_set_ptt`, exactly as D-Star.
    */
   bool ysf_active;
+  /**
+   * `true` when NXDN voice is available: the `nxdn` feature is compiled in
+   * AND a `ThumbDV` is attached right now. NXDN voice is AMBE+2 — the same
+   * 49-bit frame YSF DN carries, off the same dongle — so this is the same
+   * cached probe [`Self::dstar_available`] and [`Self::ysf_available`]
+   * read, and all three move together.
+   */
+  bool nxdn_available;
+  /**
+   * `true` while an NXDN link is live — mutually exclusive with an IAX2
+   * call, an M17 session, a D-Star session and a YSF link (see
+   * [`iax_station_connect_nxdn`]).
+   *
+   * RECEIVE ONLY: there is no NXDN transmit path, so a key is refused
+   * rather than queued and a UI must not offer PTT while this is set.
+   *
+   * Feature-INDEPENDENT, exactly as [`Self::dstar_active`] and
+   * [`Self::ysf_active`] are: `astar-server` refuses remote keying while a
+   * digital-voice link holds the dongle and must read that without
+   * compiling the feature.
+   */
+  bool nxdn_active;
 } IaxState;
 
 /**
@@ -1510,6 +1532,81 @@ int iax_station_ysf_disconnect(IaxStation *st);
  * Returns [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
  */
 int iax_station_ysf_state(IaxStation *st, char *buf, uintptr_t len);
+
+/**
+ * Link to an `NXDNReflector` and decode the audio on it (iax-b9c2).
+ *
+ * `host` is `host:port` — NXDN reflectors publish a port per reflector, so
+ * there is nothing conventional to assume. `callsign` is this station's own,
+ * sent in the registration poll; `radio_id` is its registered NXDN number
+ * and `talkgroup` the TG to join. Both are plain scalars here: NXDN
+ * addresses stations by NUMBER, and parsing an operator's typing into one is
+ * the caller's job, not the ABI's.
+ *
+ * NXDN is HARDWARE-ONLY for the same reason D-Star and YSF are — the vocoder
+ * is AMBE+2 on a DVSI `ThumbDV`. Poll [`IaxState::nxdn_available`] and offer
+ * the affordance only when it is `true`, rather than calling this
+ * speculatively.
+ *
+ * **RECEIVE ONLY today.** There is no NXDN transmit path: a key-down is
+ * REFUSED, not queued, so a UI must not offer PTT while this link is live.
+ * See `astar_console::nxdn`'s Transmit section for why a refusal beats a key
+ * that silently does nothing.
+ *
+ * `host` and `callsign` are required (NULL/non-UTF-8 → [`IAX_ERR_NULL`] /
+ * [`IAX_ERR_UTF8`]). A zero `radio_id` or `talkgroup` is [`IAX_ERR_NXDN`]:
+ * zero is what an unset field looks like, not a registration. Returns
+ * [`IAX_OK`], [`IAX_ERR_ALREADY_CONNECTED`] (any other network is live),
+ * [`IAX_ERR_NXDN`], or [`IAX_ERR_PANIC`].
+ *
+ * NOTE: this performs blocking work — a serial-port scan plus, per candidate
+ * port and baud rate, an open and a multi-transaction dongle init, then a
+ * socket bind and thread spawn. It can take on the order of a second. Call
+ * it off any UI thread.
+ */
+int iax_station_connect_nxdn(IaxStation *st,
+                             const char *host,
+                             const char *callsign,
+                             uint16_t radio_id,
+                             uint16_t talkgroup);
+
+/**
+ * Disconnect the live NXDN link, if any. Idempotent — a no-op while idle.
+ * Returns [`IAX_OK`], [`IAX_ERR_NULL`], or [`IAX_ERR_PANIC`].
+ */
+int iax_station_nxdn_disconnect(IaxStation *st);
+
+/**
+ * Write the live NXDN link's state as JSON into the caller buffer `buf` of
+ * `len` bytes (NUL-terminated, truncate-safe; same contract as
+ * [`iax_station_dstar_state`] — returns the byte length the full JSON needs,
+ * excluding the NUL, so a `len == 0` call is a sizing query).
+ *
+ * ```json
+ * {"link":"linked","last_heard":"4242","last_heard_id":4242,"frames_rx":97,
+ *  "receiving":true,"backend":"thumbdv","ptt":false,"rx_db":-31.2}
+ * ```
+ *
+ * `link` is one of `idle`/`linking`/`linked`/`unlinking`/`failed`.
+ *
+ * `last_heard` is a NUMBER rendered as a string, not a callsign: an `NXDND`
+ * datagram carries `srcId` and no callsign at all, so identifying the sender
+ * is a directory lookup astar does not hold. `last_heard_id` is that same id
+ * unformatted, for a caller that has a directory. Both are read from the
+ * header in clear, need no vocoder, and PERSIST past end-of-transmission —
+ * they are "most recently heard", not "currently transmitting". `receiving`
+ * is the one that says whether a transmission is in progress, and
+ * `frames_rx` is a liveness counter: a link that is up and silent and one
+ * that is receiving look identical from `link` alone.
+ *
+ * `ptt` is always `false`: NXDN is receive-only today and a key is refused.
+ *
+ * Every field is credential-free: numbers, counters and a level.
+ *
+ * Writes `{}` when no link is active or the `nxdn` feature isn't compiled
+ * in. Returns [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
+ */
+int iax_station_nxdn_state(IaxStation *st, char *buf, uintptr_t len);
 
 #ifdef __cplusplus
 }  // extern "C"

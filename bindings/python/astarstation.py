@@ -241,6 +241,8 @@ class _IaxState(ctypes.Structure):
         ("dstar_active", c_bool),  # a D-Star session is live
         ("ysf_available", c_bool),  # ysf feature + a ThumbDV attached now
         ("ysf_active", c_bool),  # a YSF link is live
+        ("nxdn_available", c_bool),  # nxdn feature + a ThumbDV attached now (iax-b9c2)
+        ("nxdn_active", c_bool),  # an NXDN link is live (receive-only: never offer PTT)
     ]
 
 

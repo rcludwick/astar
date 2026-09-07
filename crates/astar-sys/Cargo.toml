@@ -27,7 +27,7 @@ workspace = true
 # refuses on the feature-independent `dstar_active` snapshot flag instead of a
 # `#[cfg]` (iax-d9f4). Do not weaken that guard on the assumption that the
 # node is built without `dstar`: in a workspace build, it is not.
-default = ["dstar", "ysf", "m17"]
+default = ["dstar", "ysf", "m17", "nxdn"]
 dstar = ["astar-station/dstar"]
 # M17, ON by default — it mirrors `astar-station`'s OWN default, so this
 # feature does not turn anything on that a plain build did not already have.
@@ -46,10 +46,11 @@ m17 = ["astar-station/m17"]
 # build, `astar-server` included. That is why the node's key path refuses on
 # the feature-independent `ysf_active` snapshot flag rather than a `#[cfg]`.
 ysf = ["astar-station/ysf"]
-# NXDN (iax-b9c2). NOT default yet: the C entry points that would make it
-# reachable from Swift are Task 6 of the NXDN plan, and a feature that
-# compiles the network in without exposing it buys a dongle-free user
-# nothing. It mirrors `ysf` in every other respect.
+# NXDN, ON by default for the same reason `dstar` and `ysf` are: the Swift
+# binding is generated from this crate and reaching NXDN from astar is the
+# point of these entry points. It costs a dongle-free user nothing —
+# `nxdn_available` reports `false` through the same cached probe `dstar` and
+# `ysf` use, and every NXDN call fails cleanly.
 #
 # SAFETY: the same feature-unification warning applies as for `dstar` and
 # `ysf` above. Enabling this turns `astar-station/nxdn` on in every crate of
