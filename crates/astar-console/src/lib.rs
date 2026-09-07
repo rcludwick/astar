@@ -6,6 +6,8 @@
 //! exposes a pollable [`ConsoleState`]. Sync, no async runtime — consumed by
 //! the web harness, a later TUI, and the astar Tauri app.
 
+#[cfg(feature = "dmr")]
+pub mod dmr;
 #[cfg(feature = "dstar")]
 pub mod dstar;
 pub mod dtmf;
@@ -26,6 +28,8 @@ pub mod ysf;
 
 pub use astar_audio::{MicProfile, NotchSpec};
 pub use astar_iax::{Direction, TracedFrame};
+#[cfg(feature = "dmr")]
+pub use dmr::{DmrConfig, DmrLink, DmrSnapshot};
 #[cfg(feature = "dstar")]
 pub use dstar::{DstarConfig, DstarSession, DstarSnapshotState};
 pub use dtmf::{DetectedDigit, DtmfShared, DtmfSource, DtmfTester};

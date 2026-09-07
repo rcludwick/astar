@@ -23,6 +23,11 @@ astar-ysf = { path = "../astar-ysf", optional = true }
 # against. Pure but for that reflector; optional + gated behind the `nxdn`
 # feature (OFF by default — see below).
 astar-nxdn = { path = "../astar-nxdn", version = "0.1.11-beta", optional = true }
+# DMR protocol primitives (iax-d4f7): the homebrew/MMDVM wire, the 33-byte
+# burst, a link FSM and a loopback master to test against. Pure but for that
+# master; optional + gated behind the `dmr` feature (OFF by default — see
+# below).
+astar-dmr = { path = "../astar-dmr", version = "0.1.11-beta", optional = true }
 # Underlay socket for applying a deferred `WireGuard` link transport when the
 # engine is first built (iax-5bbd); config/status types come via `astar-iax`.
 astar-wireguard = { path = "../astar-wireguard" }
@@ -102,6 +107,13 @@ ysf = ["dep:astar-ysf", "astar-codec/ambe-hw"]
 # (`NxdnLink::connect`); it just makes no sound. Receive only for now: see
 # this crate's `nxdn` module docs for the gate transmit is behind.
 nxdn = ["dep:astar-nxdn", "astar-codec/ambe-hw"]
+# DMR (iax-d4f7). OFF by default for the same reason `nxdn` is: DMR voice is
+# AMBE+2 — 72 bits at 2450 + 1150, its own rate word — so decoding it needs
+# `astar-codec/ambe-hw` and the vendored `ThumbDV` driver behind it. A link
+# can still be opened without a dongle (`DmrLink::connect`); it just makes no
+# sound. Receive only for now: see this crate's `dmr` module docs for the gate
+# transmit is behind.
+dmr = ["dep:astar-dmr", "astar-codec/ambe-hw"]
 
 [lints]
 workspace = true

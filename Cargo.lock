@@ -245,6 +245,7 @@ dependencies = [
  "astar-asl3",
  "astar-audio",
  "astar-codec",
+ "astar-dmr",
  "astar-dstar",
  "astar-iax",
  "astar-iax-core",
