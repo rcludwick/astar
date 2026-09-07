@@ -1154,6 +1154,26 @@ int iax_station_list_outputs(IaxStation *st, char *buf, uintptr_t len);
 int iax_station_set_devices(IaxStation *st, const char *input, const char *output);
 
 /**
+ * Size in bytes of [`IaxState`] as this library lays it out.
+ *
+ * Every foreign binding mirrors `IaxState` by hand (ctypes `Structure`, a
+ * Swift `struct`, …) and `iax_station_snapshot` writes `size_of::<IaxState>()`
+ * bytes into the caller's buffer. A mirror that has fallen behind is therefore
+ * not a cosmetic mismatch but a **heap overflow** in the caller, plus garbage
+ * reads from every field past the first divergence. Bindings should assert
+ * their mirror's size against this at load time so the drift fails loudly and
+ * immediately instead of corrupting memory. Carries no state and no secret.
+ */
+uintptr_t iax_state_size(void);
+
+/**
+ * Size in bytes of [`IaxEvent`] as this library lays it out. Same contract as
+ * [`iax_state_size`]: `iax_station_next_event` fills a caller-allocated
+ * `IaxEvent`, so a stale mirror overflows the caller's buffer.
+ */
+uintptr_t iax_event_size(void);
+
+/**
  * Map an `IAX_ERR_*` code (or [`IAX_OK`]) to a `'static`, NUL-terminated,
  * human-readable C string. The returned pointer is owned by the library and
  * must **never** be freed by the caller. The strings are generic and
