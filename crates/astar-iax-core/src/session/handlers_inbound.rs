@@ -42,6 +42,18 @@ use crate::subclass::{IaxCommand, VoiceFormat};
 /// in an ACCEPT (a `disallow=all / allow=gsm` ASL node, say — astar implements
 /// no GSM). The caller REJECTs with "Unable to negotiate codec"; naming a
 /// format the peer never offered just moves the failure somewhere unreadable.
+///
+/// One wrinkle worth stating: an explicit `CAPABILITY = 0` is indistinguishable
+/// on the wire from an absent CAPABILITY IE — [`CodecMask`] is a plain bitmask
+/// with no "was it there" bit — so it takes the same widening-to-our-own-mask
+/// path and connects rather than being rejected. That is the right way round:
+/// a peer that advertises nothing is far more often one that only sent FORMAT
+/// than one genuinely claiming to support no codec at all.
+/// Asterisk's `AST_CAUSE_BEARERCAPABILITY_NOTAVAIL` (Q.931 cause 65), the
+/// CAUSECODE it pairs with "Unable to negotiate codec". Peers that key their
+/// retry logic off the number rather than the sentence need this IE present.
+const CAUSE_BEARERCAPABILITY_NOTAVAIL: u8 = 65;
+
 /// Codecs best-fidelity first, used only to degrade a request we cannot meet.
 /// Distinct from any policy's `preference_order`, which encodes what a node
 /// WANTS; this encodes what is least bad when the caller cannot have what it
@@ -248,13 +260,23 @@ impl Fsm {
                 our_call,
                 peer_call,
                 Some(CAUSE),
+                Some(CAUSE_BEARERCAPABILITY_NOTAVAIL),
             )));
-            return (
-                SessionState::Failed(FailReason::Rejected {
-                    cause: Some(CAUSE.to_string()),
-                }),
-                std::mem::take(out),
-            );
+            // `Disconnected` is not cosmetic: it is the ONLY thing that tears
+            // the leg down. The runtime translates it to `CallEvent::Hangup`,
+            // which is what sets `terminated` in the leg loop, which is what
+            // makes the leg exit and signal `done_tx`, which is what frees the
+            // listener's call number and lets the Manager reap the slot.
+            // Without it a rejected peer keeps a thread, a call number and a
+            // pool slot forever -- an unauthenticated caller could exhaust
+            // `max_calls` on a default node just by offering GSM.
+            let reason = FailReason::Rejected {
+                cause: Some(CAUSE.to_string()),
+            };
+            out.push(Action::AppEvent(AppEvent::Disconnected {
+                reason: reason.clone(),
+            }));
+            return (SessionState::Failed(reason), std::mem::take(out));
         };
         // The whole codec negotiation in one line, because when a peer links
         // and then drops immediately this is the first thing anyone needs and
@@ -401,14 +423,18 @@ impl Fsm {
                             our_call,
                             peer_call,
                             Some(cause),
+                            None,
                         )));
                         out.push(Action::CancelTimer(TimerKind::InboundTokenExpiry));
-                        (
-                            SessionState::Failed(FailReason::Rejected {
-                                cause: Some(cause.to_string()),
-                            }),
-                            out,
-                        )
+                        // Same teardown obligation as the codec reject above:
+                        // without `Disconnected` the leg never stops.
+                        let reason = FailReason::Rejected {
+                            cause: Some(cause.to_string()),
+                        };
+                        out.push(Action::AppEvent(AppEvent::Disconnected {
+                            reason: reason.clone(),
+                        }));
+                        (SessionState::Failed(reason), out)
                     }
                 } else {
                     let state = SessionState::CallTokenIssued(CallTokenIssuedData {
@@ -489,13 +515,18 @@ impl Fsm {
                                     our_call,
                                     peer_call,
                                     Some(cause),
+                                    None,
                                 )));
-                                (
-                                    SessionState::Failed(FailReason::Rejected {
-                                        cause: Some(cause.to_string()),
-                                    }),
-                                    out,
-                                )
+                                // Same teardown obligation as the codec reject:
+                                // without `Disconnected` a peer that fails auth
+                                // keeps its leg and call number forever.
+                                let reason = FailReason::Rejected {
+                                    cause: Some(cause.to_string()),
+                                };
+                                out.push(Action::AppEvent(AppEvent::Disconnected {
+                                    reason: reason.clone(),
+                                }));
+                                (SessionState::Failed(reason), out)
                             }
                         }
                         Subclass::Control(crate::subclass::ControlSubclass::Hangup)
