@@ -148,6 +148,9 @@ current.
 - **VOX pre-roll and speech onset are no longer lost on D-Star/YSF key-down**,
   and YSF key-ups now appear in the timeline.
 
+- The self-hosted M17 parrot (`just m17-parrot`) replays at exactly 40 ms per
+  packet; it drifted 4 % slow and was audible as a beat after a few seconds.
+
 ## 0.1.9beta — 2026-08-29
 
 Who you are, at the top of Settings — and the first bricks of DMR.

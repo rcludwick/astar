@@ -498,3 +498,87 @@ fn parrot_playback_is_paced_not_blasted() {
 
     handle.shutdown();
 }
+
+/// Wall-clock-precision regression guard for the parrot-pacing rate bug
+/// (`drain_playbacks` scheduled `next_send` from the send instant rather than
+/// the previous deadline, so the run loop's wake-up overshoot accumulated on
+/// every packet — measured 41.77 ms/packet, a −4.24% rate error, audible to a
+/// listener as a beat once the client's output-bus cushion drained).
+///
+/// Unlike [`parrot_playback_is_paced_not_blasted`], which only rules out an
+/// unpaced blast, this asserts the actual rate: the mean measured
+/// inter-packet interval over a long-enough run must land within 0.5% of the
+/// nominal 40 ms cadence, and the cumulative drift by the last packet must
+/// stay under one interval. A mean over 100+ samples is deliberately used
+/// instead of a per-gap ceiling — this repo already learned (see the comment
+/// above) that a tight per-gap bound measures the runner's scheduling noise
+/// as much as the code; a deadline-scheduled pacer's mean converges to the
+/// nominal rate regardless of that noise, so this stays sensitive to the bug
+/// without being sensitive to the machine.
+#[test]
+fn parrot_playback_pacing_matches_40ms_within_half_a_percent() {
+    const N: u16 = 120;
+    const NOMINAL: Duration = Duration::from_millis(40);
+
+    // A long ping_interval keeps a periodic PING control packet from landing
+    // in the middle of the measurement window: N=120 packets at ~40ms spans
+    // ~4.8s, past the 3s default ping cadence, and a PING arriving amid the
+    // 54-byte stream echoes would masquerade as a bogus near-zero gap.
+    let reflector = Reflector::bind_parrot_with_timeouts(
+        "127.0.0.1:0".parse().unwrap(),
+        Duration::from_secs(60),
+        Duration::from_secs(60),
+        Duration::from_secs(2),
+    )
+    .expect("bind parrot reflector");
+    let addr = reflector.local_addr();
+    let handle = reflector.run();
+
+    let (c1, _) = raw_client();
+    let mut buf = [0u8; 64];
+    c1.send_to(&conn_bytes("N0CALL", b'A'), addr).unwrap();
+    let (n, _) = c1.recv_from(&mut buf).unwrap();
+    assert_eq!(&buf[..n], b"ACKN");
+
+    let stream_id = 0x5150;
+    for i in 0..N {
+        let pkt = stream_packet_full("N0CALL", stream_id, i, i == N - 1);
+        c1.send_to(&pkt, addr).unwrap();
+    }
+
+    c1.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut echo_buf = [0u8; 128];
+    let mut arrivals = Vec::with_capacity(N as usize);
+    for _ in 0..N {
+        c1.recv_from(&mut echo_buf)
+            .expect("must receive every paced playback packet");
+        arrivals.push(Instant::now());
+    }
+    handle.shutdown();
+
+    let gaps: Vec<Duration> = arrivals.windows(2).map(|w| w[1] - w[0]).collect();
+    let gap_count = u32::from(N - 1);
+    let mean = gaps.iter().sum::<Duration>() / gap_count;
+
+    let tolerance = NOMINAL.mul_f64(0.005);
+    let low = NOMINAL
+        .checked_sub(tolerance)
+        .expect("tolerance under nominal");
+    let high = NOMINAL + tolerance;
+    assert!(
+        mean >= low && mean <= high,
+        "mean inter-packet interval {mean:?} over {gap_count} gaps is outside \
+         0.5% of the nominal {NOMINAL:?} (want {low:?}..={high:?}) — the \
+         parrot's playback clock is running fast or slow"
+    );
+
+    let expected_total = NOMINAL * gap_count;
+    let actual_total = arrivals[arrivals.len() - 1] - arrivals[0];
+    let drift = actual_total.abs_diff(expected_total);
+    assert!(
+        drift < NOMINAL,
+        "cumulative drift by the last packet was {drift:?}, at least one \
+         {NOMINAL:?} interval — the playback clock is not tracking a fixed \
+         deadline"
+    );
+}

@@ -576,7 +576,19 @@ fn drain_playbacks(
         };
         let _ = socket.send_to(&pkt.to_bytes(), *addr);
         pb.next_frame = pb.next_frame.wrapping_add(1);
-        pb.next_send = now + PARROT_PACE_INTERVAL;
+        // Fixed-rate schedule: advance from the DEADLINE, never from the
+        // actual send instant. `now` is always later than `next_send` (by
+        // the run loop's wake-up overshoot, floored at
+        // `MIN_PARROT_READ_TIMEOUT`), so `now + interval` accumulates that
+        // overshoot on every packet and the playback carries 40 ms of audio
+        // every ~41.8 ms — a 4 % rate deficit the listener's audio clock
+        // cannot absorb. Re-anchor only when a stalled loop has put us more
+        // than one interval behind, so catching up can never machine-gun a
+        // burst.
+        pb.next_send += PARROT_PACE_INTERVAL;
+        if pb.next_send + PARROT_PACE_INTERVAL < now {
+            pb.next_send = now + PARROT_PACE_INTERVAL;
+        }
         !is_last
     });
 }
