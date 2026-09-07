@@ -1080,7 +1080,7 @@ mod tests {
         assert_eq!(embedded_lc_checksum(&[31, 0, 0, 0, 0, 0, 0, 0, 0]), 0);
         assert_eq!(embedded_lc_checksum(&[0xFF; 9]), (255u32 * 9 % 31) as u8);
         assert!(embedded_lc_checksum(&[0xFF; 9]) < 31);
-        // The test LC: 0x7A + 0x51 + 0x30 + 0x1E + 0xB7 = 494, 494 % 31 = 30.
+        // The test LC: 0x7A + 0x51 + 0x30 + 0x1E + 0xB7 = 464, 464 % 31 = 30.
         assert_eq!(embedded_lc_checksum(&LC9), 30);
     }
 
