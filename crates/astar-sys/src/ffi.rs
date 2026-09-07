@@ -1910,6 +1910,32 @@ pub unsafe extern "C" fn iax_station_set_devices(
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
+// ABI layout parity
+// ---------------------------------------------------------------------------
+
+/// Size in bytes of [`IaxState`] as this library lays it out.
+///
+/// Every foreign binding mirrors `IaxState` by hand (ctypes `Structure`, a
+/// Swift `struct`, …) and `iax_station_snapshot` writes `size_of::<IaxState>()`
+/// bytes into the caller's buffer. A mirror that has fallen behind is therefore
+/// not a cosmetic mismatch but a **heap overflow** in the caller, plus garbage
+/// reads from every field past the first divergence. Bindings should assert
+/// their mirror's size against this at load time so the drift fails loudly and
+/// immediately instead of corrupting memory. Carries no state and no secret.
+#[unsafe(no_mangle)]
+pub extern "C" fn iax_state_size() -> usize {
+    core::mem::size_of::<IaxState>()
+}
+
+/// Size in bytes of [`IaxEvent`] as this library lays it out. Same contract as
+/// [`iax_state_size`]: `iax_station_next_event` fills a caller-allocated
+/// `IaxEvent`, so a stale mirror overflows the caller's buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn iax_event_size() -> usize {
+    core::mem::size_of::<IaxEvent>()
+}
+
+// ---------------------------------------------------------------------------
 // Error text
 // ---------------------------------------------------------------------------
 

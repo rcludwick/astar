@@ -15,6 +15,9 @@ Exercises: new -> snapshot(Idle) -> set_ptt(True) raises NOT_CONNECTED ->
 next_event(None) -> list devices -> free. Plus a secret-free guard.
 """
 
+import ctypes
+import os
+import re
 import sys
 
 from astarstation import (
@@ -24,11 +27,57 @@ from astarstation import (
     AnswerPolicy,
     AuthPolicy,
     Mode,
+    DenoiseChain,
     NodeConfig,
     Station,
     StationError,
     Status,
+    load_library,
 )
+from astarstation import _IaxEvent, _IaxState
+
+
+def test_struct_layout_matches_library() -> None:
+    """The ctypes mirrors must be byte-identical in size to the Rust structs.
+
+    `iax_station_snapshot` writes `sizeof(IaxState)` bytes into a buffer this
+    module allocates, so a field added on the Rust side and not mirrored here
+    overflows the Python heap — a segfault whose crash site (usually the GC) is
+    nowhere near the cause — and shifts every field after the divergence, which
+    is how a fresh station reported `dtmf_played == 48000`. Assert the size
+    directly so the next drift fails here instead.
+    """
+    lib = load_library()
+    assert ctypes.sizeof(_IaxState) == lib.iax_state_size(), (
+        f"IaxState mirror is {ctypes.sizeof(_IaxState)} bytes, "
+        f"library says {lib.iax_state_size()}"
+    )
+    assert ctypes.sizeof(_IaxEvent) == lib.iax_event_size(), (
+        f"IaxEvent mirror is {ctypes.sizeof(_IaxEvent)} bytes, "
+        f"library says {lib.iax_event_size()}"
+    )
+
+
+def _header_struct_fields(name: str) -> list[str]:
+    """Field names, in order, of the `typedef struct { ... } <name>;` in astar.h."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    header = os.path.join(here, "..", "..", "crates", "astar-sys", "include", "astar.h")
+    body = re.split(r"\}\s*" + name + r";", open(header, encoding="utf-8").read())[0]
+    body = body.rsplit("typedef struct {", 1)[1]
+    body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)  # strip doc comments
+    return [m.group(1) for m in re.finditer(r"\b(\w+)\s*;", body)]
+
+
+def test_struct_field_order_matches_header() -> None:
+    """The mirror's field NAMES and ORDER must match astar.h, not just its size.
+
+    Two fields of the same width swapped is a size-clean mismatch that the size
+    assertion cannot see, and it silently transposes their values.
+    """
+    for struct, name in ((_IaxState, "IaxState"), (_IaxEvent, "IaxEvent")):
+        want = _header_struct_fields(name)
+        have = [f[0] for f in struct._fields_]
+        assert have == want, f"{name}: mirror {have} != header {want}"
 
 
 def test_new_snapshot_idle_ptt_event_free() -> None:
@@ -42,9 +91,23 @@ def test_new_snapshot_idle_ptt_event_free() -> None:
         # TX health counters start at zero on a fresh station (iax-9e55).
         assert snap.tx_reanchors == 0
         assert snap.tx_capture_overruns == 0
-        # No DTMF sequence is playing on a fresh station (iax-4b7a).
-        assert snap.dtmf_played == 0
-        assert snap.dtmf_total == 0
+        # No DTMF sequence is playing on a fresh station (iax-4b7a). These two
+        # read as garbage the moment the struct mirror drifts, so they double as
+        # a layout canary.
+        assert snap.dtmf_played == 0, f"expected 0, got {snap.dtmf_played}"
+        assert snap.dtmf_total == 0, f"expected 0, got {snap.dtmf_total}"
+        # Never-connected station: no call, so no negotiated codec.
+        assert snap.negotiated_format == 0, f"got {snap.negotiated_format}"
+        # The denoise fields are host-dependent (they depend on this machine's
+        # audio devices), so assert only that they decode to their own types.
+        assert isinstance(snap.denoise_chain, DenoiseChain)
+        assert isinstance(snap.denoise_device_rate, int)
+        assert isinstance(snap.denoise_live, bool)
+        # No session of any mode is live on a fresh station.
+        assert snap.dstar_active is False, f"got {snap.dstar_active}"
+        assert snap.ysf_active is False, f"got {snap.ysf_active}"
+        assert isinstance(snap.dstar_available, bool)
+        assert isinstance(snap.ysf_available, bool)
 
         # set_ptt(True) while idle -> NOT_CONNECTED.
         try:
@@ -225,6 +288,8 @@ def test_m17_snapshot_fields() -> None:
 
 def main() -> int:
     tests = [
+        test_struct_layout_matches_library,
+        test_struct_field_order_matches_header,
         test_new_snapshot_idle_ptt_event_free,
         test_default_mode_is_wt,
         test_set_node_config_listen_only_ok,
