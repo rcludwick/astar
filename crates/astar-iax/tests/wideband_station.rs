@@ -769,3 +769,208 @@ fn default_manager_stays_narrowband() {
         "Manager::new must stay an 8 kHz station even after slin16 support landed"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 4: two-leg coexistence on ONE `prefer_slin16` node (iax-c0de).
+//
+// `astar-server` now defaults to `prefer_slin16`, so the question that default
+// has to answer is not "can a wideband client get wideband" but "does a µ-law
+// ClearNode still work on the same node at the same time". This is the
+// server's own shape: an `IncomingCallListener` (`AutoAccept`, auth `Off`,
+// `PreferSlin16`) whose answered legs are adopted into a `PreferSlin16`
+// `Manager` in `BridgeMode::Conference`, with two callers dialling in — one
+// asking for slin16, one that only speaks µ-law.
+//
+// 127.0.0.1 only; nothing keys a transmitter and no node is contacted.
+// ---------------------------------------------------------------------------
+
+use astar_iax::{
+    BridgeConfig, BridgeMode, IncomingAuthPolicy, IncomingCallEvent, IncomingCallListener,
+    IncomingCallPolicy, IncomingDecisionPolicy, dial_raw_with_policy,
+};
+
+/// Pull answered legs off the listener's channel and adopt them until the
+/// node holds `want` of them.
+fn adopt_until(
+    mgr: &mut Manager,
+    levents: &std::sync::mpsc::Receiver<IncomingCallEvent>,
+    out: &OutputId,
+    have: &mut usize,
+    want: usize,
+) {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline && *have < want {
+        if let Ok(IncomingCallEvent::Answered { call, .. }) = levents.try_recv() {
+            mgr.adopt(call, out).expect("the node adopts the leg");
+            *have += 1;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Poll a raw leg's snapshot until it publishes a negotiated codec.
+fn wait_leg_format(call: &astar_iax::Call) -> Option<VoiceFormat> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Some(f) = call.snapshot().negotiated_format {
+            return Some(f);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    None
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn tone(rate: u32, samples: usize, hz: f64, amp: f64, phase: &mut f64) -> Vec<i16> {
+    let step = std::f64::consts::TAU * hz / f64::from(rate);
+    (0..samples)
+        .map(|_| {
+            let s = (phase.sin() * amp) as i16;
+            *phase += step;
+            s
+        })
+        .collect()
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // five numbered phases; splitting them hides the story
+fn ulaw_link_coexists_with_a_slin16_client_without_downgrading_it() {
+    let (listener, levents) = IncomingCallListener::builder()
+        .bind("127.0.0.1:0".parse().unwrap())
+        .policy(IncomingCallPolicy {
+            decision: IncomingDecisionPolicy::AutoAccept,
+            auth: IncomingAuthPolicy::Off,
+            codec_policy: CodecPolicy::PreferSlin16,
+            ..IncomingCallPolicy::default()
+        })
+        .start()
+        .expect("listener starts");
+    let node_addr: SocketAddr = listener.local_addr();
+
+    let backend = TestBackend {
+        mic: MicSinks::default(),
+        capture_output: String::new(), // nothing captured; the legs are the probe
+        rx_capture: Arc::new(Mutex::new(Vec::new())),
+    };
+    let mut mgr = Manager::with_policy(Box::new(backend), CodecPolicy::PreferSlin16);
+    assert_eq!(
+        mgr.pipeline_sample_rate(),
+        16_000,
+        "prefer_slin16 pins the station pipeline at 16 kHz"
+    );
+    mgr.set_bridge_config(BridgeConfig {
+        mode: BridgeMode::Conference,
+        mix_minus: true,
+        include_local_radio: false,
+        parrot: None,
+    })
+    .expect("conference bridge config applies");
+    let out = OutputId::new("out:s");
+
+    let mut adopted = 0usize;
+
+    // --- 1. the astar client dials in asking for slin16 --------------------
+    let client = dial_raw_with_policy(
+        node_addr,
+        "client",
+        "s",
+        "",
+        CallMode::Standard,
+        CodecPolicy::PreferSlin16,
+    )
+    .expect("client dial");
+    adopt_until(&mut mgr, &levents, &out, &mut adopted, 1);
+    assert_eq!(adopted, 1, "the node adopts the client leg");
+    assert_eq!(
+        wait_leg_format(&client.call),
+        Some(VoiceFormat::Slin16),
+        "BEFORE any ulaw link exists, the client leg is slin16"
+    );
+
+    // --- 2. a ulaw-only ClearNode dials into the SAME node ------------------
+    let clear = dial_raw_with_policy(
+        node_addr,
+        "clearnode",
+        "s",
+        "",
+        CallMode::Standard,
+        CodecPolicy::UlawOnly,
+    )
+    .expect("clearnode dial");
+    adopt_until(&mut mgr, &levents, &out, &mut adopted, 2);
+    assert_eq!(adopted, 2, "the node adopts the ulaw-only leg too");
+    assert_eq!(
+        wait_leg_format(&clear.call),
+        Some(VoiceFormat::G711U),
+        "a ulaw-only peer is ACCEPTed in ulaw by a prefer_slin16 node, not rejected"
+    );
+
+    // --- 3. the wideband leg is untouched by the narrowband one -------------
+    assert_eq!(
+        client.call.snapshot().negotiated_format,
+        Some(VoiceFormat::Slin16),
+        "AFTER the ulaw link joined, the client leg must STILL be slin16"
+    );
+    assert_eq!(
+        mgr.pipeline_sample_rate(),
+        16_000,
+        "a ulaw leg must not drag the station bus down to 8 kHz"
+    );
+
+    // --- 4. audio crosses the conference in BOTH directions ----------------
+    // Each side transmits 20 ms of 1 kHz at its own wire rate and listens for
+    // the other's tone through the mix-minus bridge; the per-leg resamplers
+    // are what make that possible at all.
+    let mut phase = 0.0f64;
+    let mut heard_at_client = false;
+    let mut heard_at_clearnode = false;
+    let mut client_frame_len = 0usize;
+    let mut clear_frame_len = 0usize;
+    let audio_deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < audio_deadline && !(heard_at_client && heard_at_clearnode) {
+        clear
+            .tx_frames
+            .send(tone(8_000, 160, 1000.0, 9000.0, &mut phase))
+            .ok();
+        client
+            .tx_frames
+            .send(tone(16_000, 320, 1000.0, 9000.0, &mut phase))
+            .ok();
+        thread::sleep(Duration::from_millis(20));
+        while let Ok(f) = client.rx_frames.try_recv() {
+            client_frame_len = f.len();
+            if f.iter().any(|&s| s.abs() > 2000) {
+                heard_at_client = true;
+            }
+        }
+        while let Ok(f) = clear.rx_frames.try_recv() {
+            clear_frame_len = f.len();
+            if f.iter().any(|&s| s.abs() > 2000) {
+                heard_at_clearnode = true;
+            }
+        }
+    }
+    assert!(
+        heard_at_client,
+        "the slin16 client must hear the ulaw ClearNode through the bridge"
+    );
+    assert!(
+        heard_at_clearnode,
+        "the ulaw ClearNode must hear the slin16 client through the bridge"
+    );
+    assert_eq!(client_frame_len, 320, "client RX frames are 20 ms @ 16 kHz");
+    assert_eq!(
+        clear_frame_len, 160,
+        "ClearNode RX frames are 20 ms @ 8 kHz"
+    );
+
+    // --- 5. and neither format moved once audio had been flowing ------------
+    assert_eq!(
+        client.call.snapshot().negotiated_format,
+        Some(VoiceFormat::Slin16)
+    );
+    assert_eq!(
+        clear.call.snapshot().negotiated_format,
+        Some(VoiceFormat::G711U)
+    );
+}
