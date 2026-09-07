@@ -777,8 +777,6 @@ impl Station {
                 port,
                 module: module_byte,
                 callsign: callsign.to_string(),
-                input,
-                output,
                 codec_dirs,
                 // iax-f2b8 Task 4: no `M17Config::default()` exists yet
                 // (ledgered in the Task 3 report) — hard-coded here, matching
@@ -789,7 +787,7 @@ impl Station {
             self.session
                 .lock()
                 .unwrap()
-                .m17_connect(backend, cfg)
+                .m17_connect(backend, cfg, input.as_deref(), output.as_deref())
                 .map_err(map_console_err)
         }
         #[cfg(not(feature = "m17"))]

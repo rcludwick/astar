@@ -8,11 +8,16 @@
 //! separate call-setup handshake or protocol-level PTT frame: a `CONN`/`ACKN`
 //! exchange with a reflector brings the link up, and transmission is carried
 //! entirely by voice-stream packets (start of a stream = key-down, the `EOS`
-//! bit = key-up). [`M17Session`] owns:
+//! bit = key-up).
 //!
-//! - its own [`AudioRouter`] (the `MicMonitor` pattern, see
-//!   [`astar_audio::monitor`]) — mutual exclusion with a live IAX2 call is
-//!   enforced later, at the `ConsoleSession`/station level (Task 4), not here;
+//! The session does **not** own its audio. It is handed a [`CallAudio`] — the
+//! two channel ends of the one lane `ConsoleSession` opened on the station's
+//! router (`crate::voice_route`) — and owns nothing else about audio: no
+//! [`astar_audio::AudioRouter`], no mic or bus id, no meter mirror, no
+//! preference cell, no spectrum copy, and no PTT gate. Meters, DSP
+//! preferences and keying are read and driven once, at the lane, by
+//! `ConsoleSession`. What [`M17Session`] does own:
+//!
 //! - a [`SessionFsm`] (link state + keepalive);
 //! - a [`Codec2Voice`] instance (Codec 2 mode 3200, the rate M17 payloads
 //!   use);
@@ -22,9 +27,9 @@
 //!
 //! The control-side [`M17Session`] handle talks to the run-loop thread only
 //! through a small set of atomics (poll-cheap, per [`M17SnapshotState`]) plus
-//! a request flag for PTT — never a shared/locked `AudioRouter` or `Codec2Voice`,
-//! so those stay single-threaded (owned entirely by the run-loop) with no
-//! cross-thread synchronization on the hot audio path.
+//! a request flag for PTT — never a shared/locked `Codec2Voice`, so that stays
+//! single-threaded (owned entirely by the run-loop) with no cross-thread
+//! synchronization on the hot audio path.
 //!
 //! # RX jitter handling (documented choice)
 //!
@@ -40,19 +45,17 @@
 
 use std::net::{ToSocketAddrs, UdpSocket};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use astar_audio::{
-    AudioBackend, AudioRouter, CallAudio, MicId, MicProfile, OutputId, StreamConfig,
-};
+use astar_audio::CallAudio;
 use astar_codec::codec2::Codec2Voice;
 use astar_m17::{
     BROADCAST, ControlPacket, FsmAction, LinkState, Lsf, SessionFsm, StreamPacket, encode_callsign,
 };
 
-use crate::session::{ConsoleError, resolve_device};
+use crate::session::ConsoleError;
 
 /// How long the RX path waits, after the last voice-stream packet, before
 /// clearing [`M17SnapshotState::receiving`] back to `false`.
@@ -76,11 +79,6 @@ pub struct M17Config {
     /// This station's callsign (encoded via [`encode_callsign`]; invalid
     /// callsigns fail [`M17Session::connect`] with [`ConsoleError::Device`]).
     pub callsign: String,
-    /// Capture device substring; `None` = system default (mirrors
-    /// [`resolve_device`]'s contract).
-    pub input: Option<String>,
-    /// Playback device substring; `None` = system default.
-    pub output: Option<String>,
     /// Extra directories to search for a runtime `libcodec2` (ahead of the
     /// hard-coded system paths); see [`astar_codec::open_codec2`].
     pub codec_dirs: Vec<std::path::PathBuf>,
@@ -88,41 +86,6 @@ pub struct M17Config {
     /// the link [`LinkState::Failed`]. Default (via a fresh [`SessionFsm`])
     /// is 30 s; tests shorten this to avoid a 30-real-second wait.
     pub keepalive_timeout: Duration,
-}
-
-/// The audio DSP prefs to seed a freshly-opened M17 router with (iax-f2b8-fix
-/// Fix 4): mirrors the standing-pref re-push
-/// [`crate::session::ConsoleSession::connect`] does for an IAX2 dial
-/// (originally 8 prefs; iax-a4e7 PHASE 1 adds RX compression, a 10-pref
-/// re-push). Built by [`crate::session::ConsoleSession::m17_connect`]
-/// from its own standing pref cells and applied directly onto the new
-/// [`AudioRouter`] in [`M17Session::connect`] — `Station::m17_connect` builds
-/// [`M17Config`] without ever seeing those cells, so without this a fresh M17
-/// link silently reverted to the router's bare defaults (unity gain, DSP off)
-/// no matter what the operator had already dialed in for IAX2/WT calls.
-#[derive(Clone)]
-pub struct M17Prefs {
-    /// TX (mic/input) gain multiplier.
-    pub input_gain: f32,
-    /// RX (speaker/output) gain multiplier.
-    pub output_gain: f32,
-    /// Capture noise-reduction toggle.
-    pub denoise: bool,
-    /// Capture compression toggle.
-    pub compress: bool,
-    /// Compressor strength (0.0..=1.0).
-    pub compress_level: f32,
-    /// TX trim (0.0..=2.0; 1.0 = unity), the always-on final gain stage.
-    pub tx_trim: f32,
-    /// RX/output compression toggle (iax-a4e7 PHASE 1): automatic leveling of
-    /// the received audio.
-    pub rx_compress: bool,
-    /// RX/output compression strength (0.0..=1.0).
-    pub rx_compress_level: f32,
-    /// VOX pre-roll / look-back length in ms (0 = disabled).
-    pub vox_preroll_ms: u32,
-    /// Calibrated per-mic profile, if one is set.
-    pub calibrated: Option<MicProfile>,
 }
 
 /// A poll-cheap snapshot of an [`M17Session`]'s live state. Backed by atomics
@@ -139,83 +102,24 @@ pub struct M17SnapshotState {
     /// `true` while voice-stream packets have arrived from the reflector
     /// within the last 400 ms.
     pub receiving: bool,
-    /// Current TX level in dBFS (post-DSP mic peak; see
-    /// [`AudioRouter::mic_tx_dbfs`]).
-    pub tx_dbfs: f32,
-    /// Current RX level in dBFS (post-mix output-bus peak; see
-    /// [`AudioRouter::output_rx_dbfs`]).
-    pub rx_dbfs: f32,
-    /// The mic capture gain CURRENTLY applied on the router's open lane (iax-
-    /// f2b8-fix Fix 4): read back from [`AudioRouter::mic_gain`] every
-    /// run-loop tick, i.e. round-tripped through the real router state rather
-    /// than just echoing back whatever [`M17Session::set_mic_gain`] was last
-    /// called with. Test-visible proof the pref actually reached the router.
-    pub applied_mic_gain: f32,
-    /// The output gain CURRENTLY applied on the router's open bus. Same
-    /// round-trip contract as `applied_mic_gain`; see
-    /// [`AudioRouter::output_gain`].
-    pub applied_output_gain: f32,
-    /// The RX/output compression toggle CURRENTLY applied on the router's
-    /// open bus (iax-a4e7 PHASE 1). Same round-trip contract as
-    /// `applied_mic_gain`; see [`AudioRouter::output_compress`].
-    pub applied_rx_compress: bool,
-    /// The RX/output compression strength CURRENTLY applied on the router's
-    /// open bus (iax-a4e7 PHASE 1). Same round-trip contract as
-    /// `applied_mic_gain`; see [`AudioRouter::output_compress_level`].
-    pub applied_rx_compress_level: f32,
-    /// Current mic INPUT level in dBFS (iax-f2b8-fix Fix 6): post-gain,
-    /// pre-`NoiseReducer`, metered CONTINUOUSLY on the router's mic lane
-    /// EVEN WHILE UNKEYED — mirrors [`AudioRouter::mic_input_dbfs`] exactly,
-    /// so a consumer's VOX can key from silence the same way the IAX2 path
-    /// already does via `ConsoleState::input_level_db`.
-    pub input_dbfs: f32,
 }
 
 /// Atomics shared between the control-side [`M17Session`] and its run-loop
-/// thread. `link`/`tx_dbfs`/`rx_dbfs` are written by the run-loop and read by
-/// [`M17Session::state`]; `ptt`/`receiving` follow the same direction.
+/// thread. `link` is written by the run-loop and read by
+/// [`M17Session::state`]; `ptt`/`receiving` follow the same direction. Levels
+/// are NOT here: they are read at the lane, by `ConsoleSession`.
 struct SharedState {
     link: AtomicU8,
     ptt: AtomicBool,
     receiving: AtomicBool,
-    /// `f32` bits (`f32::to_bits`/`from_bits`) — dBFS TX peak.
-    tx_dbfs: AtomicU32,
-    /// `f32` bits — dBFS RX peak.
-    rx_dbfs: AtomicU32,
-    /// `f32` bits — mic gain read back from the router every tick (Fix 4).
-    applied_mic_gain: AtomicU32,
-    /// `f32` bits — output gain read back from the router every tick (Fix 4).
-    applied_output_gain: AtomicU32,
-    /// RX/output compression toggle read back from the router every tick
-    /// (iax-a4e7 PHASE 1, mirrors Fix 4's `applied_output_gain`).
-    applied_rx_compress: AtomicBool,
-    /// `f32` bits — RX/output compression strength read back from the router
-    /// every tick (iax-a4e7 PHASE 1).
-    applied_rx_compress_level: AtomicU32,
-    /// `f32` bits — mic INPUT level (dBFS) read back from the router every
-    /// tick (Fix 6), continuously, independent of `keyed`.
-    input_dbfs: AtomicU32,
 }
 
 impl SharedState {
     fn new() -> Self {
-        // -60 dBFS is this codebase's "silent" floor (see
-        // `astar_audio::peak_to_dbfs`); seed both meters there so a
-        // snapshot taken before the run-loop's first meter read reports
-        // silence rather than 0 dBFS (full scale). Gains seed at unity (1.0)
-        // for the same reason: a snapshot taken before the first tick reports
-        // the router's actual pre-tick default, not an arbitrary sentinel.
         Self {
             link: AtomicU8::new(link_to_u8(LinkState::Idle)),
             ptt: AtomicBool::new(false),
             receiving: AtomicBool::new(false),
-            tx_dbfs: AtomicU32::new((-60.0f32).to_bits()),
-            rx_dbfs: AtomicU32::new((-60.0f32).to_bits()),
-            applied_mic_gain: AtomicU32::new(1.0f32.to_bits()),
-            applied_output_gain: AtomicU32::new(1.0f32.to_bits()),
-            applied_rx_compress: AtomicBool::new(false),
-            applied_rx_compress_level: AtomicU32::new(0.90f32.to_bits()),
-            input_dbfs: AtomicU32::new((-60.0f32).to_bits()),
         }
     }
 
@@ -224,143 +128,6 @@ impl SharedState {
             link: u8_to_link(self.link.load(Ordering::Relaxed)),
             ptt: self.ptt.load(Ordering::Relaxed),
             receiving: self.receiving.load(Ordering::Relaxed),
-            tx_dbfs: f32::from_bits(self.tx_dbfs.load(Ordering::Relaxed)),
-            rx_dbfs: f32::from_bits(self.rx_dbfs.load(Ordering::Relaxed)),
-            applied_mic_gain: f32::from_bits(self.applied_mic_gain.load(Ordering::Relaxed)),
-            applied_output_gain: f32::from_bits(self.applied_output_gain.load(Ordering::Relaxed)),
-            applied_rx_compress: self.applied_rx_compress.load(Ordering::Relaxed),
-            applied_rx_compress_level: f32::from_bits(
-                self.applied_rx_compress_level.load(Ordering::Relaxed),
-            ),
-            input_dbfs: f32::from_bits(self.input_dbfs.load(Ordering::Relaxed)),
-        }
-    }
-}
-
-/// Live TX/RX spectrum bins, shared between the control-side [`M17Session`]
-/// and the run-loop thread (iax-f2b8-fix Fix 6): refreshed every run-loop
-/// tick from the router's own analyzers ([`AudioRouter::mic_tx_spectrum`]/
-/// [`AudioRouter::output_rx_spectrum`]), mirroring the `applied_*_gain`
-/// round-trip pattern from Fix 4. A `Mutex` (not atomics), since a spectrum
-/// is a fixed-size array, not a scalar; the lock is only ever held for a
-/// cheap fixed-size copy, never across a blocking call.
-struct SharedSpectrum {
-    /// `(bins, count)` — `count` is `0` before the router's mic lane has
-    /// ever produced a reading (mirrors [`AudioRouter::mic_tx_spectrum`]'s
-    /// own "`None`/`0` if the lane isn't open" contract rather than
-    /// reporting stale/zeroed data as if it were real).
-    tx: std::sync::Mutex<([f32; astar_audio::SPECTRUM_BINS], usize)>,
-    /// Same contract as `tx`, for the router's output bus.
-    rx: std::sync::Mutex<([f32; astar_audio::SPECTRUM_BINS], usize)>,
-}
-
-impl SharedSpectrum {
-    fn new() -> Self {
-        Self {
-            tx: std::sync::Mutex::new(([0.0; astar_audio::SPECTRUM_BINS], 0)),
-            rx: std::sync::Mutex::new(([0.0; astar_audio::SPECTRUM_BINS], 0)),
-        }
-    }
-}
-
-/// Live-adjustable audio DSP prefs the control side can push at any time
-/// (iax-f2b8-fix Fix 4): the run-loop re-applies all of them onto its
-/// `AudioRouter` every poll tick, the same "control side stores an atomic;
-/// the run-loop applies it on its next ~50 ms poll" pattern [`M17Session::set_ptt`]
-/// already uses. `profile`/`profile_gen` follow a dirty-flag instead (a
-/// `MicProfile` clone every 50 ms is needless work for something that changes
-/// rarely): the run-loop only re-applies it when `profile_gen` has moved past
-/// what it last applied.
-struct SharedPrefs {
-    /// `f32` bits — mic capture gain.
-    mic_gain: AtomicU32,
-    /// `f32` bits — output gain.
-    output_gain: AtomicU32,
-    denoise: AtomicBool,
-    compress: AtomicBool,
-    /// `f32` bits — compressor strength (0.0..=1.0).
-    compress_level: AtomicU32,
-    /// `f32` bits — TX trim (0.0..=2.0; 1.0 = unity).
-    tx_trim: AtomicU32,
-    /// RX/output compression toggle (iax-a4e7 PHASE 1).
-    rx_compress: AtomicBool,
-    /// `f32` bits — RX/output compression strength (0.0..=1.0).
-    rx_compress_level: AtomicU32,
-    preroll_ms: AtomicU32,
-    profile: std::sync::Mutex<Option<MicProfile>>,
-    /// Bumped on every [`M17Session::set_calibrated`] call; the run-loop
-    /// tracks the last generation it applied and re-applies only on change.
-    profile_gen: AtomicU32,
-    /// `f32` bits — spectrum peak-hold decay, dB/SECOND (iax-f2b8-fix Fix 6).
-    /// Unlike the other fields here, this has NO corresponding [`M17Prefs`]
-    /// field: [`crate::session::ConsoleSession::set_spectrum_decay`] is
-    /// itself a "live-only" setter with no standing/persisted cell (applies
-    /// only to CURRENTLY live analyzers, never re-pushed at connect time —
-    /// see its own doc comment), so this seeds at the analyzers' own
-    /// built-in default and only ever changes via
-    /// [`M17Session::set_spectrum_decay`].
-    spectrum_decay: AtomicU32,
-}
-
-impl SharedPrefs {
-    fn new(prefs: &M17Prefs) -> Self {
-        Self {
-            mic_gain: AtomicU32::new(prefs.input_gain.to_bits()),
-            output_gain: AtomicU32::new(prefs.output_gain.to_bits()),
-            denoise: AtomicBool::new(prefs.denoise),
-            compress: AtomicBool::new(prefs.compress),
-            compress_level: AtomicU32::new(prefs.compress_level.to_bits()),
-            tx_trim: AtomicU32::new(prefs.tx_trim.to_bits()),
-            rx_compress: AtomicBool::new(prefs.rx_compress),
-            rx_compress_level: AtomicU32::new(prefs.rx_compress_level.to_bits()),
-            preroll_ms: AtomicU32::new(prefs.vox_preroll_ms),
-            profile: std::sync::Mutex::new(prefs.calibrated.clone()),
-            // Starts at 1 (not 0, the run-loop's initial `last_applied_profile_gen`):
-            // the initial profile is applied directly, synchronously, in
-            // `M17Session::connect` before the run-loop thread ever starts
-            // (so it's live from the very first TX frame, not just "eventually,
-            // once the first tick lands"); this generation exists purely to
-            // signal LIVE changes via `set_calibrated` afterward.
-            profile_gen: AtomicU32::new(1),
-            spectrum_decay: AtomicU32::new(
-                astar_audio::spectrum::DEFAULT_DECAY_DB_PER_SEC.to_bits(),
-            ),
-        }
-    }
-
-    /// Apply every pref onto `router`'s open mic lane / output bus. Called
-    /// once synchronously at connect time (before the run-loop thread starts)
-    /// and again every run-loop tick thereafter — cheap (a handful of atomic
-    /// loads plus the router's own atomic stores), so no dirty-flag tracking
-    /// is needed for anything but the heavier `profile` clone.
-    fn apply(&self, router: &AudioRouter, mic: &MicId, out: &OutputId, last_applied_gen: &mut u32) {
-        router.set_mic_gain(mic, f32::from_bits(self.mic_gain.load(Ordering::Relaxed)));
-        router.set_output_gain(
-            out,
-            f32::from_bits(self.output_gain.load(Ordering::Relaxed)),
-        );
-        router.set_mic_denoise(mic, self.denoise.load(Ordering::Relaxed));
-        router.set_mic_compress(mic, self.compress.load(Ordering::Relaxed));
-        router.set_mic_compress_level(
-            mic,
-            f32::from_bits(self.compress_level.load(Ordering::Relaxed)),
-        );
-        router.set_mic_tx_trim(mic, f32::from_bits(self.tx_trim.load(Ordering::Relaxed)));
-        router.set_output_compress(out, self.rx_compress.load(Ordering::Relaxed));
-        router.set_output_compress_level(
-            out,
-            f32::from_bits(self.rx_compress_level.load(Ordering::Relaxed)),
-        );
-        router.set_mic_preroll_ms(mic, self.preroll_ms.load(Ordering::Relaxed));
-        let decay = f32::from_bits(self.spectrum_decay.load(Ordering::Relaxed));
-        router.set_mic_spectrum_decay(mic, decay);
-        router.set_output_spectrum_decay(out, decay);
-
-        let current_gen = self.profile_gen.load(Ordering::Relaxed);
-        if current_gen != *last_applied_gen {
-            let profile = self.profile.lock().expect("profile mutex").clone();
-            router.set_mic_profile(mic, profile);
-            *last_applied_gen = current_gen;
         }
     }
 }
@@ -395,85 +162,34 @@ pub struct M17Session {
     /// does TX stream bookkeeping) on its next poll.
     ptt_request: Arc<AtomicBool>,
     shared: Arc<SharedState>,
-    /// Live-adjustable audio DSP prefs (iax-f2b8-fix Fix 4); see
-    /// [`SharedPrefs`].
-    prefs: Arc<SharedPrefs>,
-    /// Live TX/RX spectrum bins (iax-f2b8-fix Fix 6); see [`SharedSpectrum`].
-    spectrum: Arc<SharedSpectrum>,
 }
 
 impl M17Session {
-    /// Connect to an M17 reflector: resolves the configured audio devices,
-    /// opens this session's own [`AudioRouter`] call (mirrors the
-    /// `MicMonitor` pattern — no sharing with any IAX2 call), opens a Codec 2
+    /// Connect to an M17 reflector: validates the callsign, opens a Codec 2
     /// instance, binds a UDP socket, and starts the "iax-m17" run-loop
     /// thread, which sends the initial `CONN`.
     ///
-    /// `make_backend` is called exactly once, synchronously, before this
-    /// returns (mirrors [`crate::session::ConsoleSession::connect`]'s
-    /// backend-factory contract). `prefs` (iax-f2b8-fix Fix 4) is applied
-    /// onto the fresh router SYNCHRONOUSLY, before this returns — a fresh M17
-    /// link starts with the operator's already-configured volume/DSP prefs
-    /// live from the very first frame, not just "eventually, once the
-    /// run-loop's first poll tick lands".
+    /// `audio` is the one audio lane `ConsoleSession` already opened on the
+    /// station's router (`crate::voice_route`): the session encodes whatever
+    /// arrives on `audio.tx_frames` while keyed and plays what it decodes
+    /// onto `audio.rx_frames`. It builds no router, resolves no device,
+    /// carries no preference, and never touches the PTT gate — see the
+    /// module docs.
     ///
     /// # Errors
-    /// [`ConsoleError::Device`] for an invalid callsign, unresolvable audio
-    /// device, or missing Codec 2 backend; [`ConsoleError::Audio`] if opening
-    /// the call's audio streams fails; [`ConsoleError::Resolve`] if
-    /// `cfg.host`/`cfg.port` don't resolve or the socket can't be bound.
+    /// [`ConsoleError::Device`] for an invalid callsign or a missing Codec 2
+    /// backend; [`ConsoleError::Resolve`] if `cfg.host`/`cfg.port` don't
+    /// resolve, the socket can't be bound, or the run-loop thread can't be
+    /// spawned.
     // `cfg` is taken by value per the Task 3 interface contract (matches
     // `ConsoleSession::connect`'s own `ConsoleConfig`-by-value shape); every
     // field is read out (cloned/copied/borrowed) rather than moved, which is
     // why clippy would otherwise suggest a reference here.
     #[allow(clippy::needless_pass_by_value)]
-    pub fn connect(
-        cfg: M17Config,
-        prefs: M17Prefs,
-        make_backend: &dyn Fn() -> Box<dyn AudioBackend>,
-    ) -> Result<M17Session, ConsoleError> {
+    pub fn connect(cfg: M17Config, audio: CallAudio) -> Result<M17Session, ConsoleError> {
         let callsign = encode_callsign(&cfg.callsign).ok_or_else(|| {
             ConsoleError::Device(format!("invalid M17 callsign {:?}", cfg.callsign))
         })?;
-
-        // Resolve devices against the backend BEFORE it moves into the
-        // router (mirrors ConsoleSession::connect's iax-be48 idiom, reusing
-        // the same public `resolve_device` helper).
-        let backend = make_backend();
-        let in_id = resolve_device(
-            backend.as_ref(),
-            cfg.input.as_deref(),
-            astar_audio::Direction::Input,
-        )?;
-        let out_id = resolve_device(
-            backend.as_ref(),
-            cfg.output.as_deref(),
-            astar_audio::Direction::Output,
-        )?;
-
-        let mut router = AudioRouter::new(backend);
-        let mic = MicId::new(&in_id);
-        let out = OutputId::new(&out_id);
-        // 8 kHz mono 20 ms: the StreamConfig::default() rate Codec 2 mode
-        // 3200 (and thus M17) is built around.
-        let config = StreamConfig::default();
-        let call_audio = router
-            .open_call(&mic, &out, config)
-            .map_err(ConsoleError::Audio)?;
-        // WARNING (per astar_audio::AudioRouter::open_call): open_call
-        // keys the gate immediately. Un-key right away; M17Session::set_ptt
-        // is the only thing allowed to key it from here on.
-        router.set_gate(&mic, false);
-
-        // Fix 4: apply the operator's already-configured volume/DSP prefs
-        // onto this fresh router BEFORE the run-loop thread ever starts —
-        // see the SharedPrefs::apply doc comment for why the profile
-        // generation counter starts at 1 (matching the run-loop's initial
-        // `last_applied_profile_gen`, so this synchronous apply isn't
-        // redundantly repeated on the very first tick).
-        let shared_prefs = Arc::new(SharedPrefs::new(&prefs));
-        let mut last_applied_profile_gen = 1;
-        shared_prefs.apply(&router, &mic, &out, &mut last_applied_profile_gen);
 
         let (codec, _backend) =
             astar_codec::codec2::open_codec2(&cfg.codec_dirs).ok_or_else(|| {
@@ -490,31 +206,22 @@ impl M17Session {
         let shutdown = Arc::new(AtomicBool::new(false));
         let ptt_request = Arc::new(AtomicBool::new(false));
         let shared = Arc::new(SharedState::new());
-        let spectrum = Arc::new(SharedSpectrum::new());
 
         let thread_shutdown = Arc::clone(&shutdown);
         let thread_ptt_request = Arc::clone(&ptt_request);
         let thread_shared = Arc::clone(&shared);
-        let thread_prefs = Arc::clone(&shared_prefs);
-        let thread_spectrum = Arc::clone(&spectrum);
         let handle = std::thread::Builder::new()
             .name("iax-m17".to_string())
             .spawn(move || {
                 run_loop(RunLoopParams {
                     socket,
                     fsm,
-                    router,
-                    mic,
-                    out,
-                    call_audio,
+                    call_audio: audio,
                     codec,
                     callsign,
                     shutdown: thread_shutdown,
                     ptt_request: thread_ptt_request,
                     shared: thread_shared,
-                    prefs: thread_prefs,
-                    last_applied_profile_gen,
-                    spectrum: thread_spectrum,
                 });
             })
             .map_err(|e| ConsoleError::Resolve {
@@ -527,8 +234,6 @@ impl M17Session {
             shutdown,
             ptt_request,
             shared,
-            prefs: shared_prefs,
-            spectrum,
         })
     }
 
@@ -540,108 +245,6 @@ impl M17Session {
     /// — this call itself never blocks.
     pub fn set_ptt(&mut self, on: bool) {
         self.ptt_request.store(on, Ordering::Relaxed);
-    }
-
-    // --- live DSP pref passthroughs (iax-f2b8-fix Fix 4) --------------------
-    //
-    // Every setter below just stores an atomic; the run-loop applies it onto
-    // the router on its next poll (bounded by `SOCKET_POLL_TIMEOUT`, ~50 ms) —
-    // exactly `set_ptt`'s own contract, applied to the DSP prefs instead of
-    // the keying edge. `&self` (not `&mut self`, unlike `set_ptt`): mirrors
-    // `ConsoleSession`'s own pref setters, which are `&self` so they can be
-    // called from a shared reference.
-
-    /// Set the mic (TX/input) capture gain on the live M17 router lane.
-    pub fn set_mic_gain(&self, g: f32) {
-        self.prefs.mic_gain.store(g.to_bits(), Ordering::Relaxed);
-    }
-
-    /// Set the output (RX/speaker) gain on the live M17 router bus.
-    pub fn set_output_gain(&self, g: f32) {
-        self.prefs.output_gain.store(g.to_bits(), Ordering::Relaxed);
-    }
-
-    /// Toggle capture noise reduction on the live M17 router lane.
-    pub fn set_denoise(&self, on: bool) {
-        self.prefs.denoise.store(on, Ordering::Relaxed);
-    }
-
-    /// Toggle capture compression on the live M17 router lane.
-    pub fn set_compress(&self, on: bool) {
-        self.prefs.compress.store(on, Ordering::Relaxed);
-    }
-
-    /// Set the capture compression strength on the live M17 router lane.
-    pub fn set_compression_level(&self, level: f32) {
-        self.prefs
-            .compress_level
-            .store(level.to_bits(), Ordering::Relaxed);
-    }
-
-    /// Set the TX trim on the live M17 router lane.
-    pub fn set_tx_trim(&self, g: f32) {
-        self.prefs.tx_trim.store(g.to_bits(), Ordering::Relaxed);
-    }
-
-    /// Toggle RX/output compression on the live M17 router bus (iax-a4e7
-    /// PHASE 1): automatic leveling of the received audio.
-    pub fn set_rx_compress(&self, on: bool) {
-        self.prefs.rx_compress.store(on, Ordering::Relaxed);
-    }
-
-    /// Set the RX/output compression strength on the live M17 router bus
-    /// (iax-a4e7 PHASE 1).
-    pub fn set_rx_compression_level(&self, level: f32) {
-        self.prefs
-            .rx_compress_level
-            .store(level.to_bits(), Ordering::Relaxed);
-    }
-
-    /// Set the VOX pre-roll length (ms) on the live M17 router lane.
-    pub fn set_vox_preroll_ms(&self, ms: u32) {
-        self.prefs.preroll_ms.store(ms, Ordering::Relaxed);
-    }
-
-    /// Push a calibrated per-mic profile onto the live M17 router lane.
-    pub fn set_calibrated(&self, profile: Option<MicProfile>) {
-        *self.prefs.profile.lock().expect("profile mutex") = profile;
-        self.prefs.profile_gen.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Set the live spectrum peak-hold decay (dB/SECOND) on the M17 router's
-    /// TX (mic lane) + RX (output bus) analyzers (iax-f2b8-fix Fix 6).
-    /// "Live-only" — see [`SharedPrefs::spectrum_decay`]'s doc comment for
-    /// why there's no connect-time seed from a persisted
-    /// `ConsoleSession` cell (there isn't one).
-    pub fn set_spectrum_decay(&self, db_per_sec: f32) {
-        self.prefs
-            .spectrum_decay
-            .store(db_per_sec.to_bits(), Ordering::Relaxed);
-    }
-
-    /// Copy the live TX spectrum (iax-f2b8-fix Fix 6) into `out` and return
-    /// the number of log-binned dBFS bins written (`0` before the router's
-    /// mic lane has produced its first reading). Refreshed every run-loop
-    /// tick from [`AudioRouter::mic_tx_spectrum`] — the SAME log-binned,
-    /// peak-held dBFS values the IAX2 path's `Manager::tx_spectrum` produces.
-    #[must_use]
-    pub fn tx_spectrum(&self, out: &mut [f32]) -> usize {
-        let (bins, count) = *self.spectrum.tx.lock().expect("tx spectrum mutex");
-        let n = count.min(out.len());
-        out[..n].copy_from_slice(&bins[..n]);
-        n
-    }
-
-    /// Copy the live RX spectrum (iax-f2b8-fix Fix 6) into `out` and return
-    /// the number of bins written (`0` before the router's output bus has
-    /// produced its first reading). Refreshed every run-loop tick from
-    /// [`AudioRouter::output_rx_spectrum`].
-    #[must_use]
-    pub fn rx_spectrum(&self, out: &mut [f32]) -> usize {
-        let (bins, count) = *self.spectrum.rx.lock().expect("rx spectrum mutex");
-        let n = count.min(out.len());
-        out[..n].copy_from_slice(&bins[..n]);
-        n
     }
 
     /// A poll-cheap snapshot of the session's current state.
@@ -740,22 +343,12 @@ impl Drop for M17Session {
 struct RunLoopParams {
     socket: UdpSocket,
     fsm: SessionFsm,
-    router: AudioRouter,
-    mic: MicId,
-    out: OutputId,
     call_audio: CallAudio,
     codec: Box<dyn Codec2Voice>,
     callsign: [u8; 6],
     shutdown: Arc<AtomicBool>,
     ptt_request: Arc<AtomicBool>,
     shared: Arc<SharedState>,
-    prefs: Arc<SharedPrefs>,
-    /// The profile generation already applied (synchronously, at connect
-    /// time, before this thread started) — seeds the run-loop's own tracking
-    /// var so it doesn't redundantly re-clone+re-apply the SAME profile on
-    /// its very first tick.
-    last_applied_profile_gen: u32,
-    spectrum: Arc<SharedSpectrum>,
 }
 
 /// Per-transmission TX bookkeeping: the current random `StreamID`, the
@@ -778,17 +371,17 @@ impl TxState {
     }
 
     /// Key-down edge: fresh random `StreamID`, counter restarts at 0. Also
-    /// defensively drains and discards anything already sitting in
-    /// `call_audio.tx_frames` before resetting — a safety net against any
-    /// stale audio left over from BEFORE this key-down: the connect-time
-    /// window between `open_call` (which keys the mic lane's gate
-    /// immediately) and the first `set_gate(false)`, or a residual frame
-    /// that slipped in on a prior unkey race. This discard can never eat a
-    /// LEGITIMATE frame: the mic lane's gate is still `false` when this
-    /// runs (the caller only flips it to `true` afterward — see
-    /// `apply_ptt_edge`), and `MicLane::write` returns before ever reaching
-    /// the channel while unkeyed, so the channel can only contain leftovers
-    /// at this point, never freshly-produced audio.
+    /// drains and discards anything already sitting in `call_audio.tx_frames`
+    /// before resetting, so no leftover audio can open a fresh transmission
+    /// under a new `StreamID`.
+    ///
+    /// The gate belongs to `ConsoleSession::set_ptt` now, not to this run
+    /// loop, and it opens up to one [`SOCKET_POLL_TIMEOUT`] tick before this
+    /// edge is observed. [`run_loop`] therefore drains and drops `tx_frames`
+    /// on every tick it is NOT transmitting, which is what keeps the amount
+    /// this discard can ever see down to a single tick — and what stops a
+    /// mic left open by the route (or a run-loop-forced unkey on a lost
+    /// link) from accumulating audio in the channel indefinitely.
     fn key_down(&mut self, call_audio: &CallAudio) {
         while call_audio.tx_frames.try_recv().is_ok() {}
         self.stream_id = rand::random();
@@ -807,30 +400,22 @@ impl TxState {
 }
 
 /// The "iax-m17" run-loop: the ONE thread that owns the socket, the
-/// [`AudioRouter`], and the [`Codec2Voice`] instance for this session. Single
-/// poll cadence (the socket's 50 ms read timeout) drives everything: PTT
-/// edges, TX framing, RX decode, the FSM's keepalive tick, and meter
-/// refresh.
+/// [`CallAudio`] channel ends and the [`Codec2Voice`] instance for this
+/// session. Single poll cadence (the socket's 50 ms read timeout) drives
+/// everything: PTT edges, TX framing, RX decode, and the FSM's keepalive
+/// tick. No router, no gate, no meters — those are the lane's, and
+/// `ConsoleSession` reads and drives them there.
 fn run_loop(p: RunLoopParams) {
     let RunLoopParams {
         socket,
         mut fsm,
-        router,
-        mic,
-        out,
         call_audio,
         mut codec,
         callsign,
         shutdown,
         ptt_request,
         shared,
-        prefs,
-        mut last_applied_profile_gen,
-        spectrum,
     } = p;
-    // `router` outlives the whole loop (dropping it at the end closes the
-    // audio streams); only `set_gate`/`mic_tx_dbfs`/`output_rx_dbfs` (all
-    // `&self`) are needed after `open_call`, so no `mut` binding is required.
 
     let now = Instant::now();
     let conn_bytes = fsm.connect(now);
@@ -843,16 +428,11 @@ fn run_loop(p: RunLoopParams) {
     let mut tx = TxState::new();
     let mut last_rx_voice: Option<Instant> = None;
     let mut buf = [0u8; 2_048];
-    // Fix 6: reused every tick, never reallocated.
-    let mut tx_spectrum_buf = [0.0f32; astar_audio::SPECTRUM_BINS];
-    let mut rx_spectrum_buf = [0.0f32; astar_audio::SPECTRUM_BINS];
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
             send_disc_flushing_eos_if_keyed(
                 &socket,
-                &router,
-                &mic,
                 callsign,
                 codec.as_mut(),
                 &mut tx,
@@ -863,19 +443,12 @@ fn run_loop(p: RunLoopParams) {
             break;
         }
 
-        // 0. Re-apply live audio DSP prefs (iax-f2b8-fix Fix 4): cheap even
-        //    when nothing changed (a handful of atomic loads/stores), so no
-        //    dirty-flag tracking beyond the profile's own generation counter.
-        prefs.apply(&router, &mic, &out, &mut last_applied_profile_gen);
-
         // 1. Apply a pending PTT edge (set_ptt only requests; this is where
         //    it actually takes effect).
         let want_key = ptt_request.load(Ordering::Relaxed);
         if want_key != keyed {
             keyed = apply_ptt_edge(
                 &socket,
-                &router,
-                &mic,
                 callsign,
                 codec.as_mut(),
                 &mut tx,
@@ -887,8 +460,19 @@ fn run_loop(p: RunLoopParams) {
 
         // 2. Drain any ready TX frames, pairing two 160-sample frames per
         //    54-byte stream packet.
+        //
+        //    While NOT transmitting, drain and DROP instead. The gate is
+        //    `ConsoleSession::set_ptt`'s and it can be open while this loop
+        //    is not keyed — it opens up to one poll tick before the key-down
+        //    edge lands here, and it stays open after a run-loop-forced unkey
+        //    (link lost) until the operator physically releases PTT. Without
+        //    this the mic lane would pile audio into `tx_frames` unbounded
+        //    and the next transmission would open with somebody's stale
+        //    speech.
         if keyed {
             drain_tx_frames(&socket, callsign, codec.as_mut(), &mut tx, &call_audio);
+        } else {
+            while call_audio.tx_frames.try_recv().is_ok() {}
         }
 
         // 3. Socket poll (bounded by SOCKET_POLL_TIMEOUT): react to whatever
@@ -920,117 +504,31 @@ fn run_loop(p: RunLoopParams) {
             shared.receiving.store(false, Ordering::Relaxed);
             last_rx_voice = None;
         }
-
-        // 6. Meters + spectrum (iax-f2b8-fix Fix 6 adds input level + TX/RX
-        //    spectrum readback to Fix 4's gain readback; extracted to keep
-        //    this function under clippy's line-count limit).
-        refresh_meters(
-            &router,
-            &mic,
-            &out,
-            &shared,
-            &spectrum,
-            &mut tx_spectrum_buf,
-            &mut rx_spectrum_buf,
-        );
     }
-    // `router` (and thus the audio streams) and `socket` drop here.
-}
-
-/// Run-loop step 6: refresh every poll-cheap meter/analyzer the control side
-/// can read (dBFS levels, applied gains, TX/RX spectrum) straight off the
-/// router's own accessors — nothing is computed here, only copied. See the
-/// individual `SharedState`/`SharedSpectrum` field docs for what each one
-/// proves (iax-f2b8-fix Fix 4's gain readback, Fix 6's input level +
-/// spectrum).
-#[allow(clippy::too_many_arguments)]
-fn refresh_meters(
-    router: &AudioRouter,
-    mic: &MicId,
-    out: &OutputId,
-    shared: &SharedState,
-    spectrum: &SharedSpectrum,
-    tx_spectrum_buf: &mut [f32; astar_audio::SPECTRUM_BINS],
-    rx_spectrum_buf: &mut [f32; astar_audio::SPECTRUM_BINS],
-) {
-    if let Some(db) = router.mic_tx_dbfs(mic) {
-        shared.tx_dbfs.store(db.to_bits(), Ordering::Relaxed);
-    }
-    if let Some(db) = router.output_rx_dbfs(out) {
-        shared.rx_dbfs.store(db.to_bits(), Ordering::Relaxed);
-    }
-    // Read the gains back OFF the router itself (not just echoing the pref
-    // atomics) so a snapshot proves the value actually reached the router,
-    // not just that `set_*_gain` was called (iax-f2b8-fix Fix 4).
-    if let Some(g) = router.mic_gain(mic) {
-        shared
-            .applied_mic_gain
-            .store(g.to_bits(), Ordering::Relaxed);
-    }
-    if let Some(g) = router.output_gain(out) {
-        shared
-            .applied_output_gain
-            .store(g.to_bits(), Ordering::Relaxed);
-    }
-    // RX/output compression readback (iax-a4e7 PHASE 1), same round-trip
-    // contract as the gain readback above.
-    if let Some(on) = router.output_compress(out) {
-        shared.applied_rx_compress.store(on, Ordering::Relaxed);
-    }
-    if let Some(level) = router.output_compress_level(out) {
-        shared
-            .applied_rx_compress_level
-            .store(level.to_bits(), Ordering::Relaxed);
-    }
-    // Mic INPUT level (iax-f2b8-fix Fix 6): continuous, independent of
-    // `keyed` — see `AudioRouter::mic_input_dbfs`'s own doc for why (VOX must
-    // be able to key from silence).
-    if let Some(db) = router.mic_input_dbfs(mic) {
-        shared.input_dbfs.store(db.to_bits(), Ordering::Relaxed);
-    }
-    // TX/RX spectrum (iax-f2b8-fix Fix 6): fixed-size buffers reused every
-    // tick (no per-tick allocation); `mic_tx_spectrum`/`output_rx_spectrum`
-    // always write exactly `SPECTRUM_BINS` once the lane/bus is open (see
-    // `SpectrumAnalyzer::copy_into`), so `n` is effectively always
-    // `SPECTRUM_BINS` here — checked defensively anyway since it's the
-    // router's contract, not this file's.
-    if let Some(n) = router.mic_tx_spectrum(mic, tx_spectrum_buf) {
-        let mut g = spectrum.tx.lock().expect("tx spectrum mutex");
-        g.0[..n].copy_from_slice(&tx_spectrum_buf[..n]);
-        g.1 = n;
-    }
-    if let Some(n) = router.output_rx_spectrum(out, rx_spectrum_buf) {
-        let mut g = spectrum.rx.lock().expect("rx spectrum mutex");
-        g.0[..n].copy_from_slice(&rx_spectrum_buf[..n]);
-        g.1 = n;
-    }
+    // `socket` and the `CallAudio` channel ends drop here; the lane's streams
+    // belong to the station router and outlive this thread.
 }
 
 /// Run-loop step 1: apply a pending PTT edge. M17 carries PTT purely via
-/// stream start/`EOS` (there is no protocol PTT frame).
+/// stream start/`EOS` (there is no protocol PTT frame). The lane's gate is
+/// NOT touched here — `ConsoleSession::set_ptt` opened it before forwarding
+/// the key and closes it on key-up; this is the protocol edge only.
 ///
-/// Key-down: drains/discards any stale `call_audio.tx_frames` entries WHILE
-/// the gate is still closed (see [`TxState::key_down`] for why that
-/// ordering is what makes the discard safe), THEN opens the gate under the
-/// fresh random `StreamID`.
+/// Key-down: discards whatever is still queued in `call_audio.tx_frames`
+/// (see [`TxState::key_down`]) and starts a fresh random `StreamID`.
 ///
-/// Key-up: closes the gate FIRST (so the mic lane stops enqueuing anything
-/// more), THEN drains whatever it already queued into ordinary packets
+/// Key-up: drains whatever the lane already queued into ordinary packets
 /// ([`drain_tx_frames`]) — up to one [`SOCKET_POLL_TIMEOUT`] tick's worth of
 /// audio the run-loop hadn't gotten to yet — and only THEN flushes the
 /// final `EOS`-marked packet (the one pending half-frame, if any, from that
 /// drain, zero-padded, or an all-zero payload if nothing was left). Getting
-/// this order backwards is exactly what clips the tail of a transmission
-/// and/or leaks stale audio into the START of the next one under a new
-/// `StreamID`.
+/// this order backwards is exactly what clips the tail of a transmission.
 ///
 /// Returns the newly-applied keyed state (mirrors `want_key`; only called
 /// when it differs from the previous poll's).
 #[allow(clippy::too_many_arguments)]
 fn apply_ptt_edge(
     socket: &UdpSocket,
-    router: &AudioRouter,
-    mic: &MicId,
     callsign: [u8; 6],
     codec: &mut dyn Codec2Voice,
     tx: &mut TxState,
@@ -1040,9 +538,7 @@ fn apply_ptt_edge(
 ) -> bool {
     if want_key {
         tx.key_down(call_audio);
-        router.set_gate(mic, true);
     } else {
-        router.set_gate(mic, false);
         drain_tx_frames(socket, callsign, codec, tx, call_audio);
         send_voice_packet(
             socket,
@@ -1064,11 +560,8 @@ fn apply_ptt_edge(
 /// unkey path — BEFORE sending `DISC`. Without this, disconnecting while
 /// keyed left the far end's stream open (no EOS bit ever seen) until ITS OWN
 /// silence timeout closed it out.
-#[allow(clippy::too_many_arguments)]
 fn send_disc_flushing_eos_if_keyed(
     socket: &UdpSocket,
-    router: &AudioRouter,
-    mic: &MicId,
     callsign: [u8; 6],
     codec: &mut dyn Codec2Voice,
     tx: &mut TxState,
@@ -1077,9 +570,7 @@ fn send_disc_flushing_eos_if_keyed(
     keyed: bool,
 ) {
     if keyed {
-        let _ = apply_ptt_edge(
-            socket, router, mic, callsign, codec, tx, shared, call_audio, false,
-        );
+        let _ = apply_ptt_edge(socket, callsign, codec, tx, shared, call_audio, false);
     }
     let disc = ControlPacket::Disc {
         callsign: Some(callsign),
@@ -1258,9 +749,9 @@ mod tests {
 
     #[test]
     fn key_down_discards_stale_frames_left_in_the_channel() {
-        // Simulates the connect-time gate window (open_call keys the mic
-        // lane immediately; M17Session::connect un-keys right after) or any
-        // other leftover-frame race: something pushed frames onto
+        // Simulates the gate window `ConsoleSession::set_ptt` opens up to
+        // one poll tick before this run loop observes the key-down edge, or
+        // any other leftover-frame race: something pushed frames onto
         // `tx_frames` before this key-down ever ran.
         let (call_audio, push, _rx) = fake_call_audio();
         push.send(vec![1_i16; 160]).unwrap();
@@ -1297,11 +788,6 @@ mod tests {
         push.send(vec![20_i16; 160]).unwrap();
         push.send(vec![30_i16; 160]).unwrap();
 
-        // A router with no mic ever opened: `set_gate` on an unopened mic is
-        // a documented no-op, so this is a valid (if inert) stand-in — the
-        // gate side effect itself isn't what this test is checking.
-        let router = AudioRouter::new(Box::new(astar_audio::NullBackend::new()));
-        let mic = MicId::new("unopened-test-mic");
         let (mut codec, _backend) = astar_codec::codec2::open_codec2(&[])
             .expect("a codec must be available under this crate's dev-dependency codec2-static");
         let mut tx = TxState::new();
@@ -1311,8 +797,6 @@ mod tests {
 
         let keyed = apply_ptt_edge(
             &send_sock,
-            &router,
-            &mic,
             [0; 6],
             codec.as_mut(),
             &mut tx,

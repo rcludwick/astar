@@ -28,7 +28,7 @@ use astar_iax_core::session::auth::Secret;
 #[cfg(feature = "dstar")]
 use crate::dstar::{DstarConfig, DstarSession, DstarSnapshotState};
 #[cfg(feature = "m17")]
-use crate::m17::{M17Config, M17Prefs, M17Session};
+use crate::m17::{M17Config, M17Session};
 use crate::metering::Gain;
 use crate::state::{CallStatus, ConsoleState};
 #[cfg(feature = "ysf")]
@@ -546,14 +546,12 @@ impl ConsoleSession {
     /// Store the calibrated per-mic profile; the next call's noise reducer is
     /// built from it. Calibration runs while idle, so a later `connect` picks
     /// it up.
-    // `profile` is only ever moved-from (vs. cloned/borrowed) in the
-    // `#[cfg(feature = "m17")]` branch below, so a build with `dstar` but
-    // without `m17` (iax-a9d4 Task 7: `astar-cli --features dstar` pulls
-    // in this crate's own `dstar` feature with `m17` off, unlike every
-    // previous caller, which always had `m17` on too) sees `profile` used
-    // only by reference and would otherwise suggest `Option<&MicProfile>`
-    // here — but the signature must stay identical whether or not `m17` is
-    // compiled in (same convention as `DstarSession::connect`'s own
+    // `profile` is now only ever cloned/borrowed here (the last owner, the
+    // M17 pref fan-out, went with the one-audio-lane refactor), so clippy
+    // would suggest `Option<&MicProfile>`. The by-value signature stays: it
+    // is the published shape every caller and binding already uses, and the
+    // last-use clone is a per-calibration cost, not a hot-path one (same
+    // convention as `DstarSession::connect`'s own
     // `#[allow(clippy::needless_pass_by_value)]`).
     #[allow(clippy::needless_pass_by_value)]
     pub fn set_calibrated(&self, profile: Option<MicProfile>) {
@@ -566,14 +564,6 @@ impl ConsoleSession {
             if let Some(mic) = route.mic() {
                 r.set_mic_profile(mic, profile.clone());
             }
-        }
-        // iax-f2b8-fix Fix 4: forward every standing pref to a live M17
-        // session too — before this, M17Session's own AudioRouter never
-        // heard about ANY of these (only the IAX2 Manager did), so e.g. the
-        // RX volume slider had no effect on an M17 link.
-        #[cfg(feature = "m17")]
-        if let Some(m17) = self.m17.as_ref() {
-            m17.set_calibrated(profile);
         }
     }
 
@@ -597,10 +587,6 @@ impl ConsoleSession {
                 r.set_mic_denoise(mic, on);
             }
         }
-        #[cfg(feature = "m17")]
-        if let Some(m17) = self.m17.as_ref() {
-            m17.set_denoise(on);
-        }
     }
 
     /// Toggle capture compression on the next/current network call.
@@ -614,10 +600,6 @@ impl ConsoleSession {
             if let Some(mic) = route.mic() {
                 r.set_mic_compress(mic, on);
             }
-        }
-        #[cfg(feature = "m17")]
-        if let Some(m17) = self.m17.as_ref() {
-            m17.set_compress(on);
         }
     }
 
@@ -636,10 +618,6 @@ impl ConsoleSession {
             if let Some(mic) = route.mic() {
                 r.set_mic_compress_level(mic, level);
             }
-        }
-        #[cfg(feature = "m17")]
-        if let Some(m17) = self.m17.as_ref() {
-            m17.set_compression_level(level);
         }
     }
 
@@ -679,10 +657,6 @@ impl ConsoleSession {
             let r = mgr.router();
             r.set_output_compress(route.out(), on);
         }
-        #[cfg(feature = "m17")]
-        if let Some(m17) = self.m17.as_ref() {
-            m17.set_rx_compress(on);
-        }
         #[cfg(feature = "ysf")]
         if let Some(ysf) = self.ysf.as_ref() {
             ysf.set_rx_compression(on);
@@ -706,10 +680,6 @@ impl ConsoleSession {
         if let (Some(route), Some(mgr)) = (self.voice_route.as_ref(), self.manager.as_ref()) {
             let r = mgr.router();
             r.set_output_compress_level(route.out(), level);
-        }
-        #[cfg(feature = "m17")]
-        if let Some(m17) = self.m17.as_ref() {
-            m17.set_rx_compression_level(level);
         }
         #[cfg(feature = "ysf")]
         if let Some(ysf) = self.ysf.as_ref() {
@@ -736,10 +706,6 @@ impl ConsoleSession {
                 r.set_mic_tx_trim(mic, g);
             }
         }
-        #[cfg(feature = "m17")]
-        if let Some(m17) = self.m17.as_ref() {
-            m17.set_tx_trim(g);
-        }
     }
 
     /// Set the VOX pre-roll / look-back length (ms, clamped to `0..=250`) on the
@@ -757,10 +723,6 @@ impl ConsoleSession {
                 r.set_mic_preroll_ms(mic, ms);
             }
         }
-        #[cfg(feature = "m17")]
-        if let Some(m17) = self.m17.as_ref() {
-            m17.set_vox_preroll_ms(ms);
-        }
     }
 
     /// Set the live spectrum peak-hold decay (dB/SECOND, clamped, iax-8616) on
@@ -777,16 +739,9 @@ impl ConsoleSession {
             }
             r.set_output_spectrum_decay(route.out(), db_per_sec);
         }
-        // iax-f2b8-fix Fix 6: forward to a live M17 session too — mirrors
-        // Fix 4's pref-setter forwarding, but "live-only" (no persisted
-        // cell), matching this setter's own no-op-when-idle contract above.
         #[cfg(feature = "ysf")]
         if let Some(ysf) = self.ysf.as_ref() {
             ysf.set_spectrum_decay(db_per_sec);
-        }
-        #[cfg(feature = "m17")]
-        if let Some(m17) = self.m17.as_ref() {
-            m17.set_spectrum_decay(db_per_sec);
         }
     }
 
@@ -1739,12 +1694,18 @@ impl ConsoleSession {
         #[cfg(feature = "m17")]
         if let Some(session) = self.m17.take() {
             session.disconnect();
+            // The route the session rode is this session's too: released
+            // here, exactly as `m17_disconnect` does, or the station stays
+            // reserved against every later connect.
+            let handles = self.release_voice_route();
+            drop(handles);
             self.state.status = CallStatus::Idle;
             self.state.ptt = false;
             self.state.remote_ptt = false;
             self.state.rtt_ms = None;
             self.state.tx_level_db = -60.0;
             self.state.rx_level_db = -60.0;
+            self.state.input_level_db = -60.0;
             return Ok(());
         }
         // D-Star never mirrors into `self.state` (see `dstar`'s field docs),
@@ -1790,57 +1751,51 @@ impl ConsoleSession {
     ///
     /// `backend` is a fresh audio backend — mirrors [`Self::connect`]'s
     /// contract of taking an already-constructed backend rather than a
-    /// factory. [`M17Session::connect`] itself wants a `&dyn Fn() -> Box<dyn
-    /// AudioBackend>` (called exactly once); this wraps `backend` in a
-    /// `RefCell`-backed adapter satisfying that shape without an extra trait
-    /// object allocation.
+    /// factory. It builds the station engine if one does not exist yet; a
+    /// station that has already dialed reuses the engine it has, and this
+    /// one is dropped.
+    ///
+    /// `input`/`output` are device-name substrings for the lane the session
+    /// will ride (`None` = system default), resolved exactly as
+    /// [`Self::connect`] resolves an IAX2 dial's. The session itself is
+    /// handed only the lane's channel ends: it opens no device, carries no
+    /// preference and keys no gate.
     ///
     /// # Errors
     /// [`ConsoleError::AlreadyConnected`] per above (also refused while a
-    /// D-Star session is live — iax-a9d4 Task 6, the same mutual exclusion
-    /// as an IAX2 call); otherwise whatever [`M17Session::connect`] returns
-    /// (`Device` for an invalid callsign/missing codec, `Audio` for a
-    /// device/stream failure, `Resolve` for a DNS/bind failure).
+    /// D-Star/YSF session or another voice route is live);
+    /// [`ConsoleError::Device`]/[`ConsoleError::Audio`] if the OUTPUT device
+    /// cannot be resolved or opened; otherwise whatever
+    /// [`M17Session::connect`] returns (`Device` for an invalid
+    /// callsign/missing codec, `Resolve` for a DNS/bind failure).
     #[cfg(feature = "m17")]
     pub fn m17_connect(
         &mut self,
         backend: Box<dyn AudioBackend>,
         cfg: M17Config,
+        input: Option<&str>,
+        output: Option<&str>,
     ) -> Result<(), ConsoleError> {
-        if self.active.is_some()
-            || self.m17.is_some()
-            || self.dstar_is_active()
-            || self.ysf_is_active()
-            || self.voice_route.is_some()
-        {
-            return Err(ConsoleError::AlreadyConnected);
+        // The route is the reservation, the mutual exclusion AND the pref
+        // push, all at once: `open_voice_route` refuses with
+        // `AlreadyConnected` if an IAX2 call, another voice route or any
+        // digital session is live, opens the bus (plus the capture lane
+        // when a device resolves, gate closed) on the station's ONE router,
+        // and pushes every standing operator preference onto it.
+        let audio = self.open_voice_route(input, output, || backend)?;
+        match M17Session::connect(cfg, audio) {
+            Ok(session) => {
+                self.m17 = Some(session);
+                Ok(())
+            }
+            Err(e) => {
+                // The route opened but the session did not: give the lanes
+                // back, or the station stays reserved forever.
+                let handles = self.release_voice_route();
+                drop(handles);
+                Err(e)
+            }
         }
-        // iax-f2b8-fix Fix 4: mirror the standing-pref re-push `Self::connect`
-        // does for an IAX2 dial (originally 8 prefs; iax-a4e7 PHASE 1 adds RX
-        // compression, a 10-pref re-push) — otherwise a fresh M17 link
-        // silently reverted to the router's bare defaults (unity gain, DSP
-        // off) no matter what the operator had already dialed in.
-        let prefs = M17Prefs {
-            input_gain: self.input_gain.get(),
-            output_gain: self.output_gain.get(),
-            denoise: self.denoise.load(Ordering::Relaxed),
-            compress: self.compress.load(Ordering::Relaxed),
-            compress_level: f32::from_bits(self.compress_level.load(Ordering::Relaxed)),
-            tx_trim: f32::from_bits(self.tx_trim.load(Ordering::Relaxed)),
-            rx_compress: self.rx_compress.load(Ordering::Relaxed),
-            rx_compress_level: f32::from_bits(self.rx_compress_level.load(Ordering::Relaxed)),
-            vox_preroll_ms: self.vox_preroll_ms.load(Ordering::Relaxed),
-            calibrated: self.calibrated.lock().unwrap().clone(),
-        };
-        let slot = std::cell::RefCell::new(Some(backend));
-        let make_backend = move || -> Box<dyn AudioBackend> {
-            slot.borrow_mut()
-                .take()
-                .expect("m17 backend factory called exactly once")
-        };
-        let session = M17Session::connect(cfg, prefs, &make_backend)?;
-        self.m17 = Some(session);
-        Ok(())
     }
 
     /// Disconnect the live M17 session, if any. No-op when none is active.
@@ -1851,11 +1806,14 @@ impl ConsoleSession {
         if let Some(session) = self.m17.take() {
             session.disconnect();
         }
+        let handles = self.release_voice_route();
+        drop(handles);
         self.state.status = CallStatus::Idle;
         self.state.ptt = false;
         self.state.remote_ptt = false;
         self.state.tx_level_db = -60.0;
         self.state.rx_level_db = -60.0;
+        self.state.input_level_db = -60.0;
     }
 
     /// `true` while an M17 session is live (the mutual-exclusion check every
@@ -2201,10 +2159,6 @@ impl ConsoleSession {
                 r.set_mic_gain(mic, clamped);
             }
         }
-        #[cfg(feature = "m17")]
-        if let Some(m17) = self.m17.as_ref() {
-            m17.set_mic_gain(clamped);
-        }
     }
 
     /// Set the output (RX/speaker) gain multiplier. `value` is clamped to
@@ -2228,10 +2182,6 @@ impl ConsoleSession {
             let r = mgr.router();
             r.set_output_gain(route.out(), clamped);
         }
-        #[cfg(feature = "m17")]
-        if let Some(m17) = self.m17.as_ref() {
-            m17.set_output_gain(clamped);
-        }
         // D-Star was missing from this fan-out until iax-dstaraudio, so the
         // operator's volume never reached a live D-Star session and it played
         // at the router's unity default while every other network sat at
@@ -2252,19 +2202,15 @@ impl ConsoleSession {
     /// produces, tapped from the post-DSP, pre-encode TX PCM. Returns the number
     /// of bins written (`0` if no active call / unrouted mic). A pure observer.
     ///
-    /// Also reads the M17 router's TX analyzer while an M17 session is live
-    /// (iax-f2b8-fix Fix 6) — `self.active`/`self.m17` are mutually
-    /// exclusive, so this never has to choose between the two.
+    /// Reads the ONE lane [`Self::meter_ids`] names — the IAX2 call's routed
+    /// mic or the voice route's — so every network's TX analyzer is the same
+    /// analyzer.
     #[must_use]
     pub fn tx_spectrum(&self, out: &mut [f32]) -> usize {
         if let (Some((mic, _)), Some(mgr)) = (self.meter_ids(), self.manager.as_ref()) {
             return mic
                 .and_then(|m| mgr.router().mic_tx_spectrum(&m, out))
                 .unwrap_or(0);
-        }
-        #[cfg(feature = "m17")]
-        if let Some(m17) = self.m17.as_ref() {
-            return m17.tx_spectrum(out);
         }
         #[cfg(feature = "ysf")]
         if let Some(ysf) = self.ysf.as_ref() {
@@ -2282,16 +2228,11 @@ impl ConsoleSession {
     /// produces, tapped from the post-mix decoded RX PCM. Returns the number of
     /// bins written (`0` if no active call). A pure observer.
     ///
-    /// Also reads the M17 router's RX analyzer while an M17 session is live
-    /// (iax-f2b8-fix Fix 6); see [`Self::tx_spectrum`]'s doc.
+    /// Reads the ONE bus [`Self::meter_ids`] names; see [`Self::tx_spectrum`].
     #[must_use]
     pub fn rx_spectrum(&self, out: &mut [f32]) -> usize {
         if let (Some((_, bus)), Some(mgr)) = (self.meter_ids(), self.manager.as_ref()) {
             return mgr.router().output_rx_spectrum(&bus, out).unwrap_or(0);
-        }
-        #[cfg(feature = "m17")]
-        if let Some(m17) = self.m17.as_ref() {
-            return m17.rx_spectrum(out);
         }
         #[cfg(feature = "ysf")]
         if let Some(ysf) = self.ysf.as_ref() {
@@ -2778,14 +2719,8 @@ impl ConsoleSession {
             let st = session.state();
             self.state.ptt = st.ptt;
             self.state.remote_ptt = st.receiving;
-            self.state.tx_level_db = st.tx_dbfs;
-            self.state.rx_level_db = st.rx_dbfs;
-            // iax-f2b8-fix Fix 6: mirror the M17 router's continuous mic
-            // input meter, same as tx/rx above — so the input meter (and any
-            // future VOX edge) reads correctly during an M17 call instead of
-            // sitting at the IAX2-only -60 floor `else` branch below leaves
-            // it at whenever no IAX2 call is active.
-            self.state.input_level_db = st.input_dbfs;
+            // Levels are NOT read here: the one meter block above already
+            // read them off the voice route's own lanes (`meter_ids`).
             self.state.status = match st.link {
                 LinkState::Idle | LinkState::Connecting => CallStatus::Dialing,
                 LinkState::Linked => CallStatus::Answered,
@@ -3473,17 +3408,32 @@ mod tests {
         assert!(s.has_engine());
     }
 
-    // --- iax-f2b8-fix Fix 4: standing prefs reach a live M17 session too ----
+    // --- M17 rides the one lane -------------------------------------------
     //
-    // `session.m17` is a private field of THIS module, so this same-module
-    // unit test (rather than the crate's external `tests/m17_session.rs`
-    // integration file) can read `M17Session::state()` directly through it —
-    // the smallest test-visible seam that proves `ConsoleSession`'s own
-    // setters (not just `M17Session`'s passthroughs, already covered in
-    // `tests/m17_session.rs`) actually reach the M17 router, both BEFORE and
-    // AFTER `m17_connect`. Only needs a UDP target `M17Session::connect` can
-    // bind/resolve against — link state is irrelevant to whether a pref
-    // reaches the router, so no scripted reflector is needed here.
+    // `session.m17`/`manager` are private fields of THIS module, so these
+    // same-module unit tests (rather than the crate's external
+    // `tests/m17_session.rs` integration file) can read the station router
+    // directly — the smallest test-visible seam that proves an M17 connect
+    // goes through the voice route rather than building audio of its own.
+    //
+    // Only needs a UDP target `M17Session::connect` can bind/resolve
+    // against: neither a pref nor a meter depends on link state, so no
+    // scripted reflector is needed here.
+
+    /// An `M17Config` pointed at `addr`. Carries no devices any more — the
+    /// route owns those.
+    #[cfg(feature = "m17")]
+    fn m17_cfg(addr: std::net::SocketAddr) -> M17Config {
+        M17Config {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            module: b'A',
+            callsign: "N0CALL".to_string(),
+            codec_dirs: Vec::new(),
+            keepalive_timeout: Duration::from_secs(30),
+        }
+    }
+
     #[cfg(feature = "m17")]
     #[test]
     fn console_session_prefs_reach_the_m17_router_before_and_after_connect() {
@@ -3491,96 +3441,93 @@ mod tests {
         let addr = target.local_addr().expect("local addr");
 
         let mut session = ConsoleSession::new();
-        // BEFORE m17_connect: standing prefs set on plain idle ConsoleSession.
+        // BEFORE m17_connect: standing prefs set on a plain idle session.
         session.set_output_gain(0.4);
         session.set_input_gain(1.6);
         // iax-a4e7 PHASE 1: RX compression is an output-side pref too, so it
-        // must reach the M17 router the same way output_gain does.
+        // must reach the route's bus the same way output_gain does.
         session.set_rx_compress(true);
         session.set_rx_compression_level(0.65);
 
         session
-            .m17_connect(
-                Box::new(NullBackend::new()),
-                M17Config {
-                    host: addr.ip().to_string(),
-                    port: addr.port(),
-                    module: b'A',
-                    callsign: "N0CALL".to_string(),
-                    input: None,
-                    output: None,
-                    codec_dirs: Vec::new(),
-                    keepalive_timeout: Duration::from_secs(30),
-                },
-            )
+            .m17_connect(Box::new(NullBackend::new()), m17_cfg(addr), None, None)
             .expect("m17 connect");
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        let applied = |session: &ConsoleSession| {
-            session
-                .m17
-                .as_ref()
-                .expect("m17 session must be up")
-                .state()
-        };
-        let mut st = applied(&session);
-        while std::time::Instant::now() < deadline && (st.applied_output_gain - 0.4).abs() >= 0.01 {
-            std::thread::sleep(Duration::from_millis(10));
-            st = applied(&session);
-        }
+        let (mic, bus) = session.meter_ids().expect("a route is live");
+        let mic = mic.expect("the null backend resolves a capture device");
+        // Read the values OFF the station router, not off any session
+        // mirror: this is the one place they now live.
+        let router = || session.manager.as_ref().expect("engine built").router();
         assert!(
-            (st.applied_output_gain - 0.4).abs() < 0.01,
-            "output gain set BEFORE m17_connect must reach the M17 router at connect time, got {}",
-            st.applied_output_gain
+            (router().output_gain(&bus).expect("bus open") - 0.4).abs() < 0.01,
+            "output gain set BEFORE m17_connect must be on the route's bus at connect time"
         );
         assert!(
-            (st.applied_mic_gain - 1.6).abs() < 0.01,
-            "input gain set BEFORE m17_connect must reach the M17 router at connect time, got {}",
-            st.applied_mic_gain
+            (router().mic_gain(&mic).expect("mic open") - 1.6).abs() < 0.01,
+            "input gain set BEFORE m17_connect must be on the route's mic lane"
+        );
+        assert_eq!(
+            router().output_compress(&bus),
+            Some(true),
+            "rx compression set BEFORE m17_connect must be on the route's bus"
         );
         assert!(
-            st.applied_rx_compress,
-            "rx compression set BEFORE m17_connect must reach the M17 router at connect time"
-        );
-        assert!(
-            (st.applied_rx_compress_level - 0.65).abs() < 0.01,
-            "rx compression level set BEFORE m17_connect must reach the M17 router at connect time, got {}",
-            st.applied_rx_compress_level
+            (router().output_compress_level(&bus).expect("bus open") - 0.65).abs() < 0.01,
+            "rx compression level set BEFORE m17_connect must be on the route's bus"
         );
 
-        // AFTER m17_connect: a live ConsoleSession setter must ALSO forward
-        // to the now-active M17 session (Fix 4(b)) — before the fix,
-        // set_output_gain only ever reached the IAX2 Manager. Also proves
-        // (iax-a4e7) the M17 bus accepts the new 4.0 ceiling, not just the
-        // old 2.0 one.
+        // AFTER m17_connect: a live setter must reach the same lanes, with
+        // no poll tick in between — the setter writes the router directly.
+        // Also proves (iax-a4e7) the bus accepts the 4.0 ceiling.
         session.set_output_gain(4.0);
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        let mut st = applied(&session);
-        while std::time::Instant::now() < deadline && (st.applied_output_gain - 4.0).abs() >= 0.01 {
-            std::thread::sleep(Duration::from_millis(10));
-            st = applied(&session);
-        }
         assert!(
-            (st.applied_output_gain - 4.0).abs() < 0.01,
-            "output gain set AFTER m17_connect must reach the M17 router live at the new 4.0 ceiling, got {}",
-            st.applied_output_gain
+            (router().output_gain(&bus).expect("bus open") - 4.0).abs() < 0.01,
+            "output gain set AFTER m17_connect must reach the route live at the 4.0 ceiling"
         );
-
-        // A live rx-compression toggle AFTER connect must also forward
-        // (iax-a4e7 PHASE 1), mirroring output_gain's live-update contract.
         session.set_rx_compress(false);
-        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        let mut st = applied(&session);
-        while std::time::Instant::now() < deadline && st.applied_rx_compress {
-            std::thread::sleep(Duration::from_millis(10));
-            st = applied(&session);
-        }
-        assert!(
-            !st.applied_rx_compress,
-            "a LIVE set_rx_compress(false) must reach the router"
+        assert_eq!(
+            router().output_compress(&bus),
+            Some(false),
+            "a LIVE set_rx_compress(false) must reach the route's bus"
         );
 
         session.m17_disconnect();
+    }
+
+    #[cfg(feature = "m17")]
+    #[test]
+    fn an_m17_session_reports_the_router_meters_through_the_snapshot() {
+        let target = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind silent target");
+        let addr = target.local_addr().expect("local addr");
+
+        let mut session = ConsoleSession::new();
+        session
+            .m17_connect(Box::new(NullBackend::new()), m17_cfg(addr), None, None)
+            .expect("m17 connect");
+
+        // The lane the snapshot meters: the route's, because the session
+        // has none of its own.
+        let ids = session.meter_ids().expect("a route is live");
+        assert_eq!(ids.1, OutputId::new("out:null"));
+        assert_eq!(ids.0, Some(MicId::new("in:null")));
+
+        let snap = session.snapshot();
+        assert!(
+            (snap.rx_level_db + 60.0).abs() < 1e-6,
+            "a silent bus reads the floor, not garbage, got {}",
+            snap.rx_level_db
+        );
+        assert!(
+            (snap.tx_level_db + 60.0).abs() < 1e-6,
+            "a silent, unkeyed mic lane reads the floor, got {}",
+            snap.tx_level_db
+        );
+
+        session.m17_disconnect();
+        assert!(
+            session.meter_ids().is_none(),
+            "the route is released on disconnect, so nothing is metered"
+        );
     }
 
     // ── System Fusion wiring (astar-e7b3 §2.4) ──────────────────────────
