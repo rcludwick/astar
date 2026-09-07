@@ -196,9 +196,9 @@ SemVer transition.**
 
 ### The `.dmg` URL is deliberately absent
 
-The obvious next field would be
-`https://github.com/rcludwick/astar/releases/download/v0.1.9beta/astar.dmg`.
-It is not there, for three reasons in increasing order of weight:
+The obvious next field would be the asset path GitHub derives from the tag —
+`releases/download/<tag>/astar.dmg` under the repository. It is not there, for
+three reasons in increasing order of weight:
 
 1. It is fully derivable from the tag, so it adds no information.
 2. The build cannot verify it. The docs build has no network and no auth, so
