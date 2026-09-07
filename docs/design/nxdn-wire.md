@@ -1,6 +1,11 @@
 # NXDN — wire study
 
-**Status:** verified against the reference implementations, 2026-09-07.
+**Status:** Values read from the reference implementations by the plan author
+on 2026-09-07 and independently re-checked against the fetched sources in
+Task 1 (2026-09-07) — every row below was confirmed by fetching the cited
+file at its `master` branch HEAD and reading the cited function directly; no
+row is marked ⚠, meaning none needed to fall back to the plan author's
+reading.
 **Read first:** `docs/design/nxdn-network.md` for the network's place in astar;
 this note is the citable source every later NXDN task reads its constants
 from.
