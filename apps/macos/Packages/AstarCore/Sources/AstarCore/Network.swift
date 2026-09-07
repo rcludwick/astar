@@ -38,6 +38,18 @@ public enum Network: String, CaseIterable, Codable, Sendable {
     /// offers no PTT. That is deliberate: a transmit affordance that put
     /// nothing on the air would be a worse lie than an absent one.
     case ysf
+    /// NXDN reflector linking (iax-b9c2).
+    ///
+    /// Availability is HARDWARE, exactly as for ``dstar`` and ``ysf`` and
+    /// from the same dongle: NXDN voice is AMBE+2 and astar has no software
+    /// vocoder, so this segment appears when a ThumbDV is attached and not
+    /// otherwise.
+    ///
+    /// RECEIVE ONLY today. The engine decodes an NXDN reflector's audio and
+    /// has no transmit path at all, so this network offers no PTT — see
+    /// `CallSession.canTransmit`. That is deliberate: a transmit affordance
+    /// that put nothing on the air would be a worse lie than an absent one.
+    case nxdn
 
     /// The networks the engine can actually drive right now. AllStar is
     /// always available; `hamlink` stays unavailable until the engine gains
@@ -46,11 +58,14 @@ public enum Network: String, CaseIterable, Codable, Sendable {
     /// mirroring the engine's snapshot) says so — for `dstar` that flag
     /// means "a vocoder dongle is present", which is a fact about the desk,
     /// not about the build.
-    public static func available(m17: Bool, dstar: Bool = false, ysf: Bool = false) -> [Network] {
+    public static func available(
+        m17: Bool, dstar: Bool = false, ysf: Bool = false, nxdn: Bool = false
+    ) -> [Network] {
         var networks: [Network] = [.allstar]
         if m17 { networks.append(.m17) }
         if dstar { networks.append(.dstar) }
         if ysf { networks.append(.ysf) }
+        if nxdn { networks.append(.nxdn) }
         return networks
     }
 
@@ -59,10 +74,10 @@ public enum Network: String, CaseIterable, Codable, Sendable {
     /// (always the default; nothing user-actionable in the mismatch). `m17`
     /// mirrors `available(m17:)`'s flag.
     public static func resolve(
-        _ raw: String?, m17: Bool, dstar: Bool = false, ysf: Bool = false
+        _ raw: String?, m17: Bool, dstar: Bool = false, ysf: Bool = false, nxdn: Bool = false
     ) -> Network {
         guard let raw, let network = Network(rawValue: raw),
-            available(m17: m17, dstar: dstar, ysf: ysf).contains(network)
+            available(m17: m17, dstar: dstar, ysf: ysf, nxdn: nxdn).contains(network)
         else { return .allstar }
         return network
     }
@@ -75,6 +90,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         case .m17: return "M17"
         case .dstar: return "D-Star"
         case .ysf: return "Fusion"
+        case .nxdn: return "NXDN"
         }
     }
 
@@ -87,6 +103,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         case .m17: return "M17"
         case .dstar: return "DSTAR"
         case .ysf: return "YSF"
+        case .nxdn: return "NXDN"
         }
     }
 
@@ -98,6 +115,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         case .m17: return "waveform"
         case .dstar: return "waveform.circle"
         case .ysf: return "waveform.badge.plus"
+        case .nxdn: return "waveform.badge.magnifyingglass"
         }
     }
 
@@ -115,6 +133,11 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         // the address rather than a default, because YSF has no conventional
         // one and every directory row carries its own.
         case .ysf: return "Reflector name or host:port"
+        // Talkgroups, not reflector names: every NXDN row the directory
+        // carries is identified by its talkgroup number, and a typed address
+        // has to name one too — the reflector at a given host serves exactly
+        // one talkgroup and relays nothing else.
+        case .nxdn: return "Talkgroup, or host:port/talkgroup"
         }
     }
 
@@ -129,7 +152,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
             return c.isASCII && (c.isLetter || c.isNumber || ".:-*#".contains(c))
         case .hamlink:
             return (c.isASCII && (c.isLetter || c.isNumber)) || ".:-/#".contains(c)
-        case .m17, .dstar, .ysf:
+        case .m17, .dstar, .ysf, .nxdn:
             // `host[:port]/module` or `host[:port] module`
             // (`ReflectorAddressDial`) — unlike the node networks, the space
             // is part of the grammar (the alternate separator), not something
@@ -147,11 +170,14 @@ public enum Network: String, CaseIterable, Codable, Sendable {
     /// a node number is who you dialled, not who is speaking. Hamlink is
     /// `false` for now because the engine has no link at all. Every new
     /// digital network opts in HERE — NXDN, DMR — and inherits the last-heard
-    /// line without the popover changing.
+    /// line without the popover changing. NXDN's identity is a NUMBER rather
+    /// than a callsign — an `NXDND` frame carries `srcId` and no callsign at
+    /// all — and that is still who most recently keyed up, so it belongs on
+    /// the same line.
     public var isDigitalVoice: Bool {
         switch self {
         case .allstar, .hamlink: return false
-        case .m17, .dstar, .ysf: return true
+        case .m17, .dstar, .ysf, .nxdn: return true
         }
     }
 

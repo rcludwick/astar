@@ -224,6 +224,30 @@ final class FakeStation: StationDriving {
         callLog.append("ysfDisconnect")
     }
     func ysfState() throws -> YSFState? { ysfStateValue }
+
+    // NXDN (iax-b9c2). `host` is recorded whole for the same reason YSF's is,
+    // and the radio id and talkgroup separately because they are the two
+    // numbers that go on the wire — the ones a test must be able to see.
+    private(set) var connectNXDNCalls:
+        [(host: String, callsign: String, radioID: UInt16, talkgroup: UInt16)] = []
+    private(set) var nxdnDisconnects = 0
+    /// When set, `connectNXDN` throws — the "no dongle attached" shape.
+    var nxdnConnectError: Error?
+    /// What `nxdnState()` reports; `nil` is "no link", the idle answer.
+    var nxdnStateValue: NXDNState?
+    func connectNXDN(
+        host: String, callsign: String, radioID: UInt16, talkgroup: UInt16
+    ) throws {
+        waitForGateIfSet()
+        if let nxdnConnectError { throw nxdnConnectError }
+        connectNXDNCalls.append((host, callsign, radioID, talkgroup))
+        callLog.append("connectNXDN")
+    }
+    func nxdnDisconnect() throws {
+        nxdnDisconnects += 1
+        callLog.append("nxdnDisconnect")
+    }
+    func nxdnState() throws -> NXDNState? { nxdnStateValue }
 }
 
 /// A station whose device enumeration always throws, to verify CallSession's
@@ -276,6 +300,11 @@ private struct ThrowingStation: StationDriving {
     func connectYSF(host: String, callsign: String, options: String?) throws { throw Boom() }
     func ysfDisconnect() throws { throw Boom() }
     func ysfState() throws -> YSFState? { throw Boom() }
+    func connectNXDN(
+        host: String, callsign: String, radioID: UInt16, talkgroup: UInt16
+    ) throws { throw Boom() }
+    func nxdnDisconnect() throws { throw Boom() }
+    func nxdnState() throws -> NXDNState? { throw Boom() }
 }
 
 /// An in-memory audio store so persistence-path tests don't touch real defaults.

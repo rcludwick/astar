@@ -21,7 +21,8 @@ extension Station: StationDriving {
             dtmfPlayed: s.dtmfPlayed, dtmfTotal: s.dtmfTotal,
             m17Available: s.m17Available, m17Active: s.m17Active,
             dstarAvailable: s.dstarAvailable, dstarActive: s.dstarActive,
-            ysfAvailable: s.ysfAvailable, ysfActive: s.ysfActive
+            ysfAvailable: s.ysfAvailable, ysfActive: s.ysfActive,
+            nxdnAvailable: s.nxdnAvailable, nxdnActive: s.nxdnActive
         )
     }
 
@@ -41,7 +42,8 @@ extension Station: StationDriving {
     // connectDStar/dstarDisconnect/dstarState (iax-4c8e) likewise: the vendored
     // signatures are already the protocol's, defaulted arguments included.
     // connectYSF/ysfDisconnect/ysfState the same, for the same reason, and
-    // m17State alongside them.
+    // m17State alongside them. connectNXDN/nxdnDisconnect/nxdnState (iax-b9c2)
+    // likewise.
 }
 
 /// Errors from the fallback `NullStation` (no real engine available).
@@ -85,6 +87,15 @@ public struct NullStation: StationDriving {
     /// No engine, so no link — the same answer the real station gives while
     /// idle, which keeps the last-heard line absent rather than wrong.
     public func ysfState() throws -> YSFState? { nil }
+    public func connectNXDN(
+        host: String, callsign: String, radioID: UInt16, talkgroup: UInt16
+    ) throws {
+        throw NullStationError.noEngine
+    }
+    public func nxdnDisconnect() throws {}
+    /// No engine, so no link — the same answer the real station gives while
+    /// idle, which keeps the last-heard line absent rather than wrong.
+    public func nxdnState() throws -> NXDNState? { nil }
     public func setCodecDirs(_ dirs: [String]) throws {}
     public func listInputs() throws -> [String] { [] }
     public func listOutputs() throws -> [String] { [] }

@@ -60,6 +60,8 @@ final class ConfigTransferTests: XCTestCase {
         defaults.set("/dev/cu.usbserial", forKey: "serial.portPath")
         defaults.set(true, forKey: "ui.showInDock")
         session.m17Callsign = "AJ7HR"
+        session.dmrRadioID = "3153591"
+        session.nxdnRadioID = "1234"
     }
 
     private func roundTrip(sections: Set<ConfigSection>) throws -> (
@@ -101,6 +103,8 @@ final class ConfigTransferTests: XCTestCase {
         XCTAssertEqual(suiteB.string(forKey: "serial.portPath"), "/dev/cu.usbserial")
         XCTAssertTrue(suiteB.bool(forKey: "ui.showInDock"))
         XCTAssertEqual(r.target.m17Callsign, "AJ7HR")
+        XCTAssertEqual(r.target.dmrRadioID, "3153591")
+        XCTAssertEqual(r.target.nxdnRadioID, "1234")
     }
 
     func testUncheckedSectionsDoNotTravel() throws {
@@ -113,9 +117,14 @@ final class ConfigTransferTests: XCTestCase {
     }
 
     func testCallsignStaysBehindWhenUnchecked() throws {
-        // The share case: everything useful, nothing identifying.
+        // The share case: everything useful, nothing identifying. Both radio
+        // IDs are identity too, and neither may leak through the settings
+        // slice — `nxdn.radioId` is claimed by this section, not by a prefix.
         let r = try roundTrip(sections: [.rigs, .settings, .interface])
         XCTAssertEqual(r.target.m17Callsign, "")
+        XCTAssertEqual(r.target.dmrRadioID, "")
+        XCTAssertEqual(r.target.nxdnRadioID, "")
+        XCTAssertNil(suiteB.object(forKey: "nxdn.radioId"))
         XCTAssertEqual(UserDefaultsSetupStore(suiteB).all().count, 1)
     }
 

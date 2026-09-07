@@ -60,13 +60,13 @@
         private var availableNetworks: [Network] {
             Network.available(
                 m17: session.m17Available, dstar: session.dstarAvailable,
-                ysf: session.ysfAvailable)
+                ysf: session.ysfAvailable, nxdn: session.nxdnAvailable)
         }
 
         private var selectedNetwork: Network {
             Network.resolve(
                 networkRaw, m17: session.m17Available, dstar: session.dstarAvailable,
-                ysf: session.ysfAvailable)
+                ysf: session.ysfAvailable, nxdn: session.nxdnAvailable)
         }
 
         /// The network picker's binding, and the one place a network change
@@ -331,6 +331,10 @@
                     // one network's credential, and that network is not
                     // dialable yet (astar-a7c5).
                     DmrSettingsView()
+                    // Its own section, not a second field in DMR's: NXDN ids
+                    // are 16-bit and a registered DMR ID does not fit in one,
+                    // so they are two numbers, not one shown twice.
+                    NxdnSettingsView()
                     SetupsView()
                     FavoritesSettingsView(directoryRevision: $directoryRevision)
                     MicProfilesView()
@@ -1347,15 +1351,20 @@
         }
 
         /// Replaces the PTT/VOX control on a network astar can receive but not
-        /// transmit — System Fusion today.
+        /// transmit — NXDN today, System Fusion until 2026-09-06.
         ///
         /// A PTT button that did nothing would be worse than an absent one:
         /// the operator would key, hear nothing happen, and reasonably assume
         /// the radio or the link was broken. Naming the reason costs one line
         /// and answers the question before it is asked.
+        ///
+        /// The network is read live rather than written into the string, so
+        /// the sentence stays true as networks gain and lose transmit paths —
+        /// this text and `CallSession.canTransmit` cannot drift apart.
         private var receiveOnlyIndicator: some View {
-            Label(
-                "Receive only — astar can't transmit Fusion yet",
+            let name = (session.activeCallNetwork ?? .allstar).displayName
+            return Label(
+                "Receive only — astar can't transmit \(name) yet",
                 systemImage: "antenna.radiowaves.left.and.right"
             )
             .font(.callout.weight(.semibold))
@@ -1367,7 +1376,7 @@
             )
             .foregroundStyle(.secondary)
             .accessibilityElement()
-            .accessibilityLabel("Receive only, astar cannot transmit Fusion yet")
+            .accessibilityLabel("Receive only, astar cannot transmit \(name) yet")
         }
 
         /// Replaces the PTT/VOX control while listen-only (Disable TX) is on: makes it
@@ -1613,11 +1622,11 @@
                 case .address(let value):
                     dispatchConnect(node: value, network: network, address: value)
                 }
-            case .m17, .dstar, .ysf:
+            case .m17, .dstar, .ysf, .nxdn:
                 // Every reflector network resolves its target engine-side
                 // (`CallSession.connect(node:network:)` → `m17Target` /
-                // `dstarTarget` / `ysfTarget`, directory first and address
-                // second) — this is
+                // `dstarTarget` / `ysfTarget` / `nxdnTarget`, directory first
+                // and address second) — this is
                 // only the same "unreachable via the disabled button, but
                 // refuse it on Enter too" guard as above.
                 guard session.canDial(node, network: network) else { return }

@@ -82,4 +82,21 @@ As with YSF: **read the reference, do not recall the wire format.** Build
   to need a *differently* registered number rather than the same one, that is a
   third field and a fresh decision, not a re-argument of this one.
 
+  **That exit was taken (2026-09-07).** NXDN source and destination ids are
+  16-bit: `NXDNGateway/NXDNNetwork.cpp` packs them as
+  `writeData(..., unsigned short srcId, unsigned short dstId, ...)`, and
+  `NXDNReflector`'s `Reflectors.h` holds `CNXDNReflector::m_id` the same way. A
+  registered DMR ID is six or seven digits and does not fit in sixteen bits, so
+  it **cannot** be used verbatim, and truncating one would put somebody else's
+  number on the air. So astar carries a third field: `CallSession.nxdnRadioID`,
+  stored under `nxdn.radioId`, digits only, range `1...65519` (`NxdnID`) — the
+  `0` address and the reserved block above `65519` are both refused.
+
+  Adding it does not move `ConfigVersion`: it is an addition, and both
+  directions already cope (`CLAUDE.md`, "Config version"). A dial with no NXDN
+  id is refused before the dongle is touched
+  (`ConnectError.missingRadioID` / `.radioIDOutOfRange`) rather than derived
+  from anything else. The field's placement and label are still Rob's to
+  change; the *separateness* is what the wire settles.
+
 * Talker display: reuse D-Star's last-heard treatment.

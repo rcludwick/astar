@@ -105,6 +105,7 @@ extension Network {
         case .m17: return .m17
         case .dstar: return .dstar
         case .ysf: return .ysf
+        case .nxdn: return .nxdn
         case .allstar, .hamlink: return nil
         }
     }
@@ -115,7 +116,7 @@ extension Network {
     /// case for it.
     ///
     /// The inverse of `reflectorNetwork`, and deliberately partial: the
-    /// directory covers networks astar will never dial (NXDN, P25, URF), and
+    /// directory covers networks astar cannot dial (P25, URF), and
     /// `nil` for those is the honest answer rather than a fallback to
     /// something dialable. Used where a directory row has to reach the network
     /// picker — the search sheet browsing past the selected network.
@@ -124,7 +125,8 @@ extension Network {
         case .m17: return .m17
         case .dstar: return .dstar
         case .ysf: return .ysf
-        case .nxdn, .p25, .urf, .other: return nil
+        case .nxdn: return .nxdn
+        case .p25, .urf, .other: return nil
         }
     }
 }

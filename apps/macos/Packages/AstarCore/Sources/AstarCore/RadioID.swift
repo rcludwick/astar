@@ -50,6 +50,59 @@ public enum RadioID {
     }
 }
 
+/// The operator's NXDN id — a *different* number from the DMR radio ID, and a
+/// separate field for the same reason the DMR one is separate from a callsign.
+///
+/// NXDN addresses stations by a 16-bit number: `NXDNGateway/NXDNNetwork.cpp`
+/// packs the source and destination as `unsigned short srcId, dstId`, and
+/// `NXDNReflector`'s `Reflectors.h` holds its own id the same way. A
+/// registered DMR ID is six or seven digits and does not fit in sixteen bits,
+/// so it cannot stand in here — truncating one would put somebody else's
+/// number on the air, which is why astar asks for this separately rather than
+/// deriving it.
+///
+/// Range `1...65519`: `0` addresses nobody, and `65520` and up are reserved
+/// by the standard for special destinations, so neither is an id a station
+/// may transmit as.
+public enum NxdnID {
+    /// The smallest usable id. `0` is not an address.
+    public static let minimum: UInt16 = 1
+    /// The largest id a station may use — everything above is reserved.
+    public static let maximum: UInt16 = 65519
+
+    /// The longest string the field will hold. Deliberately LONGER than the
+    /// five digits of `maximum`: a DMR ID pasted here has to survive intact
+    /// so it can be refused, and truncating `3153591` to `31535` would turn
+    /// somebody else's registration into a number astar would happily
+    /// transmit as. Same cap as `RadioID.maxDigits`, so nothing a DMR field
+    /// accepts is silently reshaped by this one.
+    public static let maxDigits = RadioID.maxDigits
+
+    /// What to store for what the user typed: digits only.
+    ///
+    /// Filtering rather than refusing, exactly as `RadioID.sanitized` does —
+    /// pasting a number out of an email that wrapped it in spaces should just
+    /// work, and a stray letter should never reach the stored value. The
+    /// RANGE is not enforced here: see `value(_:)`, which refuses.
+    public static func sanitized(_ text: String) -> String {
+        String(text.filter(\.isASCIIDigit).prefix(maxDigits))
+    }
+
+    /// The id `text` names, or `nil` when it is empty, not a number, or
+    /// outside `1...65519`.
+    ///
+    /// Unlike `RadioID.isPlausible` this is a REFUSAL, not a caption: astar
+    /// can dial NXDN, and a number the wire cannot carry is not something to
+    /// warn about and then transmit anyway.
+    public static func value(_ text: String) -> UInt16? {
+        let digits = sanitized(text)
+        guard !digits.isEmpty, let value = UInt16(digits),
+            (minimum...maximum).contains(value)
+        else { return nil }
+        return value
+    }
+}
+
 extension Character {
     /// `isNumber` is true for Unicode digits astar has no use for — Arabic-Indic
     /// forms, superscripts, Roman numerals. A radio ID is ASCII `0`–`9`.
