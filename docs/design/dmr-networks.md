@@ -1,8 +1,10 @@
 # DMR — design
 
-**Status:** started. `crates/astar-dmr` holds the network taxonomy and the
-consent gate; there is no protocol, no vocoder and no dial grammar yet. Still
-last of the AMBE family by Rob's call — see "Where this stands" at the end.
+**Status:** in progress — see
+`docs/superpowers/plans/2026-09-07-dmr-network.md`, and `dmr-wire.md` for the
+wire itself. `crates/astar-dmr` holds the network taxonomy and the consent
+gate; there is no protocol, no vocoder and no dial grammar yet. Still last of
+the AMBE family by Rob's call — see "Where this stands" at the end.
 **Read first:** `docs/design/adding-a-network.md`, then `ysf-network.md` — DMR
 inherits the AMBE+2 vocoder work and almost nothing else.
 
