@@ -694,17 +694,20 @@ impl Fixture {
     }
 
     /// Key or unkey the way `ConsoleSession::set_ptt` does: the lane's gate
-    /// FIRST on key-down (so the pre-roll and the speech onset are already
-    /// in `tx_frames` when the run loop sees the edge), the session's
-    /// protocol edge, then the gate again on key-up.
+    /// FIRST in BOTH directions, then the session's protocol edge. On
+    /// key-down that is what puts the pre-roll and the speech onset into
+    /// `tx_frames` before the run loop ever sees the edge; on key-up it is
+    /// what stops the lane capturing before the session drains its tail.
     fn key(&mut self, on: bool) {
-        if on {
-            self.router.set_gate(&self.mic, true);
-        }
+        self.router.set_gate(&self.mic, on);
         self.session_mut().set_ptt(on);
-        if !on {
-            self.router.set_gate(&self.mic, false);
-        }
+    }
+
+    /// Arm the lane's VOX look-back ring. `ConsoleSession` pushes this from
+    /// the operator's `vox_preroll_ms` preference when it opens the route;
+    /// a lane built by [`route`] starts with it disabled.
+    fn set_preroll_ms(&self, ms: u32) {
+        self.router.set_mic_preroll_ms(&self.mic, ms);
     }
 
     /// Takes the session out and disconnects it directly, bypassing
@@ -1080,6 +1083,93 @@ fn keying_ptt_emits_header_then_voice_and_unkey_emits_one_terminating_frame() {
     assert_eq!(
         end_count, 1,
         "exactly one frame may carry the EOT bit — got {end_count} in {tail:?}"
+    );
+}
+
+/// The VOX pre-roll must survive the window between the gate opening and the
+/// run loop noticing the key.
+///
+/// `ConsoleSession::set_ptt` opens the lane's gate and only THEN stores the
+/// PTT request, and the run loop applies that request once per pass — so the
+/// lane's look-back ring (and the speech onset behind it) lands in
+/// `tx_frames` while the loop still reads as unkeyed. The unkeyed
+/// drain-and-drop therefore has to run on the SAME pass that read the
+/// request, before anything can block. Behind the 50 ms idle socket read it
+/// ate exactly the audio it exists to protect: the operator's first syllable,
+/// silently, on every over.
+///
+/// The sleep before the key is what puts the run loop inside that idle read,
+/// which is where a real operator's key-down lands almost every time.
+#[test]
+fn the_preroll_flushed_before_the_run_loop_sees_the_key_is_transmitted() {
+    /// Speech captured BEFORE the key: held in the lane's look-back ring.
+    const PREROLL: i16 = 6_000;
+    /// Speech captured after it.
+    const LIVE: i16 = 11_000;
+
+    let mut f = Fixture::start(|s| FakeVocoder::new(Duration::from_millis(2), s));
+    let listener = f.talker("W1AW");
+    f.set_preroll_ms(200);
+
+    // 100 ms of speech while unkeyed: five 20 ms frames into the ring, none
+    // of them anywhere near the wire yet.
+    push_mic_level(&f.mic_sink, PREROLL, 100);
+    // Settle the run loop into its idle socket read, so the key below lands
+    // mid-pass — after that pass has already read `ptt_request` as false.
+    thread::sleep(Duration::from_millis(80));
+
+    f.key(true);
+    // The capture callback that observes the gate's false->true edge and
+    // flushes the ring ahead of the live audio. This is the delivery that
+    // used to be eaten.
+    push_mic_level(&f.mic_sink, LIVE, 100);
+
+    assert!(
+        wait_until(|| f.session().state().ptt, 1_000),
+        "set_ptt(true) must be applied by the run-loop"
+    );
+    // Long enough for the 20 ms pacer to put all ten frames out.
+    thread::sleep(Duration::from_millis(300));
+    f.key(false);
+    assert!(
+        wait_until(|| !f.session().state().ptt, 1_000),
+        "set_ptt(false) must be applied by the run-loop"
+    );
+
+    let sent = listener.drain_quiet(300);
+    let levels: Vec<i16> = sent
+        .iter()
+        .filter_map(|bytes| match DsvtPacket::parse(bytes) {
+            Ok(DsvtPacket::Voice { ambe, .. }) => Some(decoded_tx_level(&ambe)),
+            _ => None,
+        })
+        .collect();
+    let near = |want: i16| {
+        levels
+            .iter()
+            .any(|l| (i32::from(*l) - i32::from(want)).abs() <= 2)
+    };
+    assert!(
+        near(PREROLL),
+        "the pre-roll flushed at the gate edge never reached the wire — the unkeyed drain ate \
+         the operator's speech onset. levels transmitted: {levels:?}"
+    );
+    assert!(
+        near(LIVE),
+        "the live audio after the key must be transmitted too, levels: {levels:?}"
+    );
+    // Ordering: the pre-roll leads the live stream, as the lane flushed it.
+    let first_preroll = levels
+        .iter()
+        .position(|l| (i32::from(*l) - i32::from(PREROLL)).abs() <= 2)
+        .expect("checked above");
+    let first_live = levels
+        .iter()
+        .position(|l| (i32::from(*l) - i32::from(LIVE)).abs() <= 2)
+        .expect("checked above");
+    assert!(
+        first_preroll < first_live,
+        "the pre-roll must lead the live stream, got {levels:?}"
     );
 }
 

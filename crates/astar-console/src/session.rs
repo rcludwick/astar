@@ -1975,6 +1975,7 @@ impl ConsoleSession {
             // writes while a lane is live, and this released the last one.
             self.state.status = CallStatus::Idle;
             self.state.ptt = false;
+            self.state.remote_ptt = false;
             self.state.tx_level_db = -60.0;
             self.state.rx_level_db = -60.0;
             self.state.input_level_db = -60.0;

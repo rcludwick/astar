@@ -385,7 +385,7 @@ fn disconnect_clears_a_live_dstar_session_so_a_fresh_dstar_connect_succeeds() {
     );
 
     // Before the fix (mirroring iax-f2b8-fix Fix 1), a live D-Star session
-    // would stay wedged forever behind ConsoleSession::dstar_connect's own
+    // would stay wedged forever behind the voice route's own
     // AlreadyConnected guard.
     let addr2 = spawn_reflector();
     station

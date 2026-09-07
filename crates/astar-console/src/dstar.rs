@@ -1236,13 +1236,14 @@ fn frame_to_array(v: &[i16]) -> Option<[i16; 160]> {
     Some(a)
 }
 
-/// Run-loop TX step: drain whatever mic PCM frames the router's mic lane has
-/// already queued into `tx.pending_pcm`, bounded by
-/// [`MAX_PENDING_TX_FRAMES`] (overflow drops the newest frame, mirroring RX's
-/// own drop rule). Only meaningful while keyed — the mic lane's gate stops
-/// enqueuing anything the instant it's unkeyed, so calling this while
-/// unkeyed just drains whatever the gate had already let through before
-/// closing.
+/// Run-loop TX step: drain whatever mic PCM frames the lane has already
+/// queued into `tx.pending_pcm`, bounded by [`MAX_PENDING_TX_FRAMES`]
+/// (overflow drops the newest frame, mirroring RX's own drop rule).
+///
+/// Only called while keyed, and on the unkey edge. The gate belongs to
+/// `ConsoleSession::set_ptt`, which closes it before forwarding the unkey —
+/// so the unkey-edge call drains exactly the tail the lane had already let
+/// through, and nothing arrives after it.
 fn drain_tx_mic_frames(ctx: &TxCtx<'_>, tx: &mut TxState) {
     while let Ok(frame) = ctx.call_audio.tx_frames.try_recv() {
         let Some(pcm) = frame_to_array(&frame) else {
@@ -1746,6 +1747,31 @@ fn run_loop(p: RunLoopParams) {
         );
         let keyed = ptt.is_keyed();
 
+        // Not transmitting: drain and DROP, HERE — before anything on this
+        // pass can block. That placement is the whole invariant, not a
+        // detail of layout.
+        //
+        // This is the ONLY discard on the TX path; `key_down` deliberately
+        // keeps what it finds. The gate is `ConsoleSession::set_ptt`'s and it
+        // can be open while this loop is not keyed: it stays open after a
+        // run-loop-forced unkey (link lost, time-out timer) until the
+        // operator releases PTT, and without this the lane would pile audio
+        // into `tx_frames` unbounded and the next transmission would open
+        // with somebody's stale speech.
+        //
+        // It must not eat the VOX pre-roll, and what guarantees that is that
+        // it runs on the SAME pass that read `ptt_request`, with nothing in
+        // between: an operator keying after this line does so against a pass
+        // that will never drain again. Put it after `run_rx_poll_step`
+        // instead — the shape M17 can afford, because M17 drains immediately
+        // after its own `want_key` read — and the 50 ms idle socket read
+        // opens a window in which the gate opens, the lane flushes its
+        // look-back ring, and this arm throws away precisely the audio it
+        // exists to protect.
+        if !keyed {
+            while call_audio.tx_frames.try_recv().is_ok() {}
+        }
+
         // Poll fast whenever anything is waiting on either direction: an RX
         // backlog the vocoder still owes us, or ANY transmit activity — a
         // keyed session must come back around on the ~2 ms cadence its 20 ms
@@ -1777,6 +1803,9 @@ fn run_loop(p: RunLoopParams) {
             keyed,
         );
 
+        // AFTER the RX poll, so the half-duplex handoff ordering is
+        // untouched: this pass has already decided nothing inbound will be
+        // decoded while keyed.
         if keyed {
             run_tx_pump_step(
                 &socket,
@@ -1786,22 +1815,6 @@ fn run_loop(p: RunLoopParams) {
                 header,
                 &mut tx,
             );
-        } else {
-            // Not transmitting: drain and DROP. This is the ONLY discard on
-            // the TX path — `key_down` deliberately keeps what it finds. The
-            // gate is `ConsoleSession::set_ptt`'s and it can be open while
-            // this loop is not keyed: it stays open after a run-loop-forced
-            // unkey (link lost, time-out timer) until the operator releases
-            // PTT, and without this the lane would pile audio into
-            // `tx_frames` unbounded and the next transmission would open with
-            // somebody's stale speech.
-            //
-            // It cannot eat the pre-roll: `set_ptt` stores the PTT request
-            // within nanoseconds of opening the gate, whereas the lane's
-            // flush waits for its next capture callback (up to a frame, ~20
-            // ms) — so any pass that can see flushed frames has already read
-            // `ptt_request` as true and taken the `if` arm.
-            while call_audio.tx_frames.try_recv().is_ok() {}
         }
 
         // Keepalive tick: DextraFsm::tick only ever returns
