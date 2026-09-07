@@ -51,6 +51,7 @@ native front-end over it rather than a shared web shell.
 | M17 | UDP 17000 | Codec 2 3200 | Reflector + module | Callsign |
 | D-Star *(needs a dongle)* | DExtra, UDP 30001 | AMBE+2, on the dongle | XLX/XRF reflector + module | Callsign |
 | System Fusion *(needs a dongle)* | YSF reflector protocol, UDP 42000 | AMBE+2 DN, on the dongle | YSF reflector | Callsign |
+| NXDN *(needs a dongle)* | NXDNReflector, UDP 41400 | AMBE+2, on the dongle | Talkgroup on a reflector | Callsign + NXDN ID |
 
 M17 transmits your callsign on the air; AllStarLink identifies by node number
 instead, and authenticates against the portal rather than a per-node secret.

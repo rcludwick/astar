@@ -1,7 +1,8 @@
 # NXDN — design
 
-**Status:** in progress — see docs/superpowers/plans/2026-09-07-nxdn-network.md.
-Engine item `iax-b9c2`, client item `astar-b8e4`.
+**Status:** receive shipped; transmit gated (Tasks 9–10 of
+docs/superpowers/plans/2026-09-07-nxdn-network.md). Engine item `iax-b9c2`,
+client item `astar-b8e4`.
 **Read first:** `docs/design/adding-a-network.md`, then `ysf-network.md` — NXDN
 is the second AMBE+2 network and inherits most of YSF's answers.
 
@@ -100,3 +101,29 @@ As with YSF: **read the reference, do not recall the wire format.** Build
   change; the *separateness* is what the wire settles.
 
 * Talker display: reuse D-Star's last-heard treatment.
+
+## The identity question is not closed
+
+The "does NXDN need its own field" question above is answered — it does, and
+`CallSession.nxdnRadioID` exists. What is not settled is **where the range
+check on that field lives.**
+
+The 16-bit finding is structural and holds everywhere: NXDN source/destination
+ids are `unsigned short` on the wire (`NXDNGateway/NXDNNetwork.cpp`,
+`NXDNReflector/Reflectors.h`), so nothing above 65535 can ever be sent, and
+`Station::nxdn_connect` (`crates/astar-station/src/station.rs`) refuses a
+`radio_id` of `0` — "0 is not a registration" — before the dongle is touched,
+the same way it refuses an empty callsign and a zero talkgroup. That refusal
+is engine-level and applies to every caller: the app, `nxdn-listen`, and
+anything built on `Station` hereafter.
+
+The app's `NxdnID` goes narrower: `1...65519`, excluding a reserved block
+above `65519` that the engine does not know about and does not enforce.
+`nxdn-listen --radio-id` today accepts anything `Station::nxdn_connect`
+accepts — `1..=65535` — which means a value in that reserved band is refused
+by the Swift picker but not by the CLI or by the engine directly. Whether that
+gap should close (push the reserved-block refusal down into
+`astar-console::nxdn` so every caller gets it, not just the one built UI) or
+stay exactly where it is (a policy choice that belongs to a client, not a
+protocol constraint the engine should own) is Rob's decision, not an agent's —
+recorded here so it is not silently assumed either way.

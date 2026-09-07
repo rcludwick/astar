@@ -715,6 +715,32 @@ already publishes these reflectors with a `dial.kind`.
 
 **Design:** `docs/design/nxdn-network.md`.
 
+**Progress 2026-09-07 — RECEIVE IS BUILT.** `crates/astar-nxdn` carries the
+protocol (framing, link FSM, a loopback reflector with a parrot mode);
+`astar-codec` reuses `VocoderMode::YsfDn` rather than adding an
+`NxdnDn` — `DroidStar` and `MMDVMHost` both configure the AMBE-3000 for NXDN
+exactly as they do for YSF DN, so the frame packing is shared rather than
+duplicated (see the design doc's "The vocoder" section for the citation).
+`astar-console::nxdn` decodes onto the station's shared audio lane; the
+Station facade, C ABI, node key guard, Swift binding and `Network.nxdn` are
+all in, receive-only, per `astar-b8e4`. `astar-cli nxdn-listen` is the
+hardware checkpoint, mirroring `ysf-listen`.
+
+**Verified: loopback and unit tests, bytes proven. Unverified: audio.** The
+protocol crate's own loopback reflector and the feature-gated suites
+(`just nxdn-test`) all pass — framing, the link FSM, and frame packing are
+proven bytes-in-bytes-out. Whether the AMBE+2 decode is *intelligible speech*
+needs a `ThumbDV` on a live reflector and has not been run; that is Rob's
+checkpoint, not an agent's. KC-Wide's NXDN TG 31313 is the local target.
+
+**Remaining: transmit, and the identity range-check placement.** Transmit is
+Tasks 9–10 of `docs/superpowers/plans/2026-09-07-nxdn-network.md`, fenced
+until Rob confirms a clean YSF parrot round trip on the fixed build (the DN
+encode/packing path is shared between the two networks). Separately, where
+the reserved NXDN-id-range check lives (app-only today, not pushed into the
+engine) is an open, deliberately un-decided question — see "The identity
+question is not closed" in the design doc.
+
 ### iax-c9f4 — Hams Over IP engine backend: SIP/RTP client (G.711)
 *P3 low · feature · labels: hoip, protocol, cx:4*
 

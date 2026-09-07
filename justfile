@@ -122,6 +122,33 @@ ysf-parrot port:
 ysf-listen host callsign *args:
     cargo run --release -p astar-cli --features ysf -- ysf-listen {{host}} --callsign {{callsign}} {{args}}
 
+# NXDN's hardware-free half: the protocol crate, the codec layer, the session
+# and the facade. `astar-nxdn` and `astar-codec::nxdn` are already covered by
+# `just ci`; the feature-gated halves are not.
+nxdn-test:
+    cargo test -p astar-nxdn
+    cargo test -p astar-console --features nxdn
+    cargo test -p astar-station --features nxdn
+    cargo test -p astar-cli --features nxdn
+
+# NXDN — hardware-free bench loop, then the hardware checkpoint.
+#
+#     just nxdn-parrot 41400 31313          # terminal 1
+#     just nxdn-listen 127.0.0.1:41400 KC0ABC 4242 31313   # terminal 2
+#
+# astar does not transmit NXDN yet, so this is not the round-trip bench
+# `ysf-parrot`/`m17-parrot` are. Its use today is a known stream on
+# 127.0.0.1 from a real transmitter through a hotspot, or from the loopback
+# tests — when transmit lands it becomes the round-trip bench.
+nxdn-parrot port tg="31313":
+    cargo run -p astar-nxdn --example nxdn_parrot -- --port {{port}} --tg {{tg}}
+
+# Link an NXDNReflector talkgroup and decode the voice on it. RECEIVE ONLY —
+# this command has no PTT, because astar has no NXDN transmit path yet.
+# Add --wav /tmp/nxdn.wav to capture instead of play.
+nxdn-listen host callsign radio_id tg *args:
+    cargo run --release -p astar-cli --features nxdn -- nxdn-listen {{host}} --callsign {{callsign}} --radio-id {{radio_id}} --tg {{tg}} {{args}}
+
 dstar-test-hw:
     IAX_THUMBDV_TESTS=1 cargo test -p astar-codec --features ambe-hw
     IAX_THUMBDV_TESTS=1 cargo test -p astar-console --features dstar

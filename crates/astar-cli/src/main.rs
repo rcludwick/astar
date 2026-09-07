@@ -20,10 +20,12 @@ mod cli;
 mod dial;
 #[cfg(feature = "dstar")]
 mod dstar_listen;
+#[cfg(feature = "nxdn")]
+mod nxdn_listen;
 mod parrot;
 mod ptt;
 mod register;
-#[cfg(any(feature = "dstar", feature = "ysf"))]
+#[cfg(any(feature = "dstar", feature = "nxdn", feature = "ysf"))]
 mod wav_backend;
 #[cfg(feature = "ysf")]
 mod ysf_listen;
@@ -55,6 +57,10 @@ fn main() -> ExitCode {
         "ysf-listen" => ysf_listen::run(args),
         #[cfg(not(feature = "ysf"))]
         "ysf-listen" => Err("ysf-listen requires building with `--features ysf`".to_string()),
+        #[cfg(feature = "nxdn")]
+        "nxdn-listen" => nxdn_listen::run(args),
+        #[cfg(not(feature = "nxdn"))]
+        "nxdn-listen" => Err("nxdn-listen requires building with --features nxdn".to_string()),
         other => {
             eprintln!("unknown command: {other}\n\n{USAGE}");
             return ExitCode::FAILURE;
