@@ -750,9 +750,7 @@ fn run(
 
     for datagram in fsm.connect(Instant::now()) {
         if socket.send_to(&datagram, addr).is_err() {
-            shared
-                .link_state
-                .store(state_index(LinkState::Failed), Ordering::Relaxed);
+            fail(shared, send_failure_stage());
             return;
         }
     }
@@ -803,11 +801,15 @@ fn run(
         }
     }
 
-    if fsm.state() == LinkState::Failed {
-        // A failed link has nothing to close — the master refused it or
-        // dropped it — and `failed` plus its stage is exactly what the
-        // operator needs to keep seeing. Resetting the state to `idle` here
-        // would erase the diagnosis a moment after it appeared.
+    if state_from_index(shared.link_state.load(Ordering::Acquire)) == LinkState::Failed {
+        // A failed link has nothing to close — the master refused it, dropped
+        // it, or the socket stopped taking bytes — and `failed` plus its stage
+        // is exactly what the operator needs to keep seeing. Resetting the
+        // state to `idle` here would erase the diagnosis a moment after it
+        // appeared. This reads what was PUBLISHED rather than `fsm.state()`,
+        // because a send that could not leave the host is a failure the FSM
+        // never hears about: it hands over the bytes and this loop is the only
+        // thing that learns they did not go.
         return;
     }
 
@@ -831,24 +833,66 @@ fn handle(
 ) -> bool {
     match action {
         FsmAction::None | FsmAction::Linked => true,
-        FsmAction::Send(bytes) => socket.send_to(bytes, addr).is_ok(),
+        FsmAction::Send(bytes) => {
+            if socket.send_to(bytes, addr).is_ok() {
+                return true;
+            }
+            // The socket refused the datagram: the interface went away, the
+            // route did, or the address family stopped matching. Breaking the
+            // loop without saying so would leave the link reporting `idle`
+            // with no failure at all — indistinguishable from an operator
+            // who disconnected on purpose, which is the one reading that
+            // stops anybody looking for the cause.
+            fail(shared, send_failure_stage());
+            false
+        }
         FsmAction::Data(packet) => {
             on_data(packet, shared, audio);
             true
         }
         FsmAction::Failed(stage) => {
-            shared.receiving.store(false, Ordering::Relaxed);
-            shared
-                .failure
-                .store(failure_index(*stage), Ordering::Relaxed);
-            // Release, paired with the Acquire load in `DmrLink::snapshot`:
-            // the stage above must be visible to anything that sees `failed`.
-            shared
-                .link_state
-                .store(state_index(LinkState::Failed), Ordering::Release);
+            fail(shared, *stage);
             false
         }
     }
+}
+
+/// Which [`FailureStage`] a datagram this host could not send reports.
+///
+/// Pure, and its own function, because it is the one failure the FSM never
+/// sees: `FsmAction::Send` hands over bytes and the run loop is the only thing
+/// that learns they did not go, so nothing in `astar-dmr` can classify it.
+///
+/// [`FailureStage::Session`] is the honest one of the six. The other five each
+/// name a thing the MASTER said — a NAK at a step of the chain, an `MSTCL`, or
+/// silence past the timeout — and the master said nothing here. `Session` is
+/// the stage that means "the session ended while it was running", which is
+/// exactly what a socket that stops taking bytes does to it, and it renders as
+/// `session`: an operator sees a link that ended rather than one that was
+/// refused, which is the true distinction.
+///
+/// A stage of its own — `local`, say — would be a better word for it, but it
+/// would be a new variant in `astar-dmr`'s ABI enum, and this build does not
+/// need one badly enough to add it here. That is a note for a later task, not
+/// a silent edit to the protocol crate.
+fn send_failure_stage() -> FailureStage {
+    FailureStage::Session
+}
+
+/// Publish a terminal failure: the stage first, then the state.
+///
+/// The ordering is the invariant. The `Release` store on `link_state` pairs
+/// with the `Acquire` load in [`DmrLink::snapshot`], so a reader that sees
+/// `failed` also sees the stage that says why — never `failed` with no
+/// diagnosis.
+fn fail(shared: &Arc<Shared>, stage: FailureStage) {
+    shared.receiving.store(false, Ordering::Relaxed);
+    shared
+        .failure
+        .store(failure_index(stage), Ordering::Relaxed);
+    shared
+        .link_state
+        .store(state_index(LinkState::Failed), Ordering::Release);
 }
 
 /// One `DMRD` for this link's room: the talker, the transmission's edges, and
@@ -1168,7 +1212,7 @@ fn drain_tail(audio: &mut Audio) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use astar_codec::dmr::pack_voice;
+    use astar_codec::dmr::{FRAMES_PER_BURST, pack_voice};
     use astar_dmr::Master;
     use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -1216,12 +1260,17 @@ mod tests {
         }
     }
 
+    /// What the vocoder was handed, in order — shared, because the `Audio` it
+    /// goes into owns it as a `Box<dyn AmbeStream>` and a trait object cannot
+    /// be looked back inside.
+    type SubmitLog = Arc<Mutex<Vec<ChannelFrame>>>;
+
     /// A vocoder that answers immediately and remembers what it was asked.
     ///
     /// Each frame decodes to 160 samples of its own first byte, so decoded
     /// audio can be attributed to the exact frame that produced it.
     struct FakeVocoder {
-        submitted: Vec<ChannelFrame>,
+        submitted: SubmitLog,
         ready: VecDeque<[i16; 160]>,
         encoded: VecDeque<[u8; 9]>,
     }
@@ -1229,7 +1278,7 @@ mod tests {
     impl FakeVocoder {
         fn new() -> FakeVocoder {
             FakeVocoder {
-                submitted: Vec::new(),
+                submitted: SubmitLog::default(),
                 ready: VecDeque::new(),
                 encoded: VecDeque::new(),
             }
@@ -1239,7 +1288,9 @@ mod tests {
     impl AmbeStream for FakeVocoder {
         fn submit_decode(&mut self, frame: ChannelFrame) {
             let value = i16::from(frame.as_slice()[0]);
-            self.submitted.push(frame);
+            if let Ok(mut log) = self.submitted.lock() {
+                log.push(frame);
+            }
             self.ready.push_back([value; 160]);
         }
         fn poll_decoded(&mut self) -> Option<[i16; 160]> {
@@ -1292,6 +1343,16 @@ mod tests {
         )
     }
 
+    /// [`test_audio`] with the vocoder's submit log kept, for the test that
+    /// asks what the chip was actually handed.
+    fn test_audio_with_log() -> (Audio, Receiver<Vec<i16>>, SubmitLog) {
+        let (mut audio, rx) = test_audio();
+        let vocoder = FakeVocoder::new();
+        let log = Arc::clone(&vocoder.submitted);
+        audio.ambe = Box::new(vocoder);
+        (audio, rx, log)
+    }
+
     /// A bound socket plus a peer to read what was sent to it.
     fn udp_pair() -> (UdpSocket, SocketAddr, UdpSocket) {
         let peer = UdpSocket::bind("127.0.0.1:0").expect("bind peer");
@@ -1304,8 +1365,15 @@ mod tests {
     /// the codec's own packer so the test reads the same layout the decoder
     /// does.
     fn voice_burst() -> [u8; astar_dmr::frame::BURST_LEN] {
+        voice_burst_from(1)
+    }
+
+    /// [`voice_burst`] whose three frames are `first`, `first + 1`,
+    /// `first + 2` — so audio from one transmission can be told from another's
+    /// after both have been through the same vocoder.
+    fn voice_burst_from(first: u8) -> [u8; astar_dmr::frame::BURST_LEN] {
         let frames: [[u8; 9]; 3] =
-            core::array::from_fn(|i| [u8::try_from(i + 1).expect("small"); 9]);
+            core::array::from_fn(|i| [first.saturating_add(u8::try_from(i).expect("small")); 9]);
         let mut burst = pack_voice(&frames);
         astar_dmr::frame::write_sync(&mut burst, astar_dmr::frame::Sync::MsAudio);
         burst
@@ -1567,6 +1635,47 @@ mod tests {
     }
 
     #[test]
+    fn a_new_stream_id_plays_the_previous_talker_out_before_the_new_one_starts() {
+        // The audio half of the stream-id change. The previous over's frames
+        // are still in the pipeline, paced 20 ms apart, when the next talker's
+        // first burst arrives — so they have to be played out FIRST. Without
+        // the flush they sit behind a release clock that belongs to a
+        // transmission that has ended, and the new talker's speech is heard
+        // before the old talker's last words.
+        let (mut audio, rx) = test_audio();
+        let shared = Arc::new(Shared::new(TG, Timeslot::Ts2));
+        let (sock, addr, _peer) = udp_pair();
+
+        handle(
+            &FsmAction::Data(Box::new(voice_packet(0, 0))),
+            &sock,
+            addr,
+            &shared,
+            Some(&mut audio),
+        );
+        let first: Vec<i16> = rx.try_iter().map(|f| f[0]).collect();
+        assert_eq!(first, vec![1], "paced: only the primed frame so far");
+
+        let mut next = voice_packet(0, 0);
+        next.src_id = 5150;
+        next.stream_id = [9, 9, 9, 9];
+        next.burst = voice_burst_from(7);
+        handle(
+            &FsmAction::Data(Box::new(next)),
+            &sock,
+            addr,
+            &shared,
+            Some(&mut audio),
+        );
+        let after: Vec<i16> = rx.try_iter().map(|f| f[0]).collect();
+        assert_eq!(
+            after,
+            vec![2, 3, 7],
+            "the previous stream's tail, then the new stream's first frame"
+        );
+    }
+
+    #[test]
     fn a_burst_on_the_other_timeslot_is_ignored() {
         // TDMA gives a master two rooms on one wire, and this link is in one
         // of them. A burst from the other slot reaching the talker display
@@ -1610,30 +1719,28 @@ mod tests {
 
     #[test]
     fn voice_frames_reach_the_vocoder_tagged_as_dmr() {
-        // `ChannelFrame::Dmr`, built by the codec: nine bytes `.into()` a
-        // chip-configured-for-D-Star frame, and the wrong tag is not an error
-        // anywhere downstream — it is confident noise. The tag is the guard,
-        // so it is worth an assertion.
-        let (mut audio, rx) = test_audio();
+        // `ChannelFrame::Dmr`, built by the codec and never converted: nine
+        // bytes `.into()` a D-Star frame, and the wrong tag is not an error
+        // anywhere downstream — it is a chip configured for the wrong rate
+        // word returning confident noise. So this asks the vocoder what it was
+        // handed rather than inferring it from what came back.
+        let (mut audio, _rx, submitted) = test_audio_with_log();
         let shared = Arc::new(Shared::new(TG, Timeslot::Ts2));
         decode_burst(&voice_burst(), &mut audio, &shared);
         assert!(
             audio.pending.is_empty(),
             "all three frames fit the vocoder in one pass"
         );
-        // Read back through the trait object the only way a test can: the
-        // decoded audio carries each frame's first byte, and the frames were
-        // built as 1, 2, 3.
-        flush(&mut audio);
-        let played: Vec<Vec<i16>> = rx.try_iter().collect();
+        let submitted = submitted.lock().expect("the log");
+        assert_eq!(submitted.len(), FRAMES_PER_BURST, "three frames per burst");
         assert_eq!(
-            played.iter().map(|f| f[0]).collect::<Vec<_>>(),
-            vec![1, 2, 3]
-        );
-        assert_eq!(
-            ChannelFrame::Dmr([1u8; 9]).mode(),
-            VocoderMode::Dmr,
-            "and the tag the codec builds is DMR's, not D-Star's"
+            *submitted,
+            vec![
+                ChannelFrame::Dmr([1u8; 9]),
+                ChannelFrame::Dmr([2u8; 9]),
+                ChannelFrame::Dmr([3u8; 9]),
+            ],
+            "tagged Dmr, and in the order the burst carries them"
         );
     }
 
@@ -1755,6 +1862,59 @@ mod tests {
         assert!(!link.snapshot().ptt);
         link.disconnect();
         master.shutdown();
+    }
+
+    #[test]
+    fn a_datagram_that_cannot_leave_the_host_fails_the_link_rather_than_idling_it() {
+        // Nothing is transmitted here — the send is refused by the host before
+        // a byte reaches a wire: an IPv4 socket cannot address an IPv6
+        // destination. It is the deterministic local way to produce the error
+        // the run loop must not swallow.
+        //
+        // Breaking the loop quietly would leave the link reporting `idle` with
+        // no failure, which is exactly what a deliberate disconnect looks
+        // like — and an operator told "idle" stops looking for the cause.
+        let shared = Arc::new(Shared::new(TG, Timeslot::Ts2));
+        let sock = UdpSocket::bind("127.0.0.1:0").expect("bind v4");
+        let unsendable: SocketAddr = "[::1]:9".parse().expect("v6");
+        let keep_going = handle(
+            &FsmAction::Send(vec![0u8; 4]),
+            &sock,
+            unsendable,
+            &shared,
+            None,
+        );
+        assert!(!keep_going, "the loop stops");
+        assert_eq!(
+            state_str(shared.link_state.load(Ordering::Acquire)),
+            "failed"
+        );
+        assert_eq!(
+            failure_str(shared.failure.load(Ordering::Relaxed)),
+            Some("session"),
+            "and says the session ended, not that the master refused us"
+        );
+    }
+
+    #[test]
+    fn a_send_that_leaves_the_host_keeps_the_link_running() {
+        // The other half, so the arm above cannot pass by failing everything:
+        // a datagram the socket accepts leaves the link exactly as it was.
+        let shared = Arc::new(Shared::new(TG, Timeslot::Ts2));
+        let (sock, addr, peer) = udp_pair();
+        peer.set_read_timeout(Some(Duration::from_millis(200)))
+            .expect("timeout");
+        let keep_going = handle(&FsmAction::Send(vec![7u8; 4]), &sock, addr, &shared, None);
+        assert!(keep_going);
+        assert_eq!(
+            state_str(shared.link_state.load(Ordering::Acquire)),
+            "idle",
+            "nothing was failed"
+        );
+        assert_eq!(failure_str(shared.failure.load(Ordering::Relaxed)), None);
+        let mut buf = [0u8; 8];
+        let (n, _) = peer.recv_from(&mut buf).expect("the peer got it");
+        assert_eq!(&buf[..n], &[7u8; 4]);
     }
 
     #[test]
