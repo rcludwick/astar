@@ -387,6 +387,20 @@ impl Manager {
         self.config.sample_rate
     }
 
+    /// The station's one audio router. Digital-voice sessions in
+    /// `astar-console` open their lanes on it (see `VoiceRoute` there)
+    /// rather than building routers of their own. The IAX2 call path keeps
+    /// going through this type's own methods.
+    #[must_use]
+    pub fn router(&self) -> &AudioRouter {
+        &self.router
+    }
+
+    /// Mutable form of [`Self::router`].
+    pub fn router_mut(&mut self) -> &mut AudioRouter {
+        &mut self.router
+    }
+
     /// Select the primary-link transport (iax-927a). [`LinkTransport::Udp`]
     /// (the default — calling this with it is a no-op reset) keeps plain OS
     /// UDP; [`LinkTransport::Wireguard`] builds ONE shared [`WgStack`] whose

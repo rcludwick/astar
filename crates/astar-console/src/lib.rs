@@ -16,6 +16,10 @@ pub mod parrot;
 pub mod session;
 pub mod state;
 pub mod tracer;
+/// The one audio lane every digital-voice session runs on.
+mod voice_route;
+#[cfg(feature = "ysf")]
+pub mod ysf;
 
 pub use astar_audio::{MicProfile, NotchSpec};
 pub use astar_iax::{Direction, TracedFrame};
@@ -33,14 +37,18 @@ pub use astar_codec::ambe::AmbeBackend;
 #[cfg(feature = "dstar")]
 pub use astar_dstar::LinkState as DstarLinkState;
 #[cfg(feature = "m17")]
-pub use m17::{M17Config, M17Prefs, M17Session, M17SnapshotState};
+pub use m17::{M17Config, M17Session, M17SnapshotState};
 pub use metering::{Gain, Level, MeteringBackend, peak_to_dbfs};
 pub use parrot::{LocalParrot, ParrotPhase, ParrotShared, calibrate_mic};
 #[cfg(feature = "dstar")]
 pub use session::dstar_available;
+#[cfg(feature = "ysf")]
+pub use session::ysf_available;
 pub use session::{
     AnswerPolicy, ConsoleConfig, ConsoleError, ConsoleSession, LinkConnectSpec, LinkKeyResolver,
     RegisterOutcome, list_devices, m17_available, resolve_device,
 };
 pub use state::{CallSnapshot, CallStatus, ConsoleState, OperatingMode, VoiceFormat};
 pub use tracer::{TimelineEvent, Tracer};
+#[cfg(feature = "ysf")]
+pub use ysf::{YsfConfig, YsfLink, YsfSnapshot};

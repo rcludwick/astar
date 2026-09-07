@@ -17,6 +17,7 @@ astar-m17 = { path = "../astar-m17", optional = true }
 # link FSM, no extra deps of its own. Optional + gated behind the `dstar`
 # feature (OFF by default — see that feature's doc below) below.
 astar-dstar = { path = "../astar-dstar", optional = true }
+astar-ysf = { path = "../astar-ysf", optional = true }
 # Underlay socket for applying a deferred `WireGuard` link transport when the
 # engine is first built (iax-5bbd); config/status types come via `astar-iax`.
 astar-wireguard = { path = "../astar-wireguard" }
@@ -82,6 +83,14 @@ codec2-static = ["astar-codec/codec2-static"]
 # `cargo tree -p astar-console --features dstar` (`ambe-thumbdv`
 # present).
 dstar = ["dep:astar-dstar", "astar-codec/ambe-hw"]
+# System Fusion (iax-e8a4 link layer, astar-e7b3 §2 audio). Like `dstar` and
+# unlike `m17`, this is NOT part of `default`, and for the same reason: YSF
+# voice is AMBE+2, there is no software AMBE, so decoding it needs
+# `astar-codec/ambe-hw` and the vendored `ThumbDV` driver behind it. A link
+# can still be opened without a dongle (`YsfLink::connect`) — it just makes
+# no sound. Receive only: see this crate's `ysf` module docs for why transmit
+# is blocked at the vendored deframer rather than merely unwritten.
+ysf = ["dep:astar-ysf", "astar-codec/ambe-hw"]
 
 [lints]
 workspace = true

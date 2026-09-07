@@ -844,6 +844,7 @@ pub fn handle_request(state: &ServerState, method: &str, path: &str, body: &[u8]
                 policy,
                 answer,
                 register: Some(RegisterConfig {
+                    fallbacks: Vec::new(),
                     peer,
                     username: req.username.clone(),
                     refresh,

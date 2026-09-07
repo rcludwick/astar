@@ -94,9 +94,12 @@ paint the dial grammar into a corner in the meantime.
 
 1. `crates/astar-ysf` — framing, FICH, link FSM, loopback reflector. **Done.**
 2. AMBE+2 RATEP word(s) + YSF frame packing in `astar-codec`.
-3. `crates/astar-console/src/ysf.rs` — session, run loop, `SharedState`,
-   `apply_audio`, and a `connect_with_stream` test seam.
-4. `ConsoleSession` wiring — the §2.4 checklist, **including the audio fan-out**.
+3. `crates/astar-console/src/ysf.rs` — session, run loop, `SharedState`
+   (link/talker/`ptt` only — no meters, no audio preferences), and
+   `connect_with_audio`/`connect_with_stream` taking a `CallAudio` from the
+   station's voice route (adding-a-network.md §2.3, since the
+   one-audio-lane refactor — `YsfLink` owns no `AudioRouter`).
+4. `ConsoleSession` wiring — the §2.4 checklist.
 5. `Station::ysf_connect/_disconnect/_available/_state`, feature chain, C ABI,
    `just cbindgen`, Swift binding, `Network.ysf`.
 

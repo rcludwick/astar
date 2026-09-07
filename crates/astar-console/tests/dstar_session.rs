@@ -83,17 +83,18 @@ fn hardware_lock() -> HardwareGuard {
 }
 
 use astar_audio::{
-    AudioBackend, AudioError, DeviceId, DeviceInfo, Direction, InputSink, OutputSource,
-    StreamConfig, StreamHandle,
+    AudioBackend, AudioError, AudioRouter, CallAudio, DeviceId, DeviceInfo, Direction, InputSink,
+    MicId, OutputId, OutputSource, StreamConfig, StreamHandle,
 };
 use astar_console::{DstarConfig, DstarSession};
 use astar_dstar::{DsvtPacket, LinkState, Reflector, RfHeader};
 
 // ---- a pull-capable test backend (with an inert input device) -------------
 //
-// iax-2f6b: D-Star now opens a real mic lane on connect (TX), so every
-// backend `DstarSession::connect` is handed needs a working `open_input`
-// even for tests that only exercise RX — mirrors `m17_session.rs`'s
+// The session no longer opens anything: the ONE audio lane is opened here,
+// by `route()`, exactly as `ConsoleSession`'s `VoiceRoute` does in
+// production. The backend still needs a working `open_input` — the lane
+// opens the capture device eagerly — mirroring `m17_session.rs`'s
 // `PushBackend`, minus the mic-sink stash (nothing here ever pushes TX
 // audio, so the sink handed to `open_input` is simply dropped).
 
@@ -259,10 +260,50 @@ fn voice_frame(stream_id: u16, seq: u8, end: bool) -> DsvtPacket {
     }
 }
 
+// ---- audio-lane helper -----------------------------------------------------
+
+/// Build the ONE audio lane a [`DstarSession`] is now handed. The session no
+/// longer owns a router, a mic or a bus — `ConsoleSession`'s `VoiceRoute`
+/// does that in production, and this test owns it here — so a test that wants
+/// to transmit keys the returned `MicId`'s gate itself, exactly as
+/// `ConsoleSession::set_ptt` does.
+///
+/// Returns the router (which MUST be kept alive: it owns the streams), the
+/// session's channel ends, and the mic whose gate is the PTT.
+fn route(backend: Box<dyn AudioBackend>) -> (AudioRouter, CallAudio, MicId) {
+    let mic = MicId::new(
+        backend
+            .default_input()
+            .expect("the test backend has an input")
+            .id
+            .as_str(),
+    );
+    let out = OutputId::new(
+        backend
+            .default_output()
+            .expect("the test backend has an output")
+            .id
+            .as_str(),
+    );
+    let mut router = AudioRouter::new(backend);
+    let (audio, mic_tx, _mix) = router
+        .open_monitor_call(&out, StreamConfig::default())
+        .expect("bus");
+    router
+        .open_mic_lane(
+            &mic,
+            mic_tx,
+            Arc::clone(&audio.preroll_lead),
+            StreamConfig::default(),
+        )
+        .expect("mic");
+    (router, audio, mic)
+}
+
 // ---- the test ---------------------------------------------------------------
 
 #[test]
-fn dstar_session_tracks_talker_decodes_rx_and_reports_tx_capable() {
+fn dstar_session_tracks_the_talker_and_decodes_rx() {
     if !hardware_opted_in() {
         return;
     }
@@ -273,31 +314,22 @@ fn dstar_session_tracks_talker_decodes_rx_and_reports_tx_capable() {
     let handle = reflector.run();
 
     let output_tap: OutputTap = Arc::new(Mutex::new(None));
-    let tap_for_backend = Arc::clone(&output_tap);
     let cfg = DstarConfig {
         host: addr.ip().to_string(),
         port: addr.port(),
         module: b'A',
         callsign: "N0CALL".into(),
-        output: None,
-        input: None,
         reflector_callsign: None,
     };
-    let mut session = DstarSession::connect(cfg, &move || {
-        Box::new(PullBackend {
-            output_tap: Arc::clone(&tap_for_backend),
-        }) as Box<dyn AudioBackend>
-    })
-    .expect("dstar session connect");
+    let (router, audio, mic) = route(Box::new(PullBackend {
+        output_tap: Arc::clone(&output_tap),
+    }));
+    let mut session = DstarSession::connect(cfg, audio).expect("dstar session connect");
 
     assert!(
         wait_until(|| session.state().link == LinkState::Linked, 2_000),
         "session must link to the reflector, got {:?}",
         session.state().link
-    );
-    assert!(
-        session.state().tx_capable,
-        "iax-2f6b: D-Star is full-transceive now, tx_capable must be true"
     );
     assert!(!session.state().ptt, "must start unkeyed");
     assert_eq!(
@@ -308,13 +340,18 @@ fn dstar_session_tracks_talker_decodes_rx_and_reports_tx_capable() {
 
     // A quick key/unkey cycle must be applied by the run-loop and never
     // disturb the link (a smoke test — the framing/safety details have
-    // dedicated hardware-free coverage in dstar_session_pipeline.rs).
+    // dedicated hardware-free coverage in dstar_session_pipeline.rs). The
+    // gate is the route's, not the session's: `ConsoleSession::set_ptt`
+    // opens it before forwarding the key, and this test does the same by
+    // hand.
+    router.set_gate(&mic, true);
     session.set_ptt(true);
     assert!(
         wait_until(|| session.state().ptt, 1_000),
         "set_ptt(true) must be applied by the run-loop"
     );
     session.set_ptt(false);
+    router.set_gate(&mic, false);
     assert!(
         wait_until(|| !session.state().ptt, 1_000),
         "set_ptt(false) must be applied by the run-loop"
@@ -358,8 +395,7 @@ fn dstar_session_tracks_talker_decodes_rx_and_reports_tx_capable() {
         "decoded PCM must reach the audio backend's output"
     );
 
-    // tx_capable/link stay well-formed after RX traffic too.
-    assert!(session.state().tx_capable);
+    // The link stays well-formed after RX traffic too.
     assert_eq!(session.state().link, LinkState::Linked);
 
     session.disconnect();
@@ -387,22 +423,17 @@ fn dstar_session_drains_a_short_stream_shorter_than_the_priming_window() {
     let handle = reflector.run();
 
     let output_tap: OutputTap = Arc::new(Mutex::new(None));
-    let tap_for_backend = Arc::clone(&output_tap);
     let cfg = DstarConfig {
         host: addr.ip().to_string(),
         port: addr.port(),
         module: b'A',
         callsign: "N0CALL".into(),
-        output: None,
-        input: None,
         reflector_callsign: None,
     };
-    let session = DstarSession::connect(cfg, &move || {
-        Box::new(PullBackend {
-            output_tap: Arc::clone(&tap_for_backend),
-        }) as Box<dyn AudioBackend>
-    })
-    .expect("dstar session connect");
+    let (_router, audio, _mic) = route(Box::new(PullBackend {
+        output_tap: Arc::clone(&output_tap),
+    }));
+    let session = DstarSession::connect(cfg, audio).expect("dstar session connect");
 
     assert!(
         wait_until(|| session.state().link == LinkState::Linked, 2_000),

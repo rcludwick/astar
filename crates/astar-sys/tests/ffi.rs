@@ -6,7 +6,7 @@
 //! no hardware: only handle lifecycle, idle snapshots, null-guards, and error
 //! codes are covered (live dial is manual parrot acceptance).
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::ptr;
 
 use astar_sys::*;
@@ -119,6 +119,8 @@ fn snapshot_fills_idle_state() {
         m17_active: true,
         dstar_available: true,
         dstar_active: true,
+        ysf_available: true,
+        ysf_active: true,
     };
     let rc = unsafe { iax_station_snapshot(st, std::ptr::from_mut(&mut state)) };
     assert_eq!(rc, IAX_OK);
@@ -132,6 +134,11 @@ fn snapshot_fills_idle_state() {
     // asserted here — it reports whether a ThumbDV is plugged into the
     // machine running the test, which is not ours to pin.
     assert!(!state.dstar_active);
+    // astar-e7b3: and for YSF. `ysf_available` is skipped for the same
+    // reason `dstar_available` is — both read the one ThumbDV probe, and
+    // whether a dongle is plugged into the machine running this test is not
+    // ours to pin.
+    assert!(!state.ysf_active);
     assert_eq!(state.rtt_ms, -1);
     // iax-5c30: idle (no active call) reports the silence floor.
     assert!((state.input_db + 60.0).abs() < 1e-3);
@@ -177,6 +184,8 @@ fn null_guards_return_err_null() {
         m17_active: false,
         dstar_available: false,
         dstar_active: false,
+        ysf_available: false,
+        ysf_active: false,
     };
     assert_eq!(
         unsafe { iax_station_snapshot(ptr::null_mut(), std::ptr::from_mut(&mut state)) },
@@ -317,6 +326,8 @@ fn mint_token_without_portal_is_portal_err() {
         m17_active: false,
         dstar_available: false,
         dstar_active: false,
+        ysf_available: false,
+        ysf_active: false,
     };
     assert_eq!(
         unsafe { iax_station_snapshot(st, std::ptr::from_mut(&mut state)) },
@@ -1603,5 +1614,87 @@ fn idle_snapshot_m17_active_is_false() {
     let mut state = unsafe { std::mem::zeroed::<IaxState>() };
     assert_eq!(unsafe { iax_station_snapshot(st, &raw mut state) }, IAX_OK);
     assert!(!state.m17_active, "idle station must report no M17 session");
+    unsafe { iax_station_free(st) };
+}
+
+// --- astar-e7b3 §2: the YSF state document, offline ---
+
+/// No link, no document — and specifically `{}`, not `null` and not an
+/// object full of zeroes a UI would render as a dead reflector.
+///
+/// Also exercises the two-call sizing contract every string-out entry point
+/// in this ABI shares: a `len == 0` call returns the byte length needed and
+/// writes nothing.
+#[test]
+fn ysf_state_is_an_empty_object_while_idle() {
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(ptr::from_ref(&cfg)) };
+    assert!(!st.is_null());
+
+    let needed = unsafe { iax_station_ysf_state(st, ptr::null_mut(), 0) };
+    assert_eq!(needed, 2, "`{{}}` is two bytes, excluding the NUL");
+
+    let mut buf = [0 as std::ffi::c_char; 64];
+    let n = unsafe { iax_station_ysf_state(st, buf.as_mut_ptr(), buf.len()) };
+    assert_eq!(n, 2);
+    let got = unsafe { CStr::from_ptr(buf.as_ptr()) }
+        .to_str()
+        .expect("the document is always UTF-8");
+    assert_eq!(got, "{}");
+
+    unsafe { iax_station_free(st) };
+}
+
+/// Disconnecting with nothing connected is a no-op, not an error — a UI that
+/// tears down unconditionally on view-disappear must not see a failure.
+#[test]
+fn ysf_disconnect_while_idle_is_ok() {
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(ptr::from_ref(&cfg)) };
+    assert_eq!(unsafe { iax_station_ysf_disconnect(st) }, IAX_OK);
+    assert_eq!(
+        unsafe { iax_station_ysf_disconnect(st) },
+        IAX_OK,
+        "and it is idempotent"
+    );
+    unsafe { iax_station_free(st) };
+}
+
+/// A NULL station is refused rather than dereferenced, on every YSF entry
+/// point — the same contract the rest of this ABI gives.
+#[test]
+fn ysf_entry_points_refuse_a_null_station() {
+    assert_eq!(
+        unsafe { iax_station_connect_ysf(ptr::null_mut(), ptr::null(), ptr::null(), ptr::null()) },
+        IAX_ERR_NULL
+    );
+    assert_eq!(
+        unsafe { iax_station_ysf_disconnect(ptr::null_mut()) },
+        IAX_ERR_NULL
+    );
+    assert_eq!(
+        unsafe { iax_station_ysf_state(ptr::null_mut(), ptr::null_mut(), 0) },
+        IAX_ERR_NULL
+    );
+}
+
+/// A NULL host or callsign is a NULL error, not a panic and not a connect
+/// attempt. `options` is the optional one.
+#[test]
+fn ysf_connect_requires_a_host_and_a_callsign() {
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(ptr::from_ref(&cfg)) };
+    let call = CString::new("N0CALL").unwrap();
+    assert_eq!(
+        unsafe { iax_station_connect_ysf(st, ptr::null(), call.as_ptr(), ptr::null()) },
+        IAX_ERR_NULL,
+        "a NULL host must be refused"
+    );
+    let host = CString::new("127.0.0.1:42000").unwrap();
+    assert_eq!(
+        unsafe { iax_station_connect_ysf(st, host.as_ptr(), ptr::null(), ptr::null()) },
+        IAX_ERR_NULL,
+        "a NULL callsign must be refused"
+    );
     unsafe { iax_station_free(st) };
 }

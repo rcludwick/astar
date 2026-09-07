@@ -27,6 +27,17 @@ public enum Network: String, CaseIterable, Codable, Sendable {
     /// attached and not otherwise. That is the honest gate — a picker entry
     /// that always failed to connect would be worse than no entry.
     case dstar
+    /// System Fusion (YSF) reflector dialing.
+    ///
+    /// Availability is HARDWARE, exactly as for ``dstar`` and from the same
+    /// dongle: YSF voice is AMBE+2 and astar has no software vocoder, so this
+    /// segment appears when a ThumbDV is attached and not otherwise.
+    ///
+    /// RECEIVE ONLY today. The engine decodes DN — the mode Yaesu radios
+    /// actually transmit — and has no transmit path at all, so this network
+    /// offers no PTT. That is deliberate: a transmit affordance that put
+    /// nothing on the air would be a worse lie than an absent one.
+    case ysf
 
     /// The networks the engine can actually drive right now. AllStar is
     /// always available; `hamlink` stays unavailable until the engine gains
@@ -35,10 +46,11 @@ public enum Network: String, CaseIterable, Codable, Sendable {
     /// mirroring the engine's snapshot) says so — for `dstar` that flag
     /// means "a vocoder dongle is present", which is a fact about the desk,
     /// not about the build.
-    public static func available(m17: Bool, dstar: Bool = false) -> [Network] {
+    public static func available(m17: Bool, dstar: Bool = false, ysf: Bool = false) -> [Network] {
         var networks: [Network] = [.allstar]
         if m17 { networks.append(.m17) }
         if dstar { networks.append(.dstar) }
+        if ysf { networks.append(.ysf) }
         return networks
     }
 
@@ -46,9 +58,11 @@ public enum Network: String, CaseIterable, Codable, Sendable {
     /// nil, and known-but-unavailable networks all fall back to `.allstar`
     /// (always the default; nothing user-actionable in the mismatch). `m17`
     /// mirrors `available(m17:)`'s flag.
-    public static func resolve(_ raw: String?, m17: Bool, dstar: Bool = false) -> Network {
+    public static func resolve(
+        _ raw: String?, m17: Bool, dstar: Bool = false, ysf: Bool = false
+    ) -> Network {
         guard let raw, let network = Network(rawValue: raw),
-            available(m17: m17, dstar: dstar).contains(network)
+            available(m17: m17, dstar: dstar, ysf: ysf).contains(network)
         else { return .allstar }
         return network
     }
@@ -60,6 +74,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         case .hamlink: return "Hamlink"
         case .m17: return "M17"
         case .dstar: return "D-Star"
+        case .ysf: return "Fusion"
         }
     }
 
@@ -71,6 +86,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         case .hamlink: return "SVX"
         case .m17: return "M17"
         case .dstar: return "DSTAR"
+        case .ysf: return "YSF"
         }
     }
 
@@ -81,6 +97,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         case .hamlink: return "dot.radiowaves.left.and.right"
         case .m17: return "waveform"
         case .dstar: return "waveform.circle"
+        case .ysf: return "waveform.badge.plus"
         }
     }
 
@@ -94,6 +111,10 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         // reflectors are reachable by `XLX836 A`, and the address form is the
         // fallback for the one nobody has listed.
         case .dstar: return "Reflector name or host / module"
+        // No module: a plain YSFReflector is one room. The port is part of
+        // the address rather than a default, because YSF has no conventional
+        // one and every directory row carries its own.
+        case .ysf: return "Reflector name or host:port"
         }
     }
 
@@ -108,7 +129,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
             return c.isASCII && (c.isLetter || c.isNumber || ".:-*#".contains(c))
         case .hamlink:
             return (c.isASCII && (c.isLetter || c.isNumber)) || ".:-/#".contains(c)
-        case .m17, .dstar:
+        case .m17, .dstar, .ysf:
             // `host[:port]/module` or `host[:port] module`
             // (`ReflectorAddressDial`) — unlike the node networks, the space
             // is part of the grammar (the alternate separator), not something

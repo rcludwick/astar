@@ -78,7 +78,13 @@ Auth-off path collapses to `NEW`(+token) → `ACCEPT` → `ANSWER` → `ACK`.
 secrets are opt-in hardening, not the norm** — many public nodes accept calls from
 any registered node. The daemon's `auth=off` default interoperates with ASL3.
 
-**Codecs:** AllStar uses **GSM** and **µ-law (ulaw)**. Offer/accept these.
+**Codecs:** ASL peers commonly advertise GSM, µ-law, A-law, G.726 and ADPCM;
+µ-law is what they actually ask for on a link, and it is the interop floor.
+**astar implements µ-law, A-law, slin (8 kHz 16-bit linear) and slin16 (16 kHz
+wideband) — and nothing else.** There is no GSM. Extra bits in a peer's
+CAPABILITY are simply masked off; a peer with nothing in common (a
+`disallow=all / allow=gsm` node) is rejected at setup with CAUSE `Unable to
+negotiate codec` rather than accepted with a format it cannot decode.
 
 ---
 
@@ -90,8 +96,8 @@ any registered node. The daemon's `auth=off` default interoperates with ASL3.
   the `[functions]` DTMF map, and a `[nodes]` block (or DNS) for link-target
   resolution. Permanent links are declared here.
 
-For interop you implement the *behavior*: answer on UDP 4569, speak GSM/ulaw, honor
-the link-mode semantics below.
+For interop you implement the *behavior*: answer on UDP 4569, speak µ-law (plus
+whatever linear formats both ends offer), honor the link-mode semantics below.
 
 ---
 

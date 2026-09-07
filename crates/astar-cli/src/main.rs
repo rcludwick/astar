@@ -23,6 +23,10 @@ mod dstar_listen;
 mod parrot;
 mod ptt;
 mod register;
+#[cfg(any(feature = "dstar", feature = "ysf"))]
+mod wav_backend;
+#[cfg(feature = "ysf")]
+mod ysf_listen;
 
 use std::process::ExitCode;
 
@@ -47,6 +51,10 @@ fn main() -> ExitCode {
         "dstar-listen" => dstar_listen::run(args),
         #[cfg(not(feature = "dstar"))]
         "dstar-listen" => Err("dstar-listen requires building with `--features dstar`".to_string()),
+        #[cfg(feature = "ysf")]
+        "ysf-listen" => ysf_listen::run(args),
+        #[cfg(not(feature = "ysf"))]
+        "ysf-listen" => Err("ysf-listen requires building with `--features ysf`".to_string()),
         other => {
             eprintln!("unknown command: {other}\n\n{USAGE}");
             return ExitCode::FAILURE;

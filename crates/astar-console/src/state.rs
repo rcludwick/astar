@@ -39,7 +39,7 @@ pub enum OperatingMode {
 /// A snapshot of live call state for front-ends to render.
 // A plain poll/render DTO, not a control-flow state machine — the bools are
 // independently-meaningful UI flags (ptt/remote_ptt/m17_available/m17_active/
-// dstar_available/dstar_active),
+// dstar_available/dstar_active/ysf_available/ysf_active),
 // not a hidden enum in disguise.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq)]
@@ -135,6 +135,22 @@ pub struct ConsoleState {
     /// against the `dstar` feature at all (see that crate's `NodeCommand::Key`
     /// handler and iax-d9f4).
     pub dstar_active: bool,
+    /// `true` when System Fusion voice is available: the `ysf` feature is
+    /// compiled in AND a `ThumbDV` is currently attached. YSF voice is
+    /// AMBE+2, the same vocoder D-Star needs and from the same dongle, so
+    /// this is [`Self::dstar_available`]'s value read through the same cached
+    /// probe rather than a second scan of the USB bus. Always `false` when
+    /// the `ysf` feature isn't compiled in.
+    pub ysf_available: bool,
+    /// `true` while an [`crate::session::ConsoleSession`]'s YSF link is live
+    /// (mutually exclusive with an IAX2 call, an M17 session and a D-Star
+    /// session — one `ThumbDV`, one link).
+    ///
+    /// Feature-INDEPENDENT for the same reason [`Self::dstar_active`] is:
+    /// `astar-server` refuses remote keying while a digital-voice link holds
+    /// the dongle, and must be able to read that without compiling the
+    /// feature.
+    pub ysf_active: bool,
 }
 
 impl Default for ConsoleState {
@@ -160,6 +176,8 @@ impl Default for ConsoleState {
             m17_active: false,
             dstar_available: false,
             dstar_active: false,
+            ysf_available: false,
+            ysf_active: false,
         }
     }
 }

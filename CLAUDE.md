@@ -90,9 +90,10 @@ committed `astar.h` / `astarserial.h` must not drift.
 ## D-Star / AMBE
 
 D-Star is hardware-only: the ThumbDV / DV3000 dongle via `vendor/ambe-thumbdv`.
-There is **no** software AMBE backend — the old `ambe-soft` feature and its
-`SoftAmbe` type were removed, and there is no dependency on the external `ambe`
-repo. `astar-codec`'s `ambe-hw` feature is off by default.
+There is **no** software AMBE backend, and none is ever to be added, referenced
+or described here — not in code, docs, comments, backlog or commit messages.
+The vendored driver is the whole AMBE story. `astar-codec`'s `ambe-hw` feature
+is off by default.
 
 `vendor/ambe-thumbdv/Cargo.toml` hard-codes `license`/`version`/`edition`/
 `repository` on purpose. Do not convert them to `.workspace = true` — that would
@@ -210,6 +211,38 @@ outlives the session goes there.
 **Always use a per-item git worktree for implementation work** — never work
 directly on the default branch in the main checkout, which is reserved for
 merging and doc commits. Check `git worktree list` first.
+
+### Design docs — and keeping them honest
+
+Designs and implementation plans live in `docs/superpowers/`, which is
+**gitignored on purpose**: this is internal working material, it is not
+published, and it is not in either remote. Browse it with `just design`
+(localhost:8001, live reload); `zensical.design.toml` is a second Zensical
+project kept deliberately separate from the public site, because
+`ci/build-docs.sh` reads only `zensical.toml`.
+
+| Directory | Means |
+|---|---|
+| `specs/` | a design agreed but **not yet shipped** |
+| `plans/` | a task-by-task plan for work **still in progress** |
+| `notes/` | a finding that belongs to no single spec |
+| `implemented/` | shipped. Kept for the reasoning, not as a to-do list |
+
+**A file's directory is a claim about the state of the code, and that claim
+rots.** Work lands, the backlog moves on, and nobody moves the file — so
+`specs/` silently fills with things that were finished months ago, and the
+next session reads them as outstanding work.
+
+So: **when you pick up design work, check the open designs against reality
+first.** For each one that looks related to what you are about to do, confirm
+against the code and `docs/BACKLOG.md` whether it actually shipped. If it did,
+`git mv`-style move it to `implemented/` — plans especially, which are pure
+procedure and worthless once the steps are ticked. A spec whose reasoning
+exists nowhere else belongs in `docs/design/` first; move it only after that
+reasoning has a permanent home.
+
+Nothing here is in version control, so a deletion is unrecoverable except from
+Time Machine. **Move to `implemented/`; do not delete.**
 
 ## Conventions
 

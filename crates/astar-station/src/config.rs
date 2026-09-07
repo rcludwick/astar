@@ -17,12 +17,73 @@ pub use astar_console::AnswerPolicy;
 /// never from config.
 #[derive(Clone, Debug)]
 pub struct RegisterConfig {
-    /// The upstream registrar's address (resolve the node→host:port yourself).
+    /// The registrar to try first.
     pub peer: std::net::SocketAddr,
+    /// Further registrars to try when `peer` stops answering, tried in order
+    /// and then cyclically. Empty is the old behaviour: one address, forever.
+    ///
+    /// This exists because a registrar hostname is commonly several hosts
+    /// that do **not** behave alike from a given source address.
+    /// `register.allstarlink.org` resolves to three, and a node on one VPS
+    /// measured, seven weeks apart:
+    ///
+    /// | | 2026-07-20 | 2026-08-30 |
+    /// |---|---|---|
+    /// | `52.21.169.197` | REGAUTH | silent |
+    /// | `52.44.147.201` | REGAUTH | REGAUTH |
+    /// | `52.20.63.146` | silent | REGAUTH |
+    ///
+    /// Pinning one address is therefore a bet that gets re-lost whenever the
+    /// far end changes, and losing it is silent: REGREQs go out and nothing
+    /// comes back. That node was unregistered for nine days. Rotating on
+    /// failure turns a permanent outage into a delay of one retry.
+    pub fallbacks: Vec<std::net::SocketAddr>,
     /// The username/node id to register AS (e.g. `"77777"`).
     pub username: String,
     /// Requested refresh interval.
     pub refresh: Duration,
+}
+
+impl RegisterConfig {
+    /// Build from `host:port`, resolving a hostname to every address it has.
+    ///
+    /// A literal `IP:port` yields exactly one candidate and behaves as
+    /// before. A hostname yields all of them, first as `peer` and the rest as
+    /// [`Self::fallbacks`] — which is the point: one address is a single
+    /// point of failure that fails silently.
+    ///
+    /// # Errors
+    /// The `io::Error` from resolution, or `AddrNotAvailable` when the name
+    /// resolves to nothing.
+    pub fn resolve(
+        host_port: &str,
+        username: impl Into<String>,
+        refresh: Duration,
+    ) -> std::io::Result<RegisterConfig> {
+        use std::net::ToSocketAddrs;
+        let mut addrs = host_port.to_socket_addrs()?;
+        let peer = addrs.next().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::AddrNotAvailable,
+                format!("{host_port} resolved to no addresses"),
+            )
+        })?;
+        Ok(RegisterConfig {
+            peer,
+            fallbacks: addrs.collect(),
+            username: username.into(),
+            refresh,
+        })
+    }
+
+    /// Every candidate, `peer` first. Never empty.
+    #[must_use]
+    pub fn candidates(&self) -> Vec<std::net::SocketAddr> {
+        let mut all = Vec::with_capacity(1 + self.fallbacks.len());
+        all.push(self.peer);
+        all.extend_from_slice(&self.fallbacks);
+        all
+    }
 }
 
 /// Node-mode configuration. **Secret-free** — inbound credentials (for
@@ -91,12 +152,22 @@ pub struct StationConfig {
     /// `None` = the live `AllStarLink` portal. Set only to point at a staging or
     /// stub portal (e.g. an offline test harness); not exposed across the C-ABI.
     pub portal_base: Option<String>,
-    /// Codec negotiation policy for OUTBOUND calls placed by this station
-    /// (iax-31f7). Default `UlawOnly`. **Outbound-only**: this field feeds
-    /// `connect`/`connect_wt` only. Inbound calls take their codec policy from
-    /// `node.policy.codec_policy` (or `NodeConfig::default()`'s
-    /// `IncomingCallPolicy::default()`, also `UlawOnly`) — set that field
-    /// directly if a caller wants asymmetric inbound/outbound policy.
+    /// The station's codec negotiation policy (iax-31f7, iax-4348). Default
+    /// `UlawOnly`. Three things at once, and they are deliberately one field:
+    ///
+    /// * **It pins the station's audio pipeline rate**, at construction,
+    ///   before anything can build the engine — 16 kHz for a policy that can
+    ///   offer slin16, else 8 kHz. The rate is fixed when the engine is built
+    ///   and every dial's policy is capped to it, so a `prefer_slin16` station
+    ///   only really offers slin16 if this is known first. It is what makes
+    ///   the app and `astar-server` slin16 stations whichever network — IAX2,
+    ///   M17, D-Star or System Fusion — happens to start first.
+    /// * **It is the policy for OUTBOUND calls** (`connect`/`connect_wt`).
+    /// * **It is the DEFAULT for inbound calls.** `enable_inbound` and
+    ///   `set_mode(Node)` fill it into the inbound policy whenever the caller
+    ///   left `node.policy.codec_policy` at its own `UlawOnly` default. Set
+    ///   that field to anything else for an asymmetric inbound/outbound
+    ///   policy; it is then honoured as given.
     pub codec_policy: CodecPolicy,
 }
 

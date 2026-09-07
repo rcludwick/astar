@@ -4,8 +4,8 @@
 # Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 # Merge invariant: this repo has NO git dependencies.
 #
-# The AMBE software vocoder (ambe-dstar / ambe-core) was dropped; the ThumbDV
-# driver survives as a vendored path crate at vendor/ambe-thumbdv. That is what
+# The only AMBE code here is the ThumbDV driver, a vendored path crate at
+# vendor/ambe-thumbdv — there is no software vocoder and never will be. That is what
 # makes `cargo build --locked --offline` work and what keeps the build from
 # reaching out to an external repo mid-CI. If a `git = "..."` dependency ever
 # comes back, the offline/locked guarantee dies quietly — so fail loudly here.
@@ -36,10 +36,10 @@ if git grep -nE '(^|[[:space:],{])git[[:space:]]*=[[:space:]]*"' -- '*Cargo.toml
   rc=1
 fi
 
-# 3. The dropped software vocoder must not reappear as a dependency.
-if git grep -nE '^[[:space:]]*(ambe-dstar|ambe-core)[[:space:]]*=' -- '*Cargo.toml'; then
-  echo "FAIL: ambe-dstar / ambe-core are the SOFTWARE vocoder and were removed." >&2
-  echo "      D-Star in this repo is ThumbDV-only (vendor/ambe-thumbdv)." >&2
+# 3. The vendored ThumbDV driver is the only AMBE crate astar may depend on.
+if git grep -nE '^[[:space:]]*ambe-[a-z-]+[[:space:]]*=' -- '*Cargo.toml' | grep -v 'ambe-thumbdv'; then
+  echo "FAIL: the only AMBE crate astar depends on is the vendored ThumbDV driver." >&2
+  echo "      AMBE in this repo is hardware-only (vendor/ambe-thumbdv)." >&2
   rc=1
 fi
 

@@ -1,0 +1,94 @@
+# ============================================================================
+# Zensical configuration for the INTERNAL design docs — specs, plans, notes.
+#
+#   just design       →  zensical serve, http://localhost:8001, live reload
+#
+# ---------------------------------------------------------------------------
+# THIS SITE IS NEVER PUBLISHED. Two independent things guarantee it:
+#
+#   1. ci/build-docs.sh hard-codes CONFIG="$ROOT/zensical.toml". This file has
+#      a different name, so nothing in CI can discover it. Do not rename it to
+#      zensical.toml, and do not teach build-docs.sh to look for it.
+#   2. docs/superpowers/ is gitignored (.gitignore:74), so the Markdown never
+#      reaches either remote in the first place.
+#
+# The public site deliberately excludes this material — see the docs_dir note
+# in ./zensical.toml. Keep the two configs separate; merging them would publish
+# every unreleased design decision in the repository to GitHub Pages.
+# ---------------------------------------------------------------------------
+# ============================================================================
+
+[project]
+
+site_name = "astar — design docs"
+site_description = "Internal specs, plans and notes. Not published."
+site_author = "Rob Ludwick"
+
+repo_url = "https://github.com/rcludwick/astar-private"
+repo_name = "rcludwick/astar-private"
+
+# The gitignored working tree of design documents. `just design` regenerates
+# index.md here before serving; everything else is hand-written.
+docs_dir = "docs/superpowers"
+
+# Build output, gitignored via docs/.gitignore. Distinct from docs/.site so a
+# design build can never overwrite the public site's output.
+site_dir = "docs/.design-site"
+
+# No `nav`. The set of documents changes constantly and every entry in an
+# explicit nav must exist, so the tree is derived from the directory layout.
+
+copyright = "Internal engineering material — not for publication."
+
+[project.theme]
+language = "en"
+font = false
+
+features = [
+  "content.code.copy",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.sections",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "toc.follow",
+]
+
+# Unlike the public site this does not set primary/accent to "custom": that
+# tells the theme to emit no colour rules at all and hands them to
+# docs/site/stylesheets/astar.css, which is not on this docs_dir's path.
+[project.theme.palette]
+scheme = "slate"
+primary = "indigo"
+accent = "indigo"
+
+[project.markdown_extensions]
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+tables = {}
+toc = { permalink = true }
+
+"pymdownx.betterem" = {}
+"pymdownx.caret" = {}
+"pymdownx.details" = {}
+"pymdownx.inlinehilite" = {}
+"pymdownx.keys" = {}
+"pymdownx.magiclink" = {}
+"pymdownx.mark" = {}
+"pymdownx.tilde" = {}
+
+"pymdownx.highlight" = { anchor_linenums = true, line_spans = "__span", pygments_lang_class = true }
+
+# Plans are checklists — `- [ ]` steps — so tasklist is load-bearing here in a
+# way it is not on the public site.
+"pymdownx.tasklist" = { custom_checkbox = true }
+
+# Mermaid, same custom fence the public site uses.
+[project.markdown_extensions."pymdownx.superfences"]
+custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]

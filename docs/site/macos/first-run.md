@@ -8,8 +8,22 @@ This is the short path from a freshly downloaded `astar.dmg` to hearing a
 repeater and being heard back. It should take about ten minutes, most of it
 spent on audio levels.
 
+!!! danger "You must be a licensed amateur"
+
+    Everything below ends with a real transmitter keying on a real band.
+    **An appropriate amateur radio licence for your jurisdiction is
+    required**, and as control operator you are responsible for every
+    transmission your station makes — including the ones a computer
+    initiated on your behalf.
+
+    astar does not know your licence class, your band and mode privileges,
+    or your local identification rules. Those stay yours.
+    [On-air safety](../about/safety.md) is the full version and is not
+    optional reading.
+
 !!! info "What you need"
 
+    * **An amateur radio licence**, and a callsign you are entitled to use.
     * A Mac running **macOS 13 (Ventura) or later**, Apple silicon.
     * An **AllStarLink account** on [allstarlink.org](https://www.allstarlink.org/)
       with at least one node number assigned to your callsign.

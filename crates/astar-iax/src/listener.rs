@@ -1506,6 +1506,16 @@ fn inval_warranted(bytes: &[u8]) -> bool {
 }
 
 fn reject_inline(sock: &Arc<dyn LinkSocket>, peer_call: u16, cause: &str, dst: SocketAddr) {
+    // Every inline REJECT in one place. These are the refusals that happen
+    // before a leg exists -- bad IEs, unknown user, node at max_calls -- so
+    // nothing downstream ever sees them and, unlogged, they are indis-
+    // tinguishable from the node ignoring the caller outright.
+    tracing::info!(
+        target: "astar_iax::listener",
+        peer = %dst,
+        cause,
+        "rejecting inbound call"
+    );
     if let Some(b) = inline_reject(peer_call, cause) {
         let _ = sock.send_to(&b, dst);
     }

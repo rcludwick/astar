@@ -100,7 +100,7 @@ guards:
     # Nothing may arm hardware or live-network tests.
     - ./ci/guard-safety-env.sh
     # Fully vendored: no git dependencies, ambe-thumbdv present with licences,
-    # the dropped software vocoder not sneaking back in.
+    # and no AMBE crate but that driver.
     - ./ci/guard-no-git-deps.sh
     # No invented install channel. astar has never been released.
     - ./ci/guard-distribution-claims.sh

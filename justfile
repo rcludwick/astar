@@ -69,6 +69,59 @@ dstar-test:
     cargo test -p astar-station --features dstar
     cargo test -p astar-cli --features dstar
 
+# System Fusion (iax-e8a4 link, astar-e7b3 §2 audio). Unlike `dstar-test`
+# this needs no hardware at all: `astar-ysf` ships its own loopback
+# reflector, so the link tests bind 127.0.0.1 and link to it, and the decode
+# tests drive a fake vocoder rather than a dongle.
+#
+# YSF is ALREADY covered by `just ci` — `astar-sys` has `ysf` in its default
+# features and Cargo unifies features across a workspace build, so
+# `cargo test --workspace` compiles and runs all of this. This recipe is the
+# way to run it alone, and the way to catch a break in the per-crate feature
+# combinations that the unified build would hide.
+ysf-test:
+    cargo test -p astar-ysf
+    cargo test -p astar-console --features ysf
+    cargo test -p astar-station --features ysf
+    cargo test -p astar-cli --features ysf
+
+# Run a self-hosted YSF parrot reflector on [::]:<port>, dual-stack (so both
+# 127.0.0.1 and localhost reach it). The System Fusion twin of `m17-parrot`.
+#
+# Key into it from astar and hear yourself, the way `m17-parrot` works for
+# M17: astar transmits YSF in DN mode through the ThumbDV, and the parrot
+# replays your own transmission back once you unkey. One dongle is enough —
+# YSF here is half-duplex, so the replay decodes after the key-up ends. Any
+# other transmitter works too: a radio through a hotspot, Pi-Star, DroidStar.
+# Frames are relayed VERBATIM, so it hides no framing bug — what you hear is
+# what astar actually put on the wire. Nothing goes on the air.
+#
+#     just ysf-parrot 42000            # terminal 1
+#     just ysf-listen 127.0.0.1:42000 AJ7HR   # terminal 2, to watch
+#     ...then key up, from astar or from the hotspot.
+ysf-parrot port:
+    cargo run -p astar-ysf --example ysf_parrot -- --port {{port}}
+
+# The YSF hardware checkpoint — ROB RUNS THIS, not an agent.
+#
+# Needs a ThumbDV attached and a live reflector, so it is the one thing the
+# rest of the YSF suites cannot answer: they prove bytes in and bytes out,
+# this proves the result is speech. Receive only — `ysf-listen` has no PTT,
+# so nothing here can go on the air.
+#
+# KC-Wide's two, from the design doc:
+#     just ysf-listen ysf.kcwide.net:42000 AJ7HR      # US-KCWIDE
+# Add --wav /tmp/ysf.wav to capture instead of play.
+#
+# What to watch for: "linked … (backend: thumbdv)", then a "▶ <callsign>"
+# line per transmission with audible speech. A "!!" line means the reflector
+# is sending VW or data, which astar does not decode — that is the refusal
+# working, not a fault. Silence with a climbing frame count and no "!!" line
+# would be the interesting failure: most likely V/D mode 1, where MMDVMHost
+# and DroidStar disagree about the layout and astar follows MMDVMHost.
+ysf-listen host callsign *args:
+    cargo run --release -p astar-cli --features ysf -- ysf-listen {{host}} --callsign {{callsign}} {{args}}
+
 dstar-test-hw:
     IAX_THUMBDV_TESTS=1 cargo test -p astar-codec --features ambe-hw
     IAX_THUMBDV_TESTS=1 cargo test -p astar-console --features dstar
@@ -212,6 +265,36 @@ docs:
 # runs, so a local build and a published build cannot diverge.
 docs-build:
     ./ci/build-docs.sh
+
+# NOT PUBLISHED, by two independent mechanisms: docs/superpowers/ is gitignored,
+# and ci/build-docs.sh reads only zensical.toml. Read zensical.design.toml's
+# header before changing either. A separate project and port from `just docs`,
+# so both can run at once.
+#
+# Serve the internal design docs (specs, plans, notes) on localhost:8001.
+design: design-stop
+    #!/usr/bin/env bash
+    set -euo pipefail
+    python3 ci/design_index.py
+    # pkill returns before the kernel releases the socket, so a immediate
+    # bind loses to TIME_WAIT and reports "Address already in use" -- which
+    # is the confusing error this recipe exists to stop producing.
+    for _ in $(seq 1 40); do
+      curl -sS -o /dev/null --max-time 1 http://localhost:8001/ 2>/dev/null || break
+      sleep 0.25
+    done
+    uvx zensical serve -f zensical.design.toml -a localhost:8001 --open
+
+# Stop a running design-docs server. `just design` runs this first.
+design-stop:
+    @pkill -f "zensical serve -f zensical.design.toml" 2>/dev/null && echo "stopped previous design server" || true
+
+# Output is gitignored and never shipped; useful to check a page renders.
+#
+# Build the internal design-docs site once (docs/superpowers -> docs/.design-site).
+design-build:
+    python3 ci/design_index.py
+    uvx zensical build -f zensical.design.toml
 
 # The version is spelled in three places (apps/macos/project.yml's
 # MARKETING_VERSION, zensical.toml's footer chip, CHANGELOG.md's newest

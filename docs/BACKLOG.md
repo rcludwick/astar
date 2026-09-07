@@ -12,7 +12,7 @@ inline. All 228 issues (164 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (93)
+## Open items (96)
 
 ### astar-uid — Audio devices need a stable identity, not their name
 *P2 medium · bug · labels: audio, macos, migration, cx:5*
@@ -524,10 +524,122 @@ FICH coding (Golay 24/12, rate-1/2 K=5 convolutional, interleave, CRC), the
 `YSFReflector` datagrams, a client link FSM, and a loopback reflector with a
 parrot mode, 62 tests, `std` only. The wire numbers were verified against the
 deployed reference implementations rather than recalled; see the design doc's
-"Where this stands". **Remaining:** the AMBE+2 payload — RATEP word and YSF
-frame packing in `astar-codec` — then `astar-console`'s session and the ABI /
-Swift / `Network.ysf` layers. The payload bytes are carried, not decoded:
-nothing yet claims to hear a YSF stream.
+"Where this stands".
+
+**Progress 2026-09-05 — RECEIVE IS BUILT, end to end.** `astar-codec::ysf`
+carries the AMBE+2 DN vocoder (both V/D modes, the RATEP word, the chip's bit
+order); `AmbeStream` gained a `VocoderMode` so the ThumbDV is initialized for
+half rate and fed 49-bit channel packets; `astar-console::ysf` decodes each
+payload's five voice frames onto an output bus; and the Station facade, C ABI,
+node key guard, Swift binding and `Network.ysf` are all in. VW and data frames
+are refused by name into `unsupported_mode`, which reaches the UI.
+
+**Unverified on hardware.** Bytes in and bytes out are proven; that the audio
+is intelligible is not, and cannot be without a ThumbDV on a live reflector
+(KC-Wide US-KCWIDE YSF32453, US-XLX458 YSF28054). V/D mode 1 especially:
+MMDVMHost gives it its own layout, DroidStar runs it through the mode-2 path,
+and astar follows MMDVMHost.
+
+**Remaining: transmit — and it is blocked, not merely unwritten.** See
+iax-ysftx below.
+
+### iax-wavcadence — `--wav` captures less audio than the session received
+*P3 low · bug · labels: cli, audio, dstar, ysf, cx:3*
+
+Measured 2026-09-06 during the YSF receive checkpoint, on live traffic from
+KCWide. A `ysf-listen --wav` run of ~302 s wall clock produced a **226 s** WAV
+— a 25% shortfall — and the audio inside it came to 843 non-silent 20 ms
+frames where the 208 radio frames counted by a second, link-only client over
+the same window predict 1040 (81%).
+
+Two shortfalls of similar size, which is why this is filed against the capture
+harness rather than the vocoder: `WavBackend`'s output "device" pulls decoded
+audio on a background thread "at the stream's own cadence", and if that
+cadence runs slower than real time the file simply contains fewer slots than
+the session produced. The decoded audio that IS there looks right — speech
+levels, peak -10.0 dBFS, no clipping, talkers matching the `▶` lines.
+
+NOT YSF-specific: `crates/astar-cli/src/wav_backend.rs` is shared with
+`dstar-listen`, and this was extracted from it unchanged, so any D-Star `--wav`
+capture has the same behaviour and always has.
+
+**Unconfirmed as a defect.** The two clients ran in overlapping but not
+identical windows, so the frame comparison is indicative rather than exact.
+The cheap way to settle it: capture a known-length transmission into a local
+`ysf-parrot`/`m17-parrot` and compare the WAV's duration against the wall
+clock, with nothing else running. If the cadence is the cause, the fix is to
+drive the writer from a real-time clock rather than the pull loop's own pace.
+
+### iax-ysfdch — a YSF transmission carries no in-payload data channel
+*P3 low · feature · labels: ysf, protocol, cx:3*
+
+Found 2026-09-06 while building YSF transmit. The DN payload has a data
+channel alongside the voice — the one a Yaesu radio reads to show a callsign
+— and astar does not build it. `pack_dn` writes voice bits only, by design,
+and `build_frame` in `astar-console/src/ysf.rs` leaves the rest zeroed.
+
+**This does not stop a transmission being heard or attributed.** The `YSFD`
+routing header carries gateway/source/destination in clear, every reflector
+and gateway reads it, and that is where astar's own receive path takes the
+talker from. What may be missing is the callsign on a radio's display.
+
+Unverified either way: it needs a Yaesu radio on the far end, which is Rob's
+checkpoint. If it turns out radios do show the header callsign, this closes as
+won't-fix.
+
+Building it means the VD mode 2 DCH with its own FEC and interleave, read out
+of the reference implementations to the same standard the voice layout was.
+
+### iax-ysftx — DONE 2026-09-06: YSF transmit
+*P3 low · feature · labels: ysf, vendor, cx:3*
+
+**Closed.** The blocker was real and is gone. `vendor/ambe-thumbdv` is
+re-vendored at `41c35d817af3`, where `parse_channel` reports the bit count the
+device declared instead of requiring 0x48 — the check moved to
+`ThumbDv::encode_frame` and to `astar-codec`'s worker, both of which know what
+rate they configured. Encode is mode-aware end to end, and the timeout
+substitution is `DnFrame::MUTE` for YSF rather than a D-Star null codeword.
+
+`astar-console::ysf` transmits: the station's voice route (shared with every
+digital network, since the one-audio-lane refactor), a PTT request the run
+loop applies, AMBE+2 half-rate encode, five frames to a payload,
+header/communications/terminator with the end flag set. See `iax-ysfdch` for
+the one thing it still does not carry.
+
+Original text follows.
+
+### iax-ysftx — YSF transmit is blocked at the vendored deframer
+*P3 low · feature · labels: ysf, vendor, cx:3*
+
+Found 2026-09-05 while building YSF receive. Receive needed nothing from the
+vendored crate — a decode reply is `Response::Speech(pcm)`, which carries no
+mode. Transmit does, and cannot have it.
+
+`vendor/ambe-thumbdv/src/packet.rs`'s `parse_channel` rejects any `Channel`
+response whose bit count is not `0x48` (72 bits) as "rate lost", and there is
+a test in that crate asserting a `0x31` (49-bit) response IS an error. A YSF
+encode comes back at 49 bits. So every encode request would go unanswered,
+time out, and be substituted with `NULL_AMBE_FRAME` — a **D-Star** null
+codeword, which on a YSF link is not silence but nine bytes of the wrong
+vocoder, transmitted.
+
+`astar-codec::ambe` refuses `submit_encode` outright on a `YsfDn` stream so
+nothing downstream can come to depend on it, and `astar-console::ysf` has no
+TX path at all.
+
+**The fix is not a patch in place.** `vendor/ambe-thumbdv` is a verbatim copy
+of `rcludwick/ambe` (MIT/Apache), and `VENDORED.md` says so; editing it here
+forfeits cheap re-vendoring and diverges someone else's licensed code. The
+clean path is upstream, then re-vendor: widen `parse_channel` to accept the
+bit count the packet declares (and carry it), rather than assuming 72.
+
+**Also needed once the deframer can read it:** `pack_dn` and
+`dn_frame_from_channel` already exist and are tested; the encode side of
+`AmbeStream` needs the mode plumbed through the way decode's now is, and
+`YsfLink` needs its audio from the station's voice route (as it now gets,
+since the one-audio-lane refactor). And the node key guard already refuses
+YSF (`key_refusal` in `astar-server`), so remote keying stays refused
+whatever lands here.
 
 ### iax-d4f7 — DMR engine backend: MMDVM/homebrew, TGIF first
 *P4 backlog · feature · labels: dmr, protocol, cx:8*
@@ -1440,3 +1552,48 @@ Open questions from iax-bbc6 (astar-cli): (1) Manager::dial returns immediately 
 *P3 low · task · labels: cx:1, node*
 
 *(no description recorded)*
+
+### iax-onelane-iax2prefs — Route the IAX2 dial's pref push through push_prefs
+*P3 low · chore · labels: audio, console, refactor, cx:2*
+
+Left out of scope by the one-audio-lane refactor (`docs/superpowers/implemented/2026-09-06-one-audio-lane-design.md`). `ConsoleSession::open_voice_route` pushes the standing preference set (gains, DSP toggles, compressor, trim, RX compression, VOX pre-roll, calibrated profile) onto the router through one `fn push_prefs(&self, router, mic, out)`. The IAX2 dial path still does its own eleven-line push at `connect` instead of calling it, because at the point `connect` builds the call the mic/out `MixCallId`s are not yet known the way `open_voice_route`'s caller knows them — the design doc calls this out as "the same eleven-line block `connect` uses for an IAX2 dial, moved into one `fn push_prefs`" but the move only happened on the digital-voice side. Thread the IAX2 dial through `push_prefs` once its call's mic/out are resolved, so there is exactly one place a preference reaches the router, on every path.
+
+### iax-ambe-pipeline — Shared AMBE pending/pacing object for D-Star + YSF
+*P3 low · task · labels: dstar, ysf, ambe, refactor, cx:3*
+
+Recorded out of scope in the one-audio-lane design
+(`docs/superpowers/implemented/2026-09-06-one-audio-lane-design.md`): "A
+shared AMBE pipeline object for D-Star and YSF (they still duplicate
+pending-queue/pacing logic; a follow-up once both are stable)." Both
+`DstarSession` and `YsfLink` drive the same ThumbDV request/response
+protocol — a pending-request queue keyed to the dongle's reply order, plus
+timeout/pacing so a stalled dongle degrades to silence instead of blocking
+the run loop — and each grew its own copy while D-Star's and YSF's transmit
+paths were being built. Now that both are stable (D-Star and YSF transmit
+both shipped 2026-09-06), extract one `astar-codec` type both sessions hold
+instead of parallel hand-rolled queues, so a pacing fix lands once instead
+of twice.
+
+### iax-ratebridge-shared — One `FrameRateBridge` for the 8↔16 kHz edge
+*P3 low · chore · labels: audio, codec, refactor, cx:2*
+
+The exact 8↔16 kHz framing recipe now exists twice: `EdgeAudio` in
+`crates/astar-iax/src/codec_edge.rs` (bus rate ↔ negotiated wire rate) and
+`RateBridge` in `crates/astar-console/src/voice_route.rs` (bus rate ↔ the
+digital codecs' fixed 8 kHz). Both are the same four moving parts —
+`Resampler1::with_chunk` at one 20 ms frame per pass so an integer ratio
+yields one frame out per frame in, a FIFO that pops exactly one output frame
+per call (left-padding only through the interpolator's warm-up), a 4th-order
+Butterworth anti-alias cascade at the source rate ahead of any downsample, and
+the i16↔f32 scaling around them — and each carries its own copy of the `//
+iax-62ac` reasoning about why short frames must never reach a fixed cadence.
+A drift fix or a filter change has to land in both, and the second copy is
+easy to miss.
+
+Hoist it into `astar-audio` as one `FrameRateBridge { from, to }` with a
+`convert(&[i16]) -> Vec<i16>` that is exactly one frame in, one frame out, and
+have both callers hold one. `astar-iax` is frozen for this, so it wants doing
+deliberately rather than opportunistically; the tests that pin the property
+(`codec_edge`'s `cross_rate_*_emits_exactly_one_*_frame_*` pair and
+`voice_route`'s `a_16k_bridge_frames_exactly_and_keeps_pitch_both_ways`)
+should move with it.

@@ -58,11 +58,15 @@
         /// ThumbDV is attached, because D-Star voice is AMBE and astar has no
         /// software vocoder to offer without one.
         private var availableNetworks: [Network] {
-            Network.available(m17: session.m17Available, dstar: session.dstarAvailable)
+            Network.available(
+                m17: session.m17Available, dstar: session.dstarAvailable,
+                ysf: session.ysfAvailable)
         }
 
         private var selectedNetwork: Network {
-            Network.resolve(networkRaw, m17: session.m17Available, dstar: session.dstarAvailable)
+            Network.resolve(
+                networkRaw, m17: session.m17Available, dstar: session.dstarAvailable,
+                ysf: session.ysfAvailable)
         }
 
         /// The network picker's binding, and the one place a network change
@@ -1230,7 +1234,13 @@
 
         private var callControls: some View {
             HStack(spacing: 10) {
-                if session.txDisabled {
+                if !session.canTransmit {
+                    // Checked BEFORE listen-only: that is a setting the
+                    // operator can turn off, this is a property of the
+                    // network. Showing "TX disabled" here would invite
+                    // someone to go looking for the switch that fixes it.
+                    receiveOnlyIndicator
+                } else if session.txDisabled {
                     listenOnlyIndicator  // monitor mode: TX is hard-muted
                 } else if session.voxEnabled {
                     voxIndicator
@@ -1320,6 +1330,30 @@
                 .accessibilityValue(session.ptt ? "on air" : "listening")
         }
 
+        /// Replaces the PTT/VOX control on a network astar can receive but not
+        /// transmit — System Fusion today.
+        ///
+        /// A PTT button that did nothing would be worse than an absent one:
+        /// the operator would key, hear nothing happen, and reasonably assume
+        /// the radio or the link was broken. Naming the reason costs one line
+        /// and answers the question before it is asked.
+        private var receiveOnlyIndicator: some View {
+            Label(
+                "Receive only — astar can't transmit Fusion yet",
+                systemImage: "antenna.radiowaves.left.and.right"
+            )
+            .font(.callout.weight(.semibold))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(
+                Color.secondary.opacity(0.18),
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
+            .foregroundStyle(.secondary)
+            .accessibilityElement()
+            .accessibilityLabel("Receive only, astar cannot transmit Fusion yet")
+        }
+
         /// Replaces the PTT/VOX control while listen-only (Disable TX) is on: makes it
         /// obvious the radio can't transmit.
         private var listenOnlyIndicator: some View {
@@ -1383,7 +1417,8 @@
                         event.window?.firstResponder ?? NSApp.keyWindow?.firstResponder
                     if SpaceKeyGuard.spaceIsTyping(firstResponder: firstResponder) { return event }
                 }
-                guard session.status == .answered, !session.voxEnabled else { return event }
+                guard session.status == .answered, !session.voxEnabled, session.canTransmit
+                else { return event }
                 if event.type == .keyDown {
                     if !event.isARepeat { setKeyed(true) }
                 } else {
@@ -1562,10 +1597,11 @@
                 case .address(let value):
                     dispatchConnect(node: value, network: network, address: value)
                 }
-            case .m17, .dstar:
-                // Both reflector networks resolve their target engine-side
+            case .m17, .dstar, .ysf:
+                // Every reflector network resolves its target engine-side
                 // (`CallSession.connect(node:network:)` → `m17Target` /
-                // `dstarTarget`, directory first and address second) — this is
+                // `dstarTarget` / `ysfTarget`, directory first and address
+                // second) — this is
                 // only the same "unreachable via the disabled button, but
                 // refuse it on Enter too" guard as above.
                 guard session.canDial(node, network: network) else { return }

@@ -9,20 +9,19 @@ digital-voice reflectors that needs no API token and no account. This page
 records where that data comes from, the attribution it carries, and how astar
 is designed to consume it.
 
-!!! warning "The directory is published; the client that reads it is not written yet"
+!!! note "Where this stands"
 
     Everything under [Where the data comes from](#where-the-data-comes-from) is
-    live today — the files are being built and served now, and anyone can fetch
+    live — the files are built nightly and served now, and anyone can fetch
     them.
 
-    Everything under [How astar will use it](#how-astar-will-use-it) is
-    **design, not behaviour**. No shipped astar client reads the directory yet:
-    there is no reflector picker, no sync button, and no cached copy on disk.
-    Reflector names must still be typed as addresses.
-
-    D-Star is the first network the directory is meant to serve, and D-Star is
-    itself [engine-only](../build/engine.md) — the macOS client does not offer
-    it. The picker cannot arrive before the network it picks for.
+    The macOS app reads the directory: it ships with a bundled snapshot, syncs
+    on its own cadence (with a sync button in Settings), keeps a cached copy on
+    disk, and resolves a reflector typed by name before any address parser
+    runs. D-Star and System Fusion — the networks the directory was built for
+    first — are both in the app, on a DVMEGA DVstick 30 or a ThumbDV / DV3000
+    dongle. Networks the app cannot dial yet (DMR) are listed and counted, not
+    hidden.
 
 ## Where the data comes from
 

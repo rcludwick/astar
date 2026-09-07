@@ -97,6 +97,31 @@ public protocol StationDriving {
     /// parses JSON. Poll the snapshot for meters; call this at UI rate.
     func dstarState() throws -> DStarState?
 
+    // MARK: System Fusion
+
+    /// Link to a YSFReflector and decode the audio on it, mutually exclusive
+    /// with every other network. Mirrors `Station.connectYSF(host:callsign:
+    /// options:)` 1:1 — `host` is `host:port`, because YSF standardises no
+    /// port and every directory row carries its own.
+    ///
+    /// RECEIVE ONLY: there is no YSF transmit path, so nothing should offer
+    /// PTT while a link is live.
+    ///
+    /// HARDWARE-ONLY, from the same ThumbDV D-Star needs, so callers gate on
+    /// `CallSnapshot.ysfAvailable` rather than calling speculatively. Blocks
+    /// for a serial scan plus a per-port dongle init; call it off the main
+    /// thread.
+    func connectYSF(host: String, callsign: String, options: String?) throws
+    /// Disconnect the live YSF link, if any. Idempotent — a no-op while idle.
+    func ysfDisconnect() throws
+    /// The live YSF link's own state — link, last heard, whether a
+    /// transmission is in progress, and any mode astar could not decode — or
+    /// `nil` when none is active.
+    ///
+    /// Costlier than `readSnapshot()`: it crosses the ABI with a buffer and
+    /// parses JSON. Poll the snapshot for meters; call this at UI rate.
+    func ysfState() throws -> YSFState?
+
     // Audio device selection + gain. Mirrors `Station`'s methods 1:1; a `nil`
     // device selects the system default for that direction.
     func listInputs() throws -> [String]

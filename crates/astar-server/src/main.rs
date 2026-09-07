@@ -24,6 +24,28 @@ use astar_server::{
 };
 use astar_station::ConsoleSession;
 
+/// Install the tracing subscriber.
+///
+/// Without this the whole engine's `tracing` output is discarded: every
+/// `warn!`/`info!` in astar-iax, astar-console and this crate compiles to a
+/// no-op dispatch and goes nowhere. A node ran for two days emitting exactly
+/// one line — a `println!` — which is why an inbound-call failure left no
+/// evidence at all and had to be diagnosed by reading source.
+///
+/// `RUST_LOG` overrides; the default is `info`, which is the call-setup
+/// narrative (offer, codec choice, accept/reject, hangup) and nothing
+/// per-frame. Timestamps and no ANSI, because this lands in journald via
+/// podman rather than a terminal.
+fn init_logging() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_ansi(false)
+        .init();
+}
+
 /// How often the `WireGuard` status logger samples
 /// [`astar_iax::Manager::wg_status`] (handshake age, traffic counters).
 const WG_STATUS_INTERVAL: Duration = Duration::from_secs(60);
@@ -34,6 +56,8 @@ const WG_STATUS_INTERVAL: Duration = Duration::from_secs(60);
 
 #[allow(clippy::too_many_lines)]
 fn main() -> ExitCode {
+    init_logging();
+
     let mut args = std::env::args().skip(1).peekable();
 
     let Some(subcommand) = args.next() else {

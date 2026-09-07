@@ -61,6 +61,40 @@ public enum ReflectorAddressDial {
     }
 }
 
+/// System Fusion's address grammar: `host[:port]`, and no module.
+public enum YSFDial {
+    /// The port the plurality of YSFReflectors listen on — 837 of the ~1100
+    /// the directory carries, against a long tail of 42001/42002/42003 and
+    /// one-offs. So it is a sensible default and a poor assumption: the
+    /// directory row always carries the real one, and this default only ever
+    /// applies to an address an operator typed without a port.
+    public static let defaultPort: UInt16 = 42000
+
+    /// Classify `host[:port]`. No module: a plain YSFReflector is one room,
+    /// and DG-ID rooms are not addressed this way.
+    ///
+    /// A module separator is a REJECTION, not something to ignore. `XLX836 A`
+    /// is a D-Star dial that happens to look like a hostname, and silently
+    /// dropping the ` A` would connect the operator to a YSF reflector named
+    /// `XLX836` — or to whatever DNS decided that was.
+    public static func parse(_ raw: String) -> (host: String, port: UInt16)? {
+        let text = raw.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return nil }
+        guard !text.contains("/"), !text.contains(" ") else { return nil }
+
+        let parts = text.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count <= 2 else { return nil }
+        let host = String(parts[0])
+        guard !host.isEmpty, !host.contains(where: \.isWhitespace) else { return nil }
+
+        if parts.count == 2 {
+            guard let port = UInt16(parts[1]), port > 0 else { return nil }
+            return (host: host, port: port)
+        }
+        return (host: host, port: defaultPort)
+    }
+}
+
 /// D-Star's address grammar: the shared one, on the DExtra port.
 ///
 /// The design doc used to say there is no `DStarDial` type, and while D-Star

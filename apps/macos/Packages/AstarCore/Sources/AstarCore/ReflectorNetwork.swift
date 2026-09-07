@@ -104,6 +104,7 @@ extension Network {
         switch self {
         case .m17: return .m17
         case .dstar: return .dstar
+        case .ysf: return .ysf
         case .allstar, .hamlink: return nil
         }
     }
@@ -122,7 +123,8 @@ extension Network {
         switch directory {
         case .m17: return .m17
         case .dstar: return .dstar
-        case .ysf, .nxdn, .p25, .urf, .other: return nil
+        case .ysf: return .ysf
+        case .nxdn, .p25, .urf, .other: return nil
         }
     }
 }

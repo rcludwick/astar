@@ -15,7 +15,7 @@
 //! kept per-method (not module-wide) so it stays a tripwire for future handlers.
 #![allow(clippy::unused_self, clippy::needless_pass_by_value)]
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use smallvec::SmallVec;
 
@@ -183,10 +183,20 @@ impl Fsm {
                     // the invalid-frame arm and the call timed out in NewSent
                     // (iax-64b6). Mirrors the AuthRepSent ACCEPT transition.
                     let ies = Ies::parse(&ies_bytes).unwrap_or_else(|_| Ies::empty());
-                    let negotiated_format =
-                        accepted_format(&ies, self.call_profile.codec_policy, &mut out);
                     let peer = CallNo::new(peer_call).unwrap_or(our_call);
                     out.push(Action::CancelTimer(TimerKind::NewRetry));
+                    let Some(negotiated_format) =
+                        accepted_format(&ies, self.call_profile.codec_policy)
+                    else {
+                        return hangup_unnegotiable_accept(
+                            our_call,
+                            peer,
+                            ies.format,
+                            self.call_profile.codec_policy,
+                            now,
+                            &mut out,
+                        );
+                    };
                     out.push(Action::SetPeerCall(peer));
                     out.push(Action::AppEvent(AppEvent::Connected { peer_call: peer }));
                     let keepalive = KeepaliveState::new(KeepaliveConfig::default(), now);
@@ -387,11 +397,21 @@ impl Fsm {
                     // re-sent NEW until the NewResent timeout. Mirrors the
                     // NewSent / AuthRepSent ACCEPT transitions.
                     let ies = Ies::parse(&ies_bytes).unwrap_or_else(|_| Ies::empty());
-                    let negotiated_format =
-                        accepted_format(&ies, self.call_profile.codec_policy, &mut out);
                     let peer = CallNo::new(peer_call).unwrap_or(our_call);
                     out.push(Action::CancelTimer(TimerKind::NewRetry));
                     out.push(Action::CancelTimer(TimerKind::TokenExpiry));
+                    let Some(negotiated_format) =
+                        accepted_format(&ies, self.call_profile.codec_policy)
+                    else {
+                        return hangup_unnegotiable_accept(
+                            our_call,
+                            peer,
+                            ies.format,
+                            self.call_profile.codec_policy,
+                            now,
+                            &mut out,
+                        );
+                    };
                     out.push(Action::SetPeerCall(peer));
                     out.push(Action::AppEvent(AppEvent::Connected { peer_call: peer }));
                     let keepalive = KeepaliveState::new(KeepaliveConfig::default(), now);
@@ -556,9 +576,19 @@ impl Fsm {
             Event::Frame { frame, now } => match full_subclass(&frame) {
                 Some((Subclass::Iax(IaxCommand::Accept), _, ies_bytes)) => {
                     let ies = Ies::parse(&ies_bytes).unwrap_or_else(|_| Ies::empty());
-                    let negotiated_format =
-                        accepted_format(&ies, self.call_profile.codec_policy, &mut out);
                     out.push(Action::CancelTimer(TimerKind::AuthRepRetry));
+                    let Some(negotiated_format) =
+                        accepted_format(&ies, self.call_profile.codec_policy)
+                    else {
+                        return hangup_unnegotiable_accept(
+                            our_call,
+                            peer_call,
+                            ies.format,
+                            self.call_profile.codec_policy,
+                            now,
+                            &mut out,
+                        );
+                    };
                     // iax-e402: re-assert peer_call. Defence-in-depth — the
                     // value was already plumbed at AUTHREQ/CALLTOKEN time,
                     // but the AUTHREQ-less server path (rare but spec-legal)
@@ -1609,18 +1639,84 @@ impl Fsm {
     }
 }
 
-/// The FORMAT the peer's ACCEPT names, if we can actually encode it; else our
-/// policy preference. A peer naming a format we never offered violates the
-/// exchange — trace it, don't hang up (degraded beats dead on RF links).
-fn accepted_format(ies: &Ies, policy: CodecPolicy, out: &mut SmallVec<[Action; 4]>) -> VoiceFormat {
+/// The FORMAT the peer's ACCEPT names, if it is one we actually offered; `None`
+/// when the peer named something outside our CAPABILITY, which the caller turns
+/// into a HANGUP.
+///
+/// The gate is `policy.capability_mask()` — what we actually offered — not
+/// "can the media path code this at all", which is what it used to be. Those
+/// are different questions and the difference has a bandwidth bill attached: a
+/// `ulaw_only` station can *encode* slin16 perfectly well, so the old gate let
+/// a peer's `ACCEPT FORMAT=slin16` put the link on 256 kbps when the operator
+/// had capped it at 64. We offered a mask; honouring anything outside it
+/// silently overrides the config.
+///
+/// The policy here is the call profile's, which `Manager::dial` has already run
+/// through `capped_to_rate`, so the mask is what this station can really carry
+/// on this bus — not what was asked for before the cap.
+///
+/// A peer that names no FORMAT at all is not this case: our own preference
+/// applies, and that is in our mask by construction.
+fn accepted_format(ies: &Ies, policy: CodecPolicy) -> Option<VoiceFormat> {
     match ies.format.and_then(VoiceFormat::from_u32) {
-        Some(f) if CodecPolicy::is_encodable(f) => f,
-        Some(_) => {
-            out.push(Action::LogInvalid {
-                reason: "accept_format_unsupported",
-            });
-            policy.preferred()
-        }
-        None => policy.preferred(),
+        Some(f) if policy.capability_mask().contains(f) => Some(f),
+        Some(_) => None,
+        None => Some(policy.preferred()),
     }
+}
+
+/// The peer sent an ACCEPT naming a format outside what we offered. Hang up
+/// with the same
+/// "Unable to negotiate codec" cause the inbound half REJECTs with, so both
+/// directions of a failed negotiation read identically in a log, and Asterisk
+/// on the far end sees the sentence it uses itself.
+///
+/// The caller cancels its own setup timers first; this surfaces `Disconnected`
+/// so the app tears the leg down rather than sitting on a call that will never
+/// carry audio.
+fn hangup_unnegotiable_accept(
+    our_call: CallNo,
+    peer_call: CallNo,
+    named: Option<u32>,
+    policy: CodecPolicy,
+    now: Instant,
+    out: &mut SmallVec<[Action; 4]>,
+) -> (SessionState, SmallVec<[Action; 4]>) {
+    const CAUSE: &str = "Unable to negotiate codec";
+    tracing::info!(
+        target: "astar_iax::negotiate",
+        accepted = format_args!("0x{:04x}", named.unwrap_or(0)),
+        offered = format_args!("0x{:04x}", policy.capability_mask().get()),
+        policy = ?policy,
+        "peer ACCEPTed a format we never offered -- hanging up"
+    );
+    out.push(Action::SetPeerCall(peer_call));
+    out.push(Action::SendReliable(build_hangup(
+        our_call,
+        peer_call,
+        Some(CAUSE),
+    )));
+    // This timer never fires: `Disconnected` below terminates the runtime in
+    // the same dispatch batch, so the HANGUP goes out exactly once and loss
+    // recovery is the peer's re-NEW, not our retransmit. Kept for the shape's
+    // sake (every other Hangup transition arms it); do not "fix" its absence.
+    out.push(Action::SetTimer(
+        TimerKind::HangupRetry,
+        Duration::from_secs(1),
+    ));
+    out.push(Action::AppEvent(AppEvent::Disconnected {
+        reason: FailReason::Rejected {
+            cause: Some(CAUSE.to_string()),
+        },
+    }));
+    (
+        SessionState::Hangup(HangupData {
+            our_call,
+            peer_call,
+            initiated_by: HangupOrigin::Local,
+            sent_at: now,
+            attempts: 1,
+        }),
+        std::mem::take(out),
+    )
 }

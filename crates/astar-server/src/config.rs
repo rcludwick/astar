@@ -447,7 +447,7 @@ pub struct NodeFileConfig {
     /// DTMF `*` command execution (iax-d254). Absent ⇒ disabled.
     pub dtmf: Option<DtmfCfg>,
     /// Raw top-level `codec_policy` string (iax-31f7); absent ⇒ `None` ⇒
-    /// `UlawOnly`. Parsed eagerly into [`Self::codec_policy`] by
+    /// `PreferSlin16`. Parsed eagerly into [`Self::codec_policy`] by
     /// [`NodeFileConfig::from_toml_str`]; see [`parse_codec_policy`].
     #[serde(default, rename = "codec_policy")]
     codec_policy_raw: Option<String>,
@@ -584,15 +584,14 @@ impl NodeFileConfig {
         let Some(reg) = &self.register else {
             return Ok(None);
         };
-        let peer: SocketAddr = reg
-            .peer
-            .parse()
-            .map_err(|e| format!("register.peer: {e}"))?;
-        Ok(Some(RegisterConfig {
-            peer,
-            username: reg.node_id.clone(),
-            refresh: Duration::from_secs(60),
-        }))
+        // Resolve rather than parse. A literal `IP:port` still works and
+        // yields one candidate; a hostname yields every address it has, which
+        // is what makes the registrar failover in `RegisterConfig` possible
+        // at all. Requiring a literal is why deployments pin one address —
+        // and pinning is what fails silently when that host stops answering.
+        let cfg = RegisterConfig::resolve(&reg.peer, reg.node_id.clone(), Duration::from_secs(60))
+            .map_err(|e| format!("register.peer {}: {e}", reg.peer))?;
+        Ok(Some(cfg))
     }
 
     /// Build the engine [`astar_iax::LinkTransport`] from the optional
@@ -794,11 +793,23 @@ impl NodeFileConfig {
 }
 
 /// Parse the top-level `codec_policy` string (iax-31f7). `None` (the key
-/// absent) defaults to [`CodecPolicy::UlawOnly`]. Delegates to
-/// [`CodecPolicy::from_str`], whose error message already names the field.
+/// absent) defaults to [`CodecPolicy::PreferSlin16`] — deliberately NOT
+/// `CodecPolicy::default()`, which is the engine-wide `UlawOnly`.
+///
+/// A node is the one place where the bandwidth is cheap and the audio is worth
+/// it: the astar clients always dial asking for slin16, and a server left on
+/// `ulaw_only` answered them in 8-bit companded µ-law, so the default silently
+/// threw the wideband path away. `PreferSlin16` advertises
+/// slin16 → slin → ulaw → alaw (mask `0x804c`), and a µ-law-only peer still
+/// lands on µ-law because a peer's stated FORMAT wins whenever we can carry it
+/// (see `choose_codec` in `astar-iax-core`). Operators who need the old wire
+/// behaviour set `codec_policy = "ulaw_only"` explicitly.
+///
+/// Delegates to [`CodecPolicy::from_str`], whose error message already names
+/// the field.
 fn parse_codec_policy(s: Option<&str>) -> Result<CodecPolicy, String> {
     match s {
-        None => Ok(CodecPolicy::default()),
+        None => Ok(CodecPolicy::PreferSlin16),
         Some(raw) => raw.parse(),
     }
 }
@@ -1486,9 +1497,33 @@ peer_connected = { enabled = true, destination = "to_air" }
     }
 
     #[test]
-    fn codec_policy_defaults_to_ulaw_only() {
+    fn codec_policy_defaults_to_prefer_slin16() {
         let cfg = NodeFileConfig::from_toml_str(minimal_toml()).unwrap();
+        assert_eq!(
+            cfg.codec_policy,
+            CodecPolicy::PreferSlin16,
+            "an absent codec_policy key must default the SERVER to wideband, \
+             not to the engine-wide UlawOnly default"
+        );
+        assert_eq!(
+            cfg.to_inbound().unwrap().policy.codec_policy,
+            CodecPolicy::PreferSlin16,
+            "and the default must reach the inbound listener, not just the struct"
+        );
+    }
+
+    #[test]
+    fn codec_policy_ulaw_only_is_still_pinnable() {
+        let cfg = NodeFileConfig::from_toml_str(&format!(
+            "codec_policy = \"ulaw_only\"\n{}",
+            minimal_toml()
+        ))
+        .unwrap();
         assert_eq!(cfg.codec_policy, CodecPolicy::UlawOnly);
+        assert_eq!(
+            cfg.to_inbound().unwrap().policy.codec_policy,
+            CodecPolicy::UlawOnly
+        );
     }
 
     #[test]

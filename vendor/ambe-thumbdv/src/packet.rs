@@ -39,8 +39,24 @@ pub enum Response {
     Version(String),
     /// Configuration: 3 bytes from GET/READCFG.
     Config([u8; 3]),
-    /// Channel frame (9 bytes of compressed audio).
-    Channel([u8; FRAME_BYTES]),
+    /// Channel frame: compressed audio, and the number of BITS the device
+    /// said it contains.
+    ///
+    /// The bit count is carried rather than assumed because it is a property
+    /// of the rate the chip was configured for, and this parser does not know
+    /// what that was. D-Star and DMR run at 72 bits (nine bytes); AMBE+2
+    /// half-rate — YSF's DN modes, NXDN — runs at 49 (seven). Both are
+    /// legitimate, and which one is CORRECT is a question only the caller who
+    /// set the rate can answer.
+    ///
+    /// `data` holds `bits.div_ceil(8)` meaningful bytes; the remainder up to
+    /// [`FRAME_BYTES`] is zero.
+    Channel {
+        /// Bits of compressed audio the device declared, 1..=72.
+        bits: u8,
+        /// The frame, low bytes first, zero-padded to [`FRAME_BYTES`].
+        data: [u8; FRAME_BYTES],
+    },
     /// Speech frame (160 samples of PCM, big-endian i16).
     Speech([i16; FRAME_SAMPLES]),
 }
@@ -317,9 +333,9 @@ fn parse_channel(pkt: &RawPacket) -> Result<Response, ProtoError> {
     }
 
     let field = payload[0];
-    let count = payload[1];
+    let bits = payload[1];
 
-    // Expect field 0x01 (CHAND) and count 0x48 (72 bits = 9 bytes).
+    // Field 0x01 is CHAND — the only channel field this driver reads.
     if field != 0x01 {
         return Err(ProtoError::Malformed(format!(
             "expected channel field 0x01, got 0x{:02x}",
@@ -327,17 +343,34 @@ fn parse_channel(pkt: &RawPacket) -> Result<Response, ProtoError> {
         )));
     }
 
-    if count != 0x48 {
-        return Err(ProtoError::Malformed("rate lost".into())); // §8.4
+    // The bit count is REPORTED, not validated against a rate this function
+    // cannot know. It used to require 0x48 and call anything else "rate lost"
+    // (§8.4), which is a real condition — but it is the caller who configured
+    // the rate and therefore the only party who can tell a lost rate from a
+    // correctly-decoded half-rate frame. Hard-coding 72 here made every
+    // AMBE+2 half-rate mode unreachable through this crate: YSF's DN modes and
+    // NXDN both answer at 0x31, and both were rejected as corruption.
+    //
+    // `ThumbDv::encode_frame` still enforces 72, so the high-level D-Star API
+    // is unchanged; see its own "rate lost" check.
+    if bits == 0 || bits as usize > FRAME_BYTES * 8 {
+        return Err(ProtoError::Malformed(format!(
+            "channel bit count {bits} outside 1..={}",
+            FRAME_BYTES * 8
+        )));
     }
 
-    if payload.len() < 2 + FRAME_BYTES {
-        return Err(ProtoError::Malformed("channel data too short".into()));
+    let need = (bits as usize).div_ceil(8);
+    if payload.len() < 2 + need {
+        return Err(ProtoError::Malformed(format!(
+            "channel data too short: {bits} bits need {need} bytes, got {}",
+            payload.len().saturating_sub(2)
+        )));
     }
 
-    let mut frame = [0u8; FRAME_BYTES];
-    frame.copy_from_slice(&payload[2..2 + FRAME_BYTES]);
-    Ok(Response::Channel(frame))
+    let mut data = [0u8; FRAME_BYTES];
+    data[..need].copy_from_slice(&payload[2..2 + need]);
+    Ok(Response::Channel { bits, data })
 }
 
 /// Parse speech packet (§4.1).
@@ -487,11 +520,57 @@ mod tests {
                 status: 0
             }
         );
-        // Channel response with wrong bit count = rate lost (§8.4).
+        // A 49-bit (0x31) channel response is AMBE+2 half rate — YSF DN and
+        // NXDN — and is perfectly valid. This assertion used to be
+        // `is_err()`, which is what made every half-rate mode unreachable
+        // through this crate: the parser called a correctly-decoded frame
+        // corruption because it assumed one caller's rate.
         let mut payload = vec![0x01, 0x31];
-        payload.extend_from_slice(&[0u8; 7]);
+        payload.extend_from_slice(&[0xAB; 7]);
         let p = RawPacket { ptype: 1, payload };
-        assert!(parse_response(&p).is_err());
+        assert_eq!(
+            parse_response(&p).unwrap(),
+            Response::Channel {
+                bits: 0x31,
+                data: [0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0xAB, 0x00, 0x00],
+            },
+            "49 bits occupy seven bytes; the rest is zero, not garbage"
+        );
+        // Full rate still parses, and still reports its own bit count.
+        let mut payload = vec![0x01, 0x48];
+        payload.extend_from_slice(&[0x11; 9]);
+        let p = RawPacket { ptype: 1, payload };
+        assert_eq!(
+            parse_response(&p).unwrap(),
+            Response::Channel {
+                bits: 0x48,
+                data: [0x11; 9]
+            }
+        );
+
+        // A count of zero, or one wider than the frame buffer, is still
+        // refused — reporting what arrived is not the same as trusting it.
+        for bad in [0x00u8, 0x49, 0xFF] {
+            let mut payload = vec![0x01, bad];
+            payload.extend_from_slice(&[0u8; 9]);
+            let p = RawPacket { ptype: 1, payload };
+            assert!(
+                parse_response(&p).is_err(),
+                "bit count 0x{bad:02x} must be refused"
+            );
+        }
+
+        // A frame shorter than its declared bit count is refused rather than
+        // read past the end of the payload.
+        let p = RawPacket {
+            ptype: 1,
+            payload: vec![0x01, 0x48, 0x11, 0x22],
+        };
+        assert!(
+            parse_response(&p).is_err(),
+            "truncated frame must be refused"
+        );
+
         // Speech response round-trips PCM.
         let mut payload = vec![0x00, 0xA0];
         for i in 0..160u16 {

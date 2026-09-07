@@ -122,6 +122,12 @@
 #define IAX_ERR_DSTAR -19
 
 /**
+ * YSF error (iax-e8a4): a link that could not be made, or the `ysf` feature
+ * not being compiled in. Read `iax_station_last_error` for which.
+ */
+#define IAX_ERR_YSF -20
+
+/**
  * Number of log-spaced dBFS bins [`iax_station_mic_spectrum`] writes when
  * monitoring (iax-e73e). Size the `out` array to (at least) this; a larger
  * buffer is fine (the extra entries are left untouched). A literal here so
@@ -567,6 +573,20 @@ typedef struct {
    * [`iax_station_connect_dstar`]).
    */
   bool dstar_active;
+  /**
+   * `true` when System Fusion voice is available: the `ysf` feature is
+   * compiled in AND a `ThumbDV` is attached right now. The same probe
+   * [`Self::dstar_available`] reads — one dongle, one answer — so the two
+   * flags move together and a UI can trust that they agree.
+   */
+  bool ysf_available;
+  /**
+   * `true` while a YSF link is live — mutually exclusive with an IAX2
+   * call, an M17 session and a D-Star session (see
+   * [`iax_station_connect_ysf`]). Transceive: key it with
+   * `iax_station_set_ptt`, exactly as D-Star.
+   */
+  bool ysf_active;
 } IaxState;
 
 /**
@@ -1369,6 +1389,71 @@ int iax_station_dstar_disconnect(IaxStation *st);
  * needs the D-Star-specific fields.
  */
 int iax_station_dstar_state(IaxStation *st, char *buf, uintptr_t len);
+
+/**
+ * Link to a `YSFReflector` and decode the audio on it (astar-e7b3 §2).
+ *
+ * `host` is `host:port` — YSF publishes a port per reflector and has no
+ * conventional default, so there is nothing sensible to assume. `options`
+ * is the YCS room request; pass NULL for a plain reflector.
+ *
+ * YSF is HARDWARE-ONLY for the same reason D-Star is — the vocoder is
+ * AMBE+2 on a DVSI `ThumbDV`. Poll [`IaxSnapshot::ysf_available`] and offer
+ * the affordance only when it is `true`, rather than calling this
+ * speculatively.
+ *
+ * `host` and `callsign` are required (NULL/non-UTF-8 → [`IAX_ERR_NULL`] /
+ * [`IAX_ERR_UTF8`]); `options` is optional, but a non-NULL, non-UTF-8 one is
+ * [`IAX_ERR_UTF8`]. Returns [`IAX_OK`], [`IAX_ERR_ALREADY_CONNECTED`] (any
+ * other network is live), [`IAX_ERR_YSF`], or [`IAX_ERR_PANIC`].
+ *
+ * NOTE: this performs blocking work — a serial-port scan plus, per candidate
+ * port and baud rate, an open and an eight-transaction dongle init, then a
+ * socket bind and thread spawn. It can take on the order of a second. Call
+ * it off any UI thread.
+ */
+int iax_station_connect_ysf(IaxStation *st,
+                            const char *host,
+                            const char *callsign,
+                            const char *options);
+
+/**
+ * Disconnect the live YSF link, if any. Idempotent — a no-op while idle.
+ * Returns [`IAX_OK`], [`IAX_ERR_NULL`], or [`IAX_ERR_PANIC`].
+ */
+int iax_station_ysf_disconnect(IaxStation *st);
+
+/**
+ * Write the live YSF link's state as JSON into the caller buffer `buf` of
+ * `len` bytes (NUL-terminated, truncate-safe; same contract as
+ * [`iax_station_dstar_state`] — returns the byte length the full JSON needs,
+ * excluding the NUL, so a `len == 0` call is a sizing query).
+ *
+ * ```json
+ * {"link":"linked","last_heard":"AJ7HR","frames_rx":412,"receiving":true,
+ *  "unsupported_mode":null,"backend":"thumbdv","ptt":false,"rx_db":-31.2}
+ * ```
+ *
+ * `link` is one of `idle`/`linking`/`linked`/`unlinking`/`failed`.
+ * `last_heard` is read from the frame header in clear, needs no vocoder, and
+ * PERSISTS past end-of-transmission — it is "most recently heard", not
+ * "currently transmitting"; `receiving` is the one that says whether a
+ * transmission is in progress. `frames_rx` is a liveness counter: a link
+ * that is up and silent and one that is receiving look identical from
+ * `link` alone.
+ *
+ * `unsupported_mode` is the field worth wiring into the UI. It is `null`
+ * normally, and otherwise names a mode astar could not decode — `voice-fr`
+ * (VW, full-rate voice) or `data-fr`. astar decodes DN only, and a reflector
+ * carrying VW would otherwise be indistinguishable from a broken one:
+ * silence, with nothing saying why. Show it.
+ *
+ * Every field is credential-free: callsigns and counters only.
+ *
+ * Writes `{}` when no link is active or the `ysf` feature isn't compiled in.
+ * Returns [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
+ */
+int iax_station_ysf_state(IaxStation *st, char *buf, uintptr_t len);
 
 #ifdef __cplusplus
 }  // extern "C"

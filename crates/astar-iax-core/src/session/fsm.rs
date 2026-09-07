@@ -1192,46 +1192,86 @@ mod fsm_tests {
         assert_eq!(f.negotiated_format(), Some(VoiceFormat::Slin));
     }
 
+    /// A peer whose ACCEPT names a format outside our CAPABILITY is hung up
+    /// on, not
+    /// adopted (iax-c0de). The gate is what the policy OFFERED, not what the
+    /// media path could encode if asked: a `UlawOnly` station can encode
+    /// slin16 fine, and transmitting it because a peer asked would put the
+    /// link on 256 kbps after the operator capped it at 64.
     #[test]
-    fn accept_with_unsupported_format_falls_back_to_preference() {
-        // A peer ACCEPTing with a format we never offered (or can't encode)
-        // violates the exchange, but we degrade instead of hanging up: fall
-        // back to our policy preference and trace the anomaly.
+    fn accept_with_a_format_we_never_offered_hangs_up() {
         use crate::session::CodecPolicy;
         use crate::session::call_profile::CallProfile;
-        let profile = CallProfile {
+
+        for (policy, named) in [
+            // gsm: outside the mask AND unencodable.
+            (CodecPolicy::PreferSlin, VoiceFormat::Gsm.as_u32()),
+            // slin16: perfectly encodable, but this station never offered it.
+            (CodecPolicy::UlawOnly, VoiceFormat::Slin16.as_u32()),
+        ] {
+            let mut f = Fsm::new(creds(), CallNo::new(1).unwrap()).with_call_profile(CallProfile {
+                codec_policy: policy,
+                ..CallProfile::default()
+            });
+            let now = Instant::now();
+            let _ = f.handle(Event::App(AppCommand::StartCall {
+                dest: "1234".to_string(),
+                now,
+            }));
+            let ies = Ies {
+                format: Some(named),
+                ..Ies::empty()
+            };
+            let accept = peer_frame(0, 1, Subclass::Iax(IaxCommand::Accept), FrameType::Iax, ies);
+            let actions = f.handle(Event::Frame {
+                frame: accept,
+                now: now + Duration::from_millis(5),
+            });
+            assert!(
+                matches!(f.state(), SessionState::Hangup(_)),
+                "{policy:?} must hang up on ACCEPT FORMAT=0x{named:04x}, not go Active"
+            );
+            assert_eq!(
+                f.negotiated_format(),
+                None,
+                "{policy:?} must not adopt a format it never offered"
+            );
+            assert!(
+                actions.iter().any(|a| matches!(
+                    a,
+                    Action::AppEvent(AppEvent::Disconnected {
+                        reason: FailReason::Rejected { cause: Some(c) }
+                    }) if c == "Unable to negotiate codec"
+                )),
+                "{policy:?} must surface Disconnected with the codec cause"
+            );
+        }
+    }
+
+    /// ...and a format that IS in the mask is adopted as before.
+    #[test]
+    fn accept_with_an_offered_format_is_adopted() {
+        use crate::session::CodecPolicy;
+        use crate::session::call_profile::CallProfile;
+        let mut f = Fsm::new(creds(), CallNo::new(1).unwrap()).with_call_profile(CallProfile {
             codec_policy: CodecPolicy::PreferSlin,
             ..CallProfile::default()
-        };
-        let mut f = Fsm::new(creds(), CallNo::new(1).unwrap()).with_call_profile(profile);
+        });
         let now = Instant::now();
         let _ = f.handle(Event::App(AppCommand::StartCall {
             dest: "1234".to_string(),
             now,
         }));
         let ies = Ies {
-            format: Some(VoiceFormat::Gsm.as_u32()),
+            format: Some(VoiceFormat::G711U.as_u32()),
             ..Ies::empty()
         };
         let accept = peer_frame(0, 1, Subclass::Iax(IaxCommand::Accept), FrameType::Iax, ies);
-        let actions = f.handle(Event::Frame {
+        let _ = f.handle(Event::Frame {
             frame: accept,
             now: now + Duration::from_millis(5),
         });
-        assert_eq!(
-            f.negotiated_format(),
-            Some(VoiceFormat::Slin),
-            "unsupported ACCEPT format falls back to policy preference"
-        );
-        assert!(
-            actions.iter().any(|a| matches!(
-                a,
-                Action::LogInvalid {
-                    reason: "accept_format_unsupported"
-                }
-            )),
-            "unsupported ACCEPT format must be traced"
-        );
+        assert_eq!(f.negotiated_format(), Some(VoiceFormat::G711U));
     }
 
     #[test]
@@ -1648,8 +1688,35 @@ mod fsm_tests {
     /// Drive to Active with an ACCEPT carrying FORMAT=slin16, so the
     /// negotiated format differs from the G.711µ default and the iax-408b
     /// fallbacks below are observable.
+    /// A station that actually offered slin16. It has to be `PreferSlin16`:
+    /// a `UlawOnly` station never puts slin16 in its CAPABILITY, and since
+    /// iax-c0de an ACCEPT naming a format we did not offer is hung up on
+    /// rather than adopted, so the old default-profile fixture was pretending
+    /// to a negotiation that could not happen on the wire.
     fn drive_to_active_slin16() -> (Fsm, Instant) {
-        let (mut f, now) = drive_to_authrep_sent();
+        use crate::session::CodecPolicy;
+        use crate::session::call_profile::CallProfile;
+        let mut f = Fsm::new(creds(), CallNo::new(1).unwrap()).with_call_profile(CallProfile {
+            codec_policy: CodecPolicy::PreferSlin16,
+            ..CallProfile::default()
+        });
+        let now = Instant::now();
+        let _ = f.handle(Event::App(AppCommand::StartCall {
+            dest: "1234".to_string(),
+            now,
+        }));
+        let auth = peer_frame(
+            0,
+            1,
+            Subclass::Iax(IaxCommand::AuthReq),
+            FrameType::Iax,
+            Ies {
+                challenge: Some("x"),
+                authmethods: Some(2),
+                ..Ies::empty()
+            },
+        );
+        let _ = f.handle(Event::Frame { frame: auth, now });
         let ies = Ies {
             format: Some(VoiceFormat::Slin16.as_u32()),
             ..Ies::empty()

@@ -424,6 +424,7 @@ fn enable_inbound_with_valid_named_devices_succeeds() {
 fn register_without_resolver_surfaces_register_failed() {
     let st = test_station(StationConfig::default());
     let cfg = astar_station::RegisterConfig {
+        fallbacks: Vec::new(),
         peer: "127.0.0.1:4569".parse().unwrap(),
         username: "99999".into(),
         refresh: std::time::Duration::from_secs(60),

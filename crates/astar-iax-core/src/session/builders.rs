@@ -404,11 +404,18 @@ pub(super) fn build_calltoken(our_call: CallNo, peer_call: CallNo, token: &[u8])
     .expect("CALLTOKEN payload is bounded by OsRng length we control")
 }
 
-/// REJECT with an optional CAUSE IE (codepoint-truncated to the wire limit).
+/// REJECT with an optional CAUSE IE (codepoint-truncated to the wire limit) and
+/// an optional CAUSECODE.
+///
+/// Asterisk sends both: the human sentence in CAUSE and a Q.931-derived number
+/// in CAUSECODE, and some peers key their retry logic off the number rather
+/// than the string. `causecode: None` leaves the IE off entirely, which is what
+/// every reject did before [`CAUSE_BEARERCAPABILITY_NOTAVAIL`] arrived.
 pub(super) fn build_reject(
     our_call: CallNo,
     peer_call: CallNo,
     cause: Option<&str>,
+    causecode: Option<u8>,
 ) -> OwnedFullFrame {
     use crate::frame::Subclass;
     use crate::ie::Ies;
@@ -416,6 +423,7 @@ pub(super) fn build_reject(
     let cause_trunc = cause.map(|c| truncate_to_codepoint_boundary(c, 255));
     let ies = Ies {
         cause: cause_trunc,
+        causecode,
         ..Ies::empty()
     };
     OwnedFullFrame::with_ies(
@@ -560,7 +568,7 @@ mod inbound_builder_tests {
 
     #[test]
     fn build_reject_carries_cause_truncated() {
-        let f = build_reject(our(), peer(), Some("Authentication failed"));
+        let f = build_reject(our(), peer(), Some("Authentication failed"), None);
         assert_eq!(f.subclass, Subclass::Iax(IaxCommand::Reject));
         let ies = Ies::parse(&f.ie_bytes).unwrap();
         assert_eq!(ies.cause, Some("Authentication failed"));

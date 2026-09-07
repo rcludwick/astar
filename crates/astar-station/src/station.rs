@@ -9,7 +9,7 @@ use astar_console::{
     CallStatus, ConsoleConfig, ConsoleSession, ConsoleState, LinkConnectSpec, OperatingMode,
     RegisterOutcome,
 };
-use astar_iax::{CallMode, LinkEvent, LinkMode, LinkRoster};
+use astar_iax::{CallMode, CodecPolicy, IncomingCallPolicy, LinkEvent, LinkMode, LinkRoster};
 use astar_iax_core::session::auth::Secret;
 
 use crate::config::NodeConfig;
@@ -227,6 +227,11 @@ pub struct Station {
 struct RegSupervise {
     cfg: Option<RegisterConfig>,
     retry: Option<(std::time::Instant, std::time::Duration)>,
+    /// Which of `cfg.candidates()` the next attempt uses. Advanced on every
+    /// retry, so sustained failure walks the list rather than hammering one
+    /// address that has stopped answering. See `RegisterConfig::fallbacks`
+    /// for why a registrar hostname's addresses are not interchangeable.
+    peer_index: usize,
 }
 
 /// First re-register attempt lands 5 s after a failure; each subsequent
@@ -286,6 +291,7 @@ impl Station {
             #[cfg(feature = "m17")]
             codec2_probe_cache: Mutex::new(None),
         };
+        station.pin_station_policy();
         if configured_mode == OperatingMode::Node {
             let _ = station.set_mode(OperatingMode::Node);
         }
@@ -327,10 +333,50 @@ impl Station {
             #[cfg(feature = "m17")]
             codec2_probe_cache: Mutex::new(None),
         };
+        station.pin_station_policy();
         if configured_mode == OperatingMode::Node {
             let _ = station.set_mode(OperatingMode::Node);
         }
         station
+    }
+
+    /// Pin the session's station codec policy from [`StationConfig`] at
+    /// construction (iax-4348), BEFORE any path can build the engine.
+    ///
+    /// The pipeline sample rate is fixed when the `Manager` is built and
+    /// every dial's codec policy is capped to it, so a `prefer_slin16`
+    /// station — which the macOS app and `astar-server` both configure — only
+    /// actually offers slin16 if the policy is known first. It used to be
+    /// learned from the first IAX2 `connect` or `start_inbound`; a digital
+    /// session (M17/D-Star/System Fusion) reaching the engine before either
+    /// of those pinned the whole station to 8 kHz for the rest of the
+    /// process, and the node dialed narrowband with nothing in the log.
+    ///
+    /// Idempotent and safe on a shared session: an engine that is already
+    /// busy keeps its rate (the session logs the mismatch).
+    fn pin_station_policy(&self) {
+        if let Ok(mut s) = self.session.lock() {
+            s.set_station_policy(self.config.codec_policy);
+        }
+    }
+
+    /// Default an inbound policy's codec policy to the station's own
+    /// (iax-4348). `IncomingCallPolicy::codec_policy` has no "unset" state, so
+    /// "the caller did not choose" is read as the library default
+    /// (`UlawOnly`); anything else the caller set is left alone, which keeps
+    /// asymmetric inbound/outbound policy available.
+    ///
+    /// Without this a `prefer_slin16` station drops to 8 kHz the moment the
+    /// listener starts — `start_inbound` pins `station_policy` from the
+    /// inbound policy — and then STAYS there, because a listening engine is
+    /// never idle enough to rebuild. Worse, on an engine already up at 16 kHz
+    /// the 8 kHz leg the listener builds is refused outright at adopt
+    /// ("listener/station sample-rate mismatch").
+    fn inbound_policy(&self, mut policy: IncomingCallPolicy) -> IncomingCallPolicy {
+        if policy.codec_policy == CodecPolicy::default() {
+            policy.codec_policy = self.config.codec_policy;
+        }
+        policy
     }
 
     /// Select the capture/playback devices applied to the next [`Station::connect`]
@@ -707,6 +753,7 @@ impl Station {
         // iax-a9d4 Task 6: same lesson, same fix, for a live/failed D-Star
         // session — `detach()` below never touches `self.dstar` either.
         self.dstar_disconnect();
+        self.ysf_disconnect();
         if self.mode() == OperatingMode::Node {
             // Node mode: hang up the active inbound-adopted call but keep the
             // listener running for the next caller (the session retains its
@@ -771,8 +818,6 @@ impl Station {
                 port,
                 module: module_byte,
                 callsign: callsign.to_string(),
-                input,
-                output,
                 codec_dirs,
                 // iax-f2b8 Task 4: no `M17Config::default()` exists yet
                 // (ledgered in the Task 3 report) — hard-coded here, matching
@@ -783,7 +828,7 @@ impl Station {
             self.session
                 .lock()
                 .unwrap()
-                .m17_connect(backend, cfg)
+                .m17_connect(backend, cfg, input.as_deref(), output.as_deref())
                 .map_err(map_console_err)
         }
         #[cfg(not(feature = "m17"))]
@@ -872,13 +917,15 @@ impl Station {
     /// outright rather than silently substituting a software decoder.
     ///
     /// # Blocking
-    /// The `ThumbDV` probe/init handshake and the audio-device open both run
-    /// with the session mutex NOT held: the session is constructed first and
-    /// then installed via `ConsoleSession::dstar_adopt`. A slow or flaky
+    /// The `ThumbDV` probe/init handshake and the socket bind run with the
+    /// session mutex NOT held: the audio lane is opened first (under the
+    /// lock, exactly as an IAX2 dial has always opened its devices), the
+    /// lock is released for the session construction, and only the install
+    /// via `ConsoleSession::dstar_adopt` takes it again. A slow or flaky
     /// dongle therefore delays only the caller of this method; concurrent
     /// [`Station::snapshot`]/`dstar_state`/[`Station::set_ptt`] polls — which
-    /// all take that same mutex — are unaffected, per the `AstarStation`
-    /// poll-and-snapshot contract.
+    /// all take that same mutex — are unaffected for the whole of it, per
+    /// the `AstarStation` poll-and-snapshot contract.
     ///
     /// # Errors
     /// [`StationError::Dstar`] for an invalid module/callsign, when the
@@ -916,8 +963,6 @@ impl Station {
                 port,
                 module: module_byte,
                 callsign: callsign.to_string(),
-                output,
-                input,
                 // The destination reflector's callsign fills the TX header's
                 // RPT1/RPT2 (see `astar_console::dstar`'s
                 // `tx_repeater_fields`). `None` means "derive it from `host`"
@@ -927,32 +972,41 @@ impl Station {
                 // explicitly instead of transmitting blank fields.
                 reflector_callsign: reflector_callsign.map(str::to_string),
             };
-            // Refuse early and cheaply when something else already owns the
-            // session: the lock is held for a few instructions here, not for
-            // the whole ThumbDV probe.
-            self.session
-                .lock()
-                .unwrap()
-                .dstar_can_connect()
-                .map_err(map_console_err)?;
+            // Step 1, under the lock: open the ONE audio lane on the
+            // station's router and reserve it. The reservation is also the
+            // mutual-exclusion token for the gap before the adopt below —
+            // every other connect path refuses while it is held — and the
+            // pref push, so the session starts at the operator's chosen
+            // volume rather than the router's unity default.
+            let audio = {
+                let mut s = self.session.lock().unwrap();
+                s.open_voice_route(input.as_deref(), output.as_deref(), || {
+                    (self.make_backend)()
+                })
+                .map_err(map_console_err)?
+            };
 
-            // The slow part, deliberately OFF the session mutex: a
-            // candidate-port scan, then per candidate and per baud rate an
-            // open plus an eight-transaction init cookbook (each bounded at
-            // 300 ms), plus the audio-output open — seconds, on a flaky
-            // dongle. Holding the mutex across that blocked every
-            // snapshot/state poll for the whole window.
-            let backend = std::cell::RefCell::new(Some((self.make_backend)()));
-            let session = astar_console::DstarSession::connect(cfg, &move || {
-                backend
-                    .borrow_mut()
-                    .take()
-                    .expect("dstar backend factory called exactly once")
-            })
-            .map_err(map_console_err)?;
+            // Step 2, deliberately OFF the session mutex: a candidate-port
+            // scan, then per candidate and per baud rate an open plus an
+            // eight-transaction init cookbook (each bounded at 300 ms), then
+            // the socket bind — seconds, on a flaky dongle. Holding the
+            // mutex across that blocked every snapshot/state poll for the
+            // whole window.
+            let session = match astar_console::DstarSession::connect(cfg, audio) {
+                Ok(s) => s,
+                Err(e) => {
+                    // The lane opened but the session did not: give it back,
+                    // or the station stays reserved forever. Dropped off the
+                    // lock — a CoreAudio stream drop can stall.
+                    let handles = self.session.lock().unwrap().release_voice_route();
+                    drop(handles);
+                    return Err(map_console_err(e));
+                }
+            };
 
-            // Re-takes the lock only to install (and to re-check exclusion,
-            // since the state could have changed while it was released).
+            // Step 3: re-take the lock only to install (and to re-check
+            // exclusion, since the state could have changed while it was
+            // released).
             self.session
                 .lock()
                 .unwrap()
@@ -993,6 +1047,129 @@ impl Station {
         {
             false
         }
+    }
+
+    /// Link to a `YSFReflector` and decode the audio on it (astar-e7b3 §2).
+    ///
+    /// `host` is `host:port` — YSF has no single conventional port and the
+    /// directory publishes one per reflector, so there is nothing to default
+    /// to. `options` is the YCS room request; `None` for a plain reflector.
+    ///
+    /// Primitive args rather than an `astar_console::YsfConfig` for the same
+    /// reason [`Station::dstar_connect`] takes them: that type only exists
+    /// when the feature is compiled in, and this method must stay
+    /// byte-identically callable either way.
+    ///
+    /// Transceive. `Station::set_ptt` keys a live YSF link exactly as it
+    /// keys D-Star; nothing keys on its own.
+    ///
+    /// Mutually exclusive with an IAX2 call, an M17 session and a D-Star
+    /// session. One `ThumbDV`, one link.
+    ///
+    /// # Blocking
+    /// The `ThumbDV` probe/init and the audio-device open both run with the
+    /// session mutex NOT held, exactly as `dstar_connect` does and for the
+    /// same reason: every `Station` method takes that mutex, and the contract
+    /// is poll-and-snapshot.
+    ///
+    /// # Errors
+    /// [`StationError::Ysf`] for an empty callsign, when the `ysf` feature
+    /// isn't compiled in, and for every vocoder-availability failure (the
+    /// message names the specific port when a dongle is merely busy).
+    /// [`StationError::AlreadyConnected`] while another network is live.
+    pub fn ysf_connect(
+        &self,
+        host: &str,
+        callsign: &str,
+        options: Option<&str>,
+    ) -> Result<(), StationError> {
+        if callsign.is_empty() {
+            return Err(StationError::Ysf("callsign must not be empty".into()));
+        }
+        #[cfg(feature = "ysf")]
+        {
+            let (input, output) = self.selected_devices();
+            let cfg = astar_console::YsfConfig {
+                host: host.to_string(),
+                callsign: callsign.to_string(),
+                options: options.map(str::to_string),
+            };
+            // Step 1, under the lock: open the ONE audio lane on the
+            // station's router and reserve it. The reservation is also the
+            // mutual-exclusion token for the gap before the adopt below —
+            // every other connect path refuses while it is held — and the
+            // pref push, so the link starts at the operator's chosen volume
+            // rather than the router's unity default.
+            let audio = {
+                let mut s = self.session.lock().unwrap();
+                s.open_voice_route(input.as_deref(), output.as_deref(), || {
+                    (self.make_backend)()
+                })
+                .map_err(map_console_err)?
+            };
+
+            // Step 2, deliberately OFF the session mutex: the `ThumbDV`
+            // candidate-port scan and init cookbook, then the socket bind —
+            // seconds, on a flaky dongle. Holding the mutex across that
+            // blocked every snapshot/state poll for the whole window.
+            let link = match astar_console::YsfLink::connect_with_audio(&cfg, audio) {
+                Ok(l) => l,
+                Err(e) => {
+                    // The lane opened but the link did not: give it back, or
+                    // the station stays reserved forever. Dropped off the
+                    // lock — a CoreAudio stream drop can stall.
+                    let handles = self.session.lock().unwrap().release_voice_route();
+                    drop(handles);
+                    return Err(map_console_err(e));
+                }
+            };
+
+            // Step 3: re-take the lock only to install (and to re-check
+            // exclusion, since the state could have changed while it was
+            // released).
+            self.session
+                .lock()
+                .unwrap()
+                .ysf_adopt(link)
+                .map_err(map_console_err)
+        }
+        #[cfg(not(feature = "ysf"))]
+        {
+            let _ = (host, options);
+            Err(StationError::Ysf("ysf support not compiled".into()))
+        }
+    }
+
+    /// Disconnect the live YSF link, if any. No-op when none is active (and
+    /// when the `ysf` feature isn't compiled in).
+    pub fn ysf_disconnect(&self) {
+        #[cfg(feature = "ysf")]
+        {
+            self.session.lock().unwrap().ysf_disconnect();
+        }
+    }
+
+    /// `true` when System Fusion voice is available: the `ysf` feature is
+    /// compiled in AND a `ThumbDV` is attached. The same cached probe
+    /// [`Station::dstar_available`] reads — one dongle, one answer.
+    #[must_use]
+    pub fn ysf_available(&self) -> bool {
+        #[cfg(feature = "ysf")]
+        {
+            astar_console::ysf_available()
+        }
+        #[cfg(not(feature = "ysf"))]
+        {
+            false
+        }
+    }
+
+    /// A poll-cheap snapshot of the live YSF link, or `None`. Only compiled
+    /// when the `ysf` feature is enabled.
+    #[cfg(feature = "ysf")]
+    #[must_use]
+    pub fn ysf_state(&self) -> Option<astar_console::YsfSnapshot> {
+        self.session.lock().unwrap().ysf_state()
     }
 
     /// A poll-cheap snapshot of the live D-Star session's state (iax-a9d4
@@ -1070,7 +1247,7 @@ impl Station {
         let mut sess = self.session.lock().unwrap();
         sess.start_inbound_with_allowlist(
             cfg.bind,
-            cfg.policy,
+            self.inbound_policy(cfg.policy),
             cfg.answer,
             cfg.max_calls,
             cfg.allowlist,
@@ -1121,6 +1298,9 @@ impl Station {
             let mut s = self.reg_supervise.lock().unwrap();
             s.cfg = Some(cfg);
             s.retry = None;
+            // An explicit register starts from the top of the list, not
+            // wherever a previous failure left the rotation.
+            s.peer_index = 0;
         }
         self.do_register(&attempt)
     }
@@ -1129,6 +1309,20 @@ impl Station {
     /// the supervision state (shared by [`Station::register`] and the retry
     /// path in [`Station::next_event`]).
     fn do_register(&self, cfg: &RegisterConfig) -> Result<(), StationError> {
+        let peer = {
+            let s = self.reg_supervise.lock().unwrap();
+            let candidates = cfg.candidates();
+            candidates[s.peer_index % candidates.len()]
+        };
+        self.do_register_to(cfg, peer)
+    }
+
+    /// [`Self::do_register`] against one chosen candidate.
+    fn do_register_to(
+        &self,
+        cfg: &RegisterConfig,
+        peer: std::net::SocketAddr,
+    ) -> Result<(), StationError> {
         // Resolve the secret on-demand; pass None if no resolver is set.
         let secret: Option<Arc<Secret>> = self
             .secret_resolver
@@ -1140,7 +1334,7 @@ impl Station {
         self.session
             .lock()
             .unwrap()
-            .start_register(cfg.peer, cfg.username.clone(), cfg.refresh, secret)
+            .start_register(peer, cfg.username.clone(), cfg.refresh, secret)
             .map_err(|e| StationError::Iax(e.to_string()))
     }
 
@@ -1188,7 +1382,7 @@ impl Station {
                     let mut sess = self.session.lock().unwrap();
                     sess.start_inbound_with_allowlist(
                         cfg.bind,
-                        crate::config::clone_policy(&cfg.policy),
+                        self.inbound_policy(crate::config::clone_policy(&cfg.policy)),
                         cfg.answer,
                         cfg.max_calls,
                         cfg.allowlist.clone(),
@@ -1929,6 +2123,12 @@ impl Station {
                         std::time::Instant::now() + next,
                         (next * 2).min(REG_RETRY_MAX),
                     ));
+                    // Try the NEXT candidate. A registrar hostname is often
+                    // several hosts that do not all answer a given source
+                    // address, and the failure is silent — REGREQs go out,
+                    // nothing comes back — so retrying the same one forever
+                    // is an outage rather than a retry.
+                    s.peer_index = s.peer_index.wrapping_add(1);
                     Some(cfg)
                 }
                 _ => None,
@@ -1948,7 +2148,9 @@ impl Station {
         if let Some(outcome) = self.session.lock().unwrap().take_register_event() {
             return Some(match outcome {
                 RegisterOutcome::Registered => {
-                    // Success ends the supervision backoff (iax-177d).
+                    // Success ends the supervision backoff (iax-177d). The
+                    // candidate that worked is left selected: it is the one
+                    // answering, and re-registration should keep using it.
                     self.reg_supervise.lock().unwrap().retry = None;
                     StationEvent::Registered
                 }
@@ -2031,6 +2233,7 @@ impl Drop for Station {
         self.disconnect();
         self.m17_disconnect();
         self.dstar_disconnect();
+        self.ysf_disconnect();
         // Stop monitor mode (releases the input device).
         self.monitor_stop();
         // Stop outbound registration (sends REGREL, joins the thread).
@@ -2065,6 +2268,8 @@ fn map_console_err(e: astar_console::ConsoleError) -> StationError {
         C::Link(m) => StationError::Link(m),
         C::M17(m) => StationError::M17(m),
         C::Dstar(m) => StationError::Dstar(m),
+        C::Ysf(m) => StationError::Ysf(m),
+        C::NoCaptureDevice => StationError::Audio("no capture device: cannot transmit".into()),
     }
 }
 

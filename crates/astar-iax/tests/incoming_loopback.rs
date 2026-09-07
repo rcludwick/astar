@@ -799,3 +799,259 @@ fn answer_during_calltoken_handshake_is_parked_not_dropped() {
     }
     let _ = call.snapshot();
 }
+
+// ---------------------------------------------------------------------------
+// Inbound codec negotiation on the wire (iax-c0de). `astar-server` defaults to
+// `prefer_slin16`, so what a µ-law-only ClearNode gets back from a wideband
+// node is a live-interop question, not a unit-test one: these drive a real
+// `IncomingCallListener` and read the FORMAT IE off the ACCEPT it actually
+// sends. 127.0.0.1 only — no node is ever contacted.
+// ---------------------------------------------------------------------------
+
+/// ASL codec bits as they appear on the wire. The ones astar cannot carry
+/// (`GSM`, `G726`, `ADPCM`) are here because real ASL peers advertise them and
+/// the point is what happens when they do.
+const ULAW: u32 = 0x4;
+const ALAW: u32 = 0x8;
+const GSM: u32 = 0x2;
+const G726: u32 = 0x10;
+const ADPCM: u32 = 0x20;
+const SLIN: u32 = 0x40;
+const SLIN16: u32 = 0x8000;
+
+/// Start an auto-accepting, auth-free listener under `policy`.
+fn negotiating_listener(
+    policy: astar_iax::CodecPolicy,
+) -> (
+    IncomingCallListener,
+    std::sync::mpsc::Receiver<IncomingCallEvent>,
+) {
+    IncomingCallListener::builder()
+        .bind("127.0.0.1:0".parse().unwrap())
+        .policy(IncomingCallPolicy {
+            decision: IncomingDecisionPolicy::AutoAccept,
+            auth: IncomingAuthPolicy::Off,
+            codec_policy: policy,
+            ..IncomingCallPolicy::default()
+        })
+        .start()
+        .expect("listener starts")
+}
+
+/// A NEW carrying exactly `capability`/`format`, as a narrowband appliance sends.
+fn offer(capability: Option<u32>, format: Option<u32>) -> Ies<'static> {
+    Ies {
+        called_number: Some("s"),
+        calling_number: Some("1001"),
+        calling_name: Some("ClearNode"),
+        capability,
+        format,
+        version: Some(2),
+        calltoken: Some(b""),
+        ..Ies::empty()
+    }
+}
+
+/// Dial `policy`'s listener with `capability`/`format` and return the FORMAT IE
+/// of the ACCEPT that comes back. Panics if the listener REJECTs instead.
+fn accept_format_for(
+    policy: astar_iax::CodecPolicy,
+    capability: Option<u32>,
+    format: Option<u32>,
+) -> u32 {
+    let (listener, _events) = negotiating_listener(policy);
+    let listener_addr = listener.local_addr();
+    let (peer, _peer_addr) = peer_socket();
+    peer.send_to(
+        &new_datagram(offer(capability, format), PEER_CALL),
+        listener_addr,
+    )
+    .unwrap();
+
+    let reply = recv_until(&peer, listener_addr, PEER_CALL, |f| {
+        matches!(
+            f.subclass,
+            Subclass::Iax(IaxCommand::Accept | IaxCommand::Reject)
+        )
+    })
+    .expect("an ACCEPT or REJECT must arrive");
+    let Ok(Frame::Full(f)) = parse_lenient(&reply) else {
+        panic!("reply parses");
+    };
+    assert_eq!(
+        f.subclass,
+        Subclass::Iax(IaxCommand::Accept),
+        "expected an ACCEPT (policy={policy:?} cap={capability:?} fmt={format:?}), got a REJECT: {:?}",
+        f.ies.cause
+    );
+    f.ies.format.expect("an ACCEPT carries a FORMAT IE")
+}
+
+#[test]
+fn ulaw_only_peer_is_answered_in_ulaw_under_prefer_slin16() {
+    // The ClearNode case, and the reason flipping the server default to
+    // wideband is safe: a peer that can only do µ-law still gets µ-law,
+    // because its stated FORMAT wins whenever we can carry it.
+    assert_eq!(
+        accept_format_for(astar_iax::CodecPolicy::PreferSlin16, Some(ULAW), Some(ULAW)),
+        ULAW,
+        "a strictly ulaw-only CAPABILITY (0x4) must be answered in ulaw"
+    );
+    // Same, with the capability mask a real ASL node advertises — including
+    // three codecs astar does not implement.
+    assert_eq!(
+        accept_format_for(
+            astar_iax::CodecPolicy::PreferSlin16,
+            Some(GSM | ULAW | ALAW | G726 | ADPCM),
+            Some(ULAW)
+        ),
+        ULAW,
+        "the ASL-typical mask must not be pulled up to wideband"
+    );
+    // And with no FORMAT IE at all: the pull-up still cannot invent slin16
+    // out of a capability that does not carry it.
+    assert_eq!(
+        accept_format_for(astar_iax::CodecPolicy::PreferSlin16, Some(ULAW), None),
+        ULAW,
+        "a ulaw-only peer that states no FORMAT still gets ulaw"
+    );
+}
+
+#[test]
+fn wideband_peer_is_answered_in_slin16_under_prefer_slin16() {
+    // The astar client's own offer: CAPABILITY 0x804c, FORMAT slin16.
+    assert_eq!(
+        accept_format_for(
+            astar_iax::CodecPolicy::PreferSlin16,
+            Some(ULAW | SLIN | SLIN16),
+            Some(SLIN16)
+        ),
+        SLIN16,
+        "a peer offering ulaw|slin|slin16 and asking for slin16 must get slin16"
+    );
+    // A wideband-capable peer that states no preference is pulled up.
+    assert_eq!(
+        accept_format_for(
+            astar_iax::CodecPolicy::PreferSlin16,
+            Some(ULAW | SLIN | SLIN16),
+            None
+        ),
+        SLIN16,
+        "no stated FORMAT is the case the wideband pull-up exists for"
+    );
+}
+
+#[test]
+fn peer_with_no_common_codec_is_rejected_with_a_cause() {
+    // A `disallow=all / allow=gsm` ASL node. astar implements no GSM, so there
+    // is nothing honest to name in an ACCEPT. Before this, the listener
+    // ACCEPTed with ulaw the peer never offered and the call died silently.
+    let (listener, events) = negotiating_listener(astar_iax::CodecPolicy::PreferSlin16);
+    let listener_addr = listener.local_addr();
+    let (peer, _peer_addr) = peer_socket();
+    peer.send_to(
+        &new_datagram(offer(Some(GSM), Some(GSM)), PEER_CALL),
+        listener_addr,
+    )
+    .unwrap();
+
+    let reply = recv_until(&peer, listener_addr, PEER_CALL, |f| {
+        matches!(
+            f.subclass,
+            Subclass::Iax(IaxCommand::Accept | IaxCommand::Reject)
+        )
+    })
+    .expect("a REJECT must arrive");
+    let Ok(Frame::Full(f)) = parse_lenient(&reply) else {
+        panic!("reply parses");
+    };
+    assert_eq!(
+        f.subclass,
+        Subclass::Iax(IaxCommand::Reject),
+        "a gsm-only peer must be REJECTed, never ACCEPTed with a codec it cannot decode"
+    );
+    assert_eq!(
+        f.ies.cause,
+        Some("Unable to negotiate codec"),
+        "the CAUSE must be the sentence Asterisk itself uses"
+    );
+    assert_eq!(
+        f.ies.causecode,
+        Some(65),
+        "Asterisk pairs that sentence with CAUSECODE 65 \
+         (AST_CAUSE_BEARERCAPABILITY_NOTAVAIL); peers key retry logic off the number"
+    );
+
+    // The listener spawns the leg (and, in AutoAccept, hands the app a `Call`)
+    // before the FSM has negotiated anything, so an event still arrives — but
+    // the leg must TEAR DOWN, not merely fail to come up. Everything downstream
+    // hangs off the Hangup: the leg thread exits, the listener frees the call
+    // number, and the Manager reaps the pool slot. Without it an unauthenticated
+    // caller could pin `max_calls` just by offering a codec we do not have.
+    let ev = events
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the leg is spawned before negotiation, so an event arrives");
+    let IncomingCallEvent::Answered {
+        call,
+        events: call_events,
+    } = ev
+    else {
+        panic!("expected Answered in AutoAccept");
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let hangup_cause = loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match call_events.recv_timeout(remaining) {
+            Ok(astar_iax::CallEvent::Hangup { reason }) => break reason,
+            Ok(astar_iax::CallEvent::Answered { .. }) => {
+                panic!("a REJECTed leg must never report Answered")
+            }
+            Ok(_) => {}
+            Err(e) => panic!("no CallEvent::Hangup before deadline: {e}"),
+        }
+    };
+    assert!(
+        matches!(
+            hangup_cause,
+            astar_iax_core::session::FailReason::Rejected { cause: Some(ref c) }
+                if c == "Unable to negotiate codec"
+        ),
+        "the Hangup must carry the codec cause, not a bare timeout: {hangup_cause:?}"
+    );
+
+    // The leg reaches Hungup on its own — not via `Call::drop`, which would
+    // hide exactly the leak this pins. `call` is still alive right here.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut hungup = false;
+    while Instant::now() < deadline && !hungup {
+        let snap = call.snapshot();
+        assert!(!snap.is_active(), "a REJECTed leg must never reach Active");
+        assert_eq!(
+            snap.negotiated_format, None,
+            "a REJECTed leg must never publish a negotiated codec"
+        );
+        hungup = matches!(snap.state, astar_iax::CallSnapshotState::Hungup);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(hungup, "the leg must reach Hungup without being dropped");
+
+    // ...and the listener released the call number. A duplicate NEW from a live
+    // (addr, callno) pair is swallowed by the listener's `by_peer` map, so the
+    // ONLY way this second, identical NEW earns a second REJECT is if the first
+    // leg was properly reaped: `done_tx` -> `by_local_call.remove` ->
+    // `allocator.free`. If the slot leaked, no reply comes and this times out.
+    peer.send_to(
+        &new_datagram(offer(Some(GSM), Some(GSM)), PEER_CALL),
+        listener_addr,
+    )
+    .unwrap();
+    let second = recv_until(&peer, listener_addr, PEER_CALL, |f| {
+        matches!(f.subclass, Subclass::Iax(IaxCommand::Reject))
+    });
+    assert!(
+        second.is_some(),
+        "a second NEW from the same peer must get a fresh leg (and a fresh \
+         REJECT), proving the listener freed the call number"
+    );
+    drop(call);
+}

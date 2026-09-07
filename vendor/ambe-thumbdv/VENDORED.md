@@ -9,7 +9,7 @@ or decode AMBE.
 |---|---|
 | Upstream | <https://github.com/rcludwick/ambe> |
 | Path upstream | `crates/ambe-thumbdv` |
-| Revision | `cf0aeb5718bd5025dcf1cd855d615cae69cf3636` (2026-08-10) |
+| Revision | `41c35d817af39016707f58b1bbbc6b1bfaeedabe` (2026-09-06) |
 | Licence | MIT OR Apache-2.0 (see `LICENSE-MIT`, `LICENSE-APACHE`) |
 | Copyright | Rob Ludwick |
 
@@ -31,12 +31,12 @@ dependency from the build, so a clean checkout builds fully offline.
 ambe-thumbdv = { path = "../../vendor/ambe-thumbdv", optional = true }
 ```
 
-## What is *not* vendored
+## What is vendored, and only that
 
-The `ambe-core` / `ambe-dstar` **software** vocoder crates from the same
-upstream repo were deliberately dropped. D-Star in this repository is
-hardware-only (ThumbDV); the `ambe-soft` feature and the `SoftAmbe` backend that
-used them no longer exist.
+`src/` — the packet driver and its `thumbdv-rig` binary. Nothing else from
+upstream is used: D-Star, System Fusion and every other AMBE network in this
+repository decode and encode on the dongle, and there is no software AMBE
+backend of any kind here.
 
 ## Updating
 
