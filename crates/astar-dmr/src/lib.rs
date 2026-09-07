@@ -41,6 +41,7 @@
 //! recall, and never by copying code. Those projects are GPL-2.0 and this one
 //! is AGPL-3.0-only; the two do not mix.
 
+pub mod fsm;
 pub mod network;
 pub mod wire;
 
