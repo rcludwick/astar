@@ -42,5 +42,6 @@
 //! is AGPL-3.0-only; the two do not mix.
 
 pub mod network;
+pub mod wire;
 
 pub use network::{ALL, DmrNetwork, NetworkClass, dialable};

@@ -261,6 +261,9 @@ dependencies = [
 [[package]]
 name = "astar-dmr"
 version = "0.1.11-beta"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "astar-dstar"
@@ -4579,6 +4582,17 @@ dependencies = [
  "scopeguard",
  "unescaper",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
 ]
 
 [[package]]

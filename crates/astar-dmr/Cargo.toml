@@ -12,3 +12,10 @@ description = "DMR primitives — the network taxonomy that says which DMR you m
 workspace = true
 
 [dependencies]
+# The homebrew login digest is SHA256(salt || password). astar writes wire
+# formats out from their definitions; it does not write its own crypto, and a
+# hand-rolled SHA-256 in a ham client would be a liability with no upside.
+# `digest`, `block-buffer` and `crypto-common` are already in Cargo.lock behind
+# boringtun, so this is one new crate. It is not optional and it is not behind
+# a feature: the handshake does not work without it.
+sha2 = { workspace = true }
