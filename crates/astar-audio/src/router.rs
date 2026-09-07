@@ -71,7 +71,8 @@ pub struct CallAudio {
 /// lane runs on (swappable destination, PTT gate, TX peak). Phase 2 static
 /// wiring; Phase 3's `route()` swaps `dest`.
 struct MicSlot {
-    #[allow(dead_code)] // kept alive so the cpal input stream stays open
+    /// Kept alive so the cpal input stream stays open; read by
+    /// [`AudioRouter::close_mic`] when the lane is torn down.
     handle: Box<dyn StreamHandle>,
     dest: MicDest,
     gate: Arc<AtomicBool>,
@@ -122,7 +123,8 @@ struct MicSlot {
 /// One open playback device: its stream handle plus the shared `Mixer` the
 /// router adds/removes call RX channels to, and the bus RX peak cell.
 struct OutSlot {
-    #[allow(dead_code)] // kept alive so the cpal output stream stays open
+    /// Kept alive so the cpal output stream stays open; read by
+    /// [`AudioRouter::close_output`] when the bus is torn down.
     handle: Box<dyn StreamHandle>,
     mixer: Arc<Mutex<Mixer>>,
     /// Shared output-gain cell (f32 bits, default 1.0) for this bus.
@@ -507,6 +509,32 @@ impl AudioRouter {
         {
             m.remove_call(mix_id);
         }
+    }
+
+    /// Close a mic lane: drop the slot and hand back its stream handle. The
+    /// stream closes when the handle drops — a caller holding a lock can
+    /// carry it out and drop it later, because a `CoreAudio` stream drop can
+    /// stall briefly. `None` if the mic isn't open.
+    ///
+    /// Any destination still bound to the lane simply stops receiving; the
+    /// caller is expected to have unbound it. `Manager` never calls this —
+    /// the IAX2 lifecycle keeps its lanes until the router drops.
+    #[must_use]
+    pub fn close_mic(&mut self, mic: &MicId) -> Option<Box<dyn StreamHandle>> {
+        self.mics.remove(mic).map(|slot| slot.handle)
+    }
+
+    /// Close an output bus if nothing is mixed into it any more: drop the
+    /// slot and hand back its stream handle (see [`Self::close_mic`] for why
+    /// the handle comes back rather than being dropped here). `None` if the
+    /// bus isn't open OR still has a lane on it — a bus shared with another
+    /// call must not be pulled from under it.
+    #[must_use]
+    pub fn close_output(&mut self, out: &OutputId) -> Option<Box<dyn StreamHandle>> {
+        if self.bus_call_count(out) != 0 {
+            return None;
+        }
+        self.outputs.remove(out).map(|slot| slot.handle)
     }
 
     /// Open the output bus for `out` if it isn't already open.
@@ -1817,6 +1845,54 @@ mod tests {
             router.bus_call_count(&out),
             2,
             "both calls mix to the one bus"
+        );
+    }
+
+    #[test]
+    fn close_mic_drops_the_lane_and_returns_its_stream() {
+        let mut router = AudioRouter::new(Box::new(NullBackend::new()));
+        let mic = MicId::new("in:test");
+        let (tx, _rx) = channel::<Vec<i16>>();
+        router
+            .open_mic_lane(
+                &mic,
+                tx,
+                Arc::new(AtomicU32::new(0)),
+                StreamConfig::default(),
+            )
+            .expect("open");
+        assert_eq!(router.mic_count(), 1);
+        let handle = router.close_mic(&mic);
+        assert!(
+            handle.is_some(),
+            "the stream handle comes back to be dropped by the caller"
+        );
+        assert_eq!(router.mic_count(), 0);
+        assert!(router.close_mic(&mic).is_none(), "closing twice is a no-op");
+        assert!(
+            router.mic_tx_dbfs(&mic).is_none(),
+            "a closed lane has no meter"
+        );
+    }
+
+    #[test]
+    fn close_output_refuses_while_a_lane_remains_and_closes_when_empty() {
+        let mut router = AudioRouter::new(Box::new(NullBackend::new()));
+        let out = OutputId::new("out:test");
+        let (_audio, _mic_tx, mix_id) = router
+            .open_monitor_call(&out, StreamConfig::default())
+            .expect("open");
+        assert!(
+            router.close_output(&out).is_none(),
+            "a bus with a lane stays open"
+        );
+        assert_eq!(router.output_count(), 1);
+        router.remove_from_bus(&out, mix_id);
+        assert!(router.close_output(&out).is_some());
+        assert_eq!(router.output_count(), 0);
+        assert!(
+            router.close_output(&out).is_none(),
+            "closing twice is a no-op"
         );
     }
 
