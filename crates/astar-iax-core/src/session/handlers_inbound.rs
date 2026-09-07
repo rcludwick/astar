@@ -103,10 +103,10 @@ fn choose_codec(
         }
     }
     // No stated preference at all: our order decides, so a Prefer* policy
-    // pulls a silent caller up to wideband.
-    // Nothing in common yields `None`. `common` is empty only when the peer DID
-    // state a CAPABILITY (an empty one was widened to our own mask above), so
-    // that is a real "no shared codec", not a silent peer.
+    // pulls a silent caller up to wideband -- and if nothing at all is common,
+    // `None`. `common` is empty only when the peer DID state a CAPABILITY (an
+    // empty one was widened to our own mask above), so that is a real "no
+    // shared codec", never a silent peer.
     policy
         .preference_order()
         .iter()
