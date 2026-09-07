@@ -139,6 +139,22 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         }
     }
 
+    /// Whether this network carries digital voice with a talker identity on
+    /// the wire — the networks whose engine state can name whoever last keyed
+    /// up, and so the ones the popover's "Last heard" line applies to.
+    ///
+    /// AllStar is `false` because IAX2 carries no callsign in the audio path:
+    /// a node number is who you dialled, not who is speaking. Hamlink is
+    /// `false` for now because the engine has no link at all. Every new
+    /// digital network opts in HERE — NXDN, DMR — and inherits the last-heard
+    /// line without the popover changing.
+    public var isDigitalVoice: Bool {
+        switch self {
+        case .allstar, .hamlink: return false
+        case .m17, .dstar, .ysf: return true
+        }
+    }
+
     /// Whether the DTMF dialpad disclosure applies — an AllStar concern;
     /// reflector networks will bring their own sections later.
     public var showsDialpad: Bool { self == .allstar }

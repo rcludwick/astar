@@ -1164,6 +1164,24 @@ impl Station {
         }
     }
 
+    /// A poll-cheap snapshot of the live M17 session's state, or `None` when
+    /// none is active — M17's equivalent of [`Station::dstar_state`] and
+    /// [`Station::ysf_state`].
+    ///
+    /// Everything network-agnostic (PTT, remote PTT, call status, the level
+    /// meters) is already in [`ConsoleState`]/the snapshot; what is only here
+    /// is the last-heard `talker` — who most recently keyed up on the
+    /// reflector — which has no snapshot equivalent, exactly as D-Star's
+    /// talker has none.
+    ///
+    /// Only compiled when the `m17` feature is enabled — which, unlike
+    /// `dstar`/`ysf`, it is by default.
+    #[cfg(feature = "m17")]
+    #[must_use]
+    pub fn m17_state(&self) -> Option<astar_console::M17SnapshotState> {
+        self.session.lock().unwrap().m17_state()
+    }
+
     /// A poll-cheap snapshot of the live YSF link, or `None`. Only compiled
     /// when the `ysf` feature is enabled.
     #[cfg(feature = "ysf")]

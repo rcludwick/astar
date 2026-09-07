@@ -44,15 +44,16 @@
 //! Internet-routed reflector.
 
 use std::net::{ToSocketAddrs, UdpSocket};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use astar_audio::CallAudio;
 use astar_codec::codec2::Codec2Voice;
 use astar_m17::{
-    BROADCAST, ControlPacket, FsmAction, LinkState, Lsf, SessionFsm, StreamPacket, encode_callsign,
+    BROADCAST, ControlPacket, FsmAction, LinkState, Lsf, SessionFsm, StreamPacket, decode_callsign,
+    encode_callsign,
 };
 
 use crate::session::ConsoleError;
@@ -91,7 +92,10 @@ pub struct M17Config {
 /// A poll-cheap snapshot of an [`M17Session`]'s live state. Backed by atomics
 /// on the control side — [`M17Session::state`] never blocks on the run-loop
 /// thread.
-#[derive(Debug, Clone, Copy, PartialEq)]
+// NOT `Copy`: `talker` is an owned `String`. Cloning a snapshot is one
+// small allocation on a UI-rate poll, which is the same cost D-Star's and
+// YSF's snapshots already pay for the same reason.
+#[derive(Debug, Clone, PartialEq)]
 pub struct M17SnapshotState {
     /// Current reflector link state.
     pub link: LinkState,
@@ -102,6 +106,21 @@ pub struct M17SnapshotState {
     /// `true` while voice-stream packets have arrived from the reflector
     /// within the last 400 ms.
     pub receiving: bool,
+    /// The source callsign of the most recently heard transmission — the
+    /// `LSF.src` address of the first packet of the current (or last) stream,
+    /// decoded with [`decode_callsign`] — or `None` until one arrives.
+    ///
+    /// **Last heard, not talking now.** It PERSISTS past end-of-stream, on
+    /// purpose and exactly as D-Star's `talker` does: a reflector that has
+    /// been quiet for a minute should still name whoever last keyed up.
+    /// [`Self::receiving`] is the field that says whether a transmission is
+    /// in progress. It goes away with the session — a disconnected link has
+    /// no last-heard, and a `None` here is what a caller sees once
+    /// `m17_state()` stops returning a snapshot at all.
+    ///
+    /// **Attacker-supplied**: it is whatever callsign whoever keyed up put in
+    /// their LSF. Render it as text, never as markup.
+    pub talker: Option<String>,
 }
 
 /// Atomics shared between the control-side [`M17Session`] and its run-loop
@@ -112,6 +131,10 @@ struct SharedState {
     link: AtomicU8,
     ptt: AtomicBool,
     receiving: AtomicBool,
+    /// The last-heard callsign. A `Mutex<Option<String>>` rather than an
+    /// atomic because it is a `String` — the same shape `DstarSession`'s
+    /// shared `talker` uses, and touched at most once per received stream.
+    talker: Mutex<Option<String>>,
 }
 
 impl SharedState {
@@ -120,6 +143,7 @@ impl SharedState {
             link: AtomicU8::new(link_to_u8(LinkState::Idle)),
             ptt: AtomicBool::new(false),
             receiving: AtomicBool::new(false),
+            talker: Mutex::new(None),
         }
     }
 
@@ -128,6 +152,7 @@ impl SharedState {
             link: u8_to_link(self.link.load(Ordering::Relaxed)),
             ptt: self.ptt.load(Ordering::Relaxed),
             receiving: self.receiving.load(Ordering::Relaxed),
+            talker: self.talker.lock().expect("talker mutex").clone(),
         }
     }
 }
@@ -433,6 +458,12 @@ fn run_loop(p: RunLoopParams) {
     let mut keyed = false;
     let mut tx = TxState::new();
     let mut last_rx_voice: Option<Instant> = None;
+    // Which received stream the last-heard callsign was taken from. `None`
+    // means "the next voice packet opens a new stream", which is also how a
+    // stream that ended (EOS, or the RX silence timeout) leaves it — so a
+    // second transmission that happens to reuse a StreamID is still read as
+    // new, and its LSF still names its talker.
+    let mut rx_stream: Option<u16> = None;
     let mut buf = [0u8; 2_048];
 
     loop {
@@ -497,6 +528,7 @@ fn run_loop(p: RunLoopParams) {
             &call_audio,
             &shared,
             &mut last_rx_voice,
+            &mut rx_stream,
         );
 
         // 4. Keepalive tick (answers PING with PONG via FsmAction::Send;
@@ -515,6 +547,11 @@ fn run_loop(p: RunLoopParams) {
         {
             shared.receiving.store(false, Ordering::Relaxed);
             last_rx_voice = None;
+            // The stream is over as far as this client is concerned, so the
+            // next voice packet starts a new one. `talker` itself is NOT
+            // cleared — it is "last heard", and outliving the stream is the
+            // whole point.
+            rx_stream = None;
         }
     }
     // `socket` and the `CallAudio` channel ends drop here; the lane's streams
@@ -633,6 +670,7 @@ fn drain_tx_frames(
 /// `last_rx_voice`/`receiving`), or do nothing for anything else (including
 /// a fresh `Unlinked`, which the run-loop's own `fsm.state()` read picks up
 /// regardless of which path set it).
+#[allow(clippy::too_many_arguments)]
 fn poll_socket(
     socket: &UdpSocket,
     buf: &mut [u8],
@@ -641,6 +679,7 @@ fn poll_socket(
     call_audio: &CallAudio,
     shared: &SharedState,
     last_rx_voice: &mut Option<Instant>,
+    rx_stream: &mut Option<u16>,
 ) {
     match socket.recv(buf) {
         Ok(n) => {
@@ -652,6 +691,7 @@ fn poll_socket(
                 FsmAction::Voice(pkt) => {
                     *last_rx_voice = Some(Instant::now());
                     shared.receiving.store(true, Ordering::Relaxed);
+                    note_talker(&pkt, shared, rx_stream);
                     decode_and_forward(codec, &pkt, call_audio);
                 }
                 FsmAction::Unlinked | FsmAction::None => {}
@@ -661,6 +701,32 @@ fn poll_socket(
             if e.kind() == std::io::ErrorKind::WouldBlock
                 || e.kind() == std::io::ErrorKind::TimedOut => {}
         Err(_) => {}
+    }
+}
+
+/// Record who is talking, on the FIRST packet of each received stream.
+///
+/// M17 carries the source address in every packet's LSF, so this could run
+/// on all of them; it deliberately does not. The talker only changes when
+/// the stream does, and taking the callsign once per stream keeps a decode
+/// and a mutex off the 20 ms RX path.
+///
+/// A stream's `EOS` packet closes it out here too, so the next voice packet
+/// is read as a fresh stream even if the reflector reuses the `StreamID`.
+///
+/// An empty decode is ignored rather than stored: `decode_callsign` yields
+/// `""` for a null/reserved address, and "Last heard " with nothing after it
+/// is worse than no line at all.
+fn note_talker(pkt: &StreamPacket, shared: &SharedState, rx_stream: &mut Option<u16>) {
+    if *rx_stream != Some(pkt.stream_id) {
+        *rx_stream = Some(pkt.stream_id);
+        let call = decode_callsign(&pkt.lsf.src);
+        if !call.is_empty() {
+            *shared.talker.lock().expect("talker mutex") = Some(call);
+        }
+    }
+    if pkt.is_last() {
+        *rx_stream = None;
     }
 }
 
@@ -883,5 +949,68 @@ mod tests {
             "every queued frame must have been drained, none left for the next transmission"
         );
         assert!(tx.pending.is_none());
+    }
+
+    /// One received voice packet must name its talker in the snapshot, and
+    /// keep naming them after the stream ends — "last heard", not "talking
+    /// now" (`receiving` is the field that says that).
+    #[test]
+    fn a_received_stream_names_its_talker_and_the_name_outlives_it() {
+        // Round-trip the address encoding first: a talker line is only worth
+        // anything if the six base-40 bytes on the wire come back as the
+        // callsign that went in.
+        let src = encode_callsign("N0CALL").expect("a valid callsign encodes");
+        assert_eq!(decode_callsign(&src), "N0CALL");
+
+        let shared = SharedState::new();
+        let mut rx_stream: Option<u16> = None;
+        assert!(
+            shared.snapshot().talker.is_none(),
+            "a link with nothing heard on it yet names nobody"
+        );
+
+        let voice = |frame_number: u16| StreamPacket {
+            stream_id: 0x1234,
+            lsf: Lsf {
+                dst: BROADCAST,
+                src,
+                type_field: Lsf::TYPE_VOICE_3200_STREAM,
+                meta: [0; 14],
+            },
+            frame_number,
+            payload: [0u8; 16],
+        };
+
+        note_talker(&voice(0), &shared, &mut rx_stream);
+        assert_eq!(
+            shared.snapshot().talker.as_deref(),
+            Some("N0CALL"),
+            "the first packet of a stream names who keyed up"
+        );
+        assert_eq!(rx_stream, Some(0x1234));
+
+        // The EOS packet ends the stream; the callsign stays.
+        note_talker(&voice(StreamPacket::EOS_BIT), &shared, &mut rx_stream);
+        assert_eq!(
+            rx_stream, None,
+            "EOS closes the stream out so the next packet reads as a new one"
+        );
+        assert_eq!(
+            shared.snapshot().talker.as_deref(),
+            Some("N0CALL"),
+            "last heard PERSISTS past end-of-stream, exactly as D-Star's does"
+        );
+        assert!(
+            !shared.snapshot().receiving,
+            "and `receiving` — never set by note_talker — is what says nobody is on"
+        );
+
+        // A second talker replaces the first once their stream opens.
+        let src2 = encode_callsign("AJ7HR").expect("a valid callsign encodes");
+        let mut second = voice(0);
+        second.stream_id = 0x4321;
+        second.lsf.src = src2;
+        note_talker(&second, &shared, &mut rx_stream);
+        assert_eq!(shared.snapshot().talker.as_deref(), Some("AJ7HR"));
     }
 }

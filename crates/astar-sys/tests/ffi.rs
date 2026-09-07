@@ -1660,6 +1660,39 @@ fn ysf_disconnect_while_idle_is_ok() {
     unsafe { iax_station_free(st) };
 }
 
+/// No session, no document — `{}`, not `null` and not an object of zeroes a
+/// UI would render as a dead link. Also exercises the two-call sizing
+/// contract, exactly as the YSF test above does.
+#[test]
+fn m17_state_is_an_empty_object_while_idle() {
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(ptr::from_ref(&cfg)) };
+    assert!(!st.is_null());
+
+    let needed = unsafe { iax_station_m17_state(st, ptr::null_mut(), 0) };
+    assert_eq!(needed, 2, "`{{}}` is two bytes, excluding the NUL");
+
+    let mut buf = [0 as std::ffi::c_char; 64];
+    let n = unsafe { iax_station_m17_state(st, buf.as_mut_ptr(), buf.len()) };
+    assert_eq!(n, 2);
+    let got = unsafe { CStr::from_ptr(buf.as_ptr()) }
+        .to_str()
+        .expect("the document is always UTF-8");
+    assert_eq!(got, "{}");
+
+    unsafe { iax_station_free(st) };
+}
+
+/// A NULL station is refused rather than dereferenced on the M17 state entry
+/// point too — the same contract the rest of this ABI gives.
+#[test]
+fn m17_state_refuses_a_null_station() {
+    assert_eq!(
+        unsafe { iax_station_m17_state(ptr::null_mut(), ptr::null_mut(), 0) },
+        IAX_ERR_NULL
+    );
+}
+
 /// A NULL station is refused rather than dereferenced, on every YSF entry
 /// point — the same contract the rest of this ABI gives.
 #[test]
