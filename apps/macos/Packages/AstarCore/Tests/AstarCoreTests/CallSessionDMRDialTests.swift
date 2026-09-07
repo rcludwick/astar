@@ -40,25 +40,21 @@ final class CallSessionDMRDialTests: XCTestCase {
     }
 
     private func store(password: String? = "hunter2", system: String = "freedmr-network")
-        -> InMemoryCredentialStore
+        -> InMemoryDmrPasswordStore
     {
-        let passwords = password.map { [system: $0] } ?? [:]
-        return InMemoryCredentialStore(
-            Credentials(
-                portalUser: "AJ7HR", portalPass: "portal", portalNode: "12345",
-                dmrPasswords: passwords))
+        InMemoryDmrPasswordStore(password.map { [system: $0] } ?? [:])
     }
 
     private func session(
         available: Bool = true, radioID: String = "3153591",
-        credentials: InMemoryCredentialStore? = nil
+        credentials: InMemoryDmrPasswordStore? = nil
     ) -> (CallSession, FakeStation) {
         let fake = FakeStation()
         fake.snapshotToReturn = CallSnapshot(
             status: .idle, ptt: false, remotePTT: false, txDB: -60, rxDB: -60, rttMS: nil,
             dmrAvailable: available)
         let session = CallSession(
-            station: fake, credentialStore: credentials ?? store(),
+            station: fake, dmrPasswords: credentials ?? store(),
             userDefaults: scratchDefaults())
         session.operatorCallsign = "AJ7HR"
         session.dmrRadioID = radioID
@@ -269,13 +265,47 @@ final class CallSessionDMRDialTests: XCTestCase {
         // observed by SwiftUI and its @Published values end up in view
         // diagnostics; a password among them would be one screenshot away
         // from a support thread.
-        let mirror = Mirror(
-            reflecting: CallSession(station: NullStation(), userDefaults: scratchDefaults()))
-        for child in mirror.children {
-            let label = (child.label ?? "").lowercased()
-            XCTAssertFalse(label.contains("password"), "CallSession exposes \(label)")
-            XCTAssertFalse(label.contains("passphrase"), "CallSession exposes \(label)")
+        //
+        // Two assertions, because the property NAME is only half of it: no
+        // published property may be named for a secret, and no stored property
+        // at all — published or not — may hold the value. The session holds a
+        // password STORE, whose reflection is its type name and not its
+        // contents; that is the distinction the second assertion pins.
+        let session = CallSession(
+            station: NullStation(), dmrPasswords: InMemoryDmrPasswordStore(["tgif": "hunter2"]),
+            userDefaults: scratchDefaults())
+        for child in Mirror(reflecting: session).children {
+            // `@Published` shows up as `_name` wrapped in `Published<…>`.
+            let label = String((child.label ?? "").drop(while: { $0 == "_" })).lowercased()
+            if String(describing: type(of: child.value)).hasPrefix("Published<") {
+                XCTAssertFalse(label.contains("password"), "CallSession publishes \(label)")
+                XCTAssertFalse(label.contains("passphrase"), "CallSession publishes \(label)")
+            }
+            XCTAssertFalse(
+                String(describing: child.value).contains("hunter2"),
+                "the secret is sitting on CallSession.\(label)")
         }
+    }
+
+    /// A DMR password is not part of the AllStarLink account and must not
+    /// bring one into existence.
+    ///
+    /// The two live in separate Keychain items for exactly this reason: a
+    /// fabricated empty account would report `hasCredentials` true app-wide —
+    /// hiding the "add your account" prompt, enabling AllStar Connect against
+    /// nothing, and telling `CredentialsView` a password was saved.
+    func testSavingADMRPasswordDoesNotCreateAnAllStarLinkAccount() throws {
+        let account = InMemoryCredentialStore()
+        let passwords = InMemoryDmrPasswordStore()
+        try passwords.save("hunter2", system: "tgif")
+
+        XCTAssertNil(account.load(), "a DMR password must not fabricate an account")
+        let session = CallSession(
+            station: FakeStation(), dmrPasswords: passwords, userDefaults: scratchDefaults())
+        XCTAssertFalse(session.hasCredentials)
+        // …and clearing the account cannot take the DMR password with it.
+        try account.clear()
+        XCTAssertEqual(passwords.password(system: "tgif"), "hunter2")
     }
 
     /// The Keychain is the only home. A password must not ride out in a

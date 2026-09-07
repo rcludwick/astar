@@ -174,6 +174,7 @@ extension CallSession {
     /// construction (astar-eb6c).
     public static func live(
         store: CredentialStore = KeychainCredentialStore(),
+        dmrPasswords: DmrPasswordStore = KeychainDmrPasswordStore(),
         audioStore: AudioSettingsStore = UserDefaultsAudioSettingsStore()
     ) -> CallSession {
         let audio = audioStore.load()
@@ -191,12 +192,14 @@ extension CallSession {
         // `credentials` is also passed through for the M17 callsign prefill
         // (astar-c2e5/iax-f2b8 Task 8) — many hams reuse their portal login as
         // their callsign; see `CallSession.callsignPrefill(from:)`.
-        // `store` goes in as well as `credentials`: the DMR master passwords
+        // The DMR password store goes in beside the account: those passwords
         // are read at the moment of a dial and handed straight to the engine,
-        // so the session holds the STORE and never a password.
+        // so the session holds the STORE and never a password. A separate
+        // Keychain item from `store`'s, and a separate lifetime — see
+        // `DmrPasswordStore`.
         let session = CallSession(
             station: station, hasCredentials: hasCredentials, credentials: credentials,
-            credentialStore: store)
+            dmrPasswords: dmrPasswords)
         session.applyAudioSettings(audio)  // restore saved devices + gains
         return session
     }

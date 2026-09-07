@@ -101,6 +101,40 @@ public enum DmrSystemCatalog {
         return nil
     }
 
+    /// A readable name for a system SLUG, for the places that pick a network
+    /// rather than a master — the password field, chiefly.
+    ///
+    /// The directory names servers, not networks, so there is no published
+    /// label for a slug: `freedmr-network` covers 19 masters and none of their
+    /// names is the network's. This builds one from the slug, using the family
+    /// name where a family is recognised (`ipsc2-poland` → "DMR+ Poland",
+    /// which is what that network is actually called) and title-casing the
+    /// segments otherwise. The raw slug stays on screen beside it, because the
+    /// slug is what the network's own paperwork says.
+    public static func label(forSlug slug: String) -> String {
+        let trimmed = slug.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return "" }
+        let segments = trimmed.split(whereSeparator: { $0 == "-" || $0 == "_" }).map(String.init)
+        guard !segments.isEmpty else { return trimmed }
+        if let family = DmrDial.family(ofSystem: trimmed) {
+            // The family owns the first segment (or two, for `dmr-plus`), so
+            // drop what its own name already says and keep the rest.
+            let rest = segments.dropFirst().filter { $0.lowercased() != "network" }
+            let tail = rest.map(titleCased).joined(separator: " ")
+            return tail.isEmpty ? family.displayName : "\(family.displayName) \(tail)"
+        }
+        return segments.map(titleCased).joined(separator: " ")
+    }
+
+    /// Upper-cases the first letter and leaves the rest alone: `xlx696` is
+    /// "Xlx696" and `dvsph` stays `Dvsph`, which is closer to right than
+    /// `capitalized` (which would lower-case everything after the first
+    /// letter and mangle the acronyms these slugs are full of).
+    private static func titleCased(_ segment: String) -> String {
+        guard let first = segment.first else { return segment }
+        return first.uppercased() + segment.dropFirst()
+    }
+
     private static func sorted(_ systems: [System]) -> [System] {
         systems.sorted {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending

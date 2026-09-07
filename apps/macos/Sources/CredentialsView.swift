@@ -193,9 +193,7 @@ struct CredentialsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(
-                "This deletes your saved node and password from the Keychain, and any DMR "
-                    + "network passwords saved alongside them. Your callsign stays — it is not "
-                    + "part of this account."
+                "This deletes your saved node and password from the Keychain. Your callsign stays — it is not part of this account."
             )
         }
     }
@@ -249,18 +247,12 @@ struct CredentialsView: View {
         // An empty box means "unchanged", not "blank" — the password is never
         // pre-filled, so it is read back out of the Keychain and written
         // straight in again. It reaches no view state on the way through.
-        let existing = store.load()
-        let password = accountPassword.isEmpty ? (existing?.portalPass ?? "") : accountPassword
+        let password = accountPassword.isEmpty ? (store.load()?.portalPass ?? "") : accountPassword
         guard !password.isEmpty else { return }
         let creds = Credentials(
             portalUser: loginCallsign,
             portalPass: password,
-            portalNode: node.trimmingCharacters(in: .whitespaces),
-            // Carried forward, not rebuilt: the DMR master passwords live in
-            // the same Keychain item, and a fresh value here would silently
-            // delete every one of them the next time somebody fixed a typo in
-            // their node number.
-            dmrPasswords: existing?.dmrPasswords ?? [:]
+            portalNode: node.trimmingCharacters(in: .whitespaces)
         )
         do {
             try store.save(creds)

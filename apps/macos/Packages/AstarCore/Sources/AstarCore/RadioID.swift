@@ -28,6 +28,21 @@ public enum RadioID {
     /// number, not a registration.
     public static let minPlausibleDigits = 6
 
+    /// The largest id the wire can carry: a `DMRD` frame's source address is
+    /// **24 bits**, so 16,777,215 and no more.
+    ///
+    /// Its own constant, and deliberately not `DmrDial.maxTalkgroup` even
+    /// though the number is the same: a source address and a talkgroup are two
+    /// different fields that happen to be the same width today, and a shared
+    /// constant would make one of them silently follow the other if either ever
+    /// changed.
+    ///
+    /// Unlike NXDN's 16-bit refusal a registered id FITS: 7 digits is at most
+    /// 9,999,999, and even the 9-digit multi-device convention (`id × 100 + nn`)
+    /// fits for ids below 167,772. So the dial CONVERTS rather than refusing,
+    /// and refuses only what is not a registration at all.
+    public static let maximum: UInt32 = 0x00FF_FFFF
+
     /// What to actually store for what the user typed: digits only, truncated
     /// to `maxDigits`.
     ///

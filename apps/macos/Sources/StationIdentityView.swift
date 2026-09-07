@@ -46,9 +46,10 @@
                             .accessibilityLabel("Your callsign")
                     }
                     Text(
-                        "Transmitted by M17, D-Star and YSF, and named in the NXDN link. "
-                            + "AllStarLink doesn’t use it — there you dial as your node "
-                            + "number."
+                        "Transmitted by M17, D-Star and YSF, named in the NXDN link, and "
+                            + "used to log in to a DMR master — DMR puts a radio ID on the "
+                            + "air, not a callsign. AllStarLink doesn’t use it — there you "
+                            + "dial as your node number."
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)

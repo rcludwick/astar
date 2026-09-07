@@ -75,7 +75,10 @@
             {
                 for system in group.systems where seen.insert(system.slug).inserted {
                     out.append(
-                        DmrPasswordView.SystemChoice(slug: system.slug, group: group.title))
+                        DmrPasswordView.SystemChoice(
+                            slug: system.slug,
+                            name: DmrSystemCatalog.label(forSlug: system.slug),
+                            group: group.title))
                 }
             }
             // TGIF is astar's first and recommended target and is in nobody's
@@ -84,7 +87,9 @@
             if seen.insert(DmrPasswordView.tgifSlug).inserted {
                 out.append(
                     DmrPasswordView.SystemChoice(
-                        slug: DmrPasswordView.tgifSlug, group: DmrFamily.tgif.displayName))
+                        slug: DmrPasswordView.tgifSlug,
+                        name: DmrSystemCatalog.label(forSlug: DmrPasswordView.tgifSlug),
+                        group: DmrFamily.tgif.displayName))
             }
             return out
         }
@@ -105,6 +110,9 @@
     struct DmrPasswordView: View {
         struct SystemChoice: Identifiable, Equatable {
             let slug: String
+            /// A readable name for the network, so this picker and the dial
+            /// card's master picker speak the same language.
+            let name: String
             /// The family heading it sits under, so the picker can group.
             let group: String
             var id: String { slug }
@@ -117,10 +125,11 @@
 
         let systems: [SystemChoice]
 
-        /// Written straight through, never held: this view owns the Keychain
-        /// item's DMR half and nothing else in the app reads a password from
-        /// view state.
-        private let store = KeychainCredentialStore()
+        /// Written straight through, never held. Its OWN Keychain item, not a
+        /// field of the AllStarLink account: saving a DMR password must not
+        /// bring an empty account into existence, and clearing the account must
+        /// not delete these — see `DmrPasswordStore`.
+        private let store: DmrPasswordStore = KeychainDmrPasswordStore()
 
         @State private var selected = DmrPasswordView.tgifSlug
         @State private var password = ""
@@ -137,7 +146,16 @@
                         ForEach(groupedChoices, id: \.0) { group, choices in
                             Section(group) {
                                 ForEach(choices) { choice in
-                                    Text(choice.slug).tag(choice.slug)
+                                    // Name first, slug beneath: the name is
+                                    // what the dial card calls this network,
+                                    // the slug is what its own paperwork does.
+                                    VStack(alignment: .leading, spacing: 0) {
+                                        Text(choice.name)
+                                        Text(choice.slug)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .tag(choice.slug)
                                 }
                             }
                         }
@@ -206,7 +224,9 @@
         }
 
         private func loadExisting() {
-            saved = Set(store.load()?.dmrPasswords.filter { !$0.value.isEmpty }.keys ?? [:].keys)
+            // `systems()` answers which networks have one WITHOUT reading a
+            // secret back — the saved/not-set caption never needs the value.
+            saved = store.systems()
             if let first = systems.first?.slug, !systems.contains(where: { $0.slug == selected }) {
                 selected = first
             }
@@ -227,15 +247,8 @@
             let system = selected
             let secret = password
             guard !secret.isEmpty else { return }
-            // Read-modify-write: the AllStarLink account and the other
-            // networks' passwords live in the same Keychain item, and writing
-            // a fresh value would delete them.
-            var credentials =
-                store.load()
-                ?? Credentials(portalUser: "", portalPass: "", portalNode: "")
-            credentials.dmrPasswords[system] = secret
             do {
-                try store.save(credentials)
+                try store.save(secret, system: system)
                 saved.insert(system)
                 message = "Saved ✓"
                 AccessibilityAnnouncer.post("DMR password saved for \(system)", priority: .medium)
@@ -245,14 +258,23 @@
             }
         }
 
+        /// Same error handling as `persist`: a Keychain write that failed has
+        /// to say so, or the password an operator thinks they deleted is still
+        /// there.
         private func remove() {
-            guard var credentials = store.load() else { return }
-            credentials.dmrPasswords.removeValue(forKey: selected)
-            try? store.save(credentials)
-            saved.remove(selected)
-            password = ""
-            message = "Removed."
-            AccessibilityAnnouncer.post("DMR password removed for \(selected)", priority: .medium)
+            let system = selected
+            do {
+                try store.remove(system: system)
+                saved.remove(system)
+                password = ""
+                message = "Removed."
+                AccessibilityAnnouncer.post(
+                    "DMR password removed for \(system)", priority: .medium)
+            } catch {
+                message = "Couldn’t remove it from the Keychain."
+                AccessibilityAnnouncer.post(
+                    "Couldn’t remove it from the Keychain.", priority: .medium)
+            }
         }
     }
 
@@ -288,10 +310,16 @@
                 VStack(alignment: .leading, spacing: 3) {
                     Text("BrandMeister enforces its own access rules.")
                         .font(.caption.weight(.semibold))
-                    Text(Self.terms)
+                    // Three runs, one wrapped paragraph: the design doc bolds
+                    // the sentence that says who carries the risk, and losing
+                    // that emphasis is losing the point of the paragraph.
+                    (Text(Self.termsBeforeEmphasis)
+                        + Text(Self.termsEmphasis).bold()
+                        + Text(Self.termsAfterEmphasis))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityLabel(Self.terms)
                     Link("Read BrandMeister’s own policy", destination: Self.policyURL)
                         .font(.caption)
                     Text(Self.notYet)
@@ -305,13 +333,20 @@
             .font(.callout)
         }
 
-        /// Verbatim from `docs/design/dmr-networks.md`.
-        private static let terms =
+        // Verbatim from `docs/design/dmr-networks.md`, split at the one
+        // sentence that doc renders bold.
+        private static let termsBeforeEmphasis =
             "It is a private network. Its operators set the terms, decide what counts as a "
             + "violation, and have permanently blocked accounts — for conduct and for technical "
             + "reasons. astar is a third-party client and cannot tell you whether connecting this "
-            + "way is within their rules. If your access is revoked, that is between you and "
-            + "BrandMeister. Read their policy before you tick this."
+            + "way is within their rules. "
+        private static let termsEmphasis =
+            "If your access is revoked, that is between you and BrandMeister."
+        private static let termsAfterEmphasis = " Read their policy before you tick this."
+
+        /// The same paragraph as one string, for VoiceOver — which reads the
+        /// run structure as three fragments otherwise.
+        private static let terms = termsBeforeEmphasis + termsEmphasis + termsAfterEmphasis
 
         /// What Task 2 recorded, said plainly rather than implied.
         private static let notYet =

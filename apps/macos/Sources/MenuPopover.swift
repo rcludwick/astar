@@ -124,7 +124,10 @@
         /// Grouping walks all 3,415 directory rows and sorts what it keeps,
         /// and this pane re-renders at the 20 Hz poll rate while the meters
         /// are live — so it is recomputed when one of its two inputs changes
-        /// (the loaded feed, the consent flag) and not on every tick.
+        /// (the loaded feed itself, the consent flag) and not on every tick.
+        /// Keyed on the feed rather than its row COUNT: a sync that replaces
+        /// the directory with a same-sized one is exactly the case a count
+        /// would miss.
         @State private var dmrGroupsCache: [DmrSystemCatalog.Group] = []
         /// Whether the in-call "Levels & Spectrum" disclosure is expanded (remembered
         /// across launches). Default collapsed so the call card stays compact and the
@@ -687,7 +690,7 @@
                         .transition(.opacity.combined(with: .move(edge: .top)))
                         .onAppear(perform: refreshDMRGroups)
                         .onChange(of: session.brandmeisterConsent) { _ in refreshDMRGroups() }
-                        .onChange(of: reflectors.entries.count) { _ in refreshDMRGroups() }
+                        .onChange(of: reflectors.feed) { _ in refreshDMRGroups() }
                 }
                 // Connecting via AllStar requires an account (guest mode removed,
                 // au-1517) — `.m17` doesn't (astar-c2e5 Task 9 fix: this used to

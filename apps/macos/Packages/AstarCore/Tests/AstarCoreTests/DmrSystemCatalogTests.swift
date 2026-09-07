@@ -122,4 +122,23 @@ final class DmrSystemCatalogTests: XCTestCase {
             DmrDialText.compose(address: parts.address, talkgroup: parts.talkgroup, timeslot: 1),
             "freedmr-network-server-eu/91/1")
     }
+
+    // MARK: - Naming a network rather than a master
+
+    /// The password field picks a NETWORK, and the directory names servers —
+    /// so a slug needs a readable label built from what is known, with the
+    /// slug itself kept beside it because that is what the network's own
+    /// paperwork says.
+    func testASlugGetsAReadableLabelUsingTheFamilyNameWhereThereIsOne() {
+        XCTAssertEqual(DmrSystemCatalog.label(forSlug: "freedmr-network"), "FreeDMR")
+        XCTAssertEqual(DmrSystemCatalog.label(forSlug: "freedmr-reunion"), "FreeDMR Reunion")
+        XCTAssertEqual(DmrSystemCatalog.label(forSlug: "ipsc2-poland"), "DMR+ Poland")
+        XCTAssertEqual(DmrSystemCatalog.label(forSlug: "tgif"), "TGIF")
+        // No family: title-cased segments, and the acronyms these slugs are
+        // full of are left alone rather than lower-cased by `capitalized`.
+        XCTAssertEqual(
+            DmrSystemCatalog.label(forSlug: "hb_it_trani_conference"), "Hb It Trani Conference")
+        XCTAssertEqual(DmrSystemCatalog.label(forSlug: "xlx696"), "Xlx696")
+        XCTAssertEqual(DmrSystemCatalog.label(forSlug: ""), "")
+    }
 }

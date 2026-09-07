@@ -673,12 +673,12 @@ public final class CallSession: ObservableObject {
         directoryStore: NodeDirectoryStore = UserDefaultsNodeDirectoryStore(),
         micProfileStore: MicProfileStore = UserDefaultsMicProfileStore(),
         credentials: Credentials? = nil,
-        credentialStore: CredentialStore? = nil,
+        dmrPasswords: DmrPasswordStore? = nil,
         userDefaults: UserDefaults = .standard
     ) {
         self.station = station
         self.hasCredentials = hasCredentials
-        self.credentialStore = credentialStore
+        self.dmrPasswords = dmrPasswords
         self.audioStore = audioStore
         self.directoryStore = directoryStore
         // Directory first; the online AllStarLink-DB source (astar-6c65) appends
@@ -710,11 +710,14 @@ public final class CallSession: ObservableObject {
     /// Where the DMR master passwords are read from at connect time, or `nil`
     /// for a session that was never given one (previews, most tests).
     ///
-    /// A STORE, not a `Credentials` value: the password must be read at the
-    /// moment of the dial and handed straight to the engine, so that nothing
-    /// on this object ever holds one. `credentials` above is the launch-time
-    /// prefill for the callsign and is deliberately not kept either.
-    private let credentialStore: CredentialStore?
+    /// A STORE, not a value: the password must be read at the moment of the
+    /// dial and handed straight to the engine, so that nothing on this object
+    /// ever holds one. `credentials` above is the launch-time prefill for the
+    /// callsign and is deliberately not kept either.
+    ///
+    /// Its own store, separate from `CredentialStore`, and its own Keychain
+    /// item — see `DmrPasswordStore` for why the two must not share a record.
+    private let dmrPasswords: DmrPasswordStore?
 
     /// The reflector directory's name lookup, as of the last load or sync.
     ///
@@ -1266,7 +1269,7 @@ public final class CallSession: ObservableObject {
                 return "Enter your DMR radio ID in Settings to connect via DMR."
             case .dmrRadioIDOutOfRange:
                 return
-                    "A DMR radio ID is a number from 1 to \(DmrDial.maxTalkgroup) — "
+                    "A DMR radio ID is a number from 1 to \(RadioID.maximum) — "
                     + "check your registration at radioid.net."
             case .missingDMRPassword:
                 return
@@ -1776,7 +1779,7 @@ public final class CallSession: ObservableObject {
     private func dmrRadioIDValue() throws -> UInt32 {
         let digits = RadioID.sanitized(dmrRadioID)
         guard !digits.isEmpty else { throw ConnectError.missingDMRRadioID }
-        guard let value = UInt32(digits), value > 0, value <= DmrDial.maxTalkgroup else {
+        guard let value = UInt32(digits), value > 0, value <= RadioID.maximum else {
             throw ConnectError.dmrRadioIDOutOfRange
         }
         return value
@@ -1814,7 +1817,7 @@ public final class CallSession: ObservableObject {
         if DmrDial.family(ofSystem: dial.system)?.requiresConsent == true, !brandmeisterConsent {
             throw ConnectError.brandmeisterNotConsented
         }
-        guard let password = credentialStore?.load()?.dmrPassword(system: dial.system) else {
+        guard let password = dmrPasswords?.password(system: dial.system) else {
             throw ConnectError.missingDMRPassword
         }
         guard dmrAvailable else {
