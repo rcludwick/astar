@@ -81,6 +81,17 @@ dstar = ["astar-console/dstar"]
 # the methods exist, and return `StationError::Ysf("ysf support not
 # compiled")` / are no-ops / return `false`.
 ysf = ["astar-console/ysf"]
+# NXDN (iax-b9c2): re-exposes astar-console's `nxdn` feature, wired through
+# `Station::nxdn_connect`/`nxdn_disconnect`/`nxdn_available`/`nxdn_state`.
+# Not in `default`, for the same reason `ysf` is not: NXDN voice is AMBE+2 —
+# the same 49-bit frame and the same RATEP word YSF DN uses — so this pulls
+# `astar-console/nxdn` and through it `astar-codec/ambe-hw`. Receive only:
+# `set_ptt` refuses a key-down while an NXDN link is live (see
+# `astar_console::nxdn`'s module docs). Byte-identical defaults with the
+# feature off, same contract as `ysf`: the methods exist, and return
+# `StationError::Nxdn("nxdn support not compiled")` / are no-ops / return
+# `false`.
+nxdn = ["astar-console/nxdn"]
 # Link Codec 2 into the binary instead of relying on a system libcodec2 found
 # at runtime (astar-8c4d). NOT default, and it must never become one — see the
 # licensing note in `astar-codec/Cargo.toml`. The shipped macOS app turns this

@@ -47,6 +47,8 @@ pub use nxdn::{NxdnConfig, NxdnLink, NxdnSnapshot};
 pub use parrot::{LocalParrot, ParrotPhase, ParrotShared, calibrate_mic};
 #[cfg(feature = "dstar")]
 pub use session::dstar_available;
+#[cfg(feature = "nxdn")]
+pub use session::nxdn_available;
 #[cfg(feature = "ysf")]
 pub use session::ysf_available;
 pub use session::{

@@ -30,6 +30,8 @@ use crate::dstar::{DstarConfig, DstarSession, DstarSnapshotState};
 #[cfg(feature = "m17")]
 use crate::m17::{M17Config, M17Session};
 use crate::metering::Gain;
+#[cfg(feature = "nxdn")]
+use crate::nxdn::{NxdnConfig, NxdnLink, NxdnSnapshot};
 use crate::state::{CallStatus, ConsoleState};
 #[cfg(feature = "ysf")]
 use crate::ysf::{YsfConfig, YsfLink, YsfSnapshot};
@@ -365,6 +367,11 @@ pub struct ConsoleSession {
     /// two flags — same arrangement, and same reason, as [`Self::dstar`].
     #[cfg(feature = "ysf")]
     ysf: Option<YsfLink>,
+    /// The live NXDN link, if any. Read through [`Self::nxdn_state`], never
+    /// mirrored into [`ConsoleState`] beyond the two flags — same
+    /// arrangement, and same reason, as [`Self::ysf`].
+    #[cfg(feature = "nxdn")]
+    nxdn: Option<NxdnLink>,
     /// The live outbound node registration handle (Task 3.1). `Some` only while
     /// a registration is in flight; `Drop` sends REGREL when cleared.
     /// Secret-free: the resolved password was consumed into the `Registrar`
@@ -456,6 +463,8 @@ impl ConsoleSession {
             dstar: None,
             #[cfg(feature = "ysf")]
             ysf: None,
+            #[cfg(feature = "nxdn")]
+            nxdn: None,
             reg_handle: None,
             reg_events: None,
             reg_queue: VecDeque::new(),
@@ -833,6 +842,7 @@ impl ConsoleSession {
             || self.m17_is_active()
             || self.dstar_is_active()
             || self.ysf_is_active()
+            || self.nxdn_is_active()
         {
             return Err(ConsoleError::AlreadyConnected);
         }
@@ -938,6 +948,7 @@ impl ConsoleSession {
             || self.m17_is_active()
             || self.dstar_is_active()
             || self.ysf_is_active()
+            || self.nxdn_is_active()
             || self.voice_route.is_some()
         {
             return Err(ConsoleError::AlreadyConnected);
@@ -1272,6 +1283,7 @@ impl ConsoleSession {
                         && !self.m17_is_active()
                         && !self.dstar_is_active()
                         && !self.ysf_is_active()
+                        && !self.nxdn_is_active()
                         && self.voice_route.is_none()
                     {
                         self.adopt_inbound(call, events);
@@ -1297,6 +1309,7 @@ impl ConsoleSession {
         if self.m17_is_active()
             || self.dstar_is_active()
             || self.ysf_is_active()
+            || self.nxdn_is_active()
             || self.voice_route.is_some()
         {
             let _ = incoming.reject(Some("busy".into()));
@@ -1424,6 +1437,7 @@ impl ConsoleSession {
         if self.m17_is_active()
             || self.dstar_is_active()
             || self.ysf_is_active()
+            || self.nxdn_is_active()
             || self.voice_route.is_some()
         {
             return Err(ConsoleError::AlreadyConnected);
@@ -1576,6 +1590,18 @@ impl ConsoleSession {
     /// # Errors
     /// [`ConsoleError::NotConnected`] if no call is live.
     pub fn set_ptt(&mut self, on: bool) -> Result<(), ConsoleError> {
+        // NXDN has no transmit path yet (`crate::nxdn`'s Transmit section),
+        // and the refusal has to come out BEFORE the gate below opens: a
+        // key-down that opened the capture lane and then refused would leave
+        // the microphone live, feeding a run loop that discards every frame,
+        // with a UI showing a keyed station that is transmitting nothing. A
+        // key-UP is not refused — it is how a caller clears state — and
+        // falls through to the branch below, which forwards it and closes
+        // the gate like every other network.
+        #[cfg(feature = "nxdn")]
+        if on && self.nxdn.is_some() {
+            return Err(ConsoleError::Nxdn("transmit is not built yet".into()));
+        }
         // The ONE keying gate for a digital-voice session: the route's
         // capture lane opens (or is refused) before any network is told to
         // transmit, and closes on key-up. A refusal here forwards nothing —
@@ -1617,6 +1643,18 @@ impl ConsoleSession {
         // outright, not merely late.
         #[cfg(feature = "ysf")]
         if let Some(link) = self.ysf.as_ref() {
+            link.set_ptt(on);
+            self.state.ptt = on;
+            self.tracer
+                .note(if on { "LocalKey" } else { "LocalUnkey" }, String::new());
+            return Ok(());
+        }
+        // NXDN reaches this branch only on a key-UP: the key-DOWN was
+        // refused at the top of this function. The link is told anyway (it
+        // clears its own request cell), the mirror is written, and the
+        // release lands on the timeline like any other.
+        #[cfg(feature = "nxdn")]
+        if let Some(link) = self.nxdn.as_ref() {
             link.set_ptt(on);
             self.state.ptt = on;
             self.tracer
@@ -1742,6 +1780,23 @@ impl ConsoleSession {
             link.disconnect();
             // The route the link rode is this session's too: released here,
             // exactly as `ysf_disconnect` does, or the station stays
+            // reserved against every later connect.
+            let handles = self.release_voice_route();
+            drop(handles);
+            self.state.status = CallStatus::Idle;
+            self.state.ptt = false;
+            self.state.remote_ptt = false;
+            self.state.rtt_ms = None;
+            self.state.tx_level_db = -60.0;
+            self.state.rx_level_db = -60.0;
+            self.state.input_level_db = -60.0;
+            return Ok(());
+        }
+        #[cfg(feature = "nxdn")]
+        if let Some(link) = self.nxdn.take() {
+            link.disconnect();
+            // The route the link rode is this session's too: released here,
+            // exactly as `nxdn_disconnect` does, or the station stays
             // reserved against every later connect.
             let handles = self.release_voice_route();
             drop(handles);
@@ -1956,6 +2011,7 @@ impl ConsoleSession {
             || self.m17_is_active()
             || self.dstar.is_some()
             || self.ysf_is_active()
+            || self.nxdn_is_active()
             || self.voice_route.is_some()
         {
             return Err(ConsoleError::AlreadyConnected);
@@ -1996,6 +2052,7 @@ impl ConsoleSession {
             || self.m17_is_active()
             || self.dstar.is_some()
             || self.ysf_is_active()
+            || self.nxdn_is_active()
             || self.voice_route.is_none()
         {
             session.disconnect();
@@ -2131,6 +2188,7 @@ impl ConsoleSession {
             || self.m17_is_active()
             || self.dstar_is_active()
             || self.ysf.is_some()
+            || self.nxdn_is_active()
             || self.voice_route.is_some()
         {
             return Err(ConsoleError::AlreadyConnected);
@@ -2165,6 +2223,7 @@ impl ConsoleSession {
             || self.m17_is_active()
             || self.dstar_is_active()
             || self.ysf.is_some()
+            || self.nxdn_is_active()
             || self.voice_route.is_none()
         {
             link.disconnect();
@@ -2230,6 +2289,163 @@ impl ConsoleSession {
     #[must_use]
     pub fn ysf_state(&self) -> Option<YsfSnapshot> {
         let mut st = self.ysf.as_ref().map(YsfLink::snapshot)?;
+        st.tx_dbfs = self.state.tx_level_db;
+        st.rx_dbfs = self.state.rx_level_db;
+        Some(st)
+    }
+
+    /// Link to an `NXDNReflector` talkgroup and decode the audio on it
+    /// (iax-b9c2). The console-side counterpart of [`Self::ysf_connect`],
+    /// step for step: the route is the reservation, the mutual exclusion AND
+    /// the pref push, all at once.
+    ///
+    /// `input`/`output` are device-name substrings for the lane the link
+    /// will ride (`None` = system default); the link itself is handed only
+    /// the lane's channel ends.
+    ///
+    /// Receive only. [`Self::set_ptt`] refuses a key-down while this link is
+    /// live — see [`crate::nxdn`]'s Transmit section for why a refusal beats
+    /// a key that silently does nothing.
+    ///
+    /// # Errors
+    /// [`ConsoleError::AlreadyConnected`] from [`Self::open_voice_route`]
+    /// while any other network holds the lane;
+    /// [`ConsoleError::Device`]/[`ConsoleError::Audio`] if the OUTPUT device
+    /// cannot be resolved or opened; otherwise whatever
+    /// [`NxdnLink::connect_with_audio`] returns.
+    #[cfg(feature = "nxdn")]
+    pub fn nxdn_connect(
+        &mut self,
+        backend: Box<dyn AudioBackend>,
+        cfg: &NxdnConfig,
+        input: Option<&str>,
+        output: Option<&str>,
+    ) -> Result<(), ConsoleError> {
+        let audio = self.open_voice_route(input, output, || backend)?;
+        match NxdnLink::connect_with_audio(cfg, audio) {
+            Ok(link) => self.nxdn_adopt(link),
+            Err(e) => {
+                // The route opened but the link did not: give the lanes
+                // back, or the station stays reserved forever.
+                let handles = self.release_voice_route();
+                drop(handles);
+                Err(e)
+            }
+        }
+    }
+
+    /// An embedder-facing query: *would an NXDN connect be refused right
+    /// now?* — answered without opening anything, so a front-end can grey a
+    /// button out, or a caller building the link OUTSIDE this session's mutex
+    /// can decide not to scan for a dongle. Not a step of the facade's
+    /// connect flow: [`Self::open_voice_route`]'s own check is the gate. Same
+    /// reasoning as [`Self::ysf_can_connect`].
+    ///
+    /// # Errors
+    /// [`ConsoleError::AlreadyConnected`] while any other network is live.
+    #[cfg(feature = "nxdn")]
+    pub fn nxdn_can_connect(&self) -> Result<(), ConsoleError> {
+        if self.active.is_some()
+            || self.m17_is_active()
+            || self.dstar_is_active()
+            || self.ysf_is_active()
+            || self.nxdn.is_some()
+            || self.voice_route.is_some()
+        {
+            return Err(ConsoleError::AlreadyConnected);
+        }
+        Ok(())
+    }
+
+    /// Install an already-constructed [`NxdnLink`], re-checking exclusion.
+    ///
+    /// Exists so `astar-station` can run the `ThumbDV` scan and init cookbook
+    /// with the session mutex NOT held — every `Station` method takes it, and
+    /// the contract is poll-and-snapshot, never blocking.
+    ///
+    /// On refusal the link is disconnected here rather than handed back: it
+    /// has already bound a socket and taken the dongle, and leaking the
+    /// dongle — which only one process may hold — would be worse than the
+    /// error the caller is about to see — and the route it rode is released
+    /// with it.
+    ///
+    /// The link must ARRIVE with the route already reserved on its behalf, so
+    /// a `voice_route` of `None` here means the link has channel ends nothing
+    /// is feeding. Same rule, same reason, as [`Self::ysf_adopt`].
+    ///
+    /// # Errors
+    /// [`ConsoleError::AlreadyConnected`] when an IAX2 call or another
+    /// digital session is live, or when no route was reserved.
+    #[cfg(feature = "nxdn")]
+    pub fn nxdn_adopt(&mut self, link: NxdnLink) -> Result<(), ConsoleError> {
+        if self.active.is_some()
+            || self.m17_is_active()
+            || self.dstar_is_active()
+            || self.ysf_is_active()
+            || self.nxdn.is_some()
+            || self.voice_route.is_none()
+        {
+            link.disconnect();
+            let handles = self.release_voice_route();
+            drop(handles);
+            return Err(ConsoleError::AlreadyConnected);
+        }
+        self.nxdn = Some(link);
+        Ok(())
+    }
+
+    /// Disconnect the live NXDN link, if any. No-op when none is active.
+    #[cfg(feature = "nxdn")]
+    pub fn nxdn_disconnect(&mut self) {
+        // Everything here is inside the `if let`, route release included:
+        // `Station::disconnect` calls every network's disconnect in turn, so
+        // an unconditional release would close the lanes out from under a
+        // live M17, D-Star or YSF session that legitimately holds them — and
+        // an unconditional state reset would blank their mirror.
+        if let Some(link) = self.nxdn.take() {
+            link.disconnect();
+            let handles = self.release_voice_route();
+            drop(handles);
+            // Reset every field the snapshot's NXDN branch writes, exactly
+            // as `ysf_disconnect` does and for the identical reason: the
+            // mirror simply STOPS running once `self.nxdn` is `None`, so
+            // without this the last values it wrote stay frozen in
+            // `self.state` forever. The levels go with it: the meter block
+            // only writes while a lane is live, and this released the last
+            // one.
+            self.state.status = CallStatus::Idle;
+            self.state.remote_ptt = false;
+            self.state.ptt = false;
+            self.state.rx_level_db = -60.0;
+            self.state.tx_level_db = -60.0;
+            self.state.input_level_db = -60.0;
+        }
+    }
+
+    /// `true` while an NXDN link is live. Always `false` when the `nxdn`
+    /// feature isn't compiled in, so callers never need their own `#[cfg]`.
+    #[allow(clippy::unused_self)]
+    fn nxdn_is_active(&self) -> bool {
+        #[cfg(feature = "nxdn")]
+        {
+            self.nxdn.is_some()
+        }
+        #[cfg(not(feature = "nxdn"))]
+        {
+            false
+        }
+    }
+
+    /// A poll-cheap snapshot of the live NXDN link, or `None`.
+    ///
+    /// The two levels are the CONSOLE's, not the link's, and are composed
+    /// here from the one meter read `snapshot()` already does at the lane —
+    /// exactly as [`Self::ysf_state`] composes YSF's. A session owns no
+    /// meters; see [`NxdnSnapshot::tx_dbfs`].
+    #[cfg(feature = "nxdn")]
+    #[must_use]
+    pub fn nxdn_state(&self) -> Option<NxdnSnapshot> {
+        let mut st = self.nxdn.as_ref().map(NxdnLink::snapshot)?;
         st.tx_dbfs = self.state.tx_level_db;
         st.rx_dbfs = self.state.rx_level_db;
         Some(st)
@@ -2668,7 +2884,8 @@ impl ConsoleSession {
             && self.reg_handle.is_none()
             && !self.m17_is_active()
             && !self.dstar_is_active()
-            && !self.ysf_is_active();
+            && !self.ysf_is_active()
+            && !self.nxdn_is_active();
         if !idle {
             return;
         }
@@ -3038,6 +3255,46 @@ impl ConsoleSession {
         self.state.ysf_active = self.ysf_is_active();
         self.state.ysf_available = ysf_available();
 
+        // NXDN, mirrored exactly as the three branches above are and for the
+        // same reason: a front-end drives ONE connection state machine off
+        // `status`, whatever the network. Without this a live NXDN link
+        // leaves `status` at whatever it was — `Idle` on a fresh station —
+        // so the link comes up, holds the vocoder, and the UI reports
+        // nothing connected.
+        //
+        // `remote_ptt` carries "somebody is transmitting", which NXDN states
+        // outright in the frame header (the start/end flags and the
+        // terminator LICH) rather than inferring from audio level.
+        //
+        // Levels are NOT read here: the one meter block above already read
+        // them off the voice route's own lanes (`meter_ids`), which is where
+        // every network's meters come from.
+        #[cfg(feature = "nxdn")]
+        if let Some(link) = self.nxdn.as_ref() {
+            let snap = link.snapshot();
+            self.state.remote_ptt = snap.receiving;
+            // The ACTUALLY-APPLIED key state. Always `false` while transmit
+            // is gated, which is exactly the point: a snapshot must never
+            // report a station as transmitting when it is not.
+            self.state.ptt = snap.ptt;
+            // Fully qualified: the bare `LinkState` in this scope is M17's.
+            self.state.status = match link.link_state() {
+                astar_nxdn::LinkState::Idle | astar_nxdn::LinkState::Linking => CallStatus::Dialing,
+                astar_nxdn::LinkState::Linked => CallStatus::Answered,
+                // Unlinking reports as ending rather than connected, matching
+                // YSF's and D-Star's treatment: the link is going away and an
+                // operator should not be told otherwise.
+                astar_nxdn::LinkState::Unlinking => CallStatus::Hangup {
+                    reason: "nxdn unlinking".into(),
+                },
+                astar_nxdn::LinkState::Failed => CallStatus::Hangup {
+                    reason: "nxdn link lost".into(),
+                },
+            };
+        }
+        self.state.nxdn_active = self.nxdn_is_active();
+        self.state.nxdn_available = nxdn_available();
+
         // The capture gate is driven by `set_ptt` ONLY, never reconciled
         // here. `state.ptt` above is the run loop's ACTUALLY-APPLIED value,
         // which lags a key-down by up to one poll interval — closing the gate
@@ -3133,7 +3390,7 @@ pub fn m17_available() -> bool {
 /// "available" means the same thing to both and there is no second scan to
 /// keep in step with this one — see [`dstar_available`] for why the probe is
 /// enumeration-only and why it is cached on a short TTL rather than once.
-#[cfg(any(feature = "dstar", feature = "ysf"))]
+#[cfg(any(feature = "dstar", feature = "ysf", feature = "nxdn"))]
 fn thumbdv_available_cached() -> bool {
     static CACHE: std::sync::Mutex<Option<(std::time::Instant, bool)>> =
         std::sync::Mutex::new(None);
@@ -3175,6 +3432,27 @@ pub fn ysf_available() -> bool {
     }
 }
 
+/// `true` when NXDN voice is available: the `nxdn` feature is compiled in
+/// AND a `ThumbDV` is attached.
+///
+/// Deliberately the same probe as [`dstar_available`] and [`ysf_available`],
+/// not a third one. NXDN voice is AMBE+2 off the same dongle, and two probes
+/// with two caches would eventually disagree about whether it is plugged in
+/// — greying out one network and not the other for the same hardware.
+///
+/// Always `false` when the `nxdn` feature isn't compiled in.
+#[must_use]
+pub fn nxdn_available() -> bool {
+    #[cfg(feature = "nxdn")]
+    {
+        thumbdv_available_cached()
+    }
+    #[cfg(not(feature = "nxdn"))]
+    {
+        false
+    }
+}
+
 /// `true` when D-Star voice is available: the `dstar` feature is compiled in
 /// AND a `ThumbDV` dongle is attached (iax-b3e7 M0 — D-Star is hardware-only,
 /// so "available" means exactly "the dongle is plugged in").
@@ -3211,7 +3489,7 @@ pub fn dstar_available() -> bool {
 /// being recomputed. Long enough that a UI polling on a 100 ms tick scans
 /// ~twice a second; short enough that plugging the dongle in shows up
 /// promptly.
-#[cfg(any(feature = "dstar", feature = "ysf"))]
+#[cfg(any(feature = "dstar", feature = "ysf", feature = "nxdn"))]
 const DSTAR_AVAILABLE_TTL: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Map an engine error from a link-transport switch (iax-5bbd):
@@ -3901,10 +4179,10 @@ mod tests {
     /// `DstarSession::connect_with_stream` to build a session with no
     /// `ThumbDV` attached. Neither direction is exercised by these tests —
     /// what they assert is decided before a frame is ever encoded.
-    #[cfg(any(feature = "dstar", feature = "ysf"))]
+    #[cfg(any(feature = "dstar", feature = "ysf", feature = "nxdn"))]
     struct InertVocoder;
 
-    #[cfg(any(feature = "dstar", feature = "ysf"))]
+    #[cfg(any(feature = "dstar", feature = "ysf", feature = "nxdn"))]
     impl astar_codec::ambe::AmbeStream for InertVocoder {
         fn submit_decode(&mut self, _frame: astar_codec::ambe::ChannelFrame) {}
         fn poll_decoded(&mut self) -> Option<[i16; 160]> {
@@ -4453,6 +4731,278 @@ mod tests {
         assert!(s.ysf_state().is_none());
         reflector.shutdown();
     }
+    // ── NXDN wiring (iax-b9c2 Task 5) ───────────────────────────────────
+
+    /// A link that needs no dongle, riding the lane the console opened for
+    /// it: enough to prove exclusion, the mirror and the transmit gate, all
+    /// of which are about the session rather than about the vocoder.
+    /// Everything binds `127.0.0.1`.
+    #[cfg(feature = "nxdn")]
+    fn loopback_nxdn(
+        audio: astar_audio::CallAudio,
+    ) -> (astar_nxdn::ReflectorHandle, crate::nxdn::NxdnLink) {
+        let r = astar_nxdn::Reflector::bind("127.0.0.1:0".parse().expect("v4"), 31_313)
+            .expect("bind reflector");
+        let addr = r.local_addr();
+        let handle = r.run();
+        let link = crate::nxdn::NxdnLink::connect_with_stream(
+            &crate::nxdn::NxdnConfig {
+                host: addr.to_string(),
+                callsign: "N0CALL".to_string(),
+                radio_id: 4242,
+                talkgroup: 31_313,
+            },
+            audio,
+            Box::new(InertVocoder),
+            astar_codec::ambe::AmbeBackend::Hardware,
+        )
+        .expect("connect the link");
+        (handle, link)
+    }
+
+    /// The whole point of the status mirror: one connection state machine in
+    /// the front end, not a per-network special case. Without it the link
+    /// comes up, holds the vocoder, and a UI still reports nothing
+    /// connected.
+    #[cfg(feature = "nxdn")]
+    #[test]
+    fn an_nxdn_link_mirrors_linked_as_answered() {
+        let mut s = ConsoleSession::new();
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        let (reflector, link) = loopback_nxdn(audio);
+        s.nxdn_adopt(link).expect("adopt onto the reserved route");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let snap = s.snapshot();
+            if snap.status == CallStatus::Answered || std::time::Instant::now() > deadline {
+                assert_eq!(snap.status, CallStatus::Answered);
+                assert!(snap.nxdn_active);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        s.nxdn_disconnect();
+        assert_eq!(s.snapshot().status, CallStatus::Idle);
+        assert!(!s.snapshot().nxdn_active);
+        reflector.shutdown();
+    }
+
+    /// One `ThumbDV`, one link. A live NXDN link must refuse every other
+    /// network, and be refused by them — the exclusion is about the
+    /// hardware, not about tidiness. Missing one of these sites is exactly
+    /// the silent failure the design opens by warning about.
+    #[cfg(feature = "nxdn")]
+    #[test]
+    fn nxdn_is_excluded_by_every_other_network() {
+        let mut s = ConsoleSession::new();
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        let (reflector, link) = loopback_nxdn(audio);
+        s.nxdn_adopt(link).expect("adopt");
+
+        assert!(
+            matches!(s.nxdn_can_connect(), Err(ConsoleError::AlreadyConnected)),
+            "a second NXDN link must be refused"
+        );
+        #[cfg(feature = "ysf")]
+        assert!(
+            matches!(s.ysf_can_connect(), Err(ConsoleError::AlreadyConnected)),
+            "YSF must be refused while NXDN holds the dongle"
+        );
+        #[cfg(feature = "dstar")]
+        assert!(
+            matches!(s.dstar_can_connect(), Err(ConsoleError::AlreadyConnected)),
+            "D-Star must be refused while NXDN holds the dongle"
+        );
+        assert!(
+            matches!(
+                s.can_open_voice_route(),
+                Err(ConsoleError::AlreadyConnected)
+            ),
+            "and so must the route every other connect path opens"
+        );
+
+        s.nxdn_disconnect();
+        assert!(
+            s.nxdn_can_connect().is_ok(),
+            "disconnect must free the slot"
+        );
+        reflector.shutdown();
+    }
+
+    /// And the other direction: a live YSF link must refuse NXDN.
+    #[cfg(all(feature = "nxdn", feature = "ysf"))]
+    #[test]
+    fn a_live_ysf_link_excludes_nxdn() {
+        let mut s = ConsoleSession::new();
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        let (reflector, link) = loopback_ysf(audio);
+        s.ysf_adopt(link).expect("adopt");
+
+        assert!(
+            matches!(s.nxdn_can_connect(), Err(ConsoleError::AlreadyConnected)),
+            "NXDN must be refused while YSF holds the dongle"
+        );
+
+        s.ysf_disconnect();
+        reflector.shutdown();
+    }
+
+    /// The mirror STOPS running when the link goes; without the reset the
+    /// last values it wrote stay frozen in `self.state` forever, and a
+    /// snapshot reports `Answered` for a station with no session at all.
+    #[cfg(feature = "nxdn")]
+    #[test]
+    fn disconnecting_nxdn_releases_the_route_and_clears_the_mirror() {
+        let mut s = ConsoleSession::new();
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        let (reflector, link) = loopback_nxdn(audio);
+        s.nxdn_adopt(link).expect("adopt");
+        let _ = s.snapshot();
+
+        s.nxdn_disconnect();
+
+        let snap = s.snapshot();
+        assert_eq!(snap.status, CallStatus::Idle);
+        assert!(!snap.ptt && !snap.remote_ptt);
+        assert!((snap.rx_level_db + 60.0).abs() < 1e-6);
+        assert!(s.nxdn_can_connect().is_ok(), "the route came back");
+        reflector.shutdown();
+    }
+
+    /// `Station::disconnect` calls every other network's disconnect before
+    /// NXDN's, so an `nxdn_disconnect` that released the route
+    /// unconditionally would close the lanes out from under whichever of
+    /// those holds it.
+    #[cfg(feature = "nxdn")]
+    #[test]
+    fn nxdn_disconnect_leaves_a_route_it_does_not_own_alone() {
+        let mut s = ConsoleSession::new();
+        let _audio = s.open_voice_route(None, None, null).expect("route");
+
+        s.nxdn_disconnect();
+
+        let mgr = s.manager.as_ref().expect("engine survives");
+        assert_eq!(
+            mgr.router().output_count(),
+            1,
+            "the bus another network is listening on must stay open"
+        );
+        assert_eq!(mgr.router().mic_count(), 1, "so must its capture lane");
+    }
+
+    /// NXDN cannot transmit yet, and the refusal has to land BEFORE the
+    /// capture gate opens: a key that opened the microphone and then refused
+    /// would leave the lane live, feeding a run loop that discards every
+    /// frame. A key-UP is never refused — it is how a caller clears state.
+    #[cfg(feature = "nxdn")]
+    #[test]
+    fn keying_nxdn_is_refused_before_the_route_is_keyed() {
+        let mut s = ConsoleSession::new();
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        let (reflector, link) = loopback_nxdn(audio);
+        s.nxdn_adopt(link).expect("adopt");
+
+        match s.set_ptt(true) {
+            Err(ConsoleError::Nxdn(msg)) => assert!(
+                msg.contains("transmit"),
+                "the refusal must say why, got {msg:?}"
+            ),
+            other => panic!("a key-down on NXDN must be refused, got {other:?}"),
+        }
+        assert!(!s.state.ptt, "a refused key never mirrors as keyed");
+        assert!(!s.snapshot().ptt);
+
+        s.set_ptt(false).expect("a key-up is not refused");
+        assert!(!s.state.ptt);
+
+        s.nxdn_disconnect();
+        reflector.shutdown();
+    }
+
+    /// The ORDER of the refusal, pinned where it is observable: on a route
+    /// with no capture device the gate refuses first with
+    /// [`ConsoleError::NoCaptureDevice`], so an NXDN key that reached the
+    /// gate would surface THAT error. Seeing `Nxdn` instead is proof the
+    /// refusal ran before the gate — and therefore that the microphone is
+    /// never opened for a transmission that cannot happen.
+    #[cfg(feature = "nxdn")]
+    #[test]
+    fn the_nxdn_refusal_runs_before_the_capture_gate() {
+        let mut s = ConsoleSession::new();
+        let audio = s
+            .open_voice_route(Some("no such device"), None, null)
+            .expect("the bus opens; a missing capture device is not fatal");
+        let (reflector, link) = loopback_nxdn(audio);
+        s.nxdn_adopt(link).expect("adopt");
+
+        match s.set_ptt(true) {
+            Err(ConsoleError::Nxdn(_)) => {}
+            other => panic!(
+                "NXDN must refuse before the gate is asked; a NoCaptureDevice here would mean \
+                 the gate ran first, got {other:?}"
+            ),
+        }
+
+        s.nxdn_disconnect();
+        reflector.shutdown();
+    }
+
+    /// The levels a UI reads off `nxdn_state()` are the CONSOLE's — read
+    /// once, at the lane, by `snapshot()` — not the link's. A silent bus
+    /// must report the floor rather than a stale or invented level.
+    #[cfg(feature = "nxdn")]
+    #[test]
+    fn an_nxdn_link_reports_the_router_meters_through_nxdn_state() {
+        let mut s = ConsoleSession::new();
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        let (reflector, link) = loopback_nxdn(audio);
+        assert!(
+            (link.snapshot().rx_dbfs + 60.0).abs() < 1e-6,
+            "the link itself always reports the floor; the console fills it in"
+        );
+        s.nxdn_adopt(link).expect("adopt");
+
+        let snap = s.snapshot();
+        let st = s.nxdn_state().expect("a live link");
+        assert!(
+            (st.rx_dbfs - snap.rx_level_db).abs() < 1e-6
+                && (st.tx_dbfs - snap.tx_level_db).abs() < 1e-6,
+            "nxdn_state must report the SAME numbers the snapshot does, got {st:?}"
+        );
+        assert!(
+            (snap.rx_level_db + 60.0).abs() < 1e-6,
+            "a silent bus reads the floor, not garbage, got {}",
+            snap.rx_level_db
+        );
+
+        s.nxdn_disconnect();
+        assert!(s.nxdn_state().is_none(), "and nothing is readable after");
+        reflector.shutdown();
+    }
+
+    /// `nxdn_adopt` installs a link that arrived with the route already
+    /// reserved on its behalf — and refuses (tearing the link down) one that
+    /// did not, because its channel ends would have nothing feeding them.
+    #[cfg(feature = "nxdn")]
+    #[test]
+    fn nxdn_adopt_requires_a_reserved_route() {
+        let mut orphan = astar_audio::AudioRouter::new(Box::new(NullBackend::new()));
+        let (audio, _mic_tx, _mix) = orphan
+            .open_monitor_call(&OutputId::new("out:null"), StreamConfig::default())
+            .expect("bus");
+        let (reflector, link) = loopback_nxdn(audio);
+
+        let mut s = ConsoleSession::new();
+        assert!(
+            matches!(s.nxdn_adopt(link), Err(ConsoleError::AlreadyConnected)),
+            "a link with no route reserved for it must be refused"
+        );
+        assert!(s.nxdn_state().is_none(), "and not installed");
+        reflector.shutdown();
+    }
+
     // ── The one audio lane: `VoiceRoute` on the station router ───────────
 
     /// A backend factory shaped for `open_voice_route`, which takes the

@@ -128,6 +128,14 @@
 #define IAX_ERR_YSF -20
 
 /**
+ * NXDN error (iax-b9c2): a link that could not be made, a callsign/radio
+ * id/talkgroup the wire cannot carry, a refused key (NXDN is receive-only —
+ * see `astar_console::nxdn`'s Transmit section), or the `nxdn` feature not
+ * being compiled in. Read `iax_station_last_error` for which.
+ */
+#define IAX_ERR_NXDN -21
+
+/**
  * Number of log-spaced dBFS bins [`iax_station_mic_spectrum`] writes when
  * monitoring (iax-e73e). Size the `out` array to (at least) this; a larger
  * buffer is fine (the extra entries are left untouched). A literal here so
