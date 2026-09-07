@@ -17,11 +17,20 @@
 //! constant handed to `dmr_connect` — and every refusal is asserted not to
 //! contain it.
 //!
-//! `IAX_THUMBDV_PORT` is pointed at a path no VID/PID scan can ever return,
-//! so the candidate list comes back empty and nothing is opened — not the
-//! `ThumbDV`, and certainly not a radio interface's serial port.
+//! **Every test here that can reach `DmrLink::connect_with_audio` holds
+//! [`env_lock`] and pins `IAX_THUMBDV_PORT` to a path no VID/PID scan can
+//! ever return**, so the candidate list comes back empty and nothing is
+//! opened — not the `ThumbDV`, and certainly not a radio interface's serial
+//! port. Every other test is refused at an argument or at the consent gate,
+//! before the `#[cfg]` block, and never gets that far.
+//!
+//! That distinction is the whole safety property of this file and it is easy
+//! to lose: a test with fully valid arguments reaches the vocoder, and
+//! `DmrLink` returns `Ok` the moment the socket binds — the homebrew login is
+//! asynchronous — so on a machine with a dongle attached such a test both
+//! fails its own assertion AND seizes the hardware. If you add a case with
+//! valid arguments, take the lock and pin the port.
 
-#[cfg(feature = "dmr")]
 use std::sync::{Mutex, OnceLock};
 
 use astar_station::{Station, StationConfig, StationError};
@@ -31,7 +40,10 @@ const PASSWORD: &str = "passw0rd";
 /// Serializes the tests that set the process-global `IAX_THUMBDV_PORT`
 /// against each other, so `cargo test`'s default parallel execution never
 /// lets one test see another's pinned path.
-#[cfg(feature = "dmr")]
+///
+/// Not feature-gated, and neither is the pin its holders take: a test that
+/// must not open a dongle must not open one in either build, and one code
+/// path is easier to keep honest than two.
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -129,8 +141,24 @@ fn a_station_refuses_brandmeister_without_consent() {
 
 /// And an independent network is NOT gated: the consent check must refuse
 /// BrandMeister and nothing else, or the gate is just "DMR is off".
+///
+/// This is the ONE test in this file whose arguments are all valid, so it is
+/// the one that reaches `DmrLink::connect_with_audio` — which means it must
+/// pin `IAX_THUMBDV_PORT` at a path no VID/PID scan can return, exactly as
+/// `a_failed_dmr_connect_leaves_no_route_reserved` does. Without the pin, a
+/// developer machine with a dongle attached would have this test OPEN it: the
+/// vocoder is acquired, the socket binds, `DmrLink` returns `Ok` (the
+/// homebrew login is asynchronous), the assertion below fails, and the run
+/// has seized the hardware on the way past. The pin makes the refusal the
+/// no-dongle refusal, deterministically, on every machine.
 #[test]
 fn an_independent_network_is_not_gated() {
+    let _env = env_lock();
+    // SAFETY: serialized by `env_lock`; no other test in this binary reads or
+    // writes `IAX_THUMBDV_PORT` while the guard is held.
+    unsafe {
+        std::env::set_var("IAX_THUMBDV_PORT", "/dev/cu.usbserial-NOSUCHDEVICE");
+    }
     let station = test_station();
     let e = station.dmr_connect(
         "tgif",
@@ -142,15 +170,21 @@ fn an_independent_network_is_not_gated() {
         2,
         PASSWORD.into(),
     );
-    // With the feature off this is "not compiled"; with it on, no dongle. It
-    // is never the consent refusal.
+    // SAFETY: same serialization as the `set_var` above.
+    unsafe {
+        std::env::remove_var("IAX_THUMBDV_PORT");
+    }
+
+    // With the feature off this is "not compiled"; with it on, no dongle can
+    // be found because of the pin above. It is never the consent refusal.
     let Err(StationError::Dmr(message)) = e else {
-        panic!("no dongle is attached, so this cannot succeed")
+        panic!("no ThumbDV is reachable, so this cannot succeed")
     };
     assert!(
         !message.contains("BrandMeister"),
         "TGIF must not be gated behind BrandMeister's consent: {message:?}"
     );
+    assert!(!message.contains(PASSWORD));
 }
 
 #[test]
