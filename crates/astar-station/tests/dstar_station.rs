@@ -835,115 +835,71 @@ fn dstar_connect_without_a_thumbdv_fails_with_stationerror_dstar() {
     }
 }
 
-// ---- the session mutex must not be held across the connect ----------------
-
-/// An audio backend whose device enumeration takes its time — standing in,
-/// from inside `DstarSession::connect`, for the slow parts of a real connect
-/// (the `ThumbDV` candidate scan and init cookbook, then the output-device
-/// open), which together can run for seconds against a flaky dongle.
-struct SlowBackend {
-    delay: Duration,
-    inner: astar_audio::NullBackend,
-}
-
-impl AudioBackend for SlowBackend {
-    fn devices(&self) -> Result<Vec<DeviceInfo>, AudioError> {
-        thread::sleep(self.delay);
-        self.inner.devices()
-    }
-    fn default_input(&self) -> Option<DeviceInfo> {
-        self.inner.default_input()
-    }
-    fn default_output(&self) -> Option<DeviceInfo> {
-        thread::sleep(self.delay);
-        self.inner.default_output()
-    }
-    fn open_input(
-        &self,
-        device: &DeviceInfo,
-        config: StreamConfig,
-        sink: Box<dyn InputSink>,
-        overruns: Arc<AtomicU64>,
-    ) -> Result<Box<dyn StreamHandle>, AudioError> {
-        self.inner.open_input(device, config, sink, overruns)
-    }
-    fn open_output(
-        &self,
-        device: &DeviceInfo,
-        config: StreamConfig,
-        source: Box<dyn OutputSource>,
-    ) -> Result<Box<dyn StreamHandle>, AudioError> {
-        self.inner.open_output(device, config, source)
-    }
-}
-
-fn slow_backend_station(delay: Duration) -> Station {
-    Station::with_backend_factory(
-        StationConfig::default(),
-        Box::new(move || {
-            Box::new(SlowBackend {
-                delay,
-                inner: astar_audio::NullBackend::new(),
-            }) as Box<dyn AudioBackend>
-        }),
-    )
-}
-
-/// Regression guard for the `AstarStation` "poll + snapshot, never blocks"
-/// contract. `Station::dstar_connect` used to run the whole of
-/// `DstarSession::connect` — device probe, init handshake, audio open —
-/// with the session mutex held, and EVERY other `Station` method takes that
-/// same mutex (`snapshot`, `dstar_state`, `set_ptt`, `is_active`,
-/// `call_count`). A UI polling on its usual tick froze for the entire
-/// connect.
+/// A failed connect must not leave the station's ONE audio lane reserved.
 ///
-/// Hardware-free: a deliberately slow audio-backend factory supplies the
-/// delay, and `IAX_THUMBDV_PORT` is pinned at a path no VID/PID scan can
-/// return, so the connect fails (after the slow part) without opening any
-/// serial device at all.
+/// Since the one-audio-lane design the facade opens the lane BEFORE building
+/// the session, and the reservation is what every other connect path refuses
+/// against — so a connect that dies at the dongle probe (the overwhelmingly
+/// common failure: no dongle attached) would wedge the station against every
+/// later connect of any network, until process restart. That is the exact
+/// shape of the `m17_is_active()` wedge iax-f2b8-fix had to fix once already.
+///
+/// Hardware-free and hardware-SAFE for the same reason as the test above:
+/// `IAX_THUMBDV_PORT` names a path no VID/PID scan can return.
 #[test]
-fn dstar_connect_does_not_block_snapshot_polling() {
-    const CONNECT_DELAY: Duration = Duration::from_millis(600);
-    /// Generous: the lock is taken only for a precheck and an install, both
-    /// a handful of instructions. Anything near `CONNECT_DELAY` means the
-    /// connect is holding it across its slow work again.
-    const POLL_BUDGET: Duration = Duration::from_millis(150);
-
+fn a_failed_dstar_connect_leaves_no_route_reserved() {
     let _hw = hardware_lock();
     // SAFETY: serialized by `hardware_lock`; no other test in this binary
     // reads or writes `IAX_THUMBDV_PORT` while the guard is held.
     unsafe {
         std::env::set_var("IAX_THUMBDV_PORT", "/dev/cu.usbserial-NOSUCHDEVICE");
     }
-
-    let station = Arc::new(slow_backend_station(CONNECT_DELAY));
-    let connector = Arc::clone(&station);
-    let handle = thread::spawn(move || {
-        let _ = connector.dstar_connect("127.0.0.1", 30_001, 'A', "N0CALL", None);
-    });
-
-    // Poll the way a menu-bar UI does while the connect is in flight.
-    let deadline = Instant::now() + CONNECT_DELAY;
-    let mut worst = Duration::ZERO;
-    let mut polls = 0usize;
-    while Instant::now() < deadline {
-        let t = Instant::now();
-        let _ = station.snapshot();
-        let _ = station.dstar_state();
-        worst = worst.max(t.elapsed());
-        polls += 1;
-        thread::sleep(Duration::from_millis(10));
-    }
-    handle.join().expect("connect thread");
+    let station = test_station();
+    let first = station.dstar_connect("127.0.0.1", 30_001, 'A', "N0CALL", None);
+    let second = station.dstar_connect("127.0.0.1", 30_001, 'A', "N0CALL", None);
     // SAFETY: same serialization as the `set_var` above.
     unsafe {
         std::env::remove_var("IAX_THUMBDV_PORT");
     }
 
+    assert!(matches!(
+        first.expect_err("no ThumbDV"),
+        StationError::Dstar(_)
+    ));
+    // The tell: a station still holding the lane refuses the retry with
+    // AlreadyConnected instead of failing at the dongle again.
+    match second.expect_err("still no ThumbDV") {
+        StationError::Dstar(_) => {}
+        other => panic!("the lane was not released — the retry failed with {other:?}"),
+    }
     assert!(
-        worst < POLL_BUDGET,
-        "a snapshot/dstar_state poll blocked for {worst:?} (budget {POLL_BUDGET:?}) while \
-         dstar_connect was running: the session mutex is being held across the connect again"
+        station.dstar_state().is_none(),
+        "no session may be installed by a failed connect"
     );
-    assert!(polls > 5, "the poller must have actually run, got {polls}");
 }
+
+// ---- the ThumbDV probe must not be held under the session mutex -----------
+//
+// `Station::dstar_connect` once ran the whole of `DstarSession::connect` —
+// dongle probe, init handshake, audio open — with the session mutex held,
+// and EVERY other `Station` method takes that same mutex (`snapshot`,
+// `dstar_state`, `set_ptt`, `is_active`, `call_count`), so a UI polling on
+// its usual tick froze for the entire connect. `dstar_connect_does_not_
+// block_snapshot_polling` pinned that with a deliberately slow audio backend
+// and a 150 ms poll budget.
+//
+// The one-audio-lane design moved the split, and with it what is testable
+// here. The audio lane now opens UNDER the lock — a cpal enumeration and two
+// device opens, exactly what an IAX2 dial has always done under it (see the
+// design's "The station facade and the ABI") — and the lock is released for
+// the dongle probe and socket bind, retaken only to install or, on failure,
+// to give the lane back. A slow audio backend therefore blocks a poller by
+// design, and the phase that must NOT hold the lock is the dongle probe,
+// which on a machine with no dongle returns in microseconds: there is no
+// hardware-free way left to make that window observable, and a test that
+// cannot fail is worse than no test.
+//
+// What replaced it is `a_failed_dstar_connect_leaves_no_route_reserved`
+// above — the failure mode the new three-step facade actually introduces,
+// pinned deterministically. The lock discipline itself is now a matter for
+// the live hardware retest.

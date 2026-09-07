@@ -703,9 +703,8 @@ impl YsfLink {
 
     /// Set the output (RX/speaker) gain multiplier, 0.0..=4.0 (clamped).
     ///
-    /// `&self`, as [`crate::dstar::DstarSession::set_output_gain`], so a
-    /// preference can be fanned out to every live network without a mutable
-    /// borrow of each. A no-op on a link with no audio.
+    /// `&self`, so a preference can be fanned out to every live network
+    /// without a mutable borrow of each. A no-op on a link with no audio.
     pub fn set_output_gain(&self, gain: f32) {
         let gain = if gain.is_nan() {
             1.0

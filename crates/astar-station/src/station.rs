@@ -876,13 +876,15 @@ impl Station {
     /// outright rather than silently substituting a software decoder.
     ///
     /// # Blocking
-    /// The `ThumbDV` probe/init handshake and the audio-device open both run
-    /// with the session mutex NOT held: the session is constructed first and
-    /// then installed via `ConsoleSession::dstar_adopt`. A slow or flaky
+    /// The `ThumbDV` probe/init handshake and the socket bind run with the
+    /// session mutex NOT held: the audio lane is opened first (under the
+    /// lock, exactly as an IAX2 dial has always opened its devices), the
+    /// lock is released for the session construction, and only the install
+    /// via `ConsoleSession::dstar_adopt` takes it again. A slow or flaky
     /// dongle therefore delays only the caller of this method; concurrent
     /// [`Station::snapshot`]/`dstar_state`/[`Station::set_ptt`] polls — which
-    /// all take that same mutex — are unaffected, per the `AstarStation`
-    /// poll-and-snapshot contract.
+    /// all take that same mutex — are unaffected for the whole of it, per
+    /// the `AstarStation` poll-and-snapshot contract.
     ///
     /// # Errors
     /// [`StationError::Dstar`] for an invalid module/callsign, when the
@@ -920,8 +922,6 @@ impl Station {
                 port,
                 module: module_byte,
                 callsign: callsign.to_string(),
-                output,
-                input,
                 // The destination reflector's callsign fills the TX header's
                 // RPT1/RPT2 (see `astar_console::dstar`'s
                 // `tx_repeater_fields`). `None` means "derive it from `host`"
@@ -931,32 +931,41 @@ impl Station {
                 // explicitly instead of transmitting blank fields.
                 reflector_callsign: reflector_callsign.map(str::to_string),
             };
-            // Refuse early and cheaply when something else already owns the
-            // session: the lock is held for a few instructions here, not for
-            // the whole ThumbDV probe.
-            self.session
-                .lock()
-                .unwrap()
-                .dstar_can_connect()
-                .map_err(map_console_err)?;
+            // Step 1, under the lock: open the ONE audio lane on the
+            // station's router and reserve it. The reservation is also the
+            // mutual-exclusion token for the gap before the adopt below —
+            // every other connect path refuses while it is held — and the
+            // pref push, so the session starts at the operator's chosen
+            // volume rather than the router's unity default.
+            let audio = {
+                let mut s = self.session.lock().unwrap();
+                s.open_voice_route(input.as_deref(), output.as_deref(), || {
+                    (self.make_backend)()
+                })
+                .map_err(map_console_err)?
+            };
 
-            // The slow part, deliberately OFF the session mutex: a
-            // candidate-port scan, then per candidate and per baud rate an
-            // open plus an eight-transaction init cookbook (each bounded at
-            // 300 ms), plus the audio-output open — seconds, on a flaky
-            // dongle. Holding the mutex across that blocked every
-            // snapshot/state poll for the whole window.
-            let backend = std::cell::RefCell::new(Some((self.make_backend)()));
-            let session = astar_console::DstarSession::connect(cfg, &move || {
-                backend
-                    .borrow_mut()
-                    .take()
-                    .expect("dstar backend factory called exactly once")
-            })
-            .map_err(map_console_err)?;
+            // Step 2, deliberately OFF the session mutex: a candidate-port
+            // scan, then per candidate and per baud rate an open plus an
+            // eight-transaction init cookbook (each bounded at 300 ms), then
+            // the socket bind — seconds, on a flaky dongle. Holding the
+            // mutex across that blocked every snapshot/state poll for the
+            // whole window.
+            let session = match astar_console::DstarSession::connect(cfg, audio) {
+                Ok(s) => s,
+                Err(e) => {
+                    // The lane opened but the session did not: give it back,
+                    // or the station stays reserved forever. Dropped off the
+                    // lock — a CoreAudio stream drop can stall.
+                    let handles = self.session.lock().unwrap().release_voice_route();
+                    drop(handles);
+                    return Err(map_console_err(e));
+                }
+            };
 
-            // Re-takes the lock only to install (and to re-check exclusion,
-            // since the state could have changed while it was released).
+            // Step 3: re-take the lock only to install (and to re-check
+            // exclusion, since the state could have changed while it was
+            // released).
             self.session
                 .lock()
                 .unwrap()

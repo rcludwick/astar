@@ -661,10 +661,6 @@ impl ConsoleSession {
         if let Some(ysf) = self.ysf.as_ref() {
             ysf.set_rx_compression(on);
         }
-        #[cfg(feature = "dstar")]
-        if let Some(dstar) = self.dstar.as_ref() {
-            dstar.set_rx_compression(on);
-        }
     }
 
     /// Set the RX/output compression strength (0.0..=1.0, clamped) on the
@@ -684,10 +680,6 @@ impl ConsoleSession {
         #[cfg(feature = "ysf")]
         if let Some(ysf) = self.ysf.as_ref() {
             ysf.set_rx_compression_level(level);
-        }
-        #[cfg(feature = "dstar")]
-        if let Some(dstar) = self.dstar.as_ref() {
-            dstar.set_rx_compression_level(level);
         }
     }
 
@@ -1708,12 +1700,21 @@ impl ConsoleSession {
             self.state.input_level_db = -60.0;
             return Ok(());
         }
-        // D-Star never mirrors into `self.state` (see `dstar`'s field docs),
-        // so there is nothing to reset here beyond clearing the session
-        // itself.
         #[cfg(feature = "dstar")]
         if let Some(session) = self.dstar.take() {
             session.disconnect();
+            // The route the session rode is this session's too: released
+            // here, exactly as `dstar_disconnect` does, or the station stays
+            // reserved against every later connect.
+            let handles = self.release_voice_route();
+            drop(handles);
+            self.state.status = CallStatus::Idle;
+            self.state.ptt = false;
+            self.state.remote_ptt = false;
+            self.state.rtt_ms = None;
+            self.state.tx_level_db = -60.0;
+            self.state.rx_level_db = -60.0;
+            self.state.input_level_db = -60.0;
             return Ok(());
         }
         if let Some(id) = self.active.take() {
@@ -1844,38 +1845,54 @@ impl ConsoleSession {
     /// D-Star session is live — see its docs).
     ///
     /// `backend` mirrors [`Self::m17_connect`]'s contract of taking an
-    /// already-constructed backend.
+    /// already-constructed backend. `input`/`output` are device-name
+    /// substrings for the lane the session will ride (`None` = system
+    /// default); the session itself is handed only the lane's channel ends.
     ///
     /// # Errors
-    /// [`ConsoleError::AlreadyConnected`] per above; otherwise whatever
-    /// [`DstarSession::connect`] returns (`Device` for an invalid
-    /// callsign or unavailable AMBE backend, `Audio` for a device/stream
-    /// failure, `Resolve` for a DNS/bind failure).
+    /// [`ConsoleError::AlreadyConnected`] per above;
+    /// [`ConsoleError::Device`]/[`ConsoleError::Audio`] if the OUTPUT device
+    /// cannot be resolved or opened; otherwise whatever
+    /// [`DstarSession::connect`] returns (`Device` for an invalid callsign,
+    /// `Dstar` for an unavailable AMBE backend, `Resolve` for a DNS/bind
+    /// failure).
     #[cfg(feature = "dstar")]
     pub fn dstar_connect(
         &mut self,
         backend: Box<dyn AudioBackend>,
         cfg: DstarConfig,
+        input: Option<&str>,
+        output: Option<&str>,
     ) -> Result<(), ConsoleError> {
-        self.dstar_can_connect()?;
-        let slot = std::cell::RefCell::new(Some(backend));
-        let make_backend = move || -> Box<dyn AudioBackend> {
-            slot.borrow_mut()
-                .take()
-                .expect("dstar backend factory called exactly once")
-        };
-        let session = DstarSession::connect(cfg, &make_backend)?;
-        self.dstar_adopt(session)
+        // The route is the reservation, the mutual exclusion AND the pref
+        // push, all at once — see [`Self::m17_connect`].
+        let audio = self.open_voice_route(input, output, || backend)?;
+        match DstarSession::connect(cfg, audio) {
+            Ok(session) => self.dstar_adopt(session),
+            Err(e) => {
+                // The route opened but the session did not: give the lanes
+                // back, or the station stays reserved forever.
+                let handles = self.release_voice_route();
+                drop(handles);
+                Err(e)
+            }
+        }
     }
 
-    /// The mutual-exclusion guard [`Self::dstar_connect`] applies, on its
-    /// own — so a caller that wants to build the [`DstarSession`] OUTSIDE
-    /// this session's mutex (see [`Self::dstar_adopt`]) can refuse early,
-    /// cheaply, without having opened a `ThumbDV` first.
+    /// The cheap mutual-exclusion pre-check for a D-Star connect, applied
+    /// BEFORE the route is opened — so a caller that wants to build the
+    /// [`DstarSession`] outside this session's mutex can refuse early,
+    /// without having opened a `ThumbDV` first. [`Self::open_voice_route`]
+    /// applies the same guard for real when the route is actually taken;
+    /// this one just saves the work.
+    ///
+    /// It is NOT the check [`Self::dstar_adopt`] runs: by then the route is
+    /// held on this session's own behalf, so an adopt requires
+    /// `voice_route` to be `Some` where this requires it to be `None`.
     ///
     /// # Errors
-    /// [`ConsoleError::AlreadyConnected`] while an IAX2 call, an M17 session
-    /// or a D-Star session is live.
+    /// [`ConsoleError::AlreadyConnected`] while an IAX2 call, an M17, D-Star
+    /// or System Fusion session, or any voice route, is live.
     #[cfg(feature = "dstar")]
     pub fn dstar_can_connect(&self) -> Result<(), ConsoleError> {
         if self.active.is_some()
@@ -1901,67 +1918,67 @@ impl ConsoleSession {
     /// takes that mutex, including `snapshot()`/`dstar_state()`, and the
     /// `AstarStation` contract is poll-and-snapshot, never blocking.
     ///
+    /// The session must ARRIVE with the route already reserved on its
+    /// behalf: the caller opened it with [`Self::open_voice_route`] and
+    /// handed the resulting [`astar_audio::CallAudio`] to
+    /// `DstarSession::connect`, so a `voice_route` of `None` here means the
+    /// session has channel ends nothing is feeding.
+    ///
     /// On refusal the rejected session is disconnected here rather than
-    /// handed back: it has already bound a socket, opened an output stream
-    /// and taken the dongle, and leaking any of those (especially the
-    /// dongle, which only one process may hold) would be worse than the
-    /// error the caller is about to see.
+    /// handed back — it has already bound a socket and taken the dongle, and
+    /// leaking either (especially the dongle, which only one process may
+    /// hold) would be worse than the error the caller is about to see — and
+    /// the route it rode is released with it.
     ///
     /// # Errors
-    /// [`ConsoleError::AlreadyConnected`] per [`Self::dstar_can_connect`].
+    /// [`ConsoleError::AlreadyConnected`] when an IAX2 call or another
+    /// digital session is live, or when no route was reserved.
     #[cfg(feature = "dstar")]
     pub fn dstar_adopt(&mut self, session: DstarSession) -> Result<(), ConsoleError> {
-        if let Err(e) = self.dstar_can_connect() {
+        if self.active.is_some()
+            || self.m17_is_active()
+            || self.dstar.is_some()
+            || self.ysf_is_active()
+            || self.voice_route.is_none()
+        {
             session.disconnect();
-            return Err(e);
+            let handles = self.release_voice_route();
+            drop(handles);
+            return Err(ConsoleError::AlreadyConnected);
         }
-        // Seed the new session with what the operator has already chosen.
-        // Without this a D-Star session starts at the router's unity default
-        // and only picks up the real value if a slider happens to move
-        // afterwards — which is the bug that shipped, just narrowed to the
-        // first session instead of every one.
-        session.set_output_gain(self.output_gain.get());
-        session.set_rx_compression(self.rx_compress.load(Ordering::Relaxed));
-        session.set_rx_compression_level(f32::from_bits(
-            self.rx_compress_level.load(Ordering::Relaxed),
-        ));
         self.dstar = Some(session);
         Ok(())
-    }
-
-    /// The live D-Star session's listener-side audio preferences, or `None`
-    /// when no session is active. Exists so the fan-out that reaches it can be
-    /// proven rather than assumed — see `dstar_session_audio_prefs`'s test.
-    #[cfg(feature = "dstar")]
-    #[must_use]
-    pub fn dstar_session_audio_prefs(&self) -> Option<(f32, bool, f32)> {
-        self.dstar.as_ref().map(DstarSession::audio_prefs)
     }
 
     /// Disconnect the live D-Star session, if any (iax-a9d4 Task 6). No-op
     /// when none is active.
     #[cfg(feature = "dstar")]
     pub fn dstar_disconnect(&mut self) {
+        // Everything here is inside the `if let`, route release included:
+        // `Station::disconnect` calls every network's disconnect in turn, so
+        // an unconditional release would close the lanes out from under a
+        // live M17 or System Fusion session that legitimately holds them —
+        // and an unconditional state reset would blank their mirror.
         if let Some(session) = self.dstar.take() {
             session.disconnect();
+            let handles = self.release_voice_route();
+            drop(handles);
+            // Reset every field `snapshot()`'s D-Star branch mirrors, exactly
+            // as `m17_disconnect` does for its own (iax-4c8e).
+            //
+            // Without this the mirror simply stops running once `self.dstar`
+            // is `None`, leaving the LAST values it wrote frozen in
+            // `self.state` forever. Keying, then disconnecting, would leave a
+            // snapshot reporting `ptt: true` for a station that no longer has
+            // a session at all — a UI would show a transmitting station
+            // indefinitely. The levels go with it: the meter block only
+            // writes while a lane is live, and this released the last one.
+            self.state.status = CallStatus::Idle;
+            self.state.ptt = false;
+            self.state.tx_level_db = -60.0;
+            self.state.rx_level_db = -60.0;
+            self.state.input_level_db = -60.0;
         }
-        // Reset every field `snapshot()`'s D-Star branch mirrors, exactly as
-        // `m17_disconnect` does for its own (iax-4c8e).
-        //
-        // Without this the mirror simply stops running once `self.dstar` is
-        // `None`, leaving the LAST values it wrote frozen in `self.state`
-        // forever. Keying, then disconnecting, would leave a snapshot
-        // reporting `ptt: true` for a station that no longer has a session at
-        // all — a UI would show a transmitting station indefinitely.
-        //
-        // `input_level_db` is reset here but not in `m17_disconnect`: D-Star
-        // is the only path that mirrors the continuous mic meter, so it is
-        // the only one that can leave it stale.
-        self.state.status = CallStatus::Idle;
-        self.state.ptt = false;
-        self.state.tx_level_db = -60.0;
-        self.state.rx_level_db = -60.0;
-        self.state.input_level_db = -60.0;
     }
 
     /// `true` while a D-Star session is live (the mutual-exclusion check
@@ -1984,10 +2001,22 @@ impl ConsoleSession {
     /// Task 6), or `None` when no session is active. Unlike M17, D-Star
     /// state is never mirrored into [`ConsoleState`] (see [`Self::dstar`]'s
     /// field docs) — a caller reads it through this accessor instead.
+    ///
+    /// Four of the fields are the CONSOLE's, not the session's, and are
+    /// composed here: `tx_capable` comes from the lane (a session with no
+    /// capture device cannot transmit however capable its vocoder is), and
+    /// the three levels come from the one meter read `snapshot()` already
+    /// does at the lane. A session owns no meters — see
+    /// [`DstarSnapshotState`].
     #[cfg(feature = "dstar")]
     #[must_use]
     pub fn dstar_state(&self) -> Option<DstarSnapshotState> {
-        self.dstar.as_ref().map(DstarSession::state)
+        let mut st = self.dstar.as_ref().map(DstarSession::state)?;
+        st.tx_capable = self.voice_route_tx_capable();
+        st.tx_dbfs = self.state.tx_level_db;
+        st.rx_dbfs = self.state.rx_level_db;
+        st.input_dbfs = self.state.input_level_db;
+        Some(st)
     }
 
     /// Open a System Fusion link with audio, and adopt it.
@@ -2187,15 +2216,6 @@ impl ConsoleSession {
             let r = mgr.router();
             r.set_output_gain(route.out(), clamped);
         }
-        // D-Star was missing from this fan-out until iax-dstaraudio, so the
-        // operator's volume never reached a live D-Star session and it played
-        // at the router's unity default while every other network sat at
-        // whatever they had chosen. That is what "D-Star is louder than it
-        // should be" was.
-        #[cfg(feature = "dstar")]
-        if let Some(dstar) = self.dstar.as_ref() {
-            dstar.set_output_gain(clamped);
-        }
         #[cfg(feature = "ysf")]
         if let Some(ysf) = self.ysf.as_ref() {
             ysf.set_output_gain(clamped);
@@ -2221,10 +2241,6 @@ impl ConsoleSession {
         if let Some(ysf) = self.ysf.as_ref() {
             return ysf.tx_spectrum(out);
         }
-        #[cfg(feature = "dstar")]
-        if let Some(dstar) = self.dstar.as_ref() {
-            return dstar.tx_spectrum(out);
-        }
         0
     }
 
@@ -2242,10 +2258,6 @@ impl ConsoleSession {
         #[cfg(feature = "ysf")]
         if let Some(ysf) = self.ysf.as_ref() {
             return ysf.rx_spectrum(out);
-        }
-        #[cfg(feature = "dstar")]
-        if let Some(dstar) = self.dstar.as_ref() {
-            return dstar.rx_spectrum(out);
         }
         0
     }
@@ -2739,10 +2751,10 @@ impl ConsoleSession {
 
         // iax-2f6b: D-Star, mutually exclusive with both paths above (see
         // `dstar_can_connect`). Only the fields that mean the same thing for
-        // every network are mirrored — is this station transmitting, the
-        // three level meters a UI's meters/VOX read, and (iax-4c8e) the
-        // call status. Everything D-Star-shaped (talker, slow text, vocoder
-        // backend) stays behind `dstar_state()`.
+        // every network are mirrored — is this station transmitting, and
+        // (iax-4c8e) the call status. Everything D-Star-shaped (talker, slow
+        // text, vocoder backend) stays behind `dstar_state()`; the three
+        // level meters are read once, at the lane, by the meter block above.
         //
         // `status` is mapped from the D-Star link exactly as the M17 branch
         // above maps its own: a front-end drives one connection state machine
@@ -2760,9 +2772,6 @@ impl ConsoleSession {
         if let Some(session) = self.dstar.as_ref() {
             let st = session.state();
             self.state.ptt = st.ptt;
-            self.state.tx_level_db = st.tx_dbfs;
-            self.state.rx_level_db = st.rx_dbfs;
-            self.state.input_level_db = st.input_dbfs;
             // Fully qualified: the `m17` import above binds the bare name
             // `LinkState` to M17's own enum, and both features are usually on.
             self.state.status = match st.link {
@@ -3563,6 +3572,189 @@ mod tests {
             session.meter_ids().is_none(),
             "the route is released on disconnect, so nothing is metered"
         );
+    }
+
+    // ── D-Star rides the one lane ───────────────────────────────────────
+    //
+    // The decisions that moved OFF `DstarSession` and onto the console live
+    // here now: whether this station may key at all, and what the four
+    // console-owned `DstarSnapshotState` fields report. No dongle is needed
+    // for any of it — the vocoder is injected, and nothing below transmits
+    // anywhere (the socket is `connect`ed to a silent loopback port).
+
+    /// An inert [`astar_codec::ambe::AmbeStream`]: enough for
+    /// `DstarSession::connect_with_stream` to build a session with no
+    /// `ThumbDV` attached. Neither direction is exercised by these tests —
+    /// what they assert is decided before a frame is ever encoded.
+    #[cfg(feature = "dstar")]
+    struct InertVocoder;
+
+    #[cfg(feature = "dstar")]
+    impl astar_codec::ambe::AmbeStream for InertVocoder {
+        fn submit_decode(&mut self, _frame: astar_codec::ambe::ChannelFrame) {}
+        fn poll_decoded(&mut self) -> Option<[i16; 160]> {
+            None
+        }
+        fn in_flight(&self) -> usize {
+            0
+        }
+        fn submit_encode(&mut self, _pcm: [i16; 160]) {}
+        fn poll_encoded(&mut self) -> Option<astar_codec::ambe::ChannelFrame> {
+            None
+        }
+        fn in_flight_encoded(&self) -> usize {
+            0
+        }
+    }
+
+    /// A `DstarConfig` pointed at `addr`. Carries no devices any more — the
+    /// route owns those.
+    #[cfg(feature = "dstar")]
+    fn dstar_cfg(addr: std::net::SocketAddr) -> DstarConfig {
+        DstarConfig {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            module: b'A',
+            callsign: "N0CALL".to_string(),
+            reflector_callsign: None,
+        }
+    }
+
+    /// Build a D-Star session over `audio` with no hardware in the loop.
+    #[cfg(feature = "dstar")]
+    fn dstar_session(addr: std::net::SocketAddr, audio: astar_audio::CallAudio) -> DstarSession {
+        DstarSession::connect_with_stream(
+            dstar_cfg(addr),
+            audio,
+            Box::new(InertVocoder),
+            astar_codec::ambe::AmbeBackend::Hardware,
+        )
+        .expect("a session with an injected vocoder needs no dongle")
+    }
+
+    /// A machine with no usable microphone must still be able to LISTEN, and
+    /// must be told it cannot transmit — the two halves of the policy that
+    /// used to live in `DstarSession`'s own key-down.
+    ///
+    /// The refusal is the console's now because only the lane knows whether
+    /// a capture device exists. Getting this wrong puts an RF header and a
+    /// stream of silence on the air, which is worse than not transmitting.
+    #[cfg(feature = "dstar")]
+    #[test]
+    fn keying_a_receive_only_route_is_refused_for_dstar() {
+        let target = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind silent target");
+        let addr = target.local_addr().expect("local addr");
+
+        let mut s = ConsoleSession::new();
+        let audio = s
+            .open_voice_route(Some("no such device"), None, null)
+            .expect("the bus opens; a missing capture device is not fatal");
+        s.dstar_adopt(dstar_session(addr, audio))
+            .expect("adopt onto the reserved route");
+
+        assert!(
+            !s.dstar_state().expect("a live session").tx_capable,
+            "tx_capable is the LANE's answer: no capture device, no transmit — whatever the \
+             vocoder is capable of"
+        );
+        assert!(
+            matches!(s.set_ptt(true), Err(ConsoleError::NoCaptureDevice)),
+            "a key-down with no capture device must be refused, and nothing forwarded"
+        );
+        assert!(!s.snapshot().ptt, "a refused key never reports as keyed");
+
+        s.dstar_disconnect();
+    }
+
+    /// `dstar_adopt` installs a session that arrived with the route already
+    /// reserved on its behalf — and refuses (tearing the session down) one
+    /// that did not, because its channel ends would have nothing feeding
+    /// them.
+    #[cfg(feature = "dstar")]
+    #[test]
+    fn dstar_adopt_requires_a_reserved_route() {
+        let target = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind silent target");
+        let addr = target.local_addr().expect("local addr");
+
+        // A lane built outside the console: a session with real channel ends
+        // that this `ConsoleSession` never reserved anything for.
+        let mut orphan = astar_audio::AudioRouter::new(Box::new(NullBackend::new()));
+        let (audio, _mic_tx, _mix) = orphan
+            .open_monitor_call(&OutputId::new("out:null"), StreamConfig::default())
+            .expect("bus");
+
+        let mut s = ConsoleSession::new();
+        assert!(
+            matches!(
+                s.dstar_adopt(dstar_session(addr, audio)),
+                Err(ConsoleError::AlreadyConnected)
+            ),
+            "a session with no route reserved for it must be refused"
+        );
+        assert!(s.dstar_state().is_none(), "and not installed");
+    }
+
+    /// The levels a UI reads off `dstar_state()` are the CONSOLE's — read
+    /// once, at the lane, by `snapshot()` — not the session's. D-Star
+    /// shipped with a per-session meter mirror and no spectrum at all; this
+    /// pins that both now come from the one lane.
+    #[cfg(feature = "dstar")]
+    #[test]
+    fn a_dstar_session_reports_the_router_meters_through_dstar_state() {
+        let target = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind silent target");
+        let addr = target.local_addr().expect("local addr");
+
+        let mut s = ConsoleSession::new();
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        s.dstar_adopt(dstar_session(addr, audio)).expect("adopt");
+
+        // The lane the snapshot meters: the route's, because the session has
+        // none of its own.
+        let ids = s.meter_ids().expect("a route is live");
+        assert_eq!(ids.1, OutputId::new("out:null"));
+        assert_eq!(ids.0, Some(MicId::new("in:null")));
+
+        let snap = s.snapshot();
+        let st = s.dstar_state().expect("a live session");
+        assert!(
+            (st.rx_dbfs - snap.rx_level_db).abs() < 1e-6
+                && (st.tx_dbfs - snap.tx_level_db).abs() < 1e-6
+                && (st.input_dbfs - snap.input_level_db).abs() < 1e-6,
+            "dstar_state must report the SAME numbers the snapshot does, got {st:?}"
+        );
+        assert!(
+            (snap.rx_level_db + 60.0).abs() < 1e-6,
+            "a silent bus reads the floor, not garbage, got {}",
+            snap.rx_level_db
+        );
+        assert!(st.tx_capable, "a route with a capture device can transmit");
+
+        s.dstar_disconnect();
+        assert!(
+            s.meter_ids().is_none(),
+            "the route is released on disconnect, so nothing is metered"
+        );
+    }
+
+    /// `Station::disconnect` calls `m17_disconnect` before D-Star's and
+    /// YSF's, so a `dstar_disconnect` that released the route
+    /// unconditionally would close the lanes out from under whichever of
+    /// those holds it.
+    #[cfg(feature = "dstar")]
+    #[test]
+    fn dstar_disconnect_leaves_a_route_it_does_not_own_alone() {
+        let mut s = ConsoleSession::new();
+        let _audio = s.open_voice_route(None, None, null).expect("route");
+
+        s.dstar_disconnect();
+
+        let mgr = s.manager.as_ref().expect("engine survives");
+        assert_eq!(
+            mgr.router().output_count(),
+            1,
+            "the bus another network is listening on must stay open"
+        );
+        assert_eq!(mgr.router().mic_count(), 1, "so must its capture lane");
     }
 
     // ── System Fusion wiring (astar-e7b3 §2.4) ──────────────────────────

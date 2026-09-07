@@ -86,17 +86,6 @@ impl MicLane {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn opened_stub(id: &str) -> MicLane {
-        MicLane {
-            id: Some(MicId::new(id)),
-            tx: None,
-            preroll_lead: Arc::new(AtomicU32::new(0)),
-            config: StreamConfig::default(),
-            opened: true,
-        }
-    }
-
     /// Open the capture stream if it isn't already, returning `false` when
     /// this session cannot transmit at all (no device resolved, or the open
     /// failed). Callers must treat `false` as "refuse this key-down": a

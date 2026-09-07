@@ -13,14 +13,15 @@
 //! half-duplex against the one physical `ThumbDV` link — this session never
 //! decodes and encodes at the same time (see "Half-duplex" below).
 //!
-//! - It opens its [`AudioRouter`] via [`AudioRouter::open_monitor_call`] (the
-//!   output bus only) and opens the CAPTURE device lazily, on the first
-//!   key-down ([`MicLane::ensure_open`]). Receive-only D-Star therefore works
-//!   on a machine with no usable microphone — no input device at all, or
-//!   macOS mic permission denied — and no session holds a live microphone
-//!   open for its whole lifetime just in case the operator keys. The gate is
-//!   never opened by the lane's creation (unlike [`AudioRouter::open_call`]);
-//!   [`DstarSession::set_ptt`] is the only thing that ever opens it.
+//! - It does **not** own its audio. It is handed a [`CallAudio`] — the two
+//!   channel ends of the one lane `ConsoleSession` opened on the station's
+//!   router (`crate::voice_route`) — and owns nothing else about audio: no
+//!   [`astar_audio::AudioRouter`], no mic or bus id, no meter mirror, no
+//!   preference cell, no spectrum copy, and no PTT gate. Meters, DSP
+//!   preferences and keying are read and driven once, at the lane, by
+//!   `ConsoleSession`, which also decides whether a machine with no usable
+//!   microphone may key at all (receive-only D-Star still works, as it
+//!   always did — the decision simply moved).
 //! - [`DstarSession::set_ptt`] stores a request atomic; the run-loop applies
 //!   the edge on its next poll (bounded by [`SOCKET_POLL_TIMEOUT`]),
 //!   building/sending the header on key-down and flushing a terminating
@@ -79,8 +80,10 @@
 //! - [`MAX_TX_DURATION`] elapsing (the conventional radio time-out timer): a
 //!   lost key-up event — a dropped hotkey release, a wedged UI thread — must
 //!   not leave the station transmitting indefinitely;
-//! - a key-down that cannot be honoured (no capture device, or the header
-//!   send failed) is refused rather than half-applied.
+//! - a key-down that cannot be honoured (the header send failed) is refused
+//!   rather than half-applied. A key-down with no capture device never
+//!   reaches this module at all: `ConsoleSession::set_ptt` refuses it with
+//!   `ConsoleError::NoCaptureDevice` before forwarding anything.
 //!
 //! In every one of those cases the gate closes, a terminating frame goes out
 //! through the ordinary unkey path, and PTT stays refused until the operator
@@ -162,12 +165,12 @@
 
 use std::collections::VecDeque;
 use std::net::{ToSocketAddrs, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use astar_audio::{AudioBackend, AudioRouter, CallAudio, MicId, OutputId, StreamConfig};
+use astar_audio::CallAudio;
 use astar_codec::ambe::{
     AMBE_STREAM_MAX_IN_FLIGHT, AmbeBackend, AmbeStream, VocoderMode, open_ambe_stream,
 };
@@ -177,8 +180,7 @@ use astar_dstar::{
     TxStream, generate_stream_id, repeater_fields,
 };
 
-use crate::mic_lane::MicLane;
-use crate::session::{ConsoleError, resolve_device};
+use crate::session::ConsoleError;
 
 /// The run-loop thread's socket read timeout: also the cadence at which the
 /// FSM keepalive tick is re-checked. Mirrors [`crate::m17`]'s
@@ -332,15 +334,6 @@ pub struct DstarConfig {
     /// truncation-checked there; invalid callsigns fail
     /// [`DstarSession::connect`] with [`ConsoleError::Device`]).
     pub callsign: String,
-    /// Playback device substring; `None` = system default, mirroring
-    /// [`crate::m17::M17Config::output`].
-    pub output: Option<String>,
-    /// Capture device substring; `None` = system default, mirroring
-    /// [`crate::m17::M17Config::input`] (iax-2f6b: D-Star now opens a mic
-    /// lane for TX, same as M17 — see the module docs). Resolution failure
-    /// is NOT fatal: the capture device is opened lazily on the first
-    /// key-down, so a receive-only session works without one.
-    pub input: Option<String>,
     /// The destination reflector's CALLSIGN as the directories list it
     /// (e.g. `"XRF757"`, `"XLX836"`), used to fill the TX RF header's
     /// `RPT2`/`RPT1` fields — see [`tx_repeater_fields`] for why those matter
@@ -376,38 +369,44 @@ pub struct DstarSnapshotState {
     /// backend is available) — `Option` per the milestone design brief's
     /// literal interface shape.
     pub backend: Option<AmbeBackend>,
-    /// Always `true` (iax-2f6b): every [`DstarSession`] that exists at all
-    /// opened a hardware `ThumbDV` handle capable of both directions — there
-    /// is no partially-hardware, RX-only state. Kept as a real field (rather
-    /// than removed now that it's a constant) because a UI reads this
-    /// instead of inferring transmit-capability from the link state, and a
-    /// hardware requirement change in the future should not be a signature
-    /// break.
+    /// Whether this station can transmit at all.
+    ///
+    /// CONSOLE-OWNED (one-audio-lane): the session itself always reports
+    /// `true` — every [`DstarSession`] that exists opened a hardware
+    /// `ThumbDV` handle capable of both directions, so there is no
+    /// partially-hardware, RX-only state — but transmit also needs a
+    /// capture device, and the lane, not the session, is what has one.
+    /// `ConsoleSession::dstar_state` overwrites this with
+    /// `voice_route_tx_capable()` before any caller sees it. Read it from
+    /// there, never from [`DstarSession::state`].
     pub tx_capable: bool,
     /// `true` while transmit is keyed.
     ///
     /// This is the run loop's ACTUALLY-APPLIED state, not an echo of the last
     /// [`DstarSession::set_ptt`] request: a key-down that was refused (link
-    /// not up, no capture device, header send failed) never sets it, and a
-    /// forced unkey (link lost mid-transmission, [`MAX_TX_DURATION`]) clears
-    /// it without the operator asking. A request is applied within one
+    /// not up, or the header send failed) never sets it, and a forced unkey
+    /// (link lost mid-transmission, [`MAX_TX_DURATION`]) clears it without
+    /// the operator asking. A request is applied within one
     /// [`SOCKET_POLL_TIMEOUT`] tick (~50 ms); on the unkey side the flag
-    /// clears as soon as the mic gate shuts, BEFORE the (bounded, up to
+    /// clears at the top of the unkey, BEFORE the (bounded, up to
     /// [`FLUSH_DEADLINE`]) encoder flush that puts the last frames on the
     /// wire — so a UI never shows "keyed" for a transmission that has already
     /// stopped capturing.
     pub ptt: bool,
-    /// Transmit level in dBFS (post-gain, post-gate — mirrors
-    /// [`AudioRouter::mic_tx_dbfs`]), or -60.0 when nothing is transmitting.
+    /// Transmit level in dBFS (post-gain, post-gate).
+    ///
+    /// CONSOLE-OWNED, like the two below and [`Self::tx_capable`]: levels are
+    /// read once, at the lane, by `ConsoleSession` — a session owns no
+    /// meters. [`DstarSession::state`] reports the -60 dBFS silence floor
+    /// here and `ConsoleSession::dstar_state` overwrites it with
+    /// `ConsoleState::tx_level_db`.
     pub tx_dbfs: f32,
-    /// Receive level in dBFS on this session's output bus (mirrors
-    /// [`AudioRouter::output_rx_dbfs`]).
+    /// Receive level in dBFS on the lane's output bus. Console-owned — see
+    /// [`Self::tx_dbfs`].
     pub rx_dbfs: f32,
-    /// Raw microphone input level in dBFS, updated EVEN WHILE UNKEYED once
-    /// the capture device is open (mirrors [`AudioRouter::mic_input_dbfs`]) —
-    /// the meter a UI shows while the operator sets their gain. Stays at
-    /// -60.0 until the first key-down, since D-Star opens the capture device
-    /// lazily (see the module docs).
+    /// Raw microphone input level in dBFS, updated even while unkeyed — the
+    /// meter a UI shows while the operator sets their gain. Console-owned —
+    /// see [`Self::tx_dbfs`].
     pub input_dbfs: f32,
 }
 
@@ -419,36 +418,6 @@ struct SharedState {
     talker: Mutex<Option<String>>,
     slow_text: Mutex<Option<String>>,
     ptt: AtomicBool,
-    /// Level meters, `f32::to_bits` in an `AtomicU32` — the same cell shape
-    /// [`crate::m17`]'s own `SharedState` uses, seeded at the -60 dBFS floor
-    /// `astar_audio::peak_to_dbfs` reports for silence.
-    tx_dbfs: AtomicU32,
-    rx_dbfs: AtomicU32,
-    input_dbfs: AtomicU32,
-    /// `(bins, count)` from the router's analyzers, refreshed every run-loop
-    /// pass. `count` stays 0 until a lane has produced a reading.
-    ///
-    /// D-Star had levels but no spectrum: `ConsoleSession::tx_spectrum` and
-    /// `rx_spectrum` dispatched only to IAX2 and M17, so a live D-Star
-    /// session drew empty bars and had since it shipped.
-    tx_spectrum: Mutex<([f32; astar_audio::SPECTRUM_BINS], usize)>,
-    rx_spectrum: Mutex<([f32; astar_audio::SPECTRUM_BINS], usize)>,
-    /// Listener-side audio preferences, the same three
-    /// [`crate::ConsoleSession`] fans out to every other network.
-    ///
-    /// D-Star was never wired into that fan-out (iax-dstaraudio): the setters
-    /// had an IAX2 arm and an M17 arm and no D-Star arm, so the operator's
-    /// volume never reached a D-Star session and it played at the router's
-    /// 1.0 default while every other network was at whatever they had chosen.
-    /// Reported as "D-Star is louder than it should be", which is exactly what
-    /// an ignored attenuation sounds like.
-    ///
-    /// Held here rather than on the session because the router and the output
-    /// bus both move into the run-loop thread; this is the cell that thread
-    /// reads. Same shape as [`crate::m17`]'s `Prefs`.
-    output_gain: AtomicU32,
-    rx_compress: AtomicBool,
-    rx_compress_level: AtomicU32,
 }
 
 impl SharedState {
@@ -458,41 +427,15 @@ impl SharedState {
             talker: Mutex::new(None),
             ptt: AtomicBool::new(false),
             slow_text: Mutex::new(None),
-            tx_dbfs: AtomicU32::new((-60.0f32).to_bits()),
-            rx_dbfs: AtomicU32::new((-60.0f32).to_bits()),
-            input_dbfs: AtomicU32::new((-60.0f32).to_bits()),
-            tx_spectrum: Mutex::new(([0.0; astar_audio::SPECTRUM_BINS], 0)),
-            rx_spectrum: Mutex::new(([0.0; astar_audio::SPECTRUM_BINS], 0)),
-            // Unity and off — the router's own defaults, so a session nobody
-            // has configured sounds exactly as it did before this existed.
-            // `dstar_adopt` overwrites these with the console's real values
-            // before the operator can hear anything.
-            output_gain: AtomicU32::new(1.0f32.to_bits()),
-            rx_compress: AtomicBool::new(false),
-            rx_compress_level: AtomicU32::new(0.5f32.to_bits()),
         }
     }
 
-    /// Push the listener-side preferences onto the open output bus.
-    ///
-    /// Called once at connect, before the run-loop thread starts, and again on
-    /// every tick — a handful of atomic loads and the router's own atomic
-    /// stores, so it needs no dirty-flag tracking. Mirrors
-    /// [`crate::m17::Prefs::apply`], deliberately: two networks applying the
-    /// same preferences by different mechanisms is how one of them silently
-    /// stops applying them.
-    fn apply_audio(&self, router: &AudioRouter, out: &OutputId) {
-        router.set_output_gain(
-            out,
-            f32::from_bits(self.output_gain.load(Ordering::Relaxed)),
-        );
-        router.set_output_compress(out, self.rx_compress.load(Ordering::Relaxed));
-        router.set_output_compress_level(
-            out,
-            f32::from_bits(self.rx_compress_level.load(Ordering::Relaxed)),
-        );
-    }
-
+    /// The session's half of the snapshot. The four console-owned fields
+    /// (`tx_capable` and the three levels — see [`DstarSnapshotState`]) are
+    /// filled with the values a session with no audio of its own can honestly
+    /// report: the vocoder handle is bidirectional, and the meters read the
+    /// silence floor. `ConsoleSession::dstar_state` overwrites all four from
+    /// the lane before any caller sees them.
     fn snapshot(&self, backend: AmbeBackend) -> DstarSnapshotState {
         DstarSnapshotState {
             link: u8_to_link(self.link.load(Ordering::Relaxed)),
@@ -501,9 +444,9 @@ impl SharedState {
             backend: Some(backend),
             tx_capable: true,
             ptt: self.ptt.load(Ordering::Relaxed),
-            tx_dbfs: f32::from_bits(self.tx_dbfs.load(Ordering::Relaxed)),
-            rx_dbfs: f32::from_bits(self.rx_dbfs.load(Ordering::Relaxed)),
-            input_dbfs: f32::from_bits(self.input_dbfs.load(Ordering::Relaxed)),
+            tx_dbfs: -60.0,
+            rx_dbfs: -60.0,
+            input_dbfs: -60.0,
         }
     }
 }
@@ -548,16 +491,16 @@ pub struct DstarSession {
 }
 
 impl DstarSession {
-    /// Connect to a `DExtra` reflector: opens this session's own
-    /// [`AudioRouter`] call (a mic lane plus the output bus), opens an AMBE
-    /// codec handle, binds a UDP socket, and starts the "iax-dstar" run-loop
-    /// thread, which sends the initial link (connect) request. The mic gate
-    /// starts CLOSED — [`DstarSession::set_ptt`] is the only thing that ever
-    /// opens it.
+    /// Connect to a `DExtra` reflector: opens an AMBE codec handle, binds a
+    /// UDP socket, and starts the "iax-dstar" run-loop thread, which sends
+    /// the initial link (connect) request.
     ///
-    /// `make_backend` is called exactly once, synchronously, before this
-    /// returns (mirrors [`crate::m17::M17Session::connect`]'s backend-factory
-    /// contract).
+    /// `audio` is the one audio lane `ConsoleSession` already opened on the
+    /// station's router (`crate::voice_route`): the session encodes whatever
+    /// arrives on `audio.tx_frames` while keyed and plays what it decodes
+    /// onto `audio.rx_frames`. It builds no router, resolves no device,
+    /// carries no preference and never touches the PTT gate — see the module
+    /// docs.
     ///
     /// D-Star is hardware-only (iax-b3e7 M0): this always requests
     /// [`AmbeBackend::Hardware`] from [`open_ambe_stream`] — there is no
@@ -570,7 +513,6 @@ impl DstarSession {
     /// detected/it's busy — see
     /// [`classify_thumbdv_failure`](astar_codec::ambe::classify_thumbdv_failure)'s
     /// doc for how the message names the specific cause, iax-b3e7 spec §4);
-    /// [`ConsoleError::Audio`] if opening the output stream fails;
     /// [`ConsoleError::Resolve`] if `cfg.host`/`cfg.port` don't resolve or
     /// the socket can't be bound.
     // `cfg` is taken by value per the M17/console `*Config` convention
@@ -579,11 +521,8 @@ impl DstarSession {
     // rather than moved, which is why clippy would otherwise suggest a
     // reference here.
     #[allow(clippy::needless_pass_by_value)]
-    pub fn connect(
-        cfg: DstarConfig,
-        make_backend: &dyn Fn() -> Box<dyn AudioBackend>,
-    ) -> Result<DstarSession, ConsoleError> {
-        Self::connect_inner(cfg, make_backend, None)
+    pub fn connect(cfg: DstarConfig, audio: CallAudio) -> Result<DstarSession, ConsoleError> {
+        Self::connect_inner(cfg, audio, None)
     }
 
     /// [`DstarSession::connect`] with the AMBE decoder supplied by the
@@ -608,11 +547,11 @@ impl DstarSession {
     /// cases the caller has already resolved.
     pub fn connect_with_stream(
         cfg: DstarConfig,
-        make_backend: &dyn Fn() -> Box<dyn AudioBackend>,
+        audio: CallAudio,
         ambe: Box<dyn AmbeStream>,
         backend: AmbeBackend,
     ) -> Result<DstarSession, ConsoleError> {
-        Self::connect_inner(cfg, make_backend, Some((ambe, backend)))
+        Self::connect_inner(cfg, audio, Some((ambe, backend)))
     }
 
     /// The shared body of [`Self::connect`] and [`Self::connect_with_stream`].
@@ -620,7 +559,7 @@ impl DstarSession {
     #[allow(clippy::needless_pass_by_value)]
     fn connect_inner(
         cfg: DstarConfig,
-        make_backend: &dyn Fn() -> Box<dyn AudioBackend>,
+        audio: CallAudio,
         vocoder: Option<(Box<dyn AmbeStream>, AmbeBackend)>,
     ) -> Result<DstarSession, ConsoleError> {
         // Validate/build the FSM first (cheap, no I/O) — mirrors
@@ -635,47 +574,6 @@ impl DstarSession {
         let (rpt1, rpt2) =
             tx_repeater_fields(cfg.reflector_callsign.as_deref(), &cfg.host, cfg.module);
         let header = general_call_header(rpt2, rpt1, fsm.callsign());
-
-        // Resolve the output device against the backend BEFORE it moves into
-        // the router (mirrors ConsoleSession::connect's iax-be48 idiom).
-        let backend_audio = make_backend();
-        // The capture device is resolved here but NOT opened, and a failure
-        // to resolve one is deliberately NOT fatal: D-Star must stay usable
-        // receive-only on a machine with no usable microphone (no input
-        // device at all, mic permission denied, or the only input already
-        // held exclusively). The lane is opened on the first key-down
-        // instead — see MicLane.
-        let in_id = resolve_device(
-            backend_audio.as_ref(),
-            cfg.input.as_deref(),
-            astar_audio::Direction::Input,
-        )
-        .map_err(|e| {
-            tracing::warn!(
-                error = ?e,
-                "dstar: no capture device resolved — this session can receive but not transmit"
-            );
-        })
-        .ok();
-        let out_id = resolve_device(
-            backend_audio.as_ref(),
-            cfg.output.as_deref(),
-            astar_audio::Direction::Output,
-        )?;
-
-        let mut router = AudioRouter::new(backend_audio);
-        let out = OutputId::new(&out_id);
-        // 8 kHz mono 20 ms: the rate AMBE's 160-sample full-rate D-Star
-        // frame is built around (matches Codec 2 mode 3200's own rate, so
-        // StreamConfig::default() is correct here too).
-        let config = StreamConfig::default();
-        // Monitor-only to start with: the output bus (RX) opens now, the
-        // capture device only when the operator first keys. `mic_tx` is the
-        // parked TX sender MicLane::ensure_open binds to the lane then.
-        let (call_audio, mic_tx, _mix_id) = router
-            .open_monitor_call(&out, config)
-            .map_err(ConsoleError::Audio)?;
-        let mic = MicLane::new(in_id.map(MicId::new), mic_tx, &call_audio, config);
 
         // Hardware-only (iax-b3e7 M0): request Hardware unconditionally, no
         // preference knob and no software-codec fallback.
@@ -710,10 +608,7 @@ impl DstarSession {
                     socket,
                     fsm,
                     ambe,
-                    router,
-                    mic,
-                    out,
-                    call_audio,
+                    call_audio: audio,
                     header,
                     shutdown: thread_shutdown,
                     ptt_request: thread_ptt_request,
@@ -740,64 +635,9 @@ impl DstarSession {
     /// Mirrors [`crate::m17::M17Session::set_ptt`] exactly. Nothing in this
     /// session ever keys on its own — this is the ONLY path that can set the
     /// request true (see the module docs' TX-safety section).
-    /// Set the output (RX/speaker) gain multiplier, 0.0..=4.0 (the router
-    /// clamps). Takes effect on the live session's output bus within a tick.
     ///
-    /// `&self`, like [`crate::m17::M17Session::set_output_gain`], so
-    /// [`crate::ConsoleSession`] can fan a preference out to whichever
-    /// networks are live without needing a mutable borrow of each.
-    /// Copy the live TX spectrum into `out`, returning bins written.
-    #[must_use]
-    pub fn tx_spectrum(&self, out: &mut [f32]) -> usize {
-        copy_bins(&self.shared.tx_spectrum, out)
-    }
-
-    /// Copy the live RX spectrum into `out`, returning bins written.
-    #[must_use]
-    pub fn rx_spectrum(&self, out: &mut [f32]) -> usize {
-        copy_bins(&self.shared.rx_spectrum, out)
-    }
-
-    pub fn set_output_gain(&self, gain: f32) {
-        let gain = if gain.is_nan() {
-            1.0
-        } else {
-            gain.clamp(0.0, 4.0)
-        };
-        self.shared
-            .output_gain
-            .store(gain.to_bits(), Ordering::Relaxed);
-    }
-
-    /// Toggle automatic leveling of the RECEIVED audio on this session's
-    /// output bus.
-    pub fn set_rx_compression(&self, on: bool) {
-        self.shared.rx_compress.store(on, Ordering::Relaxed);
-    }
-
-    /// Set the RX/output compression strength (0.0..=1.0, clamped).
-    pub fn set_rx_compression_level(&self, level: f32) {
-        let level = if level.is_nan() {
-            0.5
-        } else {
-            level.clamp(0.0, 1.0)
-        };
-        self.shared
-            .rx_compress_level
-            .store(level.to_bits(), Ordering::Relaxed);
-    }
-
-    /// The listener-side preferences currently in force, for tests and for
-    /// anything that needs to prove the fan-out reached this session.
-    #[must_use]
-    pub fn audio_prefs(&self) -> (f32, bool, f32) {
-        (
-            f32::from_bits(self.shared.output_gain.load(Ordering::Relaxed)),
-            self.shared.rx_compress.load(Ordering::Relaxed),
-            f32::from_bits(self.shared.rx_compress_level.load(Ordering::Relaxed)),
-        )
-    }
-
+    /// The lane's gate is NOT this session's: `ConsoleSession::set_ptt`
+    /// opens it before forwarding the key here, and closes it on key-up.
     pub fn set_ptt(&mut self, on: bool) {
         self.ptt_request.store(on, Ordering::Relaxed);
     }
@@ -1019,10 +859,10 @@ struct RunLoopParams {
     socket: UdpSocket,
     fsm: DextraFsm,
     ambe: Box<dyn AmbeStream>,
-    router: AudioRouter,
-    mic: MicLane,
-    /// This session's output bus, kept for the RX level meter.
-    out: OutputId,
+    /// The lane's two channel ends. Its `preroll_lead` cell is carried but
+    /// never read: it tells a media-clock ladder how many frames the VOX
+    /// pre-roll flush put ahead of the live stream, and D-Star has no ladder
+    /// — `TxStream` owns a plain per-transmission sequence counter.
     call_audio: CallAudio,
     /// This session's own TX header (`my`/`rpt1`/`rpt2`/`ur`/`suffix`),
     /// built once at connect time — see [`DstarSession::connect_inner`].
@@ -1079,8 +919,6 @@ impl TxState {
 /// decode side.
 struct TxCtx<'a> {
     socket: &'a UdpSocket,
-    router: &'a mut AudioRouter,
-    mic: &'a mut MicLane,
     ambe: &'a mut dyn AmbeStream,
     call_audio: &'a CallAudio,
     shared: &'a SharedState,
@@ -1187,9 +1025,8 @@ impl PttGate {
     }
 
     /// Record the state an attempted key/unkey actually landed in. A key-down
-    /// that came back `false` was refused downstream (no capture device, or
-    /// the RF header could not be sent) — latch PTT off exactly as an
-    /// up-front refusal would.
+    /// that came back `false` was refused downstream (the RF header could not
+    /// be sent) — latch PTT off exactly as an up-front refusal would.
     fn applied(&mut self, keyed: bool, now: Instant) {
         // The TOT clock starts at the key-down that actually took effect and
         // is cleared by any unkey; re-reporting the same keyed state (which
@@ -1508,11 +1345,8 @@ fn send_paced_voice_frames(ctx: &mut TxCtx<'_>, tx: &mut TxState, now: Instant) 
 /// drains+pumps the mic/encoder. Split out of [`run_loop`] purely to keep
 /// that function under clippy's line-count limit — see [`drain_tx_mic_frames`]/
 /// [`pump_tx`] for the actual behavior.
-#[allow(clippy::too_many_arguments)]
 fn run_tx_pump_step(
     socket: &UdpSocket,
-    router: &mut AudioRouter,
-    mic: &mut MicLane,
     ambe: &mut dyn AmbeStream,
     call_audio: &CallAudio,
     shared: &SharedState,
@@ -1521,8 +1355,6 @@ fn run_tx_pump_step(
 ) {
     let mut ctx = TxCtx {
         socket,
-        router,
-        mic,
         ambe,
         call_audio,
         shared,
@@ -1590,28 +1422,34 @@ fn flush_tx_pipeline(
 /// refusal cases below. [`crate::m17::apply_ptt_edge`] is the M17 precedent
 /// this mirrors.
 ///
+/// The lane's gate is NOT touched here — `ConsoleSession::set_ptt` opened it
+/// before forwarding the key and closes it on key-up; this is the protocol
+/// edge only.
+///
 /// Key-down, in order:
 ///
-/// 1. discards anything already queued in `call_audio.tx_frames` (the same
-///    defensive safety net [`crate::m17::TxState::key_down`] documents);
-/// 2. DRAINS THE ENCODER's output queue. A previous unkey that hit
+/// 1. clears this session's OWN queues (`pending_pcm`, `ready`, the pacer)
+///    and DRAINS THE ENCODER's output queue. A previous unkey that hit
 ///    [`FLUSH_DEADLINE`] with frames still in flight leaves their responses
 ///    to land afterwards, unpolled; without this drain the first voice
 ///    frames of the NEW stream carry the PREVIOUS transmission's audio (and
 ///    the whole over runs a permanent 4-frame lag). RX has always been
 ///    guarded against exactly this — [`handle_dsvt`] flushes on a fresh
-///    header — this is the TX twin;
-/// 3. opens the capture device if it isn't open yet ([`MicLane::ensure_open`]),
-///    REFUSING the key-down if it can't be: an RF header plus a stream of
-///    silence is worse than not transmitting;
-/// 4. starts a fresh [`TxStream`] under a freshly generated
+///    header — this is the TX twin.
+///
+///    It does NOT drain `call_audio.tx_frames`: the gate opens up to one
+///    [`SOCKET_POLL_TIMEOUT`] tick BEFORE this edge is observed, so by now
+///    that channel holds the VOX pre-roll ring (flushed by the mic lane's
+///    own false→true gate edge) and the speech onset that followed it.
+///    Draining here would throw both away. Nothing stale can be in it
+///    either: the lane emits nothing while the gate is closed, and
+///    [`run_loop`] drains and drops on every pass it is not transmitting;
+/// 2. starts a fresh [`TxStream`] under a freshly generated
 ///    [`generate_stream_id`] and sends its header packet — refusing the
 ///    key-down if that send fails, rather than transmitting voice under a
-///    stream id no receiver ever saw a header for;
-/// 5. only THEN opens the gate.
+///    stream id no receiver ever saw a header for.
 ///
 /// Key-up (and the shutdown/Drop path via [`unlink_flushing_eot_if_keyed`]):
-/// closes the gate FIRST (so the mic lane stops enqueuing anything more) and
 /// immediately publishes `ptt = false` (the transmission is over as far as
 /// capture is concerned; a UI must not keep showing "keyed" for the duration
 /// of the flush below), THEN drains + encodes whatever mic audio was already
@@ -1634,7 +1472,6 @@ fn apply_ptt_edge(ctx: &mut TxCtx<'_>, tx: &mut TxState, want_key: bool) -> bool
 /// [`apply_ptt_edge`]'s key-down branch — see its doc for the ordering and
 /// the two refusal cases (returns `false` for either).
 fn key_down(ctx: &mut TxCtx<'_>, tx: &mut TxState) -> bool {
-    while ctx.call_audio.tx_frames.try_recv().is_ok() {}
     tx.pending_pcm.clear();
     tx.ready.clear();
     tx.next_due = None;
@@ -1647,9 +1484,6 @@ fn key_down(ctx: &mut TxCtx<'_>, tx: &mut TxState) -> bool {
             "dstar: discarded {stale} stale encoded frame(s) left over from the previous \
              transmission's truncated flush"
         );
-    }
-    if !ctx.mic.ensure_open(ctx.router) {
-        return false;
     }
     let stream = TxStream::new(generate_stream_id());
     if !send_packet(
@@ -1664,14 +1498,12 @@ fn key_down(ctx: &mut TxCtx<'_>, tx: &mut TxState) -> bool {
         return false;
     }
     tx.stream = Some(stream);
-    ctx.mic.set_gate(ctx.router, true);
     ctx.shared.ptt.store(true, Ordering::Relaxed);
     true
 }
 
 /// [`apply_ptt_edge`]'s key-up branch — see its doc.
 fn key_up(ctx: &mut TxCtx<'_>, tx: &mut TxState) {
-    ctx.mic.set_gate(ctx.router, false);
     ctx.shared.ptt.store(false, Ordering::Relaxed);
     drain_tx_mic_frames(ctx, tx);
     let mut encoded: Vec<[u8; 9]> = tx.ready.drain(..).collect();
@@ -1723,8 +1555,6 @@ fn key_up(ctx: &mut TxCtx<'_>, tx: &mut TxState) {
 #[allow(clippy::too_many_arguments)]
 fn apply_pending_ptt_edge(
     socket: &UdpSocket,
-    router: &mut AudioRouter,
-    mic: &mut MicLane,
     ambe: &mut dyn AmbeStream,
     call_audio: &CallAudio,
     shared: &SharedState,
@@ -1739,8 +1569,6 @@ fn apply_pending_ptt_edge(
     let keyed = {
         let mut ctx = TxCtx {
             socket,
-            router,
-            mic,
             ambe,
             call_audio,
             shared,
@@ -1749,11 +1577,12 @@ fn apply_pending_ptt_edge(
         apply_ptt_edge(&mut ctx, tx, want_key)
     };
     if keyed {
-        // Half-duplex handoff, AFTER the gate is open rather than before it:
-        // this flush can sleep in DRAIN_POLL_INTERVAL steps up to
-        // FLUSH_DEADLINE against a slow/wedged vocoder, and anything the
-        // operator says during that window is only captured if the gate is
-        // already open. Nothing is submitted to the ENCODER until the run
+        // Half-duplex handoff, AFTER the header has gone out: this flush can
+        // sleep in DRAIN_POLL_INTERVAL steps up to FLUSH_DEADLINE against a
+        // slow/wedged vocoder, and anything the operator says during that
+        // window keeps accumulating in the lane's channel (the gate is
+        // already open — `ConsoleSession::set_ptt` opened it) rather than
+        // being lost. Nothing is submitted to the ENCODER until the run
         // loop's next `run_tx_pump_step`, which happens after this returns —
         // so the one physical ThumbDV link still never decodes and encodes at
         // the same time.
@@ -1801,8 +1630,6 @@ fn unlink_flushing_eot_if_keyed(
 #[allow(clippy::too_many_arguments)]
 fn run_ptt_step(
     socket: &UdpSocket,
-    router: &mut AudioRouter,
-    mic: &mut MicLane,
     ambe: &mut dyn AmbeStream,
     call_audio: &CallAudio,
     shared: &SharedState,
@@ -1842,33 +1669,28 @@ fn run_ptt_step(
     }
     let key = action == PttAction::Key;
     let keyed = apply_pending_ptt_edge(
-        socket, router, mic, ambe, call_audio, shared, header, shutdown, pending, tracker, slow_rx,
-        tx, key,
+        socket, ambe, call_audio, shared, header, shutdown, pending, tracker, slow_rx, tx, key,
     );
     if key && !keyed {
-        // Refused downstream (no capture device, or the RF header could not
-        // be sent): latch PTT off until it is released, rather than retrying
-        // — and failing — every pass.
+        // Refused downstream (the RF header could not be sent): latch PTT off
+        // until it is released, rather than retrying — and failing — every
+        // pass.
         ptt.block();
     }
     ptt.applied(keyed, Instant::now());
 }
 
 /// The "iax-dstar" run-loop: the ONE thread that owns the socket, the
-/// [`AudioRouter`], and the [`AmbeStream`] pipeline for this session. Single
-/// poll cadence (the socket's 50 ms read timeout) drives everything: PTT
-/// edges, TX framing, RX decode/forward, and the FSM's keepalive tick.
+/// [`CallAudio`] channel ends and the [`AmbeStream`] pipeline for this
+/// session. Single poll cadence (the socket's 50 ms read timeout) drives
+/// everything: PTT edges, TX framing, RX decode/forward, and the FSM's
+/// keepalive tick. No router, no gate, no meters — those are the lane's, and
+/// `ConsoleSession` reads and drives them there.
 fn run_loop(p: RunLoopParams) {
     let RunLoopParams {
         socket,
         mut fsm,
         mut ambe,
-        // `router` outlives the whole loop (dropping it at the end closes
-        // the audio streams). `mut` since iax-2f6b's review: the capture
-        // device is opened lazily, on the first key-down (see `MicLane`).
-        mut router,
-        mut mic,
-        out,
         call_audio,
         header,
         shutdown,
@@ -1895,8 +1717,6 @@ fn run_loop(p: RunLoopParams) {
         if shutdown.load(Ordering::Relaxed) {
             let mut ctx = TxCtx {
                 socket: &socket,
-                router: &mut router,
-                mic: &mut mic,
                 ambe: ambe.as_mut(),
                 call_audio: &call_audio,
                 shared: &shared,
@@ -1906,18 +1726,11 @@ fn run_loop(p: RunLoopParams) {
             break;
         }
 
-        // The operator's volume and RX leveling, re-asserted every tick so a
-        // change made mid-QSO is heard on the next one. Cheap: three atomic
-        // loads and the router's own atomic stores.
-        shared.apply_audio(&router, &out);
-
         // Apply a pending PTT edge (set_ptt only requests; this is where it
         // actually takes effect), plus the forced-unkey rules PttGate owns
         // (link lost mid-transmission, time-out timer, refusals).
         run_ptt_step(
             &socket,
-            &mut router,
-            &mut mic,
             ambe.as_mut(),
             &call_audio,
             &shared,
@@ -1967,17 +1780,29 @@ fn run_loop(p: RunLoopParams) {
         if keyed {
             run_tx_pump_step(
                 &socket,
-                &mut router,
-                &mut mic,
                 ambe.as_mut(),
                 &call_audio,
                 &shared,
                 header,
                 &mut tx,
             );
+        } else {
+            // Not transmitting: drain and DROP. This is the ONLY discard on
+            // the TX path — `key_down` deliberately keeps what it finds. The
+            // gate is `ConsoleSession::set_ptt`'s and it can be open while
+            // this loop is not keyed: it stays open after a run-loop-forced
+            // unkey (link lost, time-out timer) until the operator releases
+            // PTT, and without this the lane would pile audio into
+            // `tx_frames` unbounded and the next transmission would open with
+            // somebody's stale speech.
+            //
+            // It cannot eat the pre-roll: `set_ptt` stores the PTT request
+            // within nanoseconds of opening the gate, whereas the lane's
+            // flush waits for its next capture callback (up to a frame, ~20
+            // ms) — so any pass that can see flushed frames has already read
+            // `ptt_request` as true and taken the `if` arm.
+            while call_audio.tx_frames.try_recv().is_ok() {}
         }
-
-        update_meters(&router, &mic, &out, &shared);
 
         // Keepalive tick: DextraFsm::tick only ever returns
         // FsmAction::None/Timeout (never Send — unlike SessionFsm, a
@@ -1989,42 +1814,8 @@ fn run_loop(p: RunLoopParams) {
             .link
             .store(link_to_u8(fsm.state()), Ordering::Relaxed);
     }
-    // `router` (and thus the audio streams) and `socket` drop here.
-}
-
-/// Run-loop step, once per pass: publish the audio level meters a UI polls
-/// through [`DstarSnapshotState`]. Mirrors [`crate::m17`]'s own meter
-/// mirroring exactly — including that the raw mic input meter updates even
-/// while unkeyed (once the lane exists at all; D-Star opens it lazily, so
-/// before the first key-down there is nothing to meter).
-fn update_meters(router: &AudioRouter, mic: &MicLane, out: &OutputId, shared: &SharedState) {
-    if let Some(id) = mic.id.as_ref() {
-        if let Some(db) = router.mic_tx_dbfs(id) {
-            shared.tx_dbfs.store(db.to_bits(), Ordering::Relaxed);
-        }
-        let mut bins = [0.0f32; astar_audio::SPECTRUM_BINS];
-        if let Some(n) = router.mic_tx_spectrum(id, &mut bins)
-            && let Ok(mut slot) = shared.tx_spectrum.lock()
-        {
-            let n = n.min(astar_audio::SPECTRUM_BINS);
-            slot.0[..n].copy_from_slice(&bins[..n]);
-            slot.1 = n;
-        }
-        if let Some(db) = router.mic_input_dbfs(id) {
-            shared.input_dbfs.store(db.to_bits(), Ordering::Relaxed);
-        }
-    }
-    let mut rx_bins = [0.0f32; astar_audio::SPECTRUM_BINS];
-    if let Some(n) = router.output_rx_spectrum(out, &mut rx_bins)
-        && let Ok(mut slot) = shared.rx_spectrum.lock()
-    {
-        let n = n.min(astar_audio::SPECTRUM_BINS);
-        slot.0[..n].copy_from_slice(&rx_bins[..n]);
-        slot.1 = n;
-    }
-    if let Some(db) = router.output_rx_dbfs(out) {
-        shared.rx_dbfs.store(db.to_bits(), Ordering::Relaxed);
-    }
+    // `socket` and the `CallAudio` channel ends drop here; the lane's streams
+    // belong to the station router and outlive this thread.
 }
 
 /// Run-loop step: poll the socket (bounded by [`SOCKET_POLL_TIMEOUT`]) and
@@ -2189,33 +1980,21 @@ fn handle_dsvt(pkt: DsvtPacket, rx: &mut RxState<'_>) {
     }
 }
 
-/// Copy a mirrored bin array out under its mutex.
-fn copy_bins(slot: &Mutex<([f32; astar_audio::SPECTRUM_BINS], usize)>, out: &mut [f32]) -> usize {
-    let Ok(guard) = slot.lock() else {
-        return 0;
-    };
-    let n = guard.1.min(out.len());
-    out[..n].copy_from_slice(&guard.0[..n]);
-    n
-}
-
 #[cfg(test)]
 mod tx_tests {
     //! Isolated unit coverage of the TX run-loop steps (iax-2f6b), mirroring
     //! [`crate::m17`]'s own bottom `#[cfg(test)] mod tests`: no reflector, no
-    //! session thread, no real mic/output devices — [`apply_ptt_edge`] and
-    //! friends are called directly against a hand-built [`CallAudio`], an
-    //! unopened [`AudioRouter`]/[`MicId`] pair (mirrors
-    //! `crate::m17::tests::unkey_drains_queued_frames_before_the_eos_flush`'s
-    //! own "a router with no mic ever opened ... a valid (if inert) stand-in"
-    //! idiom — `set_gate` on an unopened mic is a documented no-op), and a
-    //! real loopback `UdpSocket` pair so the exact wire bytes can be
+    //! session thread, no real mic/output devices, and — since the session
+    //! stopped owning its audio — no router at all: [`apply_ptt_edge`] and
+    //! friends are called directly against a hand-built [`CallAudio`] and a
+    //! real loopback `UdpSocket` pair, so the exact wire bytes can be
     //! inspected. This is where the error/teardown-path coverage this
     //! milestone calls out lives: the higher-level
     //! `tests/dstar_session_pipeline.rs` suite covers the same guarantees
     //! end-to-end through a real run-loop thread and reflector.
 
     use super::*;
+    use std::sync::atomic::AtomicU32;
     use std::sync::mpsc::{Receiver, Sender, channel};
 
     /// A trivial, always-immediately-ready [`AmbeStream`] double: `encode`
@@ -2286,8 +2065,8 @@ mod tx_tests {
         }
     }
 
-    /// Build a [`CallAudio`] by hand — no `AudioRouter`/`MicLane` involved —
-    /// so a test can push raw frames straight onto the exact channel
+    /// Build a [`CallAudio`] by hand — no router involved — so a test can
+    /// push raw frames straight onto the exact channel
     /// [`drain_tx_mic_frames`]/[`apply_ptt_edge`] read from. Mirrors
     /// `crate::m17::tests::fake_call_audio` exactly.
     fn fake_call_audio() -> (CallAudio, Sender<Vec<i16>>, Receiver<Vec<i16>>) {
@@ -2319,25 +2098,22 @@ mod tx_tests {
         general_call_header(BLANK_RPT, BLANK_RPT, *b"N0CALL  ")
     }
 
+    /// The gate is `ConsoleSession::set_ptt`'s and it opens up to one poll
+    /// tick BEFORE the run loop observes the edge, so whatever is sitting in
+    /// `tx_frames` at key-down is the VOX pre-roll ring and the speech
+    /// onset — the operator's first syllable. Draining it here is exactly
+    /// what silently turns pre-roll off, which is why key-down must not.
     #[test]
-    fn key_down_discards_stale_frames_and_sends_the_header_first() {
+    fn key_down_keeps_the_queued_preroll_and_sends_the_header_first() {
         let (send_sock, recv_sock) = loopback_pair();
         let (call_audio, push, _rx) = fake_call_audio();
-        // Simulates the connect-time gate window (open_call keys the mic
-        // lane immediately; DstarSession::connect_inner un-keys right after)
-        // or any other leftover-frame race: something pushed frames onto
-        // `tx_frames` before this key-down ever ran.
         push.send(vec![1_i16; 160]).unwrap();
         push.send(vec![2_i16; 160]).unwrap();
 
-        let mut router = AudioRouter::new(Box::new(astar_audio::NullBackend::new()));
-        let mut mic = MicLane::opened_stub("unopened-test-mic");
         let mut ambe = FakeEncoder::new();
         let mut tx = TxState::new();
         let mut ctx = TxCtx {
             socket: &send_sock,
-            router: &mut router,
-            mic: &mut mic,
             ambe: &mut ambe,
             call_audio: &call_audio,
             shared: &SharedState::new(),
@@ -2347,10 +2123,13 @@ mod tx_tests {
         let keyed = apply_ptt_edge(&mut ctx, &mut tx, true);
         assert!(keyed);
 
-        assert!(
-            call_audio.tx_frames.try_recv().is_err(),
-            "key_down must drain/discard anything already queued before a fresh transmission starts"
+        assert_eq!(
+            call_audio.tx_frames.try_recv().ok(),
+            Some(vec![1_i16; 160]),
+            "key_down must leave the lane's queued pre-roll alone — it is this transmission's \
+             first audio, not somebody else's residue"
         );
+        assert_eq!(call_audio.tx_frames.try_recv().ok(), Some(vec![2_i16; 160]));
         assert!(tx.pending_pcm.is_empty());
         assert!(tx.stream.is_some(), "key-down must start a fresh TxStream");
 
@@ -2369,15 +2148,11 @@ mod tx_tests {
     fn unkey_with_nothing_ever_queued_still_sends_one_bare_eot_frame() {
         let (send_sock, recv_sock) = loopback_pair();
         let (call_audio, _push, _rx) = fake_call_audio();
-        let mut router = AudioRouter::new(Box::new(astar_audio::NullBackend::new()));
-        let mut mic = MicLane::opened_stub("unopened-test-mic");
         let mut ambe = FakeEncoder::new();
         let mut tx = TxState::new();
         let shared = SharedState::new();
         let mut ctx = TxCtx {
             socket: &send_sock,
-            router: &mut router,
-            mic: &mut mic,
             ambe: &mut ambe,
             call_audio: &call_audio,
             shared: &shared,
@@ -2435,16 +2210,12 @@ mod tx_tests {
         push.send(vec![20_i16; 160]).unwrap();
         push.send(vec![30_i16; 160]).unwrap();
 
-        let mut router = AudioRouter::new(Box::new(astar_audio::NullBackend::new()));
-        let mut mic = MicLane::opened_stub("unopened-test-mic");
         let mut ambe = FakeEncoder::new();
         let mut tx = TxState::new();
         tx.stream = Some(TxStream::new(0xBEEF));
         let shared = SharedState::new();
         let mut ctx = TxCtx {
             socket: &send_sock,
-            router: &mut router,
-            mic: &mut mic,
             ambe: &mut ambe,
             call_audio: &call_audio,
             shared: &shared,
@@ -2492,16 +2263,12 @@ mod tx_tests {
         let (call_audio, push, _rx) = fake_call_audio();
         push.send(vec![5_i16; 160]).unwrap();
 
-        let mut router = AudioRouter::new(Box::new(astar_audio::NullBackend::new()));
-        let mut mic = MicLane::opened_stub("unopened-test-mic");
         let mut ambe = WedgedEncoder { in_flight: 0 };
         let mut tx = TxState::new();
         tx.stream = Some(TxStream::new(0xCAFE));
         let shared = SharedState::new();
         let mut ctx = TxCtx {
             socket: &send_sock,
-            router: &mut router,
-            mic: &mut mic,
             ambe: &mut ambe,
             call_audio: &call_audio,
             shared: &shared,
@@ -2534,8 +2301,6 @@ mod tx_tests {
     fn unlink_flushing_eot_if_keyed_sends_the_eot_before_the_unlink() {
         let (send_sock, recv_sock) = loopback_pair();
         let (call_audio, _push, _rx) = fake_call_audio();
-        let mut router = AudioRouter::new(Box::new(astar_audio::NullBackend::new()));
-        let mut mic = MicLane::opened_stub("unopened-test-mic");
         let mut ambe = FakeEncoder::new();
         let mut tx = TxState::new();
         tx.stream = Some(TxStream::new(0x1234));
@@ -2544,8 +2309,6 @@ mod tx_tests {
         let _ = fsm.connect(Instant::now());
         let mut ctx = TxCtx {
             socket: &send_sock,
-            router: &mut router,
-            mic: &mut mic,
             ambe: &mut ambe,
             call_audio: &call_audio,
             shared: &shared,
@@ -2612,8 +2375,6 @@ mod tx_tests {
     fn key_down_drains_encoded_frames_left_over_from_a_truncated_unkey() {
         let (send_sock, recv_sock) = loopback_pair();
         let (call_audio, _push, _rx) = fake_call_audio();
-        let mut router = AudioRouter::new(Box::new(astar_audio::NullBackend::new()));
-        let mut mic = MicLane::opened_stub("unopened-test-mic");
         // Four frames of the PREVIOUS transmission, still in the encoder.
         let mut ambe = PreloadedEncoder {
             queue: VecDeque::from(vec![[0xAA; 9]; 4]),
@@ -2622,8 +2383,6 @@ mod tx_tests {
         let shared = SharedState::new();
         let mut ctx = TxCtx {
             socket: &send_sock,
-            router: &mut router,
-            mic: &mut mic,
             ambe: &mut ambe,
             call_audio: &call_audio,
             shared: &shared,
@@ -2651,42 +2410,6 @@ mod tx_tests {
         assert!(
             recv_sock.recv_from(&mut buf).is_err(),
             "key-down must send the header and nothing else"
-        );
-    }
-
-    #[test]
-    fn key_down_is_refused_when_the_capture_device_cannot_be_opened() {
-        let (send_sock, recv_sock) = loopback_pair();
-        let (call_audio, _push, _rx) = fake_call_audio();
-        let mut router = AudioRouter::new(Box::new(astar_audio::NullBackend::new()));
-        // No capture device was ever resolved for this session.
-        let mut mic = MicLane::unresolved(StreamConfig::default());
-        let mut ambe = FakeEncoder::new();
-        let mut tx = TxState::new();
-        let shared = SharedState::new();
-        let mut ctx = TxCtx {
-            socket: &send_sock,
-            router: &mut router,
-            mic: &mut mic,
-            ambe: &mut ambe,
-            call_audio: &call_audio,
-            shared: &shared,
-            header: test_header(),
-        };
-
-        assert!(
-            !apply_ptt_edge(&mut ctx, &mut tx, true),
-            "a key-down with no capture device must be refused"
-        );
-        assert!(tx.stream.is_none(), "no TX stream may be opened");
-        assert!(!shared.ptt.load(Ordering::Relaxed), "ptt must stay false");
-        recv_sock
-            .set_read_timeout(Some(Duration::from_millis(50)))
-            .unwrap();
-        let mut buf = [0u8; 128];
-        assert!(
-            recv_sock.recv_from(&mut buf).is_err(),
-            "a refused key-down must put nothing on the wire — not even the header"
         );
     }
 
@@ -2895,8 +2618,6 @@ mod tx_tests {
         // cleanly unkeyed): no EOT frame is fabricated, just the unlink.
         let (send_sock, recv_sock) = loopback_pair();
         let (call_audio, _push, _rx) = fake_call_audio();
-        let mut router = AudioRouter::new(Box::new(astar_audio::NullBackend::new()));
-        let mut mic = MicLane::opened_stub("unopened-test-mic");
         let mut ambe = FakeEncoder::new();
         let mut tx = TxState::new();
         let shared = SharedState::new();
@@ -2904,8 +2625,6 @@ mod tx_tests {
         let _ = fsm.connect(Instant::now());
         let mut ctx = TxCtx {
             socket: &send_sock,
-            router: &mut router,
-            mic: &mut mic,
             ambe: &mut ambe,
             call_audio: &call_audio,
             shared: &shared,
