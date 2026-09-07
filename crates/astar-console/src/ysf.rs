@@ -18,12 +18,12 @@
 //! the header is not the payload, so `DataPacket::source` answers "is this
 //! reflector alive, and who is on it" with no vocoder involved.
 //!
-//! [`YsfLink::connect_with_audio`] adds the receive path (astar-e7b3 §2):
-//! an [`AmbeStream`] opened in [`VocoderMode::YsfDn`], an output bus, and
-//! the loop that lifts five 20 ms voice frames out of each payload with
-//! [`astar_codec::ysf::unpack_dn`] and plays them. YSF voice is **AMBE+2**,
-//! which on astar means the AMBE-3000 in a `ThumbDV` and nothing else, so
-//! this constructor fails without a dongle rather than pretending.
+//! [`YsfLink::connect_with_audio`] adds the voice path (astar-e7b3 §2):
+//! an [`AmbeStream`] opened in [`VocoderMode::YsfDn`], the console's audio
+//! lane, and the loop that lifts five 20 ms voice frames out of each payload
+//! with [`astar_codec::ysf::unpack_dn`] and plays them. YSF voice is
+//! **AMBE+2**, which on astar means the AMBE-3000 in a `ThumbDV` and nothing
+//! else, so this constructor fails without a dongle rather than pretending.
 //!
 //! # Transmit
 //!
@@ -33,10 +33,12 @@
 //! exactly one path that can set the request true, and it is a public method
 //! nobody else calls.
 //!
-//! A key-down with no capture device is refused outright rather than
-//! half-honoured. Opening the microphone is what makes transmitting possible,
-//! and a station reporting itself keyed while sending nothing would be lying
-//! to its operator and to everyone on the reflector.
+//! The capture lane is NOT this module's. `ConsoleSession` opens the one
+//! audio lane every digital-voice network rides ([`crate::voice_route`]),
+//! keys its gate before forwarding a key-down here, and refuses the key
+//! outright when no capture device could be opened. This link is handed the
+//! channel ends and nothing else: no router, no device, no meter, no
+//! preference and no gate.
 //!
 //! Captured audio is encoded to AMBE+2 half rate, five 20 ms frames to a
 //! payload, and sent as `YSFD` — a header frame, then communications frames,
@@ -97,7 +99,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use astar_audio::{AudioBackend, AudioRouter, CallAudio, MicId, OutputId, StreamConfig};
+use astar_audio::CallAudio;
 use astar_codec::ambe::{
     AMBE_STREAM_MAX_IN_FLIGHT, AmbeBackend, AmbeStream, VocoderMode, open_ambe_stream,
 };
@@ -106,8 +108,7 @@ use astar_ysf::{
     Callsign, DataPacket, DataType, Fich, Frame, FrameInfo, FsmAction, LinkState, YsfFsm, wire,
 };
 
-use crate::mic_lane::MicLane;
-use crate::session::{ConsoleError, resolve_device};
+use crate::session::ConsoleError;
 
 /// How long the socket blocks before the loop runs `tick` anyway.
 ///
@@ -194,20 +195,22 @@ pub struct YsfSnapshot {
     /// state, not an echo of the last [`YsfLink::set_ptt`] request. A
     /// key-down refused for want of a capture device never sets it.
     pub ptt: bool,
-    /// Transmit level in dBFS, or -60.0 while unkeyed.
+    /// Transmit level in dBFS. CONSOLE-OWNED, exactly as
+    /// [`crate::dstar::DstarSnapshotState`]'s levels are: the link always
+    /// fills this with the -60.0 floor and
+    /// [`crate::ConsoleSession::ysf_state`] overwrites it with the number
+    /// read once, at the one audio lane. A session owns no meters — see
+    /// [`crate::voice_route`].
     pub tx_dbfs: f32,
-    /// Receive level in dBFS on this link's output bus, or -60.0 when
-    /// nothing is being decoded — mirrors [`AudioRouter::output_rx_dbfs`],
-    /// refreshed every run-loop pass. Always -60.0 on a link opened without
-    /// audio, which has no bus to meter.
+    /// Receive level in dBFS, console-owned exactly as [`Self::tx_dbfs`] is.
     pub rx_dbfs: f32,
 }
 
-/// Operator-supplied configuration for a link that decodes audio.
+/// Operator-supplied configuration for a link that carries audio.
 ///
-/// Mirrors [`crate::dstar::DstarConfig`] minus everything that only a
-/// transmitter needs: there is no capture device here because there is no
-/// TX path (see this module's docs).
+/// Carries no devices, exactly as [`crate::dstar::DstarConfig`] no longer
+/// does: `ConsoleSession` opens the one audio lane
+/// ([`crate::voice_route`]) and hands the link its channel ends.
 pub struct YsfConfig {
     /// Reflector `host:port`, as [`YsfLink::connect`] takes it.
     pub host: String,
@@ -216,14 +219,6 @@ pub struct YsfConfig {
     /// The YCS room request (`set_options`); `None` for a plain
     /// `YSFReflector`.
     pub options: Option<String>,
-    /// Playback device substring; `None` = system default.
-    pub output: Option<String>,
-    /// Capture device substring; `None` = system default.
-    ///
-    /// Resolution failure is NOT fatal: a YSF link must stay usable
-    /// receive-only on a machine with no usable microphone. The lane is
-    /// opened on the first key-down instead — see [`MicLane`].
-    pub input: Option<String>,
 }
 
 /// A live link to one `YSFReflector`.
@@ -250,32 +245,6 @@ struct Shared {
     /// rather than an atomic because the value is a `&'static str` chosen
     /// from a closed set and read far less often than it is skipped.
     unsupported_mode: Mutex<Option<&'static str>>,
-    /// Listener-side preferences, re-asserted onto the output bus every
-    /// pass. Same three cells and the same reason as
-    /// [`crate::dstar`]'s: two networks applying the same preferences by
-    /// different mechanisms is how one of them silently stops applying them.
-    output_gain: AtomicU32,
-    rx_compress: AtomicBool,
-    rx_compress_level: AtomicU32,
-    /// Peak-hold decay for the RX analyzer, pushed onto the bus by
-    /// `apply_audio` like the other listener preferences.
-    spectrum_decay: AtomicU32,
-    /// Receive level, refreshed by the run loop from the router.
-    rx_dbfs: AtomicU32,
-    /// Transmit level, from the mic lane's own analyzer. -60 while unkeyed.
-    tx_dbfs: AtomicU32,
-    /// `(bins, count)` from [`AudioRouter::mic_tx_spectrum`], the transmit
-    /// counterpart of `rx_spectrum`.
-    tx_spectrum: Mutex<([f32; astar_audio::SPECTRUM_BINS], usize)>,
-    /// `(bins, count)` from [`AudioRouter::output_rx_spectrum`], refreshed
-    /// every run-loop pass. `count` stays 0 until the bus has produced a
-    /// reading, mirroring the router's own "nothing to report yet" contract
-    /// rather than publishing a zeroed array as though it were real.
-    ///
-    /// A mutex rather than atomics because it is an array: the run loop
-    /// writes it once per pass and a UI reads it at frame rate, so it is
-    /// uncontended in practice.
-    rx_spectrum: Mutex<([f32; astar_audio::SPECTRUM_BINS], usize)>,
     /// What the operator asked for. NOTHING in this module sets it except
     /// [`YsfLink::set_ptt`], which is the only path a key-down can take.
     ptt_request: AtomicBool,
@@ -293,80 +262,8 @@ impl Shared {
             receiving: AtomicBool::new(false),
             stop: AtomicBool::new(false),
             unsupported_mode: Mutex::new(None),
-            output_gain: AtomicU32::new(1.0f32.to_bits()),
-            rx_compress: AtomicBool::new(false),
-            rx_compress_level: AtomicU32::new(0.5f32.to_bits()),
-            spectrum_decay: AtomicU32::new(
-                astar_audio::spectrum::DEFAULT_DECAY_DB_PER_SEC.to_bits(),
-            ),
-            rx_dbfs: AtomicU32::new((-60.0f32).to_bits()),
-            tx_dbfs: AtomicU32::new((-60.0f32).to_bits()),
-            rx_spectrum: Mutex::new(([0.0; astar_audio::SPECTRUM_BINS], 0)),
-            tx_spectrum: Mutex::new(([0.0; astar_audio::SPECTRUM_BINS], 0)),
             ptt_request: AtomicBool::new(false),
             ptt: AtomicBool::new(false),
-        }
-    }
-
-    /// Push the operator's volume and RX leveling onto the output bus.
-    /// Cheap enough to run every pass — three atomic loads and the router's
-    /// own atomic stores — so no dirty-flag tracking.
-    fn apply_audio(&self, router: &AudioRouter, out: &OutputId) {
-        router.set_output_gain(
-            out,
-            f32::from_bits(self.output_gain.load(Ordering::Relaxed)),
-        );
-        router.set_output_compress(out, self.rx_compress.load(Ordering::Relaxed));
-        router.set_output_compress_level(
-            out,
-            f32::from_bits(self.rx_compress_level.load(Ordering::Relaxed)),
-        );
-        router.set_output_spectrum_decay(
-            out,
-            f32::from_bits(self.spectrum_decay.load(Ordering::Relaxed)),
-        );
-    }
-
-    /// The decay, applied to the mic analyzer once the lane exists.
-    fn apply_mic_decay(&self, router: &AudioRouter, mic: &MicLane) {
-        if let Some(id) = mic.id.as_ref() {
-            router.set_mic_spectrum_decay(
-                id,
-                f32::from_bits(self.spectrum_decay.load(Ordering::Relaxed)),
-            );
-        }
-    }
-
-    /// Pull the bus's meter and analyzer into the cells the control side
-    /// reads. Called every run-loop pass, next to `apply_audio`, so the two
-    /// directions of the same conversation with the router stay together.
-    fn read_meters(&self, router: &AudioRouter, out: &OutputId, mic: &MicLane, buf: &mut [f32]) {
-        if let Some(db) = router.output_rx_dbfs(out) {
-            self.rx_dbfs.store(db.to_bits(), Ordering::Relaxed);
-        }
-        if let Some(n) = router.output_rx_spectrum(out, buf)
-            && let Ok(mut slot) = self.rx_spectrum.lock()
-        {
-            let n = n.min(astar_audio::SPECTRUM_BINS);
-            slot.0[..n].copy_from_slice(&buf[..n]);
-            slot.1 = n;
-        }
-        // The transmit side, from the mic lane's own analyzers. `None` until
-        // the lane is open, which is the first key-down — so an unkeyed link
-        // reports the floor rather than a stale reading.
-        let Some(id) = mic.id.as_ref() else {
-            return;
-        };
-        self.tx_dbfs.store(
-            router.mic_tx_dbfs(id).unwrap_or(-60.0).to_bits(),
-            Ordering::Relaxed,
-        );
-        if let Some(n) = router.mic_tx_spectrum(id, buf)
-            && let Ok(mut slot) = self.tx_spectrum.lock()
-        {
-            let n = n.min(astar_audio::SPECTRUM_BINS);
-            slot.0[..n].copy_from_slice(&buf[..n]);
-            slot.1 = n;
         }
     }
 }
@@ -375,7 +272,10 @@ impl Shared {
 /// the link thread; `None` for a link opened without audio.
 struct Audio {
     ambe: Box<dyn AmbeStream>,
-    /// The output bus decoded frames are played on.
+    /// The one audio lane `ConsoleSession` opened for this link
+    /// ([`crate::voice_route`]): decoded frames go out on `rx_frames`,
+    /// captured frames arrive on `tx_frames` while the console has the gate
+    /// open. The link owns neither end's device.
     bus: CallAudio,
     /// Arrived-but-not-yet-submitted voice frames. A payload carries five
     /// and the vocoder accepts four, so this queue is not an optimisation —
@@ -395,11 +295,6 @@ struct Audio {
     /// When the next frame is due. `None` while re-priming — before the
     /// first frame of a transmission, and after the queue has run dry.
     next_release: Option<Instant>,
-    router: AudioRouter,
-    out: OutputId,
-    /// The capture lane, opened lazily on the first key-down. `None` on a
-    /// link that resolved no capture device — receive still works.
-    mic: MicLane,
     /// Transmit state, `None` while unkeyed.
     tx: Option<Tx>,
 }
@@ -484,25 +379,25 @@ impl YsfLink {
         Self::spawn(host, callsign, options, None, None)
     }
 
-    /// Open a link that decodes the audio on it.
+    /// Open a link that decodes the audio on it, and transmits.
     ///
-    /// Opens a `ThumbDV` in [`VocoderMode::YsfDn`] and an output bus, then
-    /// plays every DN frame the reflector sends. VW and data frames are
-    /// refused into [`YsfSnapshot::unsupported_mode`] rather than decoded.
+    /// `audio` is the one audio lane `ConsoleSession` already opened on the
+    /// station's router ([`crate::voice_route`]): this link plays what it
+    /// decodes onto `audio.rx_frames` and encodes whatever arrives on
+    /// `audio.tx_frames` while keyed. It builds no router, resolves no
+    /// device, carries no preference and never touches the PTT gate — see
+    /// this module's docs.
     ///
-    /// There is no transmit path — see this module's docs for the specific
-    /// reason, which is the vendored deframer and not effort.
+    /// Opens a `ThumbDV` in [`VocoderMode::YsfDn`], then plays every DN
+    /// frame the reflector sends. VW and data frames are refused into
+    /// [`YsfSnapshot::unsupported_mode`] rather than decoded.
     ///
     /// # Errors
     /// Everything [`YsfLink::connect`] can fail with, plus
     /// [`ConsoleError::Ysf`] when no `ThumbDV` is available (the message
     /// comes from `classify_thumbdv_failure`, so "unplugged" and "busy" are
-    /// told apart) and [`ConsoleError::Audio`] when the output device cannot
-    /// be opened.
-    pub fn connect_with_audio(
-        cfg: &YsfConfig,
-        make_backend: &dyn Fn() -> Box<dyn AudioBackend>,
-    ) -> Result<YsfLink, ConsoleError> {
+    /// told apart).
+    pub fn connect_with_audio(cfg: &YsfConfig, audio: CallAudio) -> Result<YsfLink, ConsoleError> {
         // Hardware-only, exactly as D-Star: no software AMBE exists, so a
         // missing dongle is an error with a reason rather than a silent
         // fallback to a link that makes no sound.
@@ -510,63 +405,32 @@ impl YsfLink {
             .ok_or_else(|| {
                 ConsoleError::Ysf(astar_codec::ambe::classify_thumbdv_failure().message())
             })?;
-        Self::connect_with_stream(cfg, make_backend, ambe, backend)
+        Self::connect_with_stream(cfg, audio, ambe, backend)
     }
 
     /// [`Self::connect_with_audio`] with the vocoder supplied by the caller.
     ///
-    /// The seam the tests use: a fake [`AmbeStream`] decodes without a
-    /// dongle, so the whole payload-to-speaker path is provable against the
-    /// loopback reflector on `127.0.0.1`.
+    /// Two callers want this: the `astar-station` facade, so the `ThumbDV`
+    /// probe runs OUTSIDE its session mutex, and the tests, where a fake
+    /// [`AmbeStream`] decodes without a dongle so the whole
+    /// payload-to-speaker path is provable against the loopback reflector on
+    /// `127.0.0.1`.
     ///
     /// # Errors
     /// As [`Self::connect_with_audio`], minus the `ThumbDV` probe.
     pub fn connect_with_stream(
         cfg: &YsfConfig,
-        make_backend: &dyn Fn() -> Box<dyn AudioBackend>,
+        audio: CallAudio,
         ambe: Box<dyn AmbeStream>,
         backend: AmbeBackend,
     ) -> Result<YsfLink, ConsoleError> {
-        let backend_audio = make_backend();
-        // Resolved but NOT opened, and a failure here is deliberately not
-        // fatal — receive-only has to keep working without a microphone.
-        let in_id = resolve_device(
-            backend_audio.as_ref(),
-            cfg.input.as_deref(),
-            astar_audio::Direction::Input,
-        )
-        .map_err(|e| {
-            tracing::warn!(
-                error = ?e,
-                "ysf: no capture device resolved — this link can receive but not transmit"
-            );
-        })
-        .ok();
-        let out_id = resolve_device(
-            backend_audio.as_ref(),
-            cfg.output.as_deref(),
-            astar_audio::Direction::Output,
-        )?;
-        let mut router = AudioRouter::new(backend_audio);
-        let out = OutputId::new(&out_id);
-        // 8 kHz mono 20 ms: AMBE+2 half-rate decodes to exactly 160 samples
-        // per 20 ms frame, the same shape D-Star's full-rate frames take.
-        let config = StreamConfig::default();
-        let (call_audio, mic_tx, _mix_id) = router
-            .open_monitor_call(&out, config)
-            .map_err(ConsoleError::Audio)?;
-        let mic = MicLane::new(in_id.map(|id| MicId::new(&id)), mic_tx, &call_audio, config);
-
         let audio = Audio {
             ambe,
-            bus: call_audio,
+            bus: audio,
             pending: VecDeque::new(),
             mic_pending: VecDeque::new(),
             decoded: VecDeque::new(),
             next_release: None,
-            router,
-            out,
-            mic,
             tx: None,
         };
         Self::spawn(
@@ -641,8 +505,11 @@ impl YsfLink {
             unsupported_mode: self.shared.unsupported_mode.lock().map_or(None, |g| *g),
             backend: self.backend.map(AmbeBackend::as_str),
             ptt: self.shared.ptt.load(Ordering::Relaxed),
-            tx_dbfs: f32::from_bits(self.shared.tx_dbfs.load(Ordering::Relaxed)),
-            rx_dbfs: f32::from_bits(self.shared.rx_dbfs.load(Ordering::Relaxed)),
+            // Console-owned: the floor here, overwritten by
+            // `ConsoleSession::ysf_state` from the one meter read at the
+            // lane. See the field docs.
+            tx_dbfs: -60.0,
+            rx_dbfs: -60.0,
         }
     }
 
@@ -656,41 +523,6 @@ impl YsfLink {
         self.shared.ptt_request.store(on, Ordering::Relaxed);
     }
 
-    /// Copy the live RX spectrum into `out`, returning the number of
-    /// log-binned, peak-held dBFS bins written — the SAME values the mic
-    /// monitor and the IAX2/M17 paths produce, so one UI widget renders them
-    /// all. `0` before the bus has produced a reading, and always `0` on a
-    /// link opened without audio.
-    #[must_use]
-    pub fn rx_spectrum(&self, out: &mut [f32]) -> usize {
-        let Ok(slot) = self.shared.rx_spectrum.lock() else {
-            return 0;
-        };
-        let n = slot.1.min(out.len());
-        out[..n].copy_from_slice(&slot.0[..n]);
-        n
-    }
-
-    /// Copy the live TX spectrum into `out`, returning bins written. `0`
-    /// before the mic lane has ever been opened.
-    #[must_use]
-    pub fn tx_spectrum(&self, out: &mut [f32]) -> usize {
-        let Ok(slot) = self.shared.tx_spectrum.lock() else {
-            return 0;
-        };
-        let n = slot.1.min(out.len());
-        out[..n].copy_from_slice(&slot.0[..n]);
-        n
-    }
-
-    /// Set the RX analyzer's peak-hold decay in dB/second. Applied to the
-    /// live bus on the next run-loop pass.
-    pub fn set_spectrum_decay(&self, db_per_sec: f32) {
-        self.shared
-            .spectrum_decay
-            .store(db_per_sec.to_bits(), Ordering::Relaxed);
-    }
-
     /// The link state as the protocol crate's own enum.
     ///
     /// [`YsfSnapshot::link_state`] carries the ABI string for anything
@@ -699,49 +531,6 @@ impl YsfLink {
     #[must_use]
     pub fn link_state(&self) -> LinkState {
         state_from_index(self.shared.link_state.load(Ordering::Relaxed))
-    }
-
-    /// Set the output (RX/speaker) gain multiplier, 0.0..=4.0 (clamped).
-    ///
-    /// `&self`, so a preference can be fanned out to every live network
-    /// without a mutable borrow of each. A no-op on a link with no audio.
-    pub fn set_output_gain(&self, gain: f32) {
-        let gain = if gain.is_nan() {
-            1.0
-        } else {
-            gain.clamp(0.0, 4.0)
-        };
-        self.shared
-            .output_gain
-            .store(gain.to_bits(), Ordering::Relaxed);
-    }
-
-    /// Toggle automatic leveling of the received audio.
-    pub fn set_rx_compression(&self, on: bool) {
-        self.shared.rx_compress.store(on, Ordering::Relaxed);
-    }
-
-    /// Set the RX compression strength (0.0..=1.0, clamped).
-    pub fn set_rx_compression_level(&self, level: f32) {
-        let level = if level.is_nan() {
-            0.5
-        } else {
-            level.clamp(0.0, 1.0)
-        };
-        self.shared
-            .rx_compress_level
-            .store(level.to_bits(), Ordering::Relaxed);
-    }
-
-    /// The listener-side preferences currently in force — for tests, and for
-    /// anything that needs to prove a fan-out reached this link.
-    #[must_use]
-    pub fn audio_prefs(&self) -> (f32, bool, f32) {
-        (
-            f32::from_bits(self.shared.output_gain.load(Ordering::Relaxed)),
-            self.shared.rx_compress.load(Ordering::Relaxed),
-            f32::from_bits(self.shared.rx_compress_level.load(Ordering::Relaxed)),
-        )
     }
 
     /// Send the unlink and stop the thread. Consumes the link.
@@ -800,8 +589,6 @@ fn run(
     publish(&fsm);
 
     let mut buf = [0_u8; astar_ysf::reflector::MAX_DATAGRAM];
-    // Reused every pass, never reallocated.
-    let mut spectrum_buf = [0.0f32; astar_audio::SPECTRUM_BINS];
     while !shared.stop.load(Ordering::Relaxed) {
         match socket.recv_from(&mut buf) {
             Ok((n, from)) if from == addr => {
@@ -825,10 +612,11 @@ fn run(
         publish(&fsm);
 
         if let Some(a) = audio.as_mut() {
-            // Apply a pending PTT edge. `set_ptt` only requests; this is the
-            // one place a transmission actually starts or stops, and it runs
-            // only because the operator asked.
-            apply_ptt(a, shared, socket, addr, fsm.callsign());
+            // Apply a pending PTT edge and, on a pass that is not
+            // transmitting, drop whatever the lane captured — in that order,
+            // in one step, before anything else on this pass can block. See
+            // `run_ptt_step`, where the ordering is the whole point.
+            run_ptt_step(a, shared, socket, addr, fsm.callsign());
             if a.tx.is_some() {
                 pump_tx(a, socket, addr, fsm.callsign());
             }
@@ -836,25 +624,16 @@ fn run(
             // arrivals: a payload is five frames and only four fit in the
             // pipeline at once, so the rest are submitted here.
             pump(a);
-            // The operator's volume and leveling, re-asserted every pass so
-            // a change made mid-transmission is heard on the next frame.
-            shared.apply_audio(&a.router, &a.out);
-            shared.apply_mic_decay(&a.router, &a.mic);
-            // …and the other direction: the bus's meter and analyzer into
-            // the cells a UI polls. Without this a YSF link plays audio
-            // while every level and every spectrum bar sits at the floor,
-            // which reads as a dead session.
-            shared.read_meters(&a.router, &a.out, &a.mic, &mut spectrum_buf);
         }
     }
 
     // Close an over that is still open. A link torn down mid-transmission
     // would otherwise leave the reflector waiting out its own timeout with
-    // this station's callsign still on it, and leave the mic gated open.
+    // this station's callsign still on it. The lane's gate is not ours to
+    // close — `ConsoleSession` owns it, and releases the whole route.
     if let Some(a) = audio.as_mut()
         && a.tx.is_some()
     {
-        a.mic.set_gate(&a.router, false);
         shared.ptt.store(false, Ordering::Relaxed);
         end_tx(a, socket, addr, fsm.callsign());
     }
@@ -998,12 +777,47 @@ fn pump(audio: &mut Audio) {
     release(audio, Instant::now());
 }
 
+/// One run-loop pass's transmit step: apply the pending PTT edge, then — on
+/// a pass that is NOT transmitting — drain and DROP whatever the capture lane
+/// has queued.
+///
+/// The two are ONE function because the ordering between them is the whole
+/// invariant, not a detail of layout. The gate belongs to
+/// `ConsoleSession::set_ptt`, which opens it up to a poll interval before
+/// this loop observes the request, and it can stay open while this loop is
+/// not keyed — so without the drop the lane would pile audio into
+/// `tx_frames` unbounded and the next transmission would open with somebody
+/// else's stale speech.
+///
+/// What keeps the drop from eating the VOX pre-roll is that it runs on the
+/// SAME pass that read `ptt_request`, with nothing in between: an operator
+/// keying after this call does so against a pass that will never drain
+/// again. Put it after the socket read instead and the 20 ms
+/// [`AUDIO_RECV_TIMEOUT`] opens a window in which the gate opens, the lane
+/// flushes its look-back ring, and this arm throws away precisely the audio
+/// it exists to protect. D-Star shipped that bug once; YSF must not.
+///
+/// The key-DOWN edge deliberately keeps what it finds — that is the pre-roll
+/// and the speech onset, and it is encoded first.
+fn run_ptt_step(
+    audio: &mut Audio,
+    shared: &Arc<Shared>,
+    socket: &UdpSocket,
+    addr: SocketAddr,
+    callsign: &Callsign,
+) {
+    apply_ptt(audio, shared, socket, addr, callsign);
+    if audio.tx.is_none() {
+        while audio.bus.tx_frames.try_recv().is_ok() {}
+    }
+}
+
 /// Start or stop a transmission, if the request differs from what is applied.
 ///
-/// A key-down with no capture device is REFUSED rather than half-honoured:
-/// opening the mic is what makes transmitting possible, and a station that
-/// reported itself keyed while sending nothing would be lying to its
-/// operator and to the reflector.
+/// The capture lane's gate is NOT touched here. `ConsoleSession::set_ptt`
+/// opened it before forwarding the key — refusing the key-down outright, and
+/// forwarding nothing, when no capture device could be opened — and closes it
+/// on key-up. This is the protocol edge only.
 fn apply_ptt(
     audio: &mut Audio,
     shared: &Arc<Shared>,
@@ -1017,26 +831,15 @@ fn apply_ptt(
         return;
     }
     if want {
-        if !audio.mic.ensure_open(&mut audio.router) {
-            tracing::warn!(
-                "ysf: key-down refused — no capture device could be opened, so there is \
-                 nothing to transmit"
-            );
-            shared.ptt_request.store(false, Ordering::Relaxed);
-            shared.ptt.store(false, Ordering::Relaxed);
-            return;
-        }
         // Clear the decode path BEFORE the first mic frame is submitted.
         // Whatever is queued or in flight belongs to the moment before this
         // station keyed; playing it now would land it under our own
         // transmission, and leaving it in the vocoder would interleave it
         // with the encode requests about to start.
         discard_rx(audio);
-        audio.mic.set_gate(&audio.router, true);
         audio.tx = Some(Tx::new());
         shared.ptt.store(true, Ordering::Relaxed);
     } else {
-        audio.mic.set_gate(&audio.router, false);
         shared.ptt.store(false, Ordering::Relaxed);
         end_tx(audio, socket, addr, callsign);
     }
@@ -1328,7 +1131,7 @@ mod tests {
     use astar_codec::ambe::ChannelFrame;
     use astar_codec::ysf::{FRAMES_PER_PAYLOAD, pack_dn};
     use astar_ysf::{Fich, Reflector};
-    use std::sync::mpsc::{Receiver, channel};
+    use std::sync::mpsc::{Receiver, Sender, channel};
 
     /// Everything here binds `127.0.0.1` and talks to a reflector this test
     /// started. Nothing reaches a real network — see CLAUDE.md's on-air
@@ -1467,17 +1270,25 @@ mod tests {
     }
 
     /// An `Audio` wired to channels the test can read, with no device
-    /// anywhere: `NullBackend` opens nothing and `CallAudio`'s fields are
-    /// public, so the decoded PCM lands somewhere assertable.
+    /// anywhere: the link owns no router and no device any more, and
+    /// `CallAudio`'s fields are public, so the decoded PCM lands somewhere
+    /// assertable.
     fn test_audio() -> (Audio, Receiver<Vec<i16>>) {
+        let (audio, rx, _tx) = test_audio_with_capture();
+        (audio, rx)
+    }
+
+    /// [`test_audio`] with the capture end kept, for a test that has to
+    /// deliver mic frames into the lane the way the router's own `MicLane`
+    /// does.
+    fn test_audio_with_capture() -> (Audio, Receiver<Vec<i16>>, Sender<Vec<i16>>) {
         let (rx_tx, rx_rx) = channel::<Vec<i16>>();
-        let (_tx_tx, tx_rx) = channel::<Vec<i16>>();
+        let (tx_tx, tx_rx) = channel::<Vec<i16>>();
         let call_audio = CallAudio {
             tx_frames: tx_rx,
             rx_frames: rx_tx,
             preroll_lead: Arc::new(AtomicU32::new(0)),
         };
-        let router = AudioRouter::new(Box::new(astar_audio::NullBackend::new()));
         (
             Audio {
                 ambe: Box::new(FakeVocoder::new()),
@@ -1486,12 +1297,10 @@ mod tests {
                 mic_pending: VecDeque::new(),
                 decoded: VecDeque::new(),
                 next_release: None,
-                router,
-                out: OutputId::new("out:test"),
-                mic: MicLane::unresolved(StreamConfig::default()),
                 tx: None,
             },
             rx_rx,
+            tx_tx,
         )
     }
 
@@ -1604,13 +1413,6 @@ mod tests {
         assert!(audio.pending.is_empty(), "the queue must drain");
     }
 
-    /// Preferences round-trip through `f32::to_bits`, so they come back
-    /// bit-identical — but comparing floats exactly is a habit worth not
-    /// having in a test that might later grow a conversion.
-    fn near(a: f32, b: f32) -> bool {
-        (a - b).abs() < 1e-6
-    }
-
     /// `release` on a fabricated clock — the pacing rule itself, with no
     /// wall-clock dependence, so it guards the behaviour in CI where the
     /// timing probe below would be flaky.
@@ -1629,9 +1431,6 @@ mod tests {
             mic_pending: VecDeque::new(),
             decoded: VecDeque::new(),
             next_release: None,
-            router: AudioRouter::new(Box::new(astar_audio::NullBackend::new())),
-            out: OutputId::new("out:test"),
-            mic: MicLane::unresolved(StreamConfig::default()),
             tx: None,
         };
         let t0 = Instant::now();
@@ -1863,6 +1662,125 @@ mod tests {
         );
     }
 
+    /// Every voice frame that reached `peer`, as its `FakeVocoder` tag — the
+    /// low byte of the PCM sample the encoder was handed, so a frame can be
+    /// followed from the capture lane to the wire.
+    fn transmitted_voice_tags(peer: &UdpSocket) -> Vec<u8> {
+        let mut buf = [0u8; 512];
+        let mut tags = Vec::new();
+        while let Ok(n) = peer.recv(&mut buf) {
+            let Some(astar_ysf::Packet::Data(d)) = astar_ysf::wire::parse(&buf[..n]) else {
+                continue;
+            };
+            let Some(frame) = Frame::new(&d.frame) else {
+                continue;
+            };
+            let Ok(fich) = frame.fich() else {
+                continue;
+            };
+            let Ok(voice) = unpack_dn(fich.data_type, frame.payload()) else {
+                continue;
+            };
+            tags.extend(voice.iter().map(|f| f.as_bytes()[0]));
+        }
+        tags
+    }
+
+    /// The pre-roll regression, mirroring `crate::dstar`'s
+    /// `the_preroll_flushed_before_the_run_loop_sees_the_key_is_transmitted`.
+    ///
+    /// `ConsoleSession::set_ptt` opens the lane's gate and only THEN stores
+    /// the PTT request, so the look-back ring the gate's false->true edge
+    /// flushes — and the speech onset behind it — is already sitting in
+    /// `tx_frames` when the run loop first reads the request as true. The
+    /// key-down edge must keep every one of those frames; the unkeyed
+    /// drain-and-drop exists for a different case entirely.
+    #[test]
+    fn the_frames_queued_before_the_key_edge_are_transmitted() {
+        /// Speech captured before the loop saw the key.
+        const PREROLL: i16 = 11;
+        /// Speech captured after it.
+        const LIVE: i16 = 22;
+
+        let (mut audio, _rx, mic) = test_audio_with_capture();
+        let (socket, addr, peer) = udp_pair();
+        let me = Callsign::new("N0CALL").expect("legal");
+        let shared = Arc::new(Shared::new());
+
+        for _ in 0..FRAMES_PER_PAYLOAD {
+            mic.send(vec![PREROLL; 160]).expect("send");
+        }
+
+        // The pass that observes the key-down. It must NOT drain.
+        shared.ptt_request.store(true, Ordering::Relaxed);
+        run_ptt_step(&mut audio, &shared, &socket, addr, &me);
+        assert!(audio.tx.is_some(), "the key-down must open a transmission");
+
+        for _ in 0..FRAMES_PER_PAYLOAD {
+            mic.send(vec![LIVE; 160]).expect("send");
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            pump_tx(&mut audio, &socket, addr, &me);
+            if (audio.mic_pending.is_empty() && audio.ambe.in_flight_encoded() == 0)
+                || Instant::now() >= deadline
+            {
+                break;
+            }
+        }
+        shared.ptt_request.store(false, Ordering::Relaxed);
+        run_ptt_step(&mut audio, &shared, &socket, addr, &me);
+
+        let tags = transmitted_voice_tags(&peer);
+        let preroll = u8::try_from(PREROLL).expect("small");
+        let live = u8::try_from(LIVE).expect("small");
+        let first_preroll = tags.iter().position(|t| *t == preroll);
+        let first_live = tags.iter().position(|t| *t == live);
+        assert!(
+            first_preroll.is_some(),
+            "the audio queued before the key edge never reached the wire — the unkeyed drain \
+             ate the operator's speech onset. tags transmitted: {tags:?}"
+        );
+        assert!(
+            first_live.is_some(),
+            "the audio captured after the key must be transmitted too, tags: {tags:?}"
+        );
+        assert!(
+            first_preroll < first_live,
+            "the pre-roll must lead the live stream, got {tags:?}"
+        );
+    }
+
+    /// The other half of the same rule: on a pass that is not transmitting,
+    /// whatever the lane captured is dropped rather than queued. The gate can
+    /// legitimately be open while this loop is unkeyed — the console holds it
+    /// until the operator releases PTT — and without the drop the next
+    /// transmission would open with somebody else's stale speech.
+    #[test]
+    fn an_unkeyed_pass_drops_whatever_the_lane_captured() {
+        let (mut audio, _rx, mic) = test_audio_with_capture();
+        let (socket, addr, peer) = udp_pair();
+        let me = Callsign::new("N0CALL").expect("legal");
+        let shared = Arc::new(Shared::new());
+
+        for _ in 0..10 {
+            mic.send(vec![9i16; 160]).expect("send");
+        }
+        run_ptt_step(&mut audio, &shared, &socket, addr, &me);
+
+        assert!(audio.tx.is_none(), "nothing asked for a transmission");
+        assert!(
+            audio.bus.tx_frames.try_recv().is_err(),
+            "an unkeyed pass must empty the capture channel"
+        );
+        assert!(audio.mic_pending.is_empty(), "and queue none of it");
+        let mut buf = [0u8; 512];
+        assert!(
+            peer.recv(&mut buf).is_err(),
+            "and put nothing on the wire — that would be transmitting unasked"
+        );
+    }
+
     /// The safety property, stated as a test: a link that is never keyed puts
     /// NOTHING on the wire but polls. If this ever fails, astar transmitted
     /// without being asked.
@@ -1875,27 +1793,6 @@ mod tests {
         assert!(!link.snapshot().ptt, "nothing may key on its own");
         link.disconnect();
         reflector.shutdown();
-    }
-
-    /// A key-down with no capture device is refused rather than half-applied:
-    /// the request is cleared and `ptt` stays false, so a UI reads "not
-    /// transmitting" because the station is not transmitting.
-    #[test]
-    fn a_key_down_without_a_microphone_is_refused() {
-        let (mut audio, _rx) = test_audio();
-        let shared = Arc::new(Shared::new());
-        let (socket, addr, _peer) = udp_pair();
-        let me = Callsign::new("N0CALL").expect("legal");
-
-        shared.ptt_request.store(true, Ordering::Relaxed);
-        apply_ptt(&mut audio, &shared, &socket, addr, &me);
-
-        assert!(audio.tx.is_none(), "no transmission may start");
-        assert!(!shared.ptt.load(Ordering::Relaxed), "and none is reported");
-        assert!(
-            !shared.ptt_request.load(Ordering::Relaxed),
-            "the request is cleared so it is not retried every 20 ms"
-        );
     }
 
     /// `set_ptt` requests; it does not key. The applied state only moves when
@@ -1993,9 +1890,6 @@ mod tests {
             mic_pending: VecDeque::new(),
             decoded: VecDeque::new(),
             next_release: None,
-            router: AudioRouter::new(Box::new(astar_audio::NullBackend::new())),
-            out: OutputId::new("out:test"),
-            mic: MicLane::unresolved(StreamConfig::default()),
             tx: None,
         };
         let shared = Arc::new(Shared::new());
@@ -2055,30 +1949,6 @@ mod tests {
                 f64::from(u32::try_from(n).unwrap_or(u32::MAX)) / 6.0
             );
         }
-    }
-
-    #[test]
-    fn audio_preferences_are_stored_and_clamped() {
-        let (reflector, addr) = loopback();
-        let link = YsfLink::connect(&addr.to_string(), "N0CALL", None).expect("connect");
-
-        let (gain, compress, level) = link.audio_prefs();
-        assert!(near(gain, 1.0) && !compress && near(level, 0.5), "defaults");
-        link.set_output_gain(2.0);
-        link.set_rx_compression(true);
-        link.set_rx_compression_level(0.25);
-        let (gain, compress, level) = link.audio_prefs();
-        assert!(near(gain, 2.0) && compress && near(level, 0.25));
-
-        link.set_output_gain(99.0);
-        assert!(near(link.audio_prefs().0, 4.0), "gain clamps to 4.0");
-        link.set_output_gain(f32::NAN);
-        assert!(near(link.audio_prefs().0, 1.0), "NaN falls back to unity");
-        link.set_rx_compression_level(-1.0);
-        assert!(near(link.audio_prefs().2, 0.0), "level clamps to 0.0");
-
-        link.disconnect();
-        reflector.shutdown();
     }
 
     /// A link with no vocoder decodes nothing, so it refuses nothing and

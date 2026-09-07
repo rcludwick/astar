@@ -1052,8 +1052,6 @@ impl Station {
                 host: host.to_string(),
                 callsign: callsign.to_string(),
                 options: options.map(str::to_string),
-                output,
-                input,
             };
             // Refuse early and cheaply, holding the lock for a few
             // instructions rather than for the whole dongle probe.
@@ -1063,15 +1061,39 @@ impl Station {
                 .ysf_can_connect()
                 .map_err(map_console_err)?;
 
-            let backend = std::cell::RefCell::new(Some((self.make_backend)()));
-            let link = astar_console::YsfLink::connect_with_audio(&cfg, &move || {
-                backend
-                    .borrow_mut()
-                    .take()
-                    .expect("ysf backend factory called exactly once")
-            })
-            .map_err(map_console_err)?;
+            // Step 1, under the lock: open the ONE audio lane on the
+            // station's router and reserve it. The reservation is also the
+            // mutual-exclusion token for the gap before the adopt below —
+            // every other connect path refuses while it is held — and the
+            // pref push, so the link starts at the operator's chosen volume
+            // rather than the router's unity default.
+            let audio = {
+                let mut s = self.session.lock().unwrap();
+                s.open_voice_route(input.as_deref(), output.as_deref(), || {
+                    (self.make_backend)()
+                })
+                .map_err(map_console_err)?
+            };
 
+            // Step 2, deliberately OFF the session mutex: the `ThumbDV`
+            // candidate-port scan and init cookbook, then the socket bind —
+            // seconds, on a flaky dongle. Holding the mutex across that
+            // blocked every snapshot/state poll for the whole window.
+            let link = match astar_console::YsfLink::connect_with_audio(&cfg, audio) {
+                Ok(l) => l,
+                Err(e) => {
+                    // The lane opened but the link did not: give it back, or
+                    // the station stays reserved forever. Dropped off the
+                    // lock — a CoreAudio stream drop can stall.
+                    let handles = self.session.lock().unwrap().release_voice_route();
+                    drop(handles);
+                    return Err(map_console_err(e));
+                }
+            };
+
+            // Step 3: re-take the lock only to install (and to re-check
+            // exclusion, since the state could have changed while it was
+            // released).
             self.session
                 .lock()
                 .unwrap()
