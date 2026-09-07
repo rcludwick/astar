@@ -501,7 +501,14 @@ fn err_code(e: &StationError) -> c_int {
         StationError::Listen(_) => IAX_ERR_LISTEN,
         StationError::AtCapacity => IAX_ERR_AT_CAPACITY,
         StationError::InvalidDigit => IAX_ERR_INVALID_DIGIT,
-        StationError::Link(_) => IAX_ERR_LINK,
+        // DMR shares `IAX_ERR_LINK` for now: it has no code of its own yet.
+        // `IAX_ERR_DMR`, the `iax_station_connect_dmr` entry points and the
+        // `dmr_available` / `dmr_active` snapshot fields are the C-ABI task
+        // of docs/superpowers/plans/2026-09-07-dmr-network.md, and inventing
+        // a number here would put one in the ABI ahead of the header that
+        // documents it. Nothing in this crate raises a `StationError::Dmr`
+        // until then, and a link failure is what a DMR failure is.
+        StationError::Link(_) | StationError::Dmr(_) => IAX_ERR_LINK,
         StationError::DtmfBusy => IAX_ERR_DTMF_BUSY,
         StationError::M17(_) => IAX_ERR_M17,
         StationError::Dstar(_) => IAX_ERR_DSTAR,

@@ -755,6 +755,7 @@ impl Station {
         self.dstar_disconnect();
         self.ysf_disconnect();
         self.nxdn_disconnect();
+        self.dmr_disconnect();
         if self.mode() == OperatingMode::Node {
             // Node mode: hang up the active inbound-adopted call but keep the
             // listener running for the next caller (the session retains its
@@ -1343,6 +1344,249 @@ impl Station {
     #[must_use]
     pub fn nxdn_state(&self) -> Option<astar_console::NxdnSnapshot> {
         self.session.lock().unwrap().nxdn_state()
+    }
+
+    /// Link to a DMR master's talkgroup and decode the audio on it
+    /// (iax-d4f7).
+    ///
+    /// `system` is a network slug — `tgif`, `brandmeister`, … — resolved with
+    /// `astar_dmr::DmrNetwork::from_slug`, which answers `None` rather than
+    /// guessing: a near-miss that resolved to the wrong network would put the
+    /// operator on the wrong system under their own registered ID. `radio_id`
+    /// is that registration (radioid.net), `talkgroup` the room and
+    /// `timeslot` 1 or 2. DMR addresses stations by NUMBER — a `DMRD` carries
+    /// `srcId` and no callsign at all — so `callsign` rides only in the
+    /// `RPTC` config.
+    ///
+    /// Primitive args rather than an `astar_console::DmrConfig` for the same
+    /// reason [`Station::nxdn_connect`] takes them: that type only exists when
+    /// the feature is compiled in, and this method must stay byte-identically
+    /// callable either way.
+    ///
+    /// # The password
+    ///
+    /// `password` is taken **by value** — the one place in this facade that
+    /// does. It is moved into the `DmrConfig` built here, moved on into the
+    /// link's FSM, spent on one `RPTK` digest and dropped. No `Station` field
+    /// holds it, `StationConfig` grows none, no snapshot, event, error or log
+    /// carries it, and the config is rebuilt from the in-args on every call
+    /// rather than cached. A `&str` would have left the caller holding the
+    /// secret with nothing saying when to drop it; this does not.
+    ///
+    /// # BrandMeister
+    ///
+    /// BrandMeister is refused unless the operator has explicitly opted in,
+    /// and **nothing in this build can opt in yet** — see
+    /// `BRANDMEISTER_CONSENTED` below. The gate is `astar_dmr::dialable`, written
+    /// once so no call site can forget it, and it is checked HERE, before a
+    /// socket or a dongle is touched: the risk it guards is to the operator's
+    /// own account on someone else's private network, so it is presented
+    /// before it is taken rather than after. See
+    /// `docs/design/dmr-networks.md`.
+    ///
+    /// **Receive only.** [`Station::set_ptt`] refuses a key-down while a DMR
+    /// link is live — see `astar_console::dmr`'s Transmit section for why a
+    /// refusal beats a key that silently does nothing.
+    ///
+    /// Mutually exclusive with an IAX2 call and with every other digital
+    /// network. One `ThumbDV`, one link.
+    ///
+    /// # Blocking
+    /// The `ThumbDV` probe/init, the socket bind AND the homebrew login —
+    /// which is a multi-round-trip conversation with the master, slower than
+    /// anything YSF or NXDN does — all run with the session mutex NOT held.
+    /// Every `Station` method takes that mutex, and the contract is
+    /// poll-and-snapshot.
+    ///
+    /// # Errors
+    /// [`StationError::Dmr`] for an unknown system slug, an ungated
+    /// BrandMeister target, a zero or over-wide radio id, an empty callsign,
+    /// a zero talkgroup, a timeslot that is not 1 or 2, an empty password,
+    /// when the `dmr` feature isn't compiled in, and for every
+    /// vocoder-availability failure (the message names the specific port when
+    /// a dongle is merely busy). [`StationError::AlreadyConnected`] while
+    /// another network is live. Never carrying the password.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dmr_connect(
+        &self,
+        system: &str,
+        host: &str,
+        port: u16,
+        radio_id: u32,
+        callsign: &str,
+        talkgroup: u32,
+        timeslot: u8,
+        password: String,
+    ) -> Result<(), StationError> {
+        // Everything down to the `#[cfg]` block is validated with the feature
+        // OFF as well as on, so an operator who mistypes gets the same answer
+        // either way and no lane is opened for a connect that cannot succeed.
+        //
+        // The network is resolved FIRST because the consent gate hangs off
+        // it, and the consent gate must run before anything is opened.
+        let Some(network) = astar_dmr::DmrNetwork::from_slug(system) else {
+            return Err(StationError::Dmr(format!(
+                "unknown DMR network {system:?}: this build knows {}",
+                astar_dmr::ALL
+                    .iter()
+                    .map(|n| n.slug())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        };
+        // `dialable` is the gate written once so no call site can forget it,
+        // and this facade is a call site. Asking it — rather than testing
+        // `requires_consent()` here — is what keeps the policy in one place.
+        if !astar_dmr::dialable(BRANDMEISTER_CONSENTED).contains(&network) {
+            return Err(StationError::Dmr(format!(
+                "{} requires the operator to opt in first: it is a private network whose \
+                 operators set the terms, and connecting with a third-party client is a risk \
+                 to your own access there",
+                network.label()
+            )));
+        }
+        // A radio id is a registration, not a default. Zero is what an unset
+        // field looks like, and a transmission claiming it would claim
+        // somebody else's number — or nobody's; anything past 24 bits cannot
+        // go on the wire at all. `RadioId::new` is the one definition of
+        // both, reused rather than restated — and asked HERE so the answer is
+        // the same with the feature off, where the link layer that would
+        // otherwise catch it is not compiled.
+        if let Err(e) = astar_dmr::RadioId::new(radio_id) {
+            return Err(StationError::Dmr(format!(
+                "radio id {radio_id} is not a usable registration: {e}"
+            )));
+        }
+        if callsign.is_empty() {
+            return Err(StationError::Dmr("callsign must not be empty".into()));
+        }
+        if talkgroup == 0 {
+            return Err(StationError::Dmr(
+                "talkgroup must be set: a master routes by the room you joined".into(),
+            ));
+        }
+        // Secret-free by construction: the refusal names the field, never the
+        // value.
+        if password.is_empty() {
+            return Err(StationError::Dmr(
+                "the master password must not be empty".into(),
+            ));
+        }
+        // 1 and 2 are the only slots a DMR frame can name. Mapped here rather
+        // than passed through as a number so a caller crossing the C ABI with
+        // a 0 gets a refusal instead of a silent TS1.
+        let slot = match timeslot {
+            1 => astar_dmr::Timeslot::Ts1,
+            2 => astar_dmr::Timeslot::Ts2,
+            other => {
+                return Err(StationError::Dmr(format!(
+                    "timeslot must be 1 or 2, got {other}"
+                )));
+            }
+        };
+        #[cfg(feature = "dmr")]
+        {
+            let (input, output) = self.selected_devices();
+            // Built from the in-args, every call. Nothing on this station
+            // caches it, and `DmrConfig` is deliberately not `Clone` — the
+            // password inside it is moved, not copied.
+            let cfg = astar_console::DmrConfig {
+                system: network,
+                host: host.to_string(),
+                port,
+                radio_id,
+                callsign: callsign.to_string(),
+                talkgroup,
+                timeslot: slot,
+                password,
+            };
+            // Step 1, under the lock: open the ONE audio lane on the
+            // station's router and reserve it. The reservation is also the
+            // mutual-exclusion token for the gap before the adopt below —
+            // every other connect path refuses while it is held — and the
+            // pref push, so the link starts at the operator's chosen volume
+            // rather than the router's unity default.
+            let audio = {
+                let mut s = self.session.lock().unwrap();
+                s.open_voice_route(input.as_deref(), output.as_deref(), || {
+                    (self.make_backend)()
+                })
+                .map_err(map_console_err)?
+            };
+
+            // Step 2, deliberately OFF the session mutex: the `ThumbDV`
+            // candidate-port scan and init cookbook, the socket bind, and
+            // then the homebrew login — `RPTL`, `RPTK`, `RPTC`, each a
+            // round trip to the master, with retries. Seconds, on a flaky
+            // dongle or a slow master. Holding the mutex across that blocks
+            // every snapshot/state poll for the whole window.
+            let link = match astar_console::DmrLink::connect_with_audio(cfg, audio) {
+                Ok(l) => l,
+                Err(e) => {
+                    // The lane opened but the link did not: give it back, or
+                    // the station stays reserved forever. Dropped off the
+                    // lock — a CoreAudio stream drop can stall.
+                    let handles = self.session.lock().unwrap().release_voice_route();
+                    drop(handles);
+                    return Err(map_console_err(e));
+                }
+            };
+
+            // Step 3: re-take the lock only to install (and to re-check
+            // exclusion, since the state could have changed while it was
+            // released). A refused adopt tears the link down and releases
+            // the route inside `dmr_adopt`.
+            self.session
+                .lock()
+                .unwrap()
+                .dmr_adopt(link)
+                .map_err(map_console_err)
+        }
+        #[cfg(not(feature = "dmr"))]
+        {
+            // `slot` is validated above either way — that is the point — and
+            // with no link to build there is nowhere for it to go.
+            let _ = (host, port, slot);
+            // `password` is dropped here with everything else. It was never
+            // stored, and this build has nowhere to send it.
+            drop(password);
+            Err(StationError::Dmr("dmr support not compiled".into()))
+        }
+    }
+
+    /// Disconnect the live DMR link, if any. No-op when none is active (and
+    /// when the `dmr` feature isn't compiled in).
+    pub fn dmr_disconnect(&self) {
+        #[cfg(feature = "dmr")]
+        {
+            self.session.lock().unwrap().dmr_disconnect();
+        }
+    }
+
+    /// `true` when DMR voice is available: the `dmr` feature is compiled in
+    /// AND a `ThumbDV` is attached. The same cached probe
+    /// [`Station::dstar_available`], [`Station::ysf_available`] and
+    /// [`Station::nxdn_available`] read — one dongle, one answer.
+    #[must_use]
+    pub fn dmr_available(&self) -> bool {
+        #[cfg(feature = "dmr")]
+        {
+            astar_console::dmr_available()
+        }
+        #[cfg(not(feature = "dmr"))]
+        {
+            false
+        }
+    }
+
+    /// A poll-cheap snapshot of the live DMR link, or `None`. Only compiled
+    /// when the `dmr` feature is enabled.
+    ///
+    /// Carries no password — there is none on the link to carry.
+    #[cfg(feature = "dmr")]
+    #[must_use]
+    pub fn dmr_state(&self) -> Option<astar_console::DmrSnapshot> {
+        self.session.lock().unwrap().dmr_state()
     }
 
     /// A poll-cheap snapshot of the live D-Star session's state (iax-a9d4
@@ -2408,6 +2652,7 @@ impl Drop for Station {
         self.dstar_disconnect();
         self.ysf_disconnect();
         self.nxdn_disconnect();
+        self.dmr_disconnect();
         // Stop monitor mode (releases the input device).
         self.monitor_stop();
         // Stop outbound registration (sends REGREL, joins the thread).
@@ -2430,6 +2675,20 @@ fn clone_node_config(c: &NodeConfig) -> NodeConfig {
     }
 }
 
+/// The operator's BrandMeister opt-in, as this build knows it: **`false`**.
+///
+/// One constant rather than a literal at the call site, so the thing that has
+/// to change when consent becomes settable is findable by name. Nothing in
+/// astar can set it today — there is no preference, no config field and no C
+/// ABI for it — which is the deliberate outcome of iax-d4f7's Task 2 review:
+/// the gate exists and defaults closed, and opening it is its own piece of
+/// work with its own UI, because what it opens is a risk to the operator's
+/// account on somebody else's private network.
+///
+/// Not feature-gated: `Station::dmr_connect` refuses BrandMeister identically
+/// with the `dmr` feature off, so an operator gets one answer rather than two.
+const BRANDMEISTER_CONSENTED: bool = false;
+
 fn map_console_err(e: astar_console::ConsoleError) -> StationError {
     use astar_console::ConsoleError as C;
     match e {
@@ -2444,14 +2703,7 @@ fn map_console_err(e: astar_console::ConsoleError) -> StationError {
         C::Dstar(m) => StationError::Dstar(m),
         C::Ysf(m) => StationError::Ysf(m),
         C::Nxdn(m) => StationError::Nxdn(m),
-        // DMR has no `StationError` of its own yet: the variant, its ABI code
-        // and the `Station::dmr_*` methods that raise it are Task 8 of
-        // docs/superpowers/plans/2026-09-07-dmr-network.md. Nothing reaches
-        // this arm until then — no station path builds a `ConsoleError::Dmr`
-        // — and a link failure is what a DMR failure is, so the interim
-        // mapping says so rather than inventing a code the header does not
-        // carry.
-        C::Dmr(m) => StationError::Link(format!("dmr: {m}")),
+        C::Dmr(m) => StationError::Dmr(m),
         C::NoCaptureDevice => StationError::Audio("no capture device: cannot transmit".into()),
     }
 }
