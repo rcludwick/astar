@@ -802,11 +802,11 @@ pub fn bptc12877_decode(raw: &[bool; 128]) -> Option<[u8; 9]> {
 mod tests {
     use super::*;
 
-    /// `MMDVMHost/DMRDefines.h`. Task 6 gives these a permanent home in
-    /// `frame.rs`; BPTC's contract is that it does not touch them, and that
-    /// has to be testable before `frame.rs` exists.
-    const SYNC_MASK: [u8; 7] = [0x0F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF0];
-    const MS_SOURCED_DATA_SYNC: [u8; 7] = [0x0D, 0x5D, 0x7F, 0x77, 0xFD, 0x75, 0x70];
+    /// `MMDVMHost/DMRDefines.h`, from their permanent home in
+    /// [`crate::frame`]. BPTC's contract is that it does not touch them, and
+    /// the assertion is worth more against the constants the frame layer
+    /// actually writes than against a second copy that could drift from them.
+    use crate::frame::{MS_SOURCED_DATA_SYNC, SYNC_MASK};
 
     /// The nine-byte LC every vector in this file is computed over: a group
     /// call from 3021214 to 31118, the shape `docs/design/dmr-wire.md` §7
@@ -1152,6 +1152,44 @@ mod tests {
                 "one bit in byte {byte}"
             );
         }
+    }
+
+    #[test]
+    fn two_errors_in_one_deinterleaved_column_are_refused_rather_than_miscorrected() {
+        // Where the product code's limit actually is, and which check finds
+        // it. Two errors in one *row* are two different columns' problem, one
+        // each, and the column pass -- which runs first -- repairs them
+        // outright. Two errors in one *column* are past Hamming (13,9,3), and
+        // when one of them sits in a column-parity row the row pass never
+        // touches, nothing can repair it. The reference extracts the payload
+        // regardless; this returns None, and it is the final column re-check
+        // that says so.
+        let lc: [u8; 12] = [
+            0x00, 0x00, 0x00, 0x00, 0x7A, 0x51, 0x30, 0x1E, 0xB7, 0x96, 0x96, 0x96,
+        ];
+        let mut clean = [0u8; 33];
+        bptc19696_encode(&lc, &mut clean);
+
+        // raw[(a * 181) mod 196] is where deinterleaved bit `a` landed, so a
+        // pattern that is neighbouring in the matrix is scattered in the
+        // burst -- which is the whole point of the interleave.
+        let flip = |positions: [usize; 2]| {
+            let mut raw = burst_to_raw(&clean);
+            for a in positions {
+                let index = (a * INTERLEAVE_STEP) % 196;
+                raw[index] = !raw[index];
+            }
+            let mut burst = clean;
+            raw_to_burst(&raw, &mut burst);
+            bptc19696_decode(&burst)
+        };
+
+        // Row 0, columns 0 and 1. The matrix is 13 x 15 starting at index 1,
+        // so row r column c is deinterleaved index 1 + 15 * r + c.
+        assert_eq!(flip([1, 2]), Some(lc), "one error per column is repairable");
+        // Column 0, rows 3 and 9. Row 9 is column parity: the row pass covers
+        // rows 0..8 only, so it cannot see this one at all.
+        assert_eq!(flip([1 + 15 * 3, 1 + 15 * 9]), None);
     }
 
     #[test]

@@ -32,6 +32,19 @@
 //! * **No permutation.** `DroidStar` applies `dvsi_interleave` in `ysf.cpp`
 //!   (and `nxdn.cpp`'s copy of the same table) and never in `dmr.cpp`,
 //!   which `::memcpy`s the nine bytes into the burst and back out again.
+//!
+//! So the voice lift below is a rearrangement and nothing more. Where the
+//! three frames sit inside the 33 bytes is [`astar_dmr::frame`]'s answer —
+//! the nibble-aligned 108/48/108 split of `docs/design/dmr-wire.md` §5, with
+//! frame 2 straddling the middle field — and this module only tags what comes
+//! back as `ChannelFrame::Dmr` so a caller cannot hand DMR frames to a chip
+//! configured for D-Star.
+//!
+//! **Nothing here was copied.** The layout was read out of the deployed
+//! reference implementations as a specification of the wire, the same way the
+//! rest of this crate's protocol code was, and every constant carries the file
+//! and function it came from; `docs/design/dmr-wire.md` records the fetch and
+//! how the references' disagreements were settled.
 
 /// Rate parameters for DMR: AMBE+2 at 2450 bit/s of voice plus 1150 bit/s of
 /// FEC — 72 bits per 20 ms frame, FEC included, which is what goes into the
@@ -58,6 +71,49 @@ pub fn ratep_dmr() -> Vec<u8> {
             0x6F, 0x48, // y
         ],
     )
+}
+
+/// AMBE+2 frames one DMR burst carries: three 20 ms frames, so 60 ms of
+/// audio in the burst that fills one 30 ms TDMA timeslot.
+///
+/// One number, one home — [`astar_dmr::frame::AMBE_FRAMES`] is where the
+/// burst layout counts them, and this is that count under the name the
+/// vocoder side reads it by.
+pub const FRAMES_PER_BURST: usize = astar_dmr::frame::AMBE_FRAMES;
+
+/// Lift the three 20 ms AMBE+2 frames out of one 33-byte burst.
+///
+/// Infallible by construction: every burst has 216 information bits and this
+/// only rearranges them. Whether they are *voice* is the `DMRD` bits byte's
+/// answer, not this function's — which is why a signalling burst has no error
+/// case here and is refused one layer up.
+///
+/// Gated with [`crate::ambe`] because [`crate::ambe::ChannelFrame`] is: the
+/// tag exists to stop DMR frames reaching a chip configured for D-Star, and
+/// with no chip compiled in there is no chip to protect. The layout itself is
+/// under test on every run, in `astar-dmr`'s `frame` module and in
+/// [`pack_voice`] below.
+#[cfg(feature = "ambe-hw")]
+#[must_use]
+pub fn unpack_voice(
+    burst: &[u8; astar_dmr::frame::BURST_LEN],
+) -> [crate::ambe::ChannelFrame; FRAMES_PER_BURST] {
+    astar_dmr::frame::ambe(burst).map(crate::ambe::ChannelFrame::Dmr)
+}
+
+/// The inverse. Public because the session tests build bursts with it; the
+/// signalling builders are Task 12.
+///
+/// Writes only the two information halves, so a burst that already carries a
+/// sync pattern keeps it — `astar_dmr::frame::write_ambe` is nibble-exact
+/// about the two bytes the halves and the middle field share. Not gated on
+/// `ambe-hw`: nine bytes in and 33 out needs no dongle, and a session test
+/// that has to build a burst runs under `just ci`.
+#[must_use]
+pub fn pack_voice(frames: &[[u8; 9]; FRAMES_PER_BURST]) -> [u8; astar_dmr::frame::BURST_LEN] {
+    let mut burst = [0u8; astar_dmr::frame::BURST_LEN];
+    astar_dmr::frame::write_ambe(&mut burst, frames);
+    burst
 }
 
 #[cfg(test)]
@@ -93,6 +149,75 @@ mod tests {
         // confident noise rather than an error.
         assert_ne!(ratep_dmr(), hex(RATEP_DSTAR));
         assert_ne!(ratep_dmr(), crate::ysf::ratep_dn());
+    }
+
+    #[test]
+    fn a_packed_burst_puts_the_frames_where_the_burst_layout_says() {
+        // The ungated half of the same claim: pack_voice is write_ambe and
+        // nothing else, so astar-dmr finds the frames exactly where it put
+        // them, and the 27 bytes land in the two information halves rather
+        // than over the middle field.
+        let frames: [[u8; 9]; FRAMES_PER_BURST] = [
+            [0xA5, 0x3C, 0x71, 0x0E, 0xC3, 0x96, 0x5A, 0x18, 0x81],
+            [0x5A, 0xC3, 0x8E, 0xF1, 0x3C, 0x69, 0xA5, 0xE7, 0x7E],
+            [0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00],
+        ];
+        let mut burst = pack_voice(&frames);
+        assert_eq!(astar_dmr::frame::ambe(&burst), frames);
+        astar_dmr::frame::write_sync(&mut burst, astar_dmr::frame::Sync::MsAudio);
+        assert_eq!(astar_dmr::frame::ambe(&burst), frames);
+    }
+
+    #[cfg(feature = "ambe-hw")]
+    #[test]
+    fn three_channel_frames_come_out_of_a_burst_in_wire_order() {
+        let frames: [[u8; 9]; FRAMES_PER_BURST] =
+            core::array::from_fn(|i| [u8::try_from(i + 1).expect("small"); 9]);
+        let burst = pack_voice(&frames);
+        assert_eq!(
+            unpack_voice(&burst),
+            [
+                crate::ambe::ChannelFrame::Dmr(frames[0]),
+                crate::ambe::ChannelFrame::Dmr(frames[1]),
+                crate::ambe::ChannelFrame::Dmr(frames[2]),
+            ]
+        );
+    }
+
+    #[cfg(feature = "ambe-hw")]
+    #[test]
+    fn packing_voice_leaves_the_sync_field_alone() {
+        // pack_voice writes only the two information halves. A burst built by
+        // the session is sync-then-voice, and voice must not undo it.
+        let frames: [[u8; 9]; FRAMES_PER_BURST] = [[0xFF; 9]; 3];
+        let mut burst = pack_voice(&frames);
+        astar_dmr::frame::write_sync(&mut burst, astar_dmr::frame::Sync::MsAudio);
+        assert_eq!(
+            astar_dmr::frame::sync_of(&burst),
+            astar_dmr::frame::Sync::MsAudio
+        );
+        assert_eq!(
+            unpack_voice(&burst)[0],
+            crate::ambe::ChannelFrame::Dmr([0xFF; 9])
+        );
+    }
+
+    #[cfg(feature = "ambe-hw")]
+    #[test]
+    fn the_frames_are_nine_bytes_each_and_the_chip_gets_them_unchanged() {
+        // DroidStar dmr.cpp copies the chip's nine bytes into the burst with
+        // memcpy and reads them back the same way; the dvsi_interleave that
+        // ysf.cpp applies is never applied here. Nothing in this function
+        // permutes anything, and that is the assertion.
+        let frames: [[u8; 9]; FRAMES_PER_BURST] = [
+            [0xA5, 0x3C, 0x71, 0x0E, 0xC3, 0x96, 0x5A, 0x18, 0x81],
+            [0x5A, 0xC3, 0x8E, 0xF1, 0x3C, 0x69, 0xA5, 0xE7, 0x7E],
+            [0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00, 0xFF, 0x00],
+        ];
+        let burst = pack_voice(&frames);
+        for (i, got) in unpack_voice(&burst).iter().enumerate() {
+            assert_eq!(got.as_dmr(), Some(frames[i]));
+        }
     }
 
     /// The vendored driver is only compiled under `ambe-hw`, so the

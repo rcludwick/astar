@@ -33,15 +33,18 @@
 //! astar writes wire formats out from their definitions; it does not write
 //! its own crypto.
 //!
-//! **The 33-byte burst is carried, not decoded.** Voice on DMR is AMBE+2,
-//! which on astar means the AMBE-3000 in a `ThumbDV` and nothing else;
-//! [`wire::DataPacket::burst`] hands its bytes over intact and this crate
-//! makes no claim about what is inside them. Laying the sync patterns, the
-//! embedded-LC fragments and the three 9-byte vocoder frames out inside those
-//! 33 bytes is `docs/design/dmr-wire.md` §5–§7's business and is not done
-//! here yet — [`fec`] has the codes those layers are built from, but nothing
-//! assembles or takes apart a burst. Transmit, the talkgroup dial grammar and
-//! the session layer are not here yet either.
+//! [`frame`] is the 33-byte burst itself, laid out by
+//! `docs/design/dmr-wire.md` §5–§7: the nibble-aligned 108/48/108 split, the
+//! eight sync patterns, the EMB and the embedded-LC fragments, the slot type,
+//! the full LC over [`fec`]'s RS(12,9) and BPTC(196,96), and the three
+//! 72-bit vocoder frames — one of which straddles the middle field.
+//!
+//! **The voice bits are moved, not decoded.** Voice on DMR is AMBE+2, which
+//! on astar means the AMBE-3000 in a `ThumbDV` and nothing else.
+//! [`frame::ambe`] rearranges 216 bits and stops there; that they are AMBE+2
+//! is `astar-codec`'s answer, and the dependency runs that way round — this
+//! crate never depends on the codec. Transmit, the talkgroup dial grammar and
+//! the session layer are not here yet.
 //!
 //! # The identity this assumes
 //!
@@ -89,11 +92,15 @@
 //! table.
 
 pub mod fec;
+pub mod frame;
 pub mod fsm;
 pub mod master;
 pub mod network;
 pub mod wire;
 
+pub use frame::{
+    AMBE_FRAME_BYTES, AMBE_FRAMES, Emb, EmbeddedLcAssembler, LinkControl, SlotType, Sync,
+};
 pub use fsm::{
     DmrFsm, FailureStage, FsmAction, LINK_TIMEOUT, LOGIN_RETRY, LinkState, PING_INTERVAL,
 };
