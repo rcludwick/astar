@@ -133,7 +133,18 @@ impl VoiceRoute {
             handles.extend(router.close_mic(id));
         }
         router.remove_from_bus(&self.out, self.mix_id);
-        handles.extend(router.close_output(&self.out));
+        if let Some(handle) = router.close_output(&self.out) {
+            handles.push(handle);
+        } else {
+            // The bus still carries a lane, so the stream stays open and its
+            // handle stays with the router. The exclusion guards should make
+            // that impossible for a voice route; say so rather than leak an
+            // output device silently if they ever stop holding.
+            tracing::warn!(
+                bus = self.out.as_str(),
+                "voice route: output bus still in use at release — stream left open"
+            );
+        }
         handles
     }
 }

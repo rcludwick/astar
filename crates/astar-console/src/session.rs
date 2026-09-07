@@ -1647,6 +1647,12 @@ impl ConsoleSession {
                 .note(if on { "LocalKey" } else { "LocalUnkey" }, String::new());
             return Ok(());
         }
+        // No network session took the key. A route left keyed here would
+        // capture into nothing, so close the gate before refusing — the same
+        // guarantee the key-down refusal above gives.
+        if self.active.is_none() && self.voice_route.is_some() {
+            let _ = self.key_voice_route(false);
+        }
         // NotConnected returns before any tracer write, so the no-call path
         // records nothing on the timeline.
         let id = self.active.ok_or(ConsoleError::NotConnected)?;
@@ -2890,14 +2896,14 @@ impl ConsoleSession {
         self.state.ysf_active = self.ysf_is_active();
         self.state.ysf_available = ysf_available();
 
-        // Reconcile the gate against what the run loop actually applied: a
-        // session that unkeyed itself (link lost, time-out timer) reports
-        // `ptt: false` above, and the capture lane must follow it down on the
-        // very next poll rather than keep feeding a transmission nobody is
-        // making.
-        if !self.state.ptt && self.voice_route.is_some() {
-            let _ = self.key_voice_route(false);
-        }
+        // The capture gate is driven by `set_ptt` ONLY, never reconciled
+        // here. `state.ptt` above is the run loop's ACTUALLY-APPLIED value,
+        // which lags a key-down by up to one poll interval — closing the gate
+        // on it would mute the first ≤50 ms of every transmission, and
+        // nothing would re-open it. The other direction (a session that
+        // unkeyed itself: link lost, time-out timer) leaves the gate open
+        // until the operator releases PTT, which is harmless: a run loop
+        // discards captured frames while it is not transmitting.
 
         self.state.clone()
     }
@@ -3923,6 +3929,23 @@ mod tests {
         let _audio = s
             .open_voice_route(Some("no such device"), None, null)
             .expect("route");
-        assert!(!s.key_voice_route(true));
+        assert!(matches!(
+            s.set_ptt(true),
+            Err(ConsoleError::NoCaptureDevice)
+        ));
+    }
+
+    #[test]
+    fn set_ptt_on_a_route_with_no_session_refuses_and_keeps_the_lane() {
+        // The route is reserved but no network took the key, so the refusal
+        // is `NotConnected` — and the lane it opened at connect survives it,
+        // ready for the session that will own the route in Task 3. (Whether
+        // the gate itself is closed is not observable: the router exposes no
+        // gate getter. `set_ptt` closes it on this path by construction.)
+        let mut s = ConsoleSession::new();
+        let _audio = s.open_voice_route(None, None, null).expect("route");
+        assert!(matches!(s.set_ptt(true), Err(ConsoleError::NotConnected)));
+        let mgr = s.manager.as_ref().expect("engine");
+        assert_eq!(mgr.router().mic_count(), 1, "the capture lane stays open");
     }
 }
