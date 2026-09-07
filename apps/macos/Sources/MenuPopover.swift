@@ -350,26 +350,27 @@
         private var reflectorsPane: some View {
             ReflectorSearchPane(
                 preferredNetwork: selectedNetwork.reflectorNetwork,
-                onBack: { navigation.goBack() }
-            ) { text, network in
-                // Switch the picker to the chosen reflector's own network
-                // before filling the field — the pane can browse past the
-                // network the dial is set to, and text resolved against the
-                // wrong one silently finds nothing. Same move the favorites
-                // menu already makes. Unavailable networks cannot appear here:
-                // `Network.resolve` refuses them, so this cannot select a
-                // segment that is not offered.
-                if let appNetwork = Network.matching(network),
-                    availableNetworks.contains(appNetwork)
-                {
-                    networkRaw = appNetwork.rawValue
+                onBack: { navigation.goBack() },
+                onSelect: { text, network in
+                    // Switch the picker to the chosen reflector's own network
+                    // before filling the field — the pane can browse past the
+                    // network the dial is set to, and text resolved against the
+                    // wrong one silently finds nothing. Same move the favorites
+                    // menu already makes. Unavailable networks cannot appear here:
+                    // `Network.resolve` refuses them, so this cannot select a
+                    // segment that is not offered.
+                    if let appNetwork = Network.matching(network),
+                        availableNetworks.contains(appNetwork)
+                    {
+                        networkRaw = appNetwork.rawValue
+                    }
+                    // The pane hands back dial text, not a target: the dial field
+                    // stays the single source of truth for what Connect will dial.
+                    // Selecting never connects — that is still a deliberate second
+                    // action.
+                    node = text
                 }
-                // The pane hands back dial text, not a target: the dial field
-                // stays the single source of truth for what Connect will dial.
-                // Selecting never connects — that is still a deliberate second
-                // action.
-                node = text
-            }
+            )
         }
 
         /// Default window width per pane. The user's own window size wins over
