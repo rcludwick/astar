@@ -12,7 +12,7 @@ inline. All 228 issues (164 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (96)
+## Open items (104)
 
 ### astar-uid — Audio devices need a stable identity, not their name
 *P2 medium · bug · labels: audio, macos, migration, cx:5*
@@ -684,22 +684,124 @@ forget it. 7 tests, `std` only, no I/O. The identity question that blocked DMR,
 NXDN and P25 alike is settled (astar-c9d2): callsign and radio ID are two
 independent fields.
 
-**Remaining, in order:** (1) the MMDVM/homebrew login-and-keepalive against
-TGIF, read out of the reference implementations and verified, never recalled —
-`MMDVMHost` / `DMRGateway` are GPL-2.0 and astar is AGPL-3.0-only, so
-algorithms get written from their definitions, not transcribed; (2) AMBE+2
-frame packing, which YSF's vocoder work pays for; (3) the talkgroup dial
-grammar and the **timeslot**, which has nowhere to live in `ReflectorDial`
-today; (4) directory rows — hamcall-db publishes no DMR at all, and W0CHP's
-compiled lists are explicitly not reusable; (5) BrandMeister last, and only
-after checking their current position on third-party clients. That check is
-still outstanding: the gate is built, whether it should ever open is not
-answered.
+**Progress 2026-09-07 — RECEIVE IS BUILT, end to end.** `astar-dmr` is now a
+client of the MMDVM/homebrew protocol: the `RPTL`→salt→`RPTK`→`RPTC` login FSM
+with its keepalives and its `MSTNAK`-by-state diagnosis, the 55-byte `DMRD`,
+the block codes written from their definitions (BPTC(196,96) and BPTC(128,77),
+three Hamming codes, Golay(20,8), QR(16,7,6), RS(12,9), the 5-bit embedded-LC
+checksum), the 33-byte burst with sync/EMB/embedded LC/full LC, and a real
+bench **master** (`just dmr-parrot`) that binds, handshakes and relays
+verbatim without ever dialling anything. Above it: `VocoderMode::Dmr`
+(2450 + 1150, nine bytes — NOT YSF's configuration, see the design doc's
+vocoder correction), `DmrLink`/`DmrSnapshot` on the one shared audio lane,
+`Station::dmr_connect(system, host, port, radio_id, callsign, talkgroup,
+timeslot, password)` with the password by value and the consent gate checked
+before a socket or a dongle is touched, `IAX_ERR_DMR = -22` across the C ABI /
+Swift / Python, `Network.dmr` in the macOS app with the
+`system:host[:port]/tg[/ts]` grammar and the directory's 185 rows, and
+`astar-cli dmr-listen` (`--features dmr`) reading its password from
+`ASTAR_DMR_PASSWORD`, never `argv`.
+
+**Verified as bytes, not as sound.** The crate suites, the loopback master and
+the session pipeline prove bytes in and bytes out. Speech needs a `ThumbDV`
+and a live master: `just dmr-parrot` then `just dmr-listen`, and that is
+Rob's, not an agent's.
+
+**Receive only.** `set_ptt` refuses a key-down while a DMR link is live, the
+snapshot's `ptt` is always false, and `dmr-listen` has no PTT reader at all.
+
+**Owed, in order:** (1) a **human read of BrandMeister's three wiki pages** —
+Task 2's fetch met an anti-bot interstitial, the finding is outcome (b), and
+the engine refuses BrandMeister unconditionally (`BRANDMEISTER_CONSENTED`, a
+`const false`) until somebody has read their own wording (iax-e1d8 threads the
+in-arg once that read stands); (2) **transmit**, Tasks 12–13 of the plan,
+fenced until Rob confirms a clean YSF parrot round trip, then the parrot on
+127.0.0.1 before TGIF and nothing else (iax-f4c1 lists what transmit owes);
+(3) talkgroup lists for the networks whose directory rows carry none, and for
+TGIF, which publishes no server rows at all.
+
+**Fixed 2026-09-07 (whole-branch review):** the two `system` vocabularies met
+at the ABI with no bridge on the Rust side, so `Station::dmr_connect` refused
+every one of the app's 185 directory rows as an "unknown DMR network" — DVRef
+names servers (111 distinct `system` values), `DmrNetwork` names families, and
+not one server name equals a family slug. `dmr_connect` now takes any
+non-empty `system`, resolving the family through `DmrNetwork::from_slug` then
+the new `DmrNetwork::from_system_slug` (the twin of the app's
+`DmrDial.family(ofSystem:)`, same table, same order) and dialing with
+`family: None` when neither answers; BrandMeister is refused on the resolved
+family AND on the raw spelling. `DmrConfig` carries `system: String` beside
+`family: Option<DmrNetwork>`. The stale "directory rows" doc comment on
+`DmrNetwork::slug` went with it.
 
 **Not here, deliberately:** master hostnames, ports and passwords. Passwords
 are per-network secrets — connect-time in-args only. Endpoints are directory
 data that moves, and a hostname compiled into the engine goes stale in a
 shipped binary.
+
+### iax-e1d8 — BrandMeister consent has no way in: thread the in-arg through
+*P3 low · feature · labels: dmr, api, abi, app, cx:3*
+**Blocked by:** a human read of BrandMeister's wiki (iax-d4f7's owed item 1)
+
+The gate is built and closed. `astar_dmr::dialable(consented)` decides, and
+every call site asks it — but the only caller passes `BRANDMEISTER_CONSENTED`
+(`crates/astar-station/src/station.rs`), a `const false` with no preference,
+no config field and no C ABI in-arg behind it. The macOS app's consent
+checkbox records an intent and opens nothing; its help text says so.
+
+That is the deliberate 2026-09-07 state, not an oversight: Task 2's check
+(`docs/design/dmr-brandmeister-position.md`) is outcome (b) — no published
+BrandMeister position astar could confirm, because their wiki answered every
+fetch with an anti-bot interstitial, while third-party accounts point toward
+(a), a network that asks softclients to stay off the Homebrew login. **A human
+with a browser settles that in about a minute; nobody has.**
+
+If the read confirms (b): thread a `brandmeister_consented` in-arg through
+`Station::dmr_connect` → the C ABI → the Swift binding → `CallSession`, so the
+checkbox the operator ticked is the value the gate reads, and no default
+anywhere is `true`. If it confirms (a): leave BrandMeister listed and refused
+and write down why, which is the answer `p25-network.md` gives for IMBE. Do
+not open the gate on an inference either way.
+
+### iax-a7b2 — `*_can_connect` says yes where `open_voice_route` says no
+*P3 low · bug · labels: api, dstar, ysf, nxdn, dmr, cx:1*
+
+`dstar_can_connect` / `ysf_can_connect` / `nxdn_can_connect` /
+`dmr_can_connect` (`crates/astar-console/src/session.rs`) exist so an embedder
+can grey a button out before it tries. All four check `active`, the other
+networks and `voice_route` — and **none of them checks the IAX2 link count**,
+which `can_open_voice_route` does through `Manager::call_count() > 0`. Links
+live in the Manager's call table and never set `active`, so an embedder
+holding a Transceive link is told a D-Star connect would succeed and then
+handed `AlreadyConnected` when it tries.
+
+One line each, or better: have all four delegate to `can_open_voice_route`
+plus their own "is my link already up" test, so the shared half cannot drift
+again. Pin it with a test that opens an IAX2 link and asserts every
+`*_can_connect` refuses.
+
+### iax-f4c1 — what DMR transmit owes before it can go on the air
+*P3 low · task · labels: dmr, transmit, cx:3*
+**Blocked by:** the YSF parrot round-trip confirmation (Tasks 12–13 fence)
+
+Collected while landing DMR receive, so the transmit task starts from a list
+rather than rediscovering them:
+
+* **A real DMR silence frame.** `null_frame(VocoderMode::Dmr)` in
+  `crates/astar-codec/src/ambe.rs` substitutes D-Star's null codeword — nine
+  bytes of the wrong vocoder configuration, tolerable ONLY because nothing
+  transmits DMR. The reference pattern is `MMDVMHost/DMRDefines.h`'s silence;
+  the hardware session is the arbiter if the two disagree.
+* **`EmbeddedLcAssembler`, one per timeslot.** A single assembler shared
+  across TS1 and TS2 interleaves two streams' LC fragments into one wrong
+  answer. Receive today joins one slot, so it cannot happen; transmit and any
+  future dual-slot receive can.
+* **`discard_rx` on the key-down edge**, as `crates/astar-console/src/ysf.rs`
+  does. One AMBE-3000 means a keyed station must drop in-flight decodes rather
+  than let them surface as garble after the over.
+* **The parrot's capture cap.** `crates/astar-dmr/src/master.rs` grows a
+  capture until the terminator or the stale window; a peer that keys and never
+  unkeys grows it without bound. Dev-tool grade today because nothing keys
+  into it — that changes the day transmit lands.
 
 ### iax-b9c2 — NXDN engine backend: NXDNReflector protocol
 *P4 backlog · feature · labels: nxdn, protocol, cx:4*
@@ -1661,6 +1763,13 @@ and `*-listen`'s `link_state == "failed"` exit path is unreachable. Fix all
 three (four) networks together: publish `Failed` on `FsmAction::Timeout`
 before leaving the loop, and pin it with a scripted-reflector test that
 stops answering polls.
+
+**Update 2026-09-07: DMR is the one that does it right.**
+`crates/astar-console/src/dmr.rs` publishes `Failed` on a timeout AND on a
+send failure, carrying the step it failed at, and `dmr-listen`'s
+`link_state == "failed"` exit path is therefore reachable. That is the shape
+to back-port to YSF, NXDN and D-Star — the fix is written, it just lives on
+one network.
 
 ### astar-nxdn-polish — small NXDN follow-ups from the whole-branch review
 *P4 backlog · task · labels: nxdn, app, cx:1*

@@ -192,7 +192,9 @@ extension ReflectorDial {
     public var addressesModule: Bool {
         switch self {
         case .dextra, .m17, .urf: return true
-        case .ysf, .nxdn, .p25, .unsupported: return false
+        // DMR's room is a talkgroup on a timeslot, and neither is a module:
+        // a module separator in a DMR target is refused, not ignored.
+        case .ysf, .nxdn, .mmdvm, .p25, .unsupported: return false
         }
     }
 }

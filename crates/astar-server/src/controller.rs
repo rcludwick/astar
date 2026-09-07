@@ -206,7 +206,7 @@ impl NodeController {
                 // alone would have made `POST /key` a remote D-Star transmit
                 // trigger.
                 let snap = self.station.snapshot();
-                if let Some(e) = key_refusal(snap.dstar_active, snap.ysf_active, snap.nxdn_active) {
+                if let Some(e) = key_refusal_from(&snap) {
                     return Err(e);
                 }
                 self.station.set_ptt(true).map_err(|e| station_err(&e))?;
@@ -884,34 +884,51 @@ impl NodeController {
 }
 
 /// Whether a key-down must be refused, given the snapshot's digital-voice
-/// flags (iax-d9f4, extended for YSF in astar-e7b3 and for NXDN in
-/// iax-b9c2). `Some(err)` refuses; `None` lets the key through.
+/// flags (iax-d9f4, extended for YSF in astar-e7b3, for NXDN in iax-b9c2 and
+/// for DMR in iax-d4f7). `Some(err)` refuses; `None` lets the key through.
 ///
 /// Pure, so the policy is testable without a `ThumbDV` and a live reflector —
-/// the only way to make a real `Station` report either flag.
+/// the only way to make a real `Station` report any of these flags.
 ///
-/// The three dongle networks are the ones this crate must never key. D-Star
-/// can transmit and must not be made to do so from here; YSF and NXDN cannot
-/// transmit at all yet, so keying either would be a refusal further down
-/// anyway — but a refusal that names the reason beats one that does not, and
-/// the day either grows a transmit path this guard is already in front of it
-/// rather than needing to be remembered.
+/// The four dongle networks are the ones this crate must never key. D-Star
+/// can transmit and must not be made to do so from here; YSF, NXDN and DMR
+/// cannot transmit at all yet, so keying any of them would be a refusal
+/// further down anyway — but a refusal that names the reason beats one that
+/// does not, and the day one grows a transmit path this guard is already in
+/// front of it rather than needing to be remembered. DMR is the sharpest
+/// case: a master routes by the radio ID the link logged in with, so a
+/// remotely triggered key would put bursts on a live network under the
+/// operator's own registration.
 ///
-/// Every flag is read off the SNAPSHOT, never a `#[cfg]`: enabling `nxdn`
-/// (or `dstar`, or `ysf`) anywhere in a workspace build unifies the feature
-/// into this crate too, so a compile-time guard would be exactly as absent
-/// as the feature is present.
+/// Every flag is read off the SNAPSHOT, never a `#[cfg]`: enabling `dmr` (or
+/// `nxdn`, or `dstar`, or `ysf`) anywhere in a workspace build unifies the
+/// feature into this crate too, so a compile-time guard would be exactly as
+/// absent as the feature is present.
 ///
 /// Everything else reachable from here (IAX2, M17) is remotely keyable by
 /// design; see `Station::set_ptt`'s "Remote-control surfaces" section for why
 /// the check lives at the caller rather than inside the station.
-fn key_refusal(dstar_active: bool, ysf_active: bool, nxdn_active: bool) -> Option<NodeError> {
+// Four bools, and they stay four bools: each is one network's snapshot flag,
+// read straight off `ConsoleState`, and the shape must be `#[cfg]`-free (see
+// the doc above). Folding them into an enum would mean deciding "which
+// network is live" at the call site — which is exactly the decision this
+// function exists to own, and exactly what a fifth network would then have to
+// remember to update in two places instead of one.
+#[allow(clippy::fn_params_excessive_bools)]
+fn key_refusal(
+    dstar_active: bool,
+    ysf_active: bool,
+    nxdn_active: bool,
+    dmr_active: bool,
+) -> Option<NodeError> {
     let network = if dstar_active {
         "D-Star"
     } else if ysf_active {
         "System Fusion"
     } else if nxdn_active {
         "NXDN"
+    } else if dmr_active {
+        "DMR"
     } else {
         return None;
     };
@@ -921,6 +938,18 @@ fn key_refusal(dstar_active: bool, ysf_active: bool, nxdn_active: bool) -> Optio
              remotely keyable"
         ),
     })
+}
+
+/// [`key_refusal`] asked of a live snapshot: the four flags read in one
+/// place, so `execute` stays a dispatcher and the policy stays in one pure,
+/// separately testable function.
+fn key_refusal_from(snap: &astar_station::ConsoleState) -> Option<NodeError> {
+    key_refusal(
+        snap.dstar_active,
+        snap.ysf_active,
+        snap.nxdn_active,
+        snap.dmr_active,
+    )
 }
 
 /// Map a `StationError` to a secret-free `NodeError`.
@@ -2284,8 +2313,8 @@ mod tests {
     /// must stay a local, deliberate act.
     #[test]
     fn keying_is_refused_while_a_dstar_session_is_active() {
-        let refusal =
-            key_refusal(true, false, false).expect("an active D-Star session must refuse the key");
+        let refusal = key_refusal(true, false, false, false)
+            .expect("an active D-Star session must refuse the key");
         assert!(
             refusal.message.contains("D-Star"),
             "the refusal must say why, so an operator is not left guessing: {:?}",
@@ -2300,7 +2329,7 @@ mod tests {
     #[test]
     fn keying_is_refused_while_a_ysf_link_is_active() {
         let refusal =
-            key_refusal(false, true, false).expect("an active YSF link must refuse the key");
+            key_refusal(false, true, false, false).expect("an active YSF link must refuse the key");
         assert!(
             refusal.message.contains("System Fusion"),
             "the refusal must name the network: {:?}",
@@ -2314,8 +2343,8 @@ mod tests {
     /// network is present.
     #[test]
     fn keying_is_refused_while_an_nxdn_link_is_active() {
-        let refusal =
-            key_refusal(false, false, true).expect("an active NXDN link must refuse the key");
+        let refusal = key_refusal(false, false, true, false)
+            .expect("an active NXDN link must refuse the key");
         assert!(
             refusal.message.contains("NXDN"),
             "the refusal must name the network: {:?}",
@@ -2328,12 +2357,27 @@ mod tests {
         );
     }
 
+    /// And so does a live DMR link.
+    #[test]
+    fn key_is_refused_while_a_dmr_link_is_active() {
+        // adding-a-network.md §2.8: on the SNAPSHOT flag, never a #[cfg] —
+        // enabling `dmr` on astar-sys unifies it into astar-server too.
+        let refusal = key_refusal(false, false, false, true).expect("a refusal");
+        assert!(refusal.message.contains("DMR"));
+        assert!(refusal.message.contains("refusing to key"));
+    }
+
+    #[test]
+    fn key_is_allowed_when_no_digital_session_holds_the_dongle() {
+        assert!(key_refusal(false, false, false, false).is_none());
+    }
+
     /// Every other network stays remotely keyable — the guard must not have
     /// turned `POST /key` off wholesale.
     #[test]
     fn keying_is_allowed_when_no_digital_voice_session_is_active() {
         assert!(
-            key_refusal(false, false, false).is_none(),
+            key_refusal(false, false, false, false).is_none(),
             "IAX2 and M17 keying must be unaffected by the dongle-network guard"
         );
     }

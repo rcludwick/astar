@@ -12,7 +12,7 @@ inline. All 129 issues (107 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (36)
+## Open items (37)
 
 ### astar-guidv — the Iced client has no digital voice at all
 *P2 medium · feature · labels: gui, cross-platform, dstar, ysf, cx:8*
@@ -281,6 +281,50 @@ ThumbDV) is Rob's, not an agent's.
 YSF parrot round-trip check), and the still-open decision on whether the
 `1...65519` range check should move into the engine so every caller gets it,
 not just this app.
+
+### astar-d9c4 — DMR network: Network.dmr light-up (talkgroups on masters)
+*P4 backlog · feature · labels: cx:3, dmr*
+**Blocked by:** iax-d4f7 (DMR engine backend)
+
+**Design:** `docs/design/dmr-networks.md` — and read the "directory system
+slug is not the engine family slug" correction there before touching the
+picker.
+
+**Progress 2026-09-07 — RECEIVE IS BUILT.** `Network.dmr` is in the switcher:
+`AstarCore`/`AstarStation` gained `dmrConnect`/`dmrDisconnect`/`dmrAvailable`/
+`dmrState`, the picker shows DMR whenever a `ThumbDV` is attached (the same
+hardware gate as D-Star/YSF/NXDN), and the target is four parts —
+`DmrDial`'s `system:host[:port]/tg[/ts]`, defaulting the port to 62031 and the
+timeslot to TS2. The directory's 185 DMR rows are grouped by `DmrFamily` via
+`DmrDial.family(ofSystem:)`, which answers `nil` for "independent,
+unrecognised" rather than guessing — most rows do, and every one of them is
+still listed and still dialable. That last word became true on 2026-09-07:
+until the whole-branch review the engine resolved `system` with
+`DmrNetwork::from_slug` alone and refused all 185 rows as "unknown DMR
+network", since no directory server name equals a family slug.
+`astar_dmr::DmrNetwork::from_system_slug` is now the Rust twin of
+`family(ofSystem:)` — same table, same order — and a name added to one belongs
+in both. The master password is a per-system
+credential, and the BrandMeister consent checkbox is present, off by default,
+with help text saying in as many words that this build cannot reach
+BrandMeister at all. Receive only: no PTT button is offered, because the
+engine has no DMR transmit path yet (`canTransmit` is false for DMR).
+
+**Verified: loopback, unit tests and the CLI. UNVERIFIED: the UI on screen.**
+Nobody has watched the DMR picker, dial field, consent checkbox and last-heard
+line with a `ThumbDV` attached and a master answering. That is the checkpoint
+that needs a human and a dongle — `just dmr-parrot` on 127.0.0.1 is enough for
+the link half of it, and TGIF is the only sanctioned live target. Until then
+the app's DMR path is proven as bytes and unproven as an interface, which is
+exactly the bar `docs/app/` holds UI work to.
+
+**Owed:** the on-screen pass above; transmit (blocked on `iax-d4f7`'s Tasks
+12–13, in turn fenced on the YSF parrot round-trip check); the BrandMeister
+consent in-arg (`iax-e1d8`), without which the checkbox stays an intent the
+engine cannot read; and richer talkgroup pickers — the app consumes a row's
+per-system talkgroup list where the directory publishes one, and many rows
+publish none, TGIF included (it has no server rows at all, so it is reached by
+typing `tgif:tgif.network:62031/31313/2`).
 
 ### astar-f1c6 — Hams Over IP network: Network.hoip light-up (SIP/G.711)
 *P3 low · feature · labels: cx:3, hoip*

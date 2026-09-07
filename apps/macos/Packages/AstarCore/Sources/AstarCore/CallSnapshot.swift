@@ -74,6 +74,13 @@ public struct CallSnapshot: Equatable {
     /// every other network at the engine. Receive only: no PTT while it is
     /// set.
     public var nxdnActive: Bool
+    /// Whether the engine can link DMR. The SAME fact as `dstarAvailable`,
+    /// `ysfAvailable` and `nxdnAvailable` — one ThumbDV, one probe — carried
+    /// separately only so a caller never has to know that.
+    public var dmrAvailable: Bool
+    /// Whether the live session is a DMR link. Mutually exclusive with every
+    /// other network at the engine. Receive only: no PTT while it is set.
+    public var dmrActive: Bool
 
     public init(
         status: IaxStatus, ptt: Bool, remotePTT: Bool,
@@ -85,7 +92,8 @@ public struct CallSnapshot: Equatable {
         m17Available: Bool = false, m17Active: Bool = false,
         dstarAvailable: Bool = false, dstarActive: Bool = false,
         ysfAvailable: Bool = false, ysfActive: Bool = false,
-        nxdnAvailable: Bool = false, nxdnActive: Bool = false
+        nxdnAvailable: Bool = false, nxdnActive: Bool = false,
+        dmrAvailable: Bool = false, dmrActive: Bool = false
     ) {
         self.status = status
         self.ptt = ptt
@@ -107,6 +115,8 @@ public struct CallSnapshot: Equatable {
         self.ysfActive = ysfActive
         self.nxdnAvailable = nxdnAvailable
         self.nxdnActive = nxdnActive
+        self.dmrAvailable = dmrAvailable
+        self.dmrActive = dmrActive
     }
 
     /// The idle resting state: no call, meters at the floor.

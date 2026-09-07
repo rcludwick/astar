@@ -276,6 +276,19 @@ public struct Snapshot: Sendable, Equatable {
     /// RECEIVE ONLY. There is no NXDN transmit path: a key-down is refused,
     /// not queued, so a UI must not offer a PTT affordance while this is set.
     public let nxdnActive: Bool
+    /// `true` when DMR voice is available: the `dmr` feature is compiled in
+    /// AND a ThumbDV is attached right now.
+    ///
+    /// The same probe ``dstarAvailable``, ``ysfAvailable`` and
+    /// ``nxdnAvailable`` read — one dongle, one answer — so all four always
+    /// agree and a UI can grey their affordances together.
+    public let dmrAvailable: Bool
+    /// `true` while a DMR link is live — mutually exclusive with an IAX2
+    /// call, an M17 session, a D-Star session, a YSF link and an NXDN link.
+    ///
+    /// RECEIVE ONLY. There is no DMR transmit path: a key-down is refused,
+    /// not queued, so a UI must not offer a PTT affordance while this is set.
+    public let dmrActive: Bool
 }
 
 /// The YSF-shaped state of a live link, from ``Station/ysfState()``.
@@ -476,6 +489,133 @@ public struct NXDNState: Equatable, Sendable {
         link = Link(rawValue: linkString) ?? .failed
         lastHeard = obj["last_heard"] as? String
         lastHeardID = (obj["last_heard_id"] as? NSNumber)?.uint16Value
+        framesRX = (obj["frames_rx"] as? NSNumber)?.uint64Value ?? 0
+        receiving = obj["receiving"] as? Bool ?? false
+        backend = (obj["backend"] as? String).flatMap(Backend.init(rawValue:))
+        ptt = obj["ptt"] as? Bool ?? false
+    }
+}
+
+/// The DMR-shaped state of a live link, from ``Station/dmrState()``.
+///
+/// Everything network-agnostic — the level meters, the call status — lives on
+/// ``Station/Snapshot``. Credential-free: numbers and counters only. The
+/// master password given to ``Station/connectDMR(system:host:port:radioID:callsign:talkgroup:timeslot:password:)``
+/// is not here, and there is no field it could occupy.
+public struct DMRState: Equatable, Sendable {
+    /// State of the link to the master.
+    ///
+    /// Longer than ``NXDNState/Link``'s vocabulary because a homebrew login is
+    /// a CONVERSATION — login, then authenticate, then configure, each a round
+    /// trip that can stall on its own — and an operator watching a connect
+    /// hang is owed which one stalled.
+    public enum Link: String, Sendable {
+        case idle
+        case loggingIn = "logging_in"
+        case authenticating
+        case configuring
+        case linked
+        case closing
+        case failed
+    }
+
+    /// Where a failed link failed.
+    ///
+    /// ``auth`` ("your password is wrong") and ``login`` ("your ID is not
+    /// permitted on this master") are the two an operator can act on, and on
+    /// the wire the only difference between them is which packet the refusal
+    /// answered. Show it.
+    public enum Failure: String, Sendable {
+        case login, auth, config, session, closed, timeout
+    }
+
+    /// Which vocoder is decoding. Always ``Backend/thumbdv`` — DMR voice is
+    /// AMBE+2 and there is no software vocoder.
+    public enum Backend: String, Sendable {
+        case thumbdv
+    }
+
+    public let link: Link
+    /// Why the link failed, or `nil` while it has not.
+    public let failure: Failure?
+    /// The most recently heard station's DMR id, as text, or `nil` until one
+    /// transmits.
+    ///
+    /// A NUMBER, not a callsign: a `DMRD` frame carries `srcId` and no
+    /// callsign at all, so naming the sender is a directory lookup (radioid.net)
+    /// astar does not hold. Read from the header in clear — no vocoder
+    /// involved — and it PERSISTS past end-of-transmission: this is "last
+    /// heard", not "transmitting right now". Read ``receiving`` for that.
+    ///
+    /// Attacker-controlled: it is whatever the transmitting station put on
+    /// the wire. Render it as text, never as markup.
+    public let lastHeard: String?
+    /// That same id, unformatted, for a caller that has a directory to
+    /// resolve it against.
+    public let lastHeardID: UInt32?
+    /// The talkgroup this link joined.
+    public let talkgroup: UInt32
+    /// The timeslot it joined it on — `1` or `2`.
+    public let timeslot: UInt8
+    /// Network frames received since the link came up.
+    ///
+    /// A liveness counter: a link that is up and silent and one that is
+    /// receiving look identical from ``link`` alone.
+    public let framesRX: UInt64
+    /// `true` while a transmission is in progress.
+    public let receiving: Bool
+    /// The vocoder decoding this link, or `nil` for a link opened without
+    /// audio (or one whose backend this binding does not recognise).
+    public let backend: Backend?
+    /// `true` while this station is transmitting.
+    ///
+    /// ALWAYS `false` today: DMR is receive-only and a key is refused rather
+    /// than queued. It exists so a client polling every network through one
+    /// shape need not special-case this one.
+    public let ptt: Bool
+
+    /// Construct one directly.
+    ///
+    /// Public, like ``NXDNState``'s and ``YSFState``'s, because a SwiftUI
+    /// preview or a client test that renders the last-heard line needs a
+    /// value and has no master to hand.
+    public init(
+        link: Link, failure: Failure? = nil, lastHeard: String? = nil, lastHeardID: UInt32? = nil,
+        talkgroup: UInt32 = 0, timeslot: UInt8 = 0, framesRX: UInt64 = 0, receiving: Bool = false,
+        backend: Backend? = nil, ptt: Bool = false
+    ) {
+        self.link = link
+        self.failure = failure
+        self.lastHeard = lastHeard
+        self.lastHeardID = lastHeardID
+        self.talkgroup = talkgroup
+        self.timeslot = timeslot
+        self.framesRX = framesRX
+        self.receiving = receiving
+        self.backend = backend
+        self.ptt = ptt
+    }
+
+    /// Decode from the C-ABI's JSON. Returns `nil` for the `{}` no-link
+    /// document.
+    ///
+    /// An unrecognized `link` string means a newer engine is talking to an
+    /// older binding, and lands as ``Link/failed`` — the same answer
+    /// ``DStarState``, ``YSFState``, ``NXDNState`` and ``M17State`` give, and
+    /// the safe direction: a UI that believes the link is down offers nothing
+    /// on it. An unrecognized `failure` lands as `nil`, which is the same
+    /// safety in the other shape — better no diagnosis than a wrong one.
+    init?(json: String) {
+        guard let data = json.data(using: .utf8),
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let linkString = obj["link"] as? String
+        else { return nil }
+        link = Link(rawValue: linkString) ?? .failed
+        failure = (obj["failure"] as? String).flatMap(Failure.init(rawValue:))
+        lastHeard = obj["last_heard"] as? String
+        lastHeardID = (obj["last_heard_id"] as? NSNumber)?.uint32Value
+        talkgroup = (obj["talkgroup"] as? NSNumber)?.uint32Value ?? 0
+        timeslot = (obj["timeslot"] as? NSNumber)?.uint8Value ?? 0
         framesRX = (obj["frames_rx"] as? NSNumber)?.uint64Value ?? 0
         receiving = obj["receiving"] as? Bool ?? false
         backend = (obj["backend"] as? String).flatMap(Backend.init(rawValue:))
@@ -1838,6 +1978,85 @@ public final class Station {
         return NXDNState(json: String(cString: buf))
     }
 
+    /// Link to a DMR master's talkgroup and decode the audio on it.
+    ///
+    /// `system` is a network SLUG — `tgif`, `brandmeister`, … — not a
+    /// hostname: each network sets its own terms, and a near-miss resolved to
+    /// the wrong one would put the operator on the wrong system under their
+    /// own registration, so an unknown slug is refused rather than guessed.
+    /// `radioID` is that registration (radioid.net), `talkgroup` the room and
+    /// `timeslot` 1 or 2. DMR addresses stations by number: a `DMRD` carries
+    /// `srcId` and no callsign, so `callsign` rides only in the login.
+    ///
+    /// The `password` argument is the master password. It is NOT retained by
+    /// this binding: it crosses the ABI as a temporary C string, is copied
+    /// into the engine's own buffer for one login digest and dropped there.
+    /// Nothing on the station, in a snapshot, in an error or in
+    /// ``dmrState()`` ever holds it.
+    ///
+    /// HARDWARE-ONLY, like D-Star, YSF and NXDN and for the same reason — the
+    /// vocoder is AMBE+2 on a ThumbDV. Gate the affordance on
+    /// ``Snapshot/dmrAvailable`` rather than calling this speculatively.
+    ///
+    /// RECEIVE ONLY today. There is no DMR transmit path: a key-down is
+    /// refused, not queued, so do not offer PTT while this link is live.
+    ///
+    /// Throws `IAX_ERR_DMR` for an unknown or not-opted-in network, a zero or
+    /// over-wide `radioID`, an empty `callsign` or `password`, a zero
+    /// `talkgroup`, a `timeslot` that is not 1 or 2, or a login the master
+    /// refused; and `IAX_ERR_ALREADY_CONNECTED` when another session is live.
+    ///
+    /// NOTE: this blocks for a serial-port scan plus a per-port dongle init
+    /// and then a multi-round-trip login to the master — seconds, not
+    /// milliseconds. Do not call it on the main thread.
+    public func connectDMR(
+        system: String,
+        host: String,
+        port: UInt16,
+        radioID: UInt32,
+        callsign: String,
+        talkgroup: UInt32,
+        timeslot: UInt8,
+        password: String
+    ) throws {
+        try check(
+            system.withCString { systemPtr in
+                host.withCString { hostPtr in
+                    callsign.withCString { callsignPtr in
+                        password.withCString { passwordPtr in
+                            iax_station_connect_dmr(
+                                handle, systemPtr, hostPtr, port, radioID, callsignPtr, talkgroup,
+                                timeslot, passwordPtr)
+                        }
+                    }
+                }
+            }
+        )
+    }
+
+    /// Disconnect the live DMR link, if any. Idempotent — a no-op while idle.
+    public func dmrDisconnect() throws {
+        try check(iax_station_dmr_disconnect(handle))
+    }
+
+    /// The live DMR link's own state, or `nil` when none is active.
+    ///
+    /// Cheap, but not as cheap as ``snapshot()`` — it crosses the ABI with a
+    /// buffer and parses JSON. Poll ``snapshot()`` for meters; call this at UI
+    /// rate for the link state, the failure stage and the last-heard id.
+    public func dmrState() throws -> DMRState? {
+        let needed = iax_station_dmr_state(handle, nil, 0)
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
+        if needed == 0 { return nil }
+        // +1 for the NUL the C-ABI writes.
+        var buf = [CChar](repeating: 0, count: Int(needed) + 1)
+        let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+            iax_station_dmr_state(handle, ptr.baseAddress, UInt(ptr.count))
+        }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
+        return DMRState(json: String(cString: buf))
+    }
+
     /// The live M17 session's own state, or `nil` when none is active.
     ///
     /// Cheap, but not as cheap as ``snapshot()`` — it crosses the ABI with a
@@ -1913,7 +2132,9 @@ public final class Station {
             ysfAvailable: out.ysf_available,
             ysfActive: out.ysf_active,
             nxdnAvailable: out.nxdn_available,
-            nxdnActive: out.nxdn_active
+            nxdnActive: out.nxdn_active,
+            dmrAvailable: out.dmr_available,
+            dmrActive: out.dmr_active
         )
     }
 

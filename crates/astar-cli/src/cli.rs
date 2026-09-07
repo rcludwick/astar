@@ -24,6 +24,10 @@ COMMANDS:
     nxdn-listen    Link to an NXDNReflector talkgroup and decode RX audio
                    (receive only; requires a ThumbDV dongle and
                    `--features nxdn`).
+    dmr-listen     Log in to a DMR master, join a talkgroup on a timeslot,
+                   and decode RX audio (receive only; requires a ThumbDV
+                   dongle and `--features dmr`). The master password comes
+                   from ASTAR_DMR_PASSWORD, never from the command line.
     dstar-listen   Link to a D-Star DExtra reflector module, decode RX
                    audio, and key manual TX from stdin (built with
                    `--features dstar`).
@@ -214,6 +218,84 @@ software fallback). Links, prints \"linked <host>:<port> (backend: thumbdv)\",
 then a \"▶ <id>\" line per received transmission — a numeric id, not a
 callsign, because NXDN carries no callsign on the wire for anyone but the
 polling client itself. Ctrl-C unlinks cleanly.
+";
+
+/// `dmr-listen` usage. Only compiled with `--features dmr`.
+///
+/// There is no `--password` here, and there never will be: a secret in `argv`
+/// is readable by every process on the machine and lands in shell history.
+/// `ASTAR_DMR_PASSWORD` or nothing.
+#[cfg(feature = "dmr")]
+pub const DMR_LISTEN_USAGE: &str = "\
+astar-cli dmr-listen — log in to a DMR master, join a talkgroup, decode RX audio
+
+USAGE:
+    ASTAR_DMR_PASSWORD=<pass> \\
+      astar-cli dmr-listen [OPTIONS] <host> --system <net> --callsign <CS> \\
+      --radio-id <id> --tg <tg>
+
+ARGS:
+    <host>      Master host, or host:port. 62031 is the homebrew convention
+                 and is used when none is given; the network's own published
+                 port always wins.
+
+OPTIONS:
+    --port <u16>        Master UDP port. Equivalent to host:port; giving both
+                         is an error if they disagree.
+    --system <name>     Which DMR this is (required). A talkgroup number names
+                         nothing on its own — TG 91 is a different room on
+                         every one of these networks — so the network is part
+                         of the address, not a label. Any non-empty name is
+                         accepted and passed through verbatim: an engine
+                         family slug (tgif, freedmr, dmrplus, systemx,
+                         amcomm, vkdmr, freestar, adn) or a directory server
+                         name (freedmr-network, ipsc2-poland, xlx696). Only
+                         BrandMeister is refused, and only because this build
+                         cannot reach it at all.
+    --callsign <CS>     This station's callsign (required). Rides in the
+                         login, not in a voice burst — DMR addresses stations
+                         by number on the wire.
+    --radio-id <u32>    This station's DMR radio ID from radioid.net, 24 bits
+                         (required). A registration, not a default: 0 and
+                         anything past 16777215 are refused.
+    --tg <u32>          Talkgroup to join (required), 24 bits. A master routes
+                         by the room you joined, so there is no default to
+                         guess; 0 and anything past 16777215 are refused,
+                         because a DMRD destination id truncates rather than
+                         fails.
+    --ts <1|2>          Timeslot. Defaults to 2, the hotspot convention — a
+                         convention, not a specification.
+    --wav <path>        Write decoded audio as an 8 kHz s16 mono WAV file at
+                         <path> instead of playing it on the default output
+                         device.
+    -h, --help          Print this help and exit.
+
+ENVIRONMENT:
+    ASTAR_DMR_PASSWORD  The master's password (required). There is no flag
+                         that takes it and there will not be one: a secret in
+                         argv is readable by every process on the machine and
+                         ends up in shell history. It is used for one login
+                         digest and dropped; nothing stores or prints it.
+
+RECEIVE ONLY. This command has no PTT; astar has no DMR transmit path yet.
+
+Try it against your own machine first — `just dmr-parrot` runs a DMR master on
+127.0.0.1 that does the real login handshake, so a wrong digest fails there
+rather than against somebody's network:
+
+    just dmr-parrot 62031
+    ASTAR_DMR_PASSWORD=passw0rd just dmr-listen 127.0.0.1:62031 tgif KC0ABC \\
+      3153591 31313
+
+DMR is hardware-only: a ThumbDV USB dongle must be attached (AMBE+2 at
+2450 + 1150, no software fallback). Logs in, prints
+\"linked <host>:<port> (backend: thumbdv)\", then a \"▶ <id>\" line per received
+transmission — a numeric id, not a callsign, because a DMRD carries srcId and
+no callsign at all. Ctrl-C logs out cleanly.
+
+BrandMeister is refused by the engine on this build, opt-in or not: it is a
+private network whose operators set the terms, and astar has not confirmed
+where they stand on third-party clients. See docs/design/dmr-networks.md.
 ";
 
 /// Resolve `host` (optionally `host:port`) to a `SocketAddr`, defaulting the

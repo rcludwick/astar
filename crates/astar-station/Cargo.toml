@@ -28,6 +28,15 @@ astar-codec = { path = "../astar-codec", version = "0.1.11-beta" }
 # characterize / set-mic-profile FFI (iax-5fb6 / iax-2095).
 astar-audio = { path = "../astar-audio", version = "0.1.11-beta", features = ["serde"] }
 astar-asl3 = { path = "../astar-asl3", version = "0.1.11-beta" }
+# DMR's network taxonomy (iax-d4f7): `DmrNetwork::from_slug`, `dialable` and
+# `Timeslot`. NOT optional and NOT behind the `dmr` feature, unlike every
+# other network's protocol crate here — `Station::dmr_connect` resolves the
+# system slug, runs the BrandMeister consent gate and maps the timeslot
+# BEFORE its `#[cfg]` block, so those refusals hold identically with the
+# feature off. A crate that carries a taxonomy plus one `sha2` is cheap
+# enough to compile either way; a consent gate that only exists in some
+# builds is not.
+astar-dmr = { path = "../astar-dmr", version = "0.1.11-beta" }
 
 [dev-dependencies]
 astar-audio = { path = "../astar-audio", version = "0.1.11-beta", features = ["test-backend", "serde"] }
@@ -92,6 +101,19 @@ ysf = ["astar-console/ysf"]
 # `StationError::Nxdn("nxdn support not compiled")` / are no-ops / return
 # `false`.
 nxdn = ["astar-console/nxdn"]
+# DMR (iax-d4f7): re-exposes astar-console's `dmr` feature, wired through
+# `Station::dmr_connect`/`dmr_disconnect`/`dmr_available`/`dmr_state`. Not in
+# `default`, for the same reason `nxdn` is not: DMR voice is AMBE+2 — 72 bits
+# at its own rate word — so this pulls `astar-console/dmr` and through it
+# `astar-codec/ambe-hw`. Receive only: `set_ptt` refuses a key-down while a
+# DMR link is live (see `astar_console::dmr`'s Transmit section).
+# Byte-identical defaults with the feature off, same contract as `nxdn`: the
+# methods exist, and return `StationError::Dmr("dmr support not compiled")` /
+# are no-ops / return `false`. Note what this feature does NOT gate — the
+# system-slug resolution, the BrandMeister consent gate and the argument
+# refusals all run either way, off the unconditional `astar-dmr` dependency
+# above.
+dmr = ["astar-console/dmr"]
 # Link Codec 2 into the binary instead of relying on a system libcodec2 found
 # at runtime (astar-8c4d). NOT default, and it must never become one — see the
 # licensing note in `astar-codec/Cargo.toml`. The shipped macOS app turns this

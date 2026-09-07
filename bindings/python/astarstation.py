@@ -85,6 +85,10 @@ IAX_ERR_SERIAL = -9
 IAX_ERR_UTF8 = -10
 IAX_ERR_UNSUPPORTED = -11
 IAX_ERR_MODE_MISMATCH = -12
+# DMR link or validation failure (iax-d4f7). The codes between -13 and -21
+# are not mirrored here: they belong to entry points this binding does not
+# expose.
+IAX_ERR_DMR = -22
 
 
 # --------------------------------------------------------------------------- #
@@ -243,6 +247,8 @@ class _IaxState(ctypes.Structure):
         ("ysf_active", c_bool),  # a YSF link is live
         ("nxdn_available", c_bool),  # nxdn feature + a ThumbDV attached now (iax-b9c2)
         ("nxdn_active", c_bool),  # an NXDN link is live (receive-only: never offer PTT)
+        ("dmr_available", c_bool),  # dmr feature + a ThumbDV attached now (iax-d4f7)
+        ("dmr_active", c_bool),  # a DMR link is live (receive-only: never offer PTT)
     ]
 
 
@@ -310,6 +316,8 @@ class Snapshot:
     ysf_active: bool  # a YSF link is currently live
     nxdn_available: bool  # nxdn feature compiled in AND a ThumbDV attached now
     nxdn_active: bool  # an NXDN link is currently live (receive-only: never key)
+    dmr_available: bool  # dmr feature compiled in AND a ThumbDV attached now
+    dmr_active: bool  # a DMR link is currently live (receive-only: never key)
 
 
 @dataclass(frozen=True)
@@ -944,6 +952,8 @@ class Station:
             ysf_active=bool(out.ysf_active),
             nxdn_available=bool(out.nxdn_available),
             nxdn_active=bool(out.nxdn_active),
+            dmr_available=bool(out.dmr_available),
+            dmr_active=bool(out.dmr_active),
         )
 
     def next_event(self) -> Event | None:

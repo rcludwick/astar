@@ -136,6 +136,16 @@
 #define IAX_ERR_NXDN -21
 
 /**
+ * DMR error (iax-d4f7): an unknown network slug, a network the operator has
+ * not opted in to, a radio id/callsign/talkgroup/timeslot the wire cannot
+ * carry, an empty master password, a login the master refused, a refused key
+ * (DMR is receive-only — see `astar_console::dmr`'s Transmit section), or the
+ * `dmr` feature not being compiled in. Read `iax_station_last_error` for
+ * which — it never carries the password.
+ */
+#define IAX_ERR_DMR -22
+
+/**
  * Number of log-spaced dBFS bins [`iax_station_mic_spectrum`] writes when
  * monitoring (iax-e73e). Size the `out` array to (at least) this; a larger
  * buffer is fine (the extra entries are left untouched). A literal here so
@@ -617,6 +627,29 @@ typedef struct {
    * compiling the feature.
    */
   bool nxdn_active;
+  /**
+   * `true` when DMR voice is available: the `dmr` feature is compiled in
+   * AND a `ThumbDV` is attached right now. DMR voice is AMBE+2 — the same
+   * 49-bit frame YSF DN and NXDN carry, off the same dongle — so this is
+   * the same cached probe [`Self::dstar_available`],
+   * [`Self::ysf_available`] and [`Self::nxdn_available`] read, and all
+   * four move together.
+   */
+  bool dmr_available;
+  /**
+   * `true` while a DMR link is live — mutually exclusive with an IAX2
+   * call, an M17 session, a D-Star session, a YSF link and an NXDN link
+   * (see [`iax_station_connect_dmr`]).
+   *
+   * RECEIVE ONLY: there is no DMR transmit path, so a key is refused
+   * rather than queued and a UI must not offer PTT while this is set.
+   *
+   * Feature-INDEPENDENT, exactly as [`Self::dstar_active`],
+   * [`Self::ysf_active`] and [`Self::nxdn_active`] are: `astar-server`
+   * refuses remote keying while a digital-voice link holds the dongle and
+   * must read that without compiling the feature.
+   */
+  bool dmr_active;
 } IaxState;
 
 /**
@@ -1607,6 +1640,108 @@ int iax_station_nxdn_disconnect(IaxStation *st);
  * in. Returns [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
  */
 int iax_station_nxdn_state(IaxStation *st, char *buf, uintptr_t len);
+
+/**
+ * Link to a DMR master's talkgroup and decode the audio on it (iax-d4f7).
+ *
+ * `system` is a network SLUG — `tgif`, `brandmeister`, … — not a hostname:
+ * each network has its own rules, and a near-miss that resolved to the wrong
+ * one would put the operator on the wrong system under their own registered
+ * ID, so an unknown slug is refused rather than guessed. `host`/`port` are
+ * that network's master. `radio_id` is the station's radioid.net
+ * registration, `talkgroup` the room and `timeslot` 1 or 2. DMR addresses
+ * stations by NUMBER — a `DMRD` carries `srcId` and no callsign at all — so
+ * `callsign` rides only in the login's config packet.
+ *
+ * # The password
+ * `password` is the master password. It is copied out of the caller's buffer
+ * into an owned `String` at the top of this function, moved onward into the
+ * link, spent on one login digest and dropped. Nothing on the station, in a
+ * snapshot, in an error, in the state JSON or in a log ever holds it — see
+ * [`iax_station_dmr_state`], whose document has no field it could occupy.
+ * The caller's own buffer is the caller's to scrub.
+ *
+ * DMR is HARDWARE-ONLY for the same reason D-Star, YSF and NXDN are — the
+ * vocoder is AMBE+2 on a DVSI `ThumbDV`. Poll [`IaxState::dmr_available`] and
+ * offer the affordance only when it is `true`, rather than calling this
+ * speculatively.
+ *
+ * **RECEIVE ONLY today.** There is no DMR transmit path: a key-down is
+ * REFUSED, not queued, so a UI must not offer PTT while this link is live.
+ * See `astar_console::dmr`'s Transmit section for why a refusal beats a key
+ * that silently does nothing.
+ *
+ * `system`, `host`, `callsign` and `password` are required (NULL/non-UTF-8 →
+ * [`IAX_ERR_NULL`] / [`IAX_ERR_UTF8`]; a NULL password is a caller bug, not
+ * an empty password). Returns [`IAX_OK`], [`IAX_ERR_ALREADY_CONNECTED`] (any
+ * other network is live), [`IAX_ERR_DMR`] for an unknown or ungated network,
+ * a zero/over-wide `radio_id`, an empty `callsign` or `password`, a zero
+ * `talkgroup`, a `timeslot` that is not 1 or 2, or a login the master
+ * refused, or [`IAX_ERR_PANIC`].
+ *
+ * NOTE: this performs blocking work — a serial-port scan plus, per candidate
+ * port and baud rate, an open and a multi-transaction dongle init, then a
+ * socket bind and a multi-round-trip login to the master. It can take
+ * several seconds. Call it off any UI thread.
+ */
+int iax_station_connect_dmr(IaxStation *st,
+                            const char *system,
+                            const char *host,
+                            uint16_t port,
+                            uint32_t radio_id,
+                            const char *callsign,
+                            uint32_t talkgroup,
+                            uint8_t timeslot,
+                            const char *password);
+
+/**
+ * Disconnect the live DMR link, if any. Idempotent — a no-op while idle.
+ * Returns [`IAX_OK`], [`IAX_ERR_NULL`], or [`IAX_ERR_PANIC`].
+ */
+int iax_station_dmr_disconnect(IaxStation *st);
+
+/**
+ * Write the live DMR link's state as JSON into the caller buffer `buf` of
+ * `len` bytes (NUL-terminated, truncate-safe; same contract as
+ * [`iax_station_nxdn_state`] — returns the byte length the full JSON needs,
+ * excluding the NUL, so a `len == 0` call is a sizing query).
+ *
+ * ```json
+ * {"link":"linked","failure":null,"last_heard":"4242","last_heard_id":4242,
+ *  "talkgroup":31313,"timeslot":2,"frames_rx":97,"receiving":true,
+ *  "backend":"thumbdv","ptt":false,"rx_db":-31.2}
+ * ```
+ *
+ * `link` is one of `idle`/`logging_in`/`authenticating`/`configuring`/
+ * `linked`/`closing`/`failed` — a homebrew login is a conversation, and an
+ * operator watching it stall is owed which round trip stalled.
+ *
+ * `failure` says where a failed link failed — `login`/`auth`/`config`/
+ * `session`/`closed`/`timeout` — and is `null` while it has not. "Your
+ * password is wrong" (`auth`) and "your ID is not allowed here" (`login`) are
+ * the two an operator can act on; show it.
+ *
+ * `last_heard` is a NUMBER rendered as a string, not a callsign: a `DMRD`
+ * datagram carries `srcId` and no callsign at all, so identifying the sender
+ * is a directory lookup astar does not hold. `last_heard_id` is that same id
+ * unformatted, for a caller that has a directory. Both PERSIST past
+ * end-of-transmission — they are "most recently heard", not "currently
+ * transmitting". `receiving` is the one that says whether a transmission is
+ * in progress, and `frames_rx` is a liveness counter: a link that is up and
+ * silent and one that is receiving look identical from `link` alone.
+ *
+ * `timeslot` is the slot NUMBER, 1 or 2 (the engine's own `ts1`/`ts2` label
+ * is not what an operator reads).
+ *
+ * `ptt` is always `false`: DMR is receive-only today and a key is refused.
+ *
+ * Every field is credential-free: numbers, counters and a level. There is no
+ * password field, and `iax_station_connect_dmr`'s never reaches here.
+ *
+ * Writes `{}` when no link is active or the `dmr` feature isn't compiled in.
+ * Returns [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
+ */
+int iax_station_dmr_state(IaxStation *st, char *buf, uintptr_t len);
 
 #ifdef __cplusplus
 }  // extern "C"

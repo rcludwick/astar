@@ -543,4 +543,96 @@ final class StationTests: XCTestCase {
         }
     }
 
+    // MARK: - DMR (iax-d4f7)
+
+    func testDMRStateDecodesTheEngineJSON() throws {
+        let json = """
+            {"link":"linked","failure":null,"last_heard":"4242","last_heard_id":4242,\
+            "talkgroup":31313,"timeslot":2,"frames_rx":97,"receiving":true,\
+            "backend":"thumbdv","ptt":false,"rx_db":-31.2}
+            """
+        let state = try XCTUnwrap(DMRState(json: json))
+        XCTAssertEqual(state.link, .linked)
+        XCTAssertNil(state.failure, "a linked link has not failed")
+        XCTAssertEqual(state.lastHeard, "4242")
+        XCTAssertEqual(state.lastHeardID, 4242)
+        XCTAssertEqual(state.talkgroup, 31313)
+        XCTAssertEqual(state.timeslot, 2)
+        XCTAssertEqual(state.framesRX, 97)
+        XCTAssertTrue(state.receiving)
+        XCTAssertEqual(state.backend, .thumbdv)
+        XCTAssertFalse(state.ptt, "DMR is receive-only: ptt is always false")
+    }
+
+    func testDMRAuthFailureSurvivesTheCrossing() throws {
+        // The one failure an operator can actually fix themselves, and the
+        // only reason the engine reports a stage at all.
+        let json = """
+            {"link":"failed","failure":"auth","talkgroup":31313,"timeslot":2,\
+            "frames_rx":0,"receiving":false,"ptt":false}
+            """
+        let state = try XCTUnwrap(DMRState(json: json))
+        XCTAssertEqual(state.link, .failed)
+        XCTAssertEqual(state.failure, .auth)
+    }
+
+    func testAnUnrecognisedDMRLinkDecodesToTheSafeCase() throws {
+        // A UI that believes the link is down will not offer PTT. An unknown
+        // string must never be read as `linked`. `failed` is what D-Star,
+        // YSF, NXDN and M17 answer, so one decoder shape covers them all.
+        let json = """
+            {"link":"quantum","talkgroup":1,"timeslot":2,"frames_rx":0,\
+            "receiving":false,"ptt":false}
+            """
+        let state = try XCTUnwrap(DMRState(json: json))
+        XCTAssertEqual(state.link, .failed)
+    }
+
+    func testAnUnrecognisedDMRFailureDecodesToNil() throws {
+        let json = """
+            {"link":"failed","failure":"quantum","talkgroup":1,"timeslot":1,\
+            "frames_rx":0,"receiving":false,"ptt":false}
+            """
+        let state = try XCTUnwrap(DMRState(json: json))
+        XCTAssertNil(state.failure, "an unknown stage names nothing an operator could act on")
+    }
+
+    func testEmptyDMRStateJSONIsNil() {
+        XCTAssertNil(DMRState(json: "{}"), "the no-link document decodes as nil")
+    }
+
+    func testFreshStationHasNoDMRLink() throws {
+        let station = try Station()
+        XCTAssertNil(try station.dmrState())
+        XCTAssertFalse(try station.snapshot().dmrActive)
+    }
+
+    func testDMRDisconnectIsIdempotentWhileIdle() throws {
+        let station = try Station()
+        XCTAssertNoThrow(try station.dmrDisconnect())
+        XCTAssertNoThrow(try station.dmrDisconnect())
+    }
+
+    /// An empty system is refused before a socket or a dongle is touched, so
+    /// this holds with or without a dongle attached.
+    ///
+    /// Empty, not `not-a-network`: an unrecognised system is DIALED now — a
+    /// directory row's `system` names a server, and none of the feed's 111
+    /// values equals an engine family slug — so a nonsense one here would
+    /// reach the dongle probe and, with a ThumbDV attached, seize it.
+    func testConnectDMRRejectsAnEmptySystem() throws {
+        let station = try Station()
+        XCTAssertThrowsError(
+            try station.connectDMR(
+                system: "", host: "127.0.0.1", port: 62031, radioID: 1_234_567,
+                callsign: "N0CALL", talkgroup: 31313, timeslot: 2, password: "passw0rd")
+        ) { error in
+            // IAX_ERR_DMR == -22
+            XCTAssertEqual((error as? StationError)?.code, -22)
+            XCTAssertFalse(
+                (error as? StationError)?.detail.contains("passw0rd") ?? false,
+                "no refusal may echo the master password")
+        }
+    }
+
 }

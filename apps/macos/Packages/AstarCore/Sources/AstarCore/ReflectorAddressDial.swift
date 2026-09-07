@@ -171,3 +171,237 @@ public enum DStarDial {
         ReflectorAddressDial.parse(raw, defaultPort: defaultPort)
     }
 }
+
+/// The DMR network families astar names — `astar_dmr::DmrNetwork`'s cases,
+/// mirrored on this side of the FFI for grouping and for the consent gate.
+///
+/// Nine families against the directory's 111 `system` slugs: this is a
+/// vocabulary for *organising* a picker and for asking one question
+/// (`requiresConsent`), never a list of what may be dialled. A system that
+/// matches nothing here is an independent network astar does not recognise,
+/// and it is dialled exactly like the ones it does.
+public enum DmrFamily: String, CaseIterable, Sendable {
+    case tgif, freedmr, dmrplus, systemx, amcomm, vkdmr, freestar, adn, brandmeister
+
+    /// The label the picker groups under.
+    public var displayName: String {
+        switch self {
+        case .tgif: return "TGIF"
+        case .freedmr: return "FreeDMR"
+        case .dmrplus: return "DMR+"
+        case .systemx: return "SystemX"
+        case .amcomm: return "AmComm"
+        case .vkdmr: return "VKDMR"
+        case .freestar: return "FreeSTAR"
+        case .adn: return "ADN"
+        case .brandmeister: return "BrandMeister"
+        }
+    }
+
+    /// Whether the operator must opt in before this family is offered at all.
+    ///
+    /// True for BrandMeister and nothing else. BrandMeister is a private
+    /// network whose operators set their own terms and have permanently
+    /// blocked accounts; astar is a third-party client and cannot tell an
+    /// operator whether connecting this way is within those rules. So it is
+    /// hidden until the operator ticks a box that says so in plain words —
+    /// `docs/design/dmr-networks.md`, "What the gate looks like", and
+    /// `dmr-brandmeister-position.md` for what BrandMeister's own material
+    /// did and did not say on 2026-09-07.
+    ///
+    /// The independent networks ask nothing of the sort: they publish their
+    /// masters, issue their own passwords, and expect clients.
+    public var requiresConsent: Bool { self == .brandmeister }
+}
+
+/// A DMR target: which network, which master, which talkgroup, which slot.
+/// Four things, because a DMR talkgroup number names nothing on its own.
+///
+/// TG 91 exists on FreeDMR, on DMR+, on BrandMeister and on TGIF, and it is a
+/// different room on each — so "91" is not a target, it is a quarter of one.
+/// The timeslot is the fourth quarter and is not cosmetic either: a master
+/// relays a talkgroup on the slot it was subscribed on.
+///
+/// Nothing here holds the password. Every dialable row in the directory
+/// publishes `requires: ["dmr_id", "password"]`; the ID is the operator's
+/// registration and the password is a per-network credential that lives in
+/// the Keychain and reaches the engine as a connect-time in-arg.
+public struct DmrDial: Equatable, Sendable {
+    /// The port 75 of the directory's 185 rows publish — the plurality, ahead
+    /// of 55555 (24) and 62030 (23). A sensible default for an address typed
+    /// without one, and never a substitute for the row's own.
+    public static let defaultPort: UInt16 = 62031
+    /// TS2, the hotspot convention: a hotspot's own traffic rides slot 2 and
+    /// that is the slot a softclient is standing in for.
+    public static let defaultTimeslot: UInt8 = 2
+    /// The widest talkgroup the wire carries — `DMRD` addresses are 24-bit.
+    public static let maxTalkgroup: UInt32 = 0x00FF_FFFF
+
+    /// The directory's slug for the network this master belongs to.
+    public let system: String
+    public let host: String
+    public let port: UInt16
+    public let talkgroup: UInt32
+    /// `1` or `2`. Nothing else is a slot.
+    public let timeslot: UInt8
+
+    public init(system: String, host: String, port: UInt16, talkgroup: UInt32, timeslot: UInt8) {
+        self.system = system
+        self.host = host
+        self.port = port
+        self.talkgroup = talkgroup
+        self.timeslot = timeslot
+    }
+
+    /// Classify a typed DMR target.
+    ///
+    ///     tgif.network:62031/31313/2      host, port, talkgroup, slot
+    ///     tgif.network/31313              port 62031, slot 2
+    ///     tgif:tgif.network:62031/31313/2 the system typed in as well
+    ///
+    /// `system` supplies the network when the text does not name one — it is
+    /// what the picker has selected. The text WINS when it names one, because
+    /// what was typed is what was meant.
+    ///
+    /// The two-part `a:b` address is decided on whether `b` is digits: a port
+    /// is a number and a hostname is not, so `host:port` and `system:host`
+    /// are told apart without guessing at either.
+    ///
+    /// Returns nil rather than guessing any of the four. A bare address is a
+    /// target with the room missing; a bare talkgroup is a room with no
+    /// master; a system that is nowhere in the string and nowhere in the
+    /// argument is a login astar cannot even attempt. A space anywhere is a
+    /// rejection too — `XLX836 A` is a D-Star dial, and quietly dropping the
+    /// ` A` would put an operator on whatever DNS made of `XLX836`.
+    public static func parse(_ raw: String, system: String?) -> DmrDial? {
+        let text = raw.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty, !text.contains(where: \.isWhitespace) else { return nil }
+
+        let slashParts = text.split(separator: "/", omittingEmptySubsequences: false)
+        // `address/talkgroup` or `address/talkgroup/timeslot`. Fewer is not a
+        // target; more is not this grammar.
+        guard slashParts.count == 2 || slashParts.count == 3 else { return nil }
+
+        guard let talkgroup = number(slashParts[1], max: maxTalkgroup), talkgroup > 0 else {
+            return nil
+        }
+        let timeslot: UInt8
+        if slashParts.count == 3 {
+            guard let slot = number(slashParts[2], max: 2), slot == 1 || slot == 2 else {
+                return nil
+            }
+            timeslot = UInt8(slot)
+        } else {
+            timeslot = defaultTimeslot
+        }
+
+        let colonParts = slashParts[0].split(separator: ":", omittingEmptySubsequences: false)
+        let namedSystem: String?
+        let hostPart: Substring
+        let portPart: Substring?
+        switch colonParts.count {
+        case 1:
+            namedSystem = nil
+            hostPart = colonParts[0]
+            portPart = nil
+        case 2:
+            if colonParts[1].allSatisfy({ $0.isASCII && $0.isNumber }) {
+                namedSystem = nil
+                hostPart = colonParts[0]
+                portPart = colonParts[1]
+            } else {
+                namedSystem = String(colonParts[0])
+                hostPart = colonParts[1]
+                portPart = nil
+            }
+        case 3:
+            namedSystem = String(colonParts[0])
+            hostPart = colonParts[1]
+            portPart = colonParts[2]
+        default:
+            return nil
+        }
+
+        let host = String(hostPart)
+        guard !host.isEmpty else { return nil }
+
+        let port: UInt16
+        if let portPart {
+            guard let parsed = number(portPart, max: UInt32(UInt16.max)), parsed > 0 else {
+                return nil
+            }
+            port = UInt16(parsed)
+        } else {
+            port = defaultPort
+        }
+
+        let resolvedSystem = (namedSystem ?? system)?
+            .trimmingCharacters(in: .whitespaces)
+        guard let resolvedSystem, !resolvedSystem.isEmpty else { return nil }
+
+        return DmrDial(
+            system: resolvedSystem, host: host, port: port, talkgroup: talkgroup,
+            timeslot: timeslot)
+    }
+
+    /// The family `astar_dmr::DmrNetwork` would call `system`, for grouping
+    /// and for the consent gate. `nil` for a system this build does not know.
+    ///
+    /// **The directory's `system` is not the engine's slug, and cannot be.**
+    /// Checked against the live feed on 2026-09-07: 185 DMR rows carry 111
+    /// distinct `system` values — `freedmr-network`, `dmrplus-ipsc2-uk`,
+    /// `ipsc2-poland`, `hb_it_trani_conference`, `xlx696` — and not one of
+    /// them equals a `DmrNetwork` slug. DVRef enumerates *servers*, one row
+    /// per operator instance; `DmrNetwork` enumerates *families*. Both are
+    /// kept, and this table is the documented bridge between them.
+    ///
+    /// The rules below are prefixes because the directory's slugs are
+    /// `<family>-<place>` by convention (`freedmr-reunion`,
+    /// `adn-systems-espana`), with DMR+'s IPSC2/IPSC3 server software
+    /// standing in for its name (`ipsc2-poland` is DMR+).
+    ///
+    /// **`nil` means "independent, unrecognised", never "refuse".** Most rows
+    /// answer `nil` — 111 systems against nine families — and every one of
+    /// them is listed and dialable. The only thing a family is consulted for
+    /// is `requiresConsent`, and a network astar does not recognise is not
+    /// BrandMeister.
+    public static func family(ofSystem system: String) -> DmrFamily? {
+        let slug = system.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !slug.isEmpty else { return nil }
+        // The slug either IS the family's name or is that name followed by a
+        // separator. Never a bare `hasPrefix`: `adn` would then claim
+        // `adnetwork`, and a wrong family on a picker is a network filed under
+        // somebody else's terms.
+        for (family, names) in familyNames
+        where names.contains(where: {
+            slug == $0 || slug.hasPrefix($0 + "-") || slug.hasPrefix($0 + "_")
+        }) {
+            return family
+        }
+        return nil
+    }
+
+    /// The names each family is spelled with in the directory. `ipsc2` and
+    /// `ipsc3` are DMR+: the slug names the server software the network runs
+    /// (`ipsc2-poland`), not the network, and DMR+ is what it is.
+    private static let familyNames: [(DmrFamily, [String])] = [
+        (.brandmeister, ["brandmeister"]),
+        (.freedmr, ["freedmr"]),
+        (.freestar, ["freestar"]),
+        (.dmrplus, ["dmrplus", "dmr-plus", "ipsc2", "ipsc3"]),
+        (.systemx, ["systemx", "system-x"]),
+        (.amcomm, ["amcomm"]),
+        (.vkdmr, ["vkdmr", "vk-dmr"]),
+        (.tgif, ["tgif"]),
+        (.adn, ["adn"]),
+    ]
+
+    /// Digits-only, in range. `Substring` in, so the parser above never
+    /// allocates a String for something it is about to reject.
+    private static func number(_ text: Substring, max: UInt32) -> UInt32? {
+        guard !text.isEmpty, text.allSatisfy({ $0.isASCII && $0.isNumber }),
+            let value = UInt32(text), value <= max
+        else { return nil }
+        return value
+    }
+}
