@@ -73,6 +73,10 @@ current.
 
 ### Changed
 
+- **astar-server prefers signed 16-bit linear by default** and rejects a peer
+  with no usable codec instead of accepting one it cannot decode; µ-law-only
+  nodes are still accepted.
+
 - **Versions are real SemVer from here on**, this one included, and the app and
   the Rust workspace now spell a release identically — they had been carrying
   two different strings for the same version because Cargo demands the hyphen.

@@ -126,15 +126,41 @@ container or a headless VPS wants.
 
 ## `codec_policy` — codec negotiation
 
-A top-level key, not a section:
+A top-level key, not a section, and **`"prefer_slin16"` is the default** — omit
+it entirely and the node negotiates wideband:
 
 ```toml
-codec_policy = "prefer_slin"
+codec_policy = "prefer_slin16"
 ```
 
-`"ulaw_only"` (the default), `"allow_slin"`, or `"prefer_slin"`. `prefer_slin`
-negotiates 16-bit linear audio with peers that permit it (ASL3: `allow = slin`)
-and falls back to µ-law.
+| Value | Offers, best first |
+|---|---|
+| `"ulaw_only"` | µ-law, A-law — the pre-slin wire behaviour |
+| `"allow_slin"` | µ-law, A-law, slin (slin only if the peer asks for it) |
+| `"prefer_slin"` | slin, µ-law, A-law |
+| `"prefer_slin16"` | slin16, slin, µ-law, A-law — **the default** |
+
+`prefer_slin` negotiates 8 kHz 16-bit linear audio (~128 kbps) with peers that
+permit it (ASL3: `allow = slin`) and falls back to µ-law. `prefer_slin16` adds
+16 kHz wideband linear (~256 kbps) above that, and switches the station's own
+audio pipeline — capture, playback and mixing — to 16 kHz.
+
+**A µ-law-only node is still answered in µ-law.** Negotiation honours whatever
+FORMAT a caller asks for whenever the node can carry it, so a ClearNode or an
+ASL3 peer that only speaks µ-law gets µ-law on a `prefer_slin16` node, and it
+can share a conference with a wideband client — each leg resamples at its own
+codec edge. What the default changes is the caller that *asks* for slin16 (the
+astar clients always do): it is answered in slin16 instead of being quietly
+downgraded.
+
+Set `codec_policy = "ulaw_only"` to pin the old behaviour — worth doing on a
+bandwidth-constrained link, since each wideband leg costs roughly twice a slin
+leg and eight times a µ-law one.
+
+A peer with *no* codec in common with the policy is rejected at call setup with
+CAUSE `Unable to negotiate codec`, the same as Asterisk. astar implements
+µ-law, A-law, slin and slin16 and no others, so a `disallow=all / allow=gsm`
+peer lands here.
 
 ## `[announce]` — voice and CW announcements
 
