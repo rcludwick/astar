@@ -609,7 +609,7 @@ mod tests {
         let mut f = linked(t0);
         for offset in [10, 20, 30, 40, 50, 59] {
             assert_eq!(
-                f.on_packet(b"RPTSBKN   ", t0 + Duration::from_secs(offset)),
+                f.on_packet(b"RPTSBKN\x00\x00\x00\x01", t0 + Duration::from_secs(offset)),
                 FsmAction::None
             );
         }

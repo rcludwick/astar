@@ -534,7 +534,7 @@ definitions, not an implementation:
 
 **Golay(20,8)** — the slot type. This is the **(24,12) extended Golay code
 shortened by four**: generator polynomial
-`x¹¹ + x⁹ + x⁷ + x⁶ + x⁵ + x + 1` (0xC75), systematic, with a twelfth parity
+`x¹¹ + x¹⁰ + x⁶ + x⁵ + x⁴ + x² + 1` (0xC75), systematic, with a twelfth parity
 bit that is the overall even parity of the nineteen bits before it. Verified by
 hand against `MMDVMHost/Golay2087.cpp`'s `ENCODING_TABLE_2087` at indices 1, 2
 and 48: reproducing `(m · x¹¹) mod g` plus the overall parity bit gives that
