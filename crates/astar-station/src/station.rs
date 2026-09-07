@@ -291,6 +291,7 @@ impl Station {
             #[cfg(feature = "m17")]
             codec2_probe_cache: Mutex::new(None),
         };
+        station.pin_station_policy();
         if configured_mode == OperatingMode::Node {
             let _ = station.set_mode(OperatingMode::Node);
         }
@@ -332,10 +333,31 @@ impl Station {
             #[cfg(feature = "m17")]
             codec2_probe_cache: Mutex::new(None),
         };
+        station.pin_station_policy();
         if configured_mode == OperatingMode::Node {
             let _ = station.set_mode(OperatingMode::Node);
         }
         station
+    }
+
+    /// Pin the session's station codec policy from [`StationConfig`] at
+    /// construction (iax-4348), BEFORE any path can build the engine.
+    ///
+    /// The pipeline sample rate is fixed when the `Manager` is built and
+    /// every dial's codec policy is capped to it, so a `prefer_slin16`
+    /// station — which the macOS app and `astar-server` both configure — only
+    /// actually offers slin16 if the policy is known first. It used to be
+    /// learned from the first IAX2 `connect` or `start_inbound`; a digital
+    /// session (M17/D-Star/System Fusion) reaching the engine before either
+    /// of those pinned the whole station to 8 kHz for the rest of the
+    /// process, and the node dialed narrowband with nothing in the log.
+    ///
+    /// Idempotent and safe on a shared session: an engine that is already
+    /// busy keeps its rate (the session logs the mismatch).
+    fn pin_station_policy(&self) {
+        if let Ok(mut s) = self.session.lock() {
+            s.set_station_policy(self.config.codec_policy);
+        }
     }
 
     /// Select the capture/playback devices applied to the next [`Station::connect`]

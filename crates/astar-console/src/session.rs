@@ -383,10 +383,16 @@ pub struct ConsoleSession {
     bridge_config: BridgeConfig,
     /// Station-level codec policy (iax-4348), pins the `Manager`'s pipeline
     /// sample rate at construction. Library default `CodecPolicy::default()`
-    /// (`UlawOnly`, 8 kHz), byte-identical to pre-iax-4348 sessions. Set from
-    /// [`ConsoleConfig::codec_policy`] in [`Self::connect`] BEFORE
-    /// [`Self::ensure_engine`] builds the `Manager`; has no effect once the
-    /// `Manager` already exists (the pipeline rate cannot change live).
+    /// (`UlawOnly`, 8 kHz), byte-identical to pre-iax-4348 sessions.
+    ///
+    /// Set by [`Self::set_station_policy`] — which is what `Station`'s
+    /// constructors call from `StationConfig`, so a `prefer_slin16` station is
+    /// 16 kHz whichever network builds the engine first — and again from
+    /// [`ConsoleConfig::codec_policy`] in [`Self::connect`] and from the
+    /// inbound policy in [`Self::start_inbound`]. A live `Manager`'s rate
+    /// cannot change, so a mismatch on an IDLE engine rebuilds it
+    /// ([`Self::rebuild_idle_engine_for_rate`]) and a mismatch on a BUSY one
+    /// is logged and left alone.
     station_policy: CodecPolicy,
     /// A `WireGuard` link transport selected before the engine exists
     /// (iax-5bbd): the secret-free config plus the owned key resolver, applied
@@ -734,6 +740,11 @@ impl ConsoleSession {
     /// stay here. `input`/`output` are device-name substrings, `None` =
     /// system default, resolved exactly as [`Self::connect`] resolves them.
     ///
+    /// The lanes open at the STATION's pipeline rate (iax-4348), and the
+    /// session still gets the fixed 8 kHz its codec speaks: on a 16 kHz
+    /// station `VoiceRoute` bridges the two, 20 ms frame for 20 ms frame.
+    /// See `crate::voice_route`'s module docs.
+    ///
     /// # Errors
     /// [`ConsoleError::AlreadyConnected`] if anything is live;
     /// [`ConsoleError::Device`]/[`ConsoleError::Audio`] if the OUTPUT cannot
@@ -768,11 +779,23 @@ impl ConsoleSession {
             if mic_id.is_none() {
                 tracing::warn!("voice route: no capture device resolved — receive only");
             }
+            // The lanes open at the STATION's pipeline rate, never at a fixed
+            // 8 kHz: `AudioRouter::ensure_output`/`ensure_mic` reuse an
+            // already-open lane whatever config they are passed, and the
+            // Manager refuses to mix rates on one bus — so a 16 kHz station
+            // asked for 8 kHz here would either be silently ignored or
+            // corrupt the bus. `VoiceRoute` bridges the session's fixed
+            // 8 kHz codec framing to whatever the bus runs at.
+            let bus_rate = manager.pipeline_sample_rate();
+            let stream_cfg = StreamConfig {
+                sample_rate: bus_rate,
+                ..StreamConfig::default()
+            };
             crate::voice_route::VoiceRoute::open(
                 manager.router_mut(),
                 mic_id.map(MicId::new),
                 OutputId::new(&out_id),
-                StreamConfig::default(),
+                stream_cfg,
             )
             .map_err(ConsoleError::Audio)?
         };
@@ -930,9 +953,13 @@ impl ConsoleSession {
         let calibrated = self.calibrated.lock().unwrap().clone();
 
         // Pin the station pipeline rate to this call's codec policy (iax-4348)
-        // BEFORE the Manager is built; a no-op if the Manager already exists
-        // (its pipeline rate cannot change live — set on the first `connect`).
+        // BEFORE the Manager is built. The rate cannot change on a live
+        // Manager, so an engine left behind at the wrong rate by a
+        // digital-voice session is dropped here while it is idle and rebuilt
+        // below — otherwise `Manager::dial` would cap this dial's policy to
+        // the old rate and a `prefer_slin16` node would be dialed narrowband.
         self.station_policy = cfg.codec_policy;
+        self.rebuild_idle_engine_for_rate(cfg.codec_policy.max_sample_rate());
 
         // Ensure a Manager exists (build it once; keep it across calls).
         // The caller passes `backend` as the factory value for the first call;
@@ -1080,9 +1107,12 @@ impl ConsoleSession {
         // Pin the station pipeline rate to the inbound policy's codec policy
         // (iax-4348) BEFORE the Manager is built — the node path reaches inbound
         // without ever calling `connect`, so this is where node.toml's
-        // `prefer_slin16` becomes a 16 kHz engine. A no-op if the Manager
-        // already exists (its pipeline rate cannot change live).
+        // `prefer_slin16` becomes a 16 kHz engine. As in [`Self::connect`], an
+        // idle engine left at the wrong rate by a digital-voice session is
+        // dropped and rebuilt rather than silently capping every call the
+        // listener goes on to adopt.
         self.station_policy = policy.codec_policy;
+        self.rebuild_idle_engine_for_rate(policy.codec_policy.max_sample_rate());
 
         // Resolve the handset devices against the session's Manager (built now if
         // absent). Mirror the connect-path resolution (iax-be48): enumerate only
@@ -2553,6 +2583,113 @@ impl ConsoleSession {
             .ok_or_else(|| ConsoleError::Link(format!("no link for node {node}")))
     }
 
+    /// Pin the station's audio pipeline rate from `policy` (iax-4348), which
+    /// is what makes astar and astar-server slin16 stations: the rate is
+    /// fixed when the `Manager` is built, and `Manager::dial` CAPS every
+    /// dial's codec policy to it, so a station that means to offer slin16
+    /// has to say so before anything builds the engine — not on the first
+    /// dial, by which time a digital-voice session may already have built it
+    /// at the 8 kHz default. `Station`'s constructors call this with
+    /// `StationConfig.codec_policy`.
+    ///
+    /// An engine that is already up and idle is rebuilt at the new rate; a
+    /// busy one keeps the rate it has (calls, the inbound listener and the
+    /// digital-voice bus are all live on it) and the mismatch is logged.
+    pub fn set_station_policy(&mut self, policy: CodecPolicy) {
+        self.station_policy = policy;
+        let rate = policy.max_sample_rate();
+        self.rebuild_idle_engine_for_rate(rate);
+        if let Some(mgr) = self.manager.as_ref()
+            && mgr.pipeline_sample_rate() != rate
+        {
+            tracing::warn!(
+                engine_hz = mgr.pipeline_sample_rate(),
+                policy_hz = rate,
+                "station policy set while the engine is busy: the pipeline rate cannot change live"
+            );
+        }
+    }
+
+    /// Drop an engine that is doing nothing when the pipeline sample rate it
+    /// was pinned to at construction no longer matches the policy about to
+    /// build a call (iax-4348), so the next `ensure_engine` rebuilds it at
+    /// `rate`. A no-op when the rates already agree or the engine is busy.
+    ///
+    /// Why this is needed: `Manager::pipeline_sample_rate` is fixed at
+    /// construction and `Manager::dial` CAPS every dial's codec policy to it,
+    /// so an engine built at 8 kHz silently turns a `prefer_slin16` dial into
+    /// a plain-slin one — the app offers `capability=0x004c`, the far end
+    /// answers slin, and nobody logs a word about it. The one audio lane made
+    /// that reachable in normal use: `open_voice_route` builds the engine at
+    /// `station_policy` (the 8 kHz default until an IAX2 `connect` has run),
+    /// and a digital disconnect deliberately leaves the engine in place, so
+    /// M17/D-Star/YSF followed by a dial pinned the station narrowband for
+    /// the rest of the process.
+    ///
+    /// "Idle" is strict: no pooled calls, no inbound listener, no voice
+    /// route, no digital session. A live `WireGuard` transport with no
+    /// pending config left to replay it from also blocks the rebuild — a
+    /// fresh engine would come up on plain UDP and the dial would leave the
+    /// tunnel without saying so. In both cases the old (capped) behaviour
+    /// stands.
+    ///
+    /// Dropping the engine drops its `AudioRouter`, so any device streams the
+    /// old rate left open close here, under whatever lock the caller holds.
+    /// A digital route has already closed its own two lanes by the time it
+    /// releases, so that case is free; an IAX2 call's lanes outlive its
+    /// hangup (the `Manager` never closes them), so a policy change between
+    /// two dials pays one stream-drop. That is the price of not handing the
+    /// next call a bus running at the wrong rate.
+    fn rebuild_idle_engine_for_rate(&mut self, rate: u32) {
+        let (from, no_calls, wg_live) = {
+            let Some(mgr) = self.manager.as_ref() else {
+                return;
+            };
+            (
+                mgr.pipeline_sample_rate(),
+                mgr.call_count() == 0,
+                mgr.wg_status().is_some(),
+            )
+        };
+        if from == rate {
+            return;
+        }
+        let idle = no_calls
+            && self.active.is_none()
+            && self.inbound.is_none()
+            && self.voice_route.is_none()
+            && !self.m17_is_active()
+            && !self.dstar_is_active()
+            && !self.ysf_is_active();
+        if !idle {
+            return;
+        }
+        if wg_live && self.pending_wg.is_none() {
+            tracing::warn!(
+                from_hz = from,
+                to_hz = rate,
+                "idle engine kept at its pinned rate: rebuilding would drop the WireGuard transport"
+            );
+            return;
+        }
+        tracing::info!(
+            from_hz = from,
+            to_hz = rate,
+            "idle engine rebuilt for the new pipeline rate"
+        );
+        // Everything taken FROM the old engine dies with it; `ensure_engine`
+        // replays what the SESSION owns (pending announce config, bridge
+        // mode) and `ensure_engine_checked` re-applies a pending WireGuard
+        // transport. `link_event_rx` must go or `link_events()` would keep
+        // draining a receiver whose sender is gone and never re-take from the
+        // new engine.
+        self.manager = None;
+        self.link_event_rx = None;
+        self.events = None;
+        self.frames = None;
+        self.inbound_active = false;
+    }
+
     /// Build the `Manager` once and keep it for the session lifetime. Idempotent:
     /// if a `Manager` is already present the factory is not called and the
     /// existing one is returned. The pipeline rate is pinned by
@@ -3306,6 +3443,128 @@ mod tests {
             16_000,
             "inbound prefer_slin16 must build a 16 kHz engine"
         );
+    }
+
+    // --- iax-4348: pinning the station rate before anything builds the engine ---
+
+    fn null_backend() -> Box<dyn AudioBackend> {
+        Box::new(NullBackend::new())
+    }
+
+    fn slin16_config() -> ConsoleConfig {
+        ConsoleConfig {
+            node: "1".into(),
+            calling_node: "1".into(),
+            secret: String::new(),
+            name: "test".into(),
+            input_device: None,
+            output_device: None,
+            codec_policy: CodecPolicy::PreferSlin16,
+        }
+    }
+
+    /// The live bug, at the seam it happened: the one audio lane lets a
+    /// digital-voice session build the engine, and the engine's pipeline rate
+    /// is fixed at construction — so an M17/D-Star/YSF session before the
+    /// first dial used to pin the station to 8 kHz forever, and every later
+    /// `prefer_slin16` dial was silently capped to plain slin. An IDLE engine
+    /// must be rebuilt at the dial's rate instead.
+    #[test]
+    fn an_idle_engine_left_by_a_digital_session_is_rebuilt_at_the_dial_policy_rate() {
+        let mut s = ConsoleSession::new();
+        let audio = s
+            .open_voice_route(None, None, null_backend)
+            .expect("the route opens on the NullBackend");
+        drop(audio);
+        drop(s.release_voice_route());
+        assert_eq!(
+            s.pipeline_sample_rate(),
+            8_000,
+            "a digital session builds the engine at the default 8 kHz"
+        );
+
+        // The dial goes to a bound-but-silent loopback socket: it reaches
+        // `Dialing` and never further, which is all this assertion needs.
+        let (_sink, peer) = sink_socket();
+        s.connect(null_backend(), peer, slin16_config())
+            .expect("dial starts");
+        assert_eq!(
+            s.pipeline_sample_rate(),
+            16_000,
+            "an idle 8 kHz engine must be rebuilt at the dial policy's rate, \
+             or Manager::dial caps prefer_slin16 back to plain slin"
+        );
+        let _ = s.disconnect();
+    }
+
+    /// The other half of the rule: a BUSY engine keeps the rate it has. The
+    /// inbound listener is live on it, its pipeline rate cannot change under
+    /// a running call, and the dial is capped exactly as it was before this
+    /// fix — pre-existing, intended behaviour.
+    #[test]
+    fn a_busy_engine_is_never_rebuilt() {
+        let mut s = ConsoleSession::new();
+        start_inbound_null(&mut s).expect("listener binds on 127.0.0.1:0");
+        assert_eq!(
+            s.pipeline_sample_rate(),
+            8_000,
+            "the default inbound policy builds an 8 kHz engine"
+        );
+
+        let (_sink, peer) = sink_socket();
+        s.connect(null_backend(), peer, slin16_config())
+            .expect("dial starts");
+        assert_eq!(
+            s.pipeline_sample_rate(),
+            8_000,
+            "the listener is live on this engine: the rate stands and the dial is capped"
+        );
+        let _ = s.disconnect();
+        s.stop_inbound();
+    }
+
+    /// What actually makes astar and astar-server slin16 stations: the policy
+    /// is set at construction, so the FIRST thing to build the engine — a
+    /// digital session included — builds it at 16 kHz.
+    #[test]
+    fn set_station_policy_pins_the_rate_a_digital_session_then_builds_at() {
+        let mut s = ConsoleSession::new();
+        s.set_station_policy(CodecPolicy::PreferSlin16);
+        assert!(
+            !s.has_engine(),
+            "setting the policy must not build anything"
+        );
+
+        let audio = s
+            .open_voice_route(None, None, null_backend)
+            .expect("the route opens");
+        drop(audio);
+        assert_eq!(
+            s.pipeline_sample_rate(),
+            16_000,
+            "a prefer_slin16 station stays 16 kHz through a digital session"
+        );
+        assert!(
+            s.voice_route.as_ref().expect("route held").bridged(),
+            "the 8 kHz digital codecs must be rate-bridged onto the 16 kHz bus"
+        );
+        drop(s.release_voice_route());
+    }
+
+    /// An 8 kHz station is unchanged: no bridge, the session holds the bus's
+    /// own channel ends.
+    #[test]
+    fn an_8k_station_passes_a_digital_route_straight_through() {
+        let mut s = ConsoleSession::new();
+        let audio = s
+            .open_voice_route(None, None, null_backend)
+            .expect("the route opens");
+        drop(audio);
+        assert!(
+            !s.voice_route.as_ref().expect("route held").bridged(),
+            "an 8 kHz station needs no converter"
+        );
+        drop(s.release_voice_route());
     }
 
     #[test]
