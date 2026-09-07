@@ -1457,20 +1457,24 @@ impl Station {
         // `brandmeister_uk`, but this gate protects an operator's account on
         // somebody else's private network, so a spelling that slips past the
         // separator rule (`brandmeister3102`) must not slip past this.
-        let is_brandmeister = family == Some(astar_dmr::DmrNetwork::BrandMeister)
-            || trimmed.to_ascii_lowercase().starts_with("brandmeister");
+        let gated = if trimmed.to_ascii_lowercase().starts_with("brandmeister") {
+            Some(astar_dmr::DmrNetwork::BrandMeister)
+        } else {
+            family
+        };
         // `dialable` is the gate written once so no call site can forget it,
-        // and this facade is a call site. Asking it — rather than testing
-        // `requires_consent()` here — is what keeps the policy in one place.
-        if is_brandmeister
-            && !astar_dmr::dialable(BRANDMEISTER_CONSENTED)
-                .contains(&astar_dmr::DmrNetwork::BrandMeister)
+        // and this facade is a call site. Asking it about whatever family
+        // resolved — rather than testing `requires_consent()` here, or naming
+        // BrandMeister — is what keeps the policy in one place: a second gated
+        // network would be refused here without this line changing.
+        if let Some(network) = gated
+            && !astar_dmr::dialable(BRANDMEISTER_CONSENTED).contains(&network)
         {
             return Err(StationError::Dmr(format!(
                 "{} requires the operator to opt in first: it is a private network whose \
                  operators set the terms, and connecting with a third-party client is a risk \
                  to your own access there",
-                astar_dmr::DmrNetwork::BrandMeister.label()
+                network.label()
             )));
         }
         // A radio id is a registration, not a default. Zero is what an unset

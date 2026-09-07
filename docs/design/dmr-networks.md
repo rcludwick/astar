@@ -263,7 +263,12 @@ The two tables are twins and must stay in step. Adding a spelling to
 `familyNames` in `ReflectorAddressDial.swift` without adding it to
 `SYSTEM_NAMES` in `crates/astar-dmr/src/network.rs` makes the picker and the
 gate disagree about which rows are BrandMeister; each table's doc comment says
-so, and both are tested against the same rows.
+so, and both are tested against the same rows. The engine carries one extra
+belt the app does not: any system whose lowercased spelling *starts with*
+`brandmeister` is treated as BrandMeister at the gate even when the separator
+rule resolves no family, so a hand-typed `brandmeister3102` is refused by the
+engine while the picker showed it as an unrecognised independent. Fail-safe by
+design; do not "fix" the app to match.
 
 `family(ofSystem:)` answers **`nil` for "independent, unrecognised"** rather
 than guessing. Most rows answer `nil` — 111 systems against nine families —
