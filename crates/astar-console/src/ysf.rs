@@ -68,14 +68,21 @@
 //! half-rate encode reply. That check now lives in the caller that configured
 //! the rate; see `iax-ysftx` and `vendor/ambe-thumbdv/VENDORED.md`.
 //!
-//! ## What a transmission does NOT carry yet
+//! ## The data channel, and who reads it
 //!
-//! The DN payload has a data channel alongside the voice, and astar does not
-//! build it — `pack_dn` writes voice bits only, and the rest is left zeroed.
-//! Receivers take the callsign from the `YSFD` header, which every reflector
-//! and gateway reads, so a transmission is heard and attributed correctly on
-//! the network. A Yaesu radio reading the payload's own data channel may show
-//! no callsign. Filed as `iax-ysfdch`.
+//! A transmission carries the payload's own DATA channel as well as the
+//! voice (`iax-ysfdch`, designed in `docs/design/ysf-dch.md`). That matters
+//! more than "a radio can show a callsign": `MMDVMHost`'s
+//! `CYSFControl::writeNetwork` only attributes a network transmission —
+//! and only regenerates the DCH for the air — when the channel's CRC
+//! checks, and a reflector opens the stream it relays on a frame whose FICH
+//! says Header. An over with a zeroed DCH is carried as audio with nothing
+//! downstream able to say who sent it, which is what astar did until now.
+//!
+//! So a transmission is a real Header frame at key-down (CSD1 = destination
+//! and source, CSD2 = downlink and uplink, no voice), then Communications
+//! frames cycling FN 0..=6 with FT 6, each carrying that frame number's ten
+//! bytes of DCH beside its five voice frames, then a real Terminator.
 //!
 //! # Modes astar refuses, out loud
 //!
@@ -105,7 +112,7 @@ use astar_codec::ambe::{
 };
 use astar_codec::ysf::{DnError, DnFrame, FRAMES_PER_PAYLOAD, pack_dn, unpack_dn};
 use astar_ysf::{
-    Callsign, DataPacket, DataType, Fich, Frame, FrameInfo, FsmAction, LinkState, YsfFsm, wire,
+    Callsign, DataPacket, DataType, Fich, Frame, FrameInfo, FsmAction, LinkState, YsfFsm, dch, wire,
 };
 
 use crate::session::ConsoleError;
@@ -315,17 +322,39 @@ struct Tx {
     voice: Vec<DnFrame>,
     /// The wire's frame counter, seven bits, wrapping.
     counter: u8,
-    /// Whether the opening header frame has gone out yet.
-    sent_header: bool,
+    /// The FICH's frame number, cycling 0..=[`astar_ysf::FRAME_TOTAL`].
+    ///
+    /// Not the same thing as `counter`, which is the `YSFD` header's own
+    /// sequence: this one selects which ten bytes of callsign the payload's
+    /// data channel carries, and a client that never advances it never
+    /// sends the frames a receiver takes the callsigns from.
+    frame_number: u8,
 }
 
 impl Tx {
+    /// Opens a transmission. The header frame goes out separately, at the
+    /// key-down edge, so the first voice frame is already frame 0.
     fn new() -> Tx {
         Tx {
             voice: Vec::with_capacity(FRAMES_PER_PAYLOAD),
-            counter: 0,
-            sent_header: false,
+            // The header frame is counter 0; voice starts after it.
+            counter: 1,
+            frame_number: 0,
         }
+    }
+
+    /// Takes the next frame number, advancing the cycle.
+    fn next_frame_number(&mut self) -> u8 {
+        let n = self.frame_number;
+        self.frame_number = (self.frame_number + 1) % astar_ysf::SUPERFRAME;
+        n
+    }
+
+    /// Takes the next `YSFD` counter, advancing it.
+    fn next_counter(&mut self) -> u8 {
+        let n = self.counter;
+        self.counter = (self.counter + 1) % COUNTER_WRAP;
+        n
     }
 }
 
@@ -845,6 +874,19 @@ fn apply_ptt(
         discard_rx(audio);
         audio.tx = Some(Tx::new());
         shared.ptt.store(true, Ordering::Relaxed);
+        // The Header frame opens the over, and it goes out NOW rather than
+        // with the first payload of voice: a reflector creates the stream
+        // it relays on a frame whose FICH says Header, so a hundred
+        // milliseconds of speech sent ahead of it is a hundred milliseconds
+        // nobody forwards.
+        send_radio_frame(
+            socket,
+            addr,
+            callsign,
+            0,
+            false,
+            build_csd_frame(FrameInfo::Header, callsign),
+        );
     } else {
         shared.ptt.store(false, Ordering::Relaxed);
         end_tx(audio, socket, addr, callsign);
@@ -873,28 +915,62 @@ fn discard_rx(audio: &mut Audio) {
     audio.next_release = None;
 }
 
-/// Build one radio frame: sync, FICH, and a DN payload carrying `voice`.
+/// The FICH every frame of a transmission shares, with `info` and
+/// `frame_number` filled in.
 ///
-/// The payload's DATA channel is left zeroed. `pack_dn` writes only the voice
-/// bits by design, and astar has no encoder for the in-payload data channel
-/// that carries callsigns to a radio's display. Receivers take the callsign
-/// from the `YSFD` header instead, which every reflector and gateway reads —
-/// see `iax-ysfdch`.
-fn build_frame(
-    info: FrameInfo,
-    voice: &[DnFrame; FRAMES_PER_PAYLOAD],
-) -> [u8; astar_ysf::FRAME_LEN] {
-    let fich = Fich {
+/// The values are a softclient's, field for field — see
+/// `docs/design/ysf-dch.md` §3. `Fich::default` already carries CS 2, CM 0,
+/// BN/BT 0, Dev and `VoIP` clear, MR direct, SQL clear and DG-ID 0. That
+/// `VoIP` bit in particular stays FALSE: the code that sets it true is a
+/// repeater putting network audio back on the air, which is not what this
+/// is.
+fn tx_fich(info: FrameInfo, frame_number: u8) -> Fich {
+    Fich {
         frame_info: info,
         // V/D mode 2 is what Yaesu radios transmit for "DN" and what every
         // reflector expects; mode 1 is decoded on receive but never sent.
         data_type: DataType::VDMode2,
+        frame_number: frame_number % astar_ysf::SUPERFRAME,
+        frame_total: astar_ysf::FRAME_TOTAL,
         ..Fich::default()
-    };
+    }
+}
+
+/// Build one Communications frame: sync, FICH, five voice frames, and the
+/// ten bytes of data channel that belong to `frame_number`.
+///
+/// Voice and data share the payload's five blocks without overlapping — the
+/// voice channel starts 40 bits into each block — so the two are written one
+/// after the other rather than merged.
+fn build_voice_frame(
+    frame_number: u8,
+    voice: &[DnFrame; FRAMES_PER_PAYLOAD],
+    callsign: &Callsign,
+) -> [u8; astar_ysf::FRAME_LEN] {
+    let fich = tx_fich(FrameInfo::Communications, frame_number);
     let mut payload = [0u8; astar_ysf::PAYLOAD_LEN];
     // Infallible: `data_type` is half-rate voice and the payload is exactly
     // PAYLOAD_LEN, which are the only two things `pack_dn` refuses.
     let _ = pack_dn(fich.data_type, voice, &mut payload);
+    // A client linked to a reflector is its own gateway, so the source and
+    // the downlink/uplink callsigns are all this station.
+    dch::write_vd2(
+        &mut payload,
+        &dch::vd2_dch(fich.frame_number, callsign, callsign),
+    );
+    astar_ysf::frame::build(fich, &payload)
+}
+
+/// Build the Header or Terminator frame that opens and closes an over.
+///
+/// These carry NO voice: their whole ninety bytes are the two callsign
+/// blocks under their own FEC. That is what the references send and what a
+/// reflector needs before it will open the stream it relays.
+fn build_csd_frame(info: FrameInfo, callsign: &Callsign) -> [u8; astar_ysf::FRAME_LEN] {
+    let fich = tx_fich(info, 0);
+    let (csd1, csd2) = dch::header_csd(callsign, callsign);
+    let mut payload = [0u8; astar_ysf::PAYLOAD_LEN];
+    dch::write_csd(&mut payload, &csd1, &csd2);
     astar_ysf::frame::build(fich, &payload)
 }
 
@@ -972,24 +1048,19 @@ fn pump_tx(audio: &mut Audio, socket: &UdpSocket, addr: SocketAddr, callsign: &C
         five.copy_from_slice(&tx.voice[..FRAMES_PER_PAYLOAD]);
         tx.voice.clear();
 
-        // The first frame of a transmission is a header; the rest carry
-        // voice. Both carry the same payload here — a header frame's own
-        // data channel is the thing astar cannot build yet.
-        let info = if tx.sent_header {
-            FrameInfo::Communications
-        } else {
-            tx.sent_header = true;
-            FrameInfo::Header
-        };
-        let counter = tx.counter;
-        tx.counter = (tx.counter + 1) % COUNTER_WRAP;
+        // Every frame here carries voice; the header went out on the
+        // key-down edge, before there was any. The frame number cycles
+        // independently of the wire counter — it is what selects the ten
+        // bytes of callsign this frame's data channel carries.
+        let frame_number = tx.next_frame_number();
+        let counter = tx.next_counter();
         send_radio_frame(
             socket,
             addr,
             callsign,
             counter,
             false,
-            build_frame(info, &five),
+            build_voice_frame(frame_number, &five, callsign),
         );
     }
 }
@@ -1032,28 +1103,31 @@ fn end_tx(audio: &mut Audio, socket: &UdpSocket, addr: SocketAddr, callsign: &Ca
     while tx.voice.len() % FRAMES_PER_PAYLOAD != 0 {
         tx.voice.push(DnFrame::MUTE);
     }
-    for chunk in tx.voice.chunks(FRAMES_PER_PAYLOAD) {
+    let tail = std::mem::take(&mut tx.voice);
+    for chunk in tail.chunks(FRAMES_PER_PAYLOAD) {
         let mut five = [DnFrame::default(); FRAMES_PER_PAYLOAD];
         five.copy_from_slice(chunk);
-        let counter = tx.counter;
-        tx.counter = (tx.counter + 1) % COUNTER_WRAP;
+        let frame_number = tx.next_frame_number();
+        let counter = tx.next_counter();
         send_radio_frame(
             socket,
             addr,
             callsign,
             counter,
             false,
-            build_frame(FrameInfo::Communications, &five),
+            build_voice_frame(frame_number, &five, callsign),
         );
     }
-    let silence = [DnFrame::MUTE; FRAMES_PER_PAYLOAD];
+    // The terminator is a callsign frame, not a frame of silence: it closes
+    // the reflector's stream and repeats who was talking, which is what the
+    // references send and what leaves a radio's display correct.
     send_radio_frame(
         socket,
         addr,
         callsign,
         tx.counter,
         true,
-        build_frame(FrameInfo::Terminator, &silence),
+        build_csd_frame(FrameInfo::Terminator, callsign),
     );
 }
 
@@ -1494,12 +1568,18 @@ mod tests {
     /// every reflector expects — and the voice must survive the round trip
     /// through `pack_dn`, or the far end hears the wrong thing while every
     /// state machine reports success.
+    ///
+    /// The data channel is checked here too, for the reason `iax-ysfdch`
+    /// exists: a receiver that cannot read it attributes the over to nobody
+    /// and passes the channel to the air unchanged, so "the voice arrived"
+    /// is not enough to call a transmission correct.
     #[test]
     fn a_transmitted_frame_is_dn_mode_2_and_carries_its_voice() {
         let voice: [DnFrame; FRAMES_PER_PAYLOAD] = core::array::from_fn(|i| {
             DnFrame::from_bytes([u8::try_from(i + 1).expect("small"), 0, 0, 0, 0, 0, 0])
         });
-        let bytes = build_frame(FrameInfo::Header, &voice);
+        let me = Callsign::new("AJ7HR").expect("legal");
+        let bytes = build_voice_frame(1, &voice, &me);
 
         let frame = Frame::new(&bytes).expect("a built frame must parse");
         assert!(
@@ -1507,22 +1587,79 @@ mod tests {
             "every radio frame opens with the sync word"
         );
         let fich = frame.fich().expect("the FICH must decode");
-        assert_eq!(fich.frame_info, FrameInfo::Header);
+        assert_eq!(fich.frame_info, FrameInfo::Communications);
         assert_eq!(fich.data_type, DataType::VDMode2, "astar transmits DN only");
+        assert_eq!(fich.frame_number, 1);
+        assert_eq!(fich.frame_total, astar_ysf::FRAME_TOTAL);
+        assert_eq!(fich.call_sign_path, 2, "CS 2 is what a softclient sends");
+        assert!(!fich.voip, "VoIP is a repeater's bit, not a client's");
 
         let back = unpack_dn(fich.data_type, frame.payload()).expect("must round-trip");
         assert_eq!(back, voice, "the voice we packed is the voice on the wire");
+
+        let payload: &[u8; astar_ysf::PAYLOAD_LEN] =
+            frame.payload().try_into().expect("ninety bytes");
+        assert_eq!(
+            dch::read_vd2(payload),
+            Some(*b"AJ7HR     "),
+            "frame 1's data channel is the source callsign"
+        );
     }
 
+    /// The DCH cycle, frame by frame: what each frame number must carry, and
+    /// that the voice in the same payload is untouched by it.
     #[test]
-    fn a_terminator_is_marked_as_such() {
-        let silence = [DnFrame::MUTE; FRAMES_PER_PAYLOAD];
-        let bytes = build_frame(FrameInfo::Terminator, &silence);
-        let frame = Frame::new(&bytes).expect("parse");
-        assert_eq!(
-            frame.fich().expect("fich").frame_info,
-            FrameInfo::Terminator
-        );
+    fn every_frame_of_the_cycle_carries_its_own_callsign_block() {
+        let me = Callsign::new("AJ7HR").expect("legal");
+        let voice: [DnFrame; FRAMES_PER_PAYLOAD] = core::array::from_fn(|i| {
+            DnFrame::from_bytes([u8::try_from(i + 1).expect("small"), 0, 0, 0, 0, 0, 0])
+        });
+        let expected: [&[u8; 10]; 7] = [
+            b"**********",
+            b"AJ7HR     ",
+            b"AJ7HR     ",
+            b"AJ7HR     ",
+            b"          ",
+            b"          ",
+            b"          ",
+        ];
+        for (fn_, want) in expected.iter().enumerate() {
+            let fn_ = u8::try_from(fn_).expect("small");
+            let bytes = build_voice_frame(fn_, &voice, &me);
+            let frame = Frame::new(&bytes).expect("parse");
+            let fich = frame.fich().expect("fich");
+            assert_eq!(fich.frame_number, fn_);
+            let payload: &[u8; astar_ysf::PAYLOAD_LEN] =
+                frame.payload().try_into().expect("ninety bytes");
+            assert_eq!(dch::read_vd2(payload), Some(**want), "frame {fn_}");
+            assert_eq!(
+                unpack_dn(fich.data_type, frame.payload()).expect("round-trip"),
+                voice,
+                "frame {fn_}'s voice must survive its data channel"
+            );
+        }
+    }
+
+    /// The header and terminator frames, which carry callsigns and no voice.
+    #[test]
+    fn the_header_and_terminator_carry_the_callsign_blocks() {
+        let me = Callsign::new("AJ7HR").expect("legal");
+        for info in [FrameInfo::Header, FrameInfo::Terminator] {
+            let bytes = build_csd_frame(info, &me);
+            let frame = Frame::new(&bytes).expect("parse");
+            let fich = frame.fich().expect("fich");
+            assert_eq!(fich.frame_info, info);
+            assert_eq!(fich.data_type, DataType::VDMode2);
+            assert_eq!(fich.frame_total, astar_ysf::FRAME_TOTAL);
+
+            let payload: &[u8; astar_ysf::PAYLOAD_LEN] =
+                frame.payload().try_into().expect("ninety bytes");
+            let (csd1, csd2) = dch::read_csd(payload).expect("both blocks must decode");
+            assert_eq!(&csd1[..10], b"**********", "CSD1 destination");
+            assert_eq!(&csd1[10..], b"AJ7HR     ", "CSD1 source");
+            assert_eq!(&csd2[..10], b"AJ7HR     ", "CSD2 downlink");
+            assert_eq!(&csd2[10..], b"AJ7HR     ", "CSD2 uplink");
+        }
     }
 
     /// The routing header a reflector reads. `source` is what every other
@@ -1538,10 +1675,7 @@ mod tests {
             &me,
             7,
             true,
-            build_frame(
-                FrameInfo::Communications,
-                &[DnFrame::MUTE; FRAMES_PER_PAYLOAD],
-            ),
+            build_voice_frame(0, &[DnFrame::MUTE; FRAMES_PER_PAYLOAD], &me),
         );
         let mut buf = [0u8; 512];
         let n = rx.recv(&mut buf).expect("a datagram must arrive");
@@ -1684,6 +1818,12 @@ mod tests {
             let Ok(fich) = frame.fich() else {
                 continue;
             };
+            // Header and terminator frames carry callsigns where the voice
+            // channel would be. Reading one as voice would splice two frames
+            // of FEC-coded callsign into the middle of the tag stream.
+            if fich.frame_info != FrameInfo::Communications {
+                continue;
+            }
             let Ok(voice) = unpack_dn(fich.data_type, frame.payload()) else {
                 continue;
             };
@@ -1756,6 +1896,96 @@ mod tests {
             first_preroll < first_live,
             "the pre-roll must lead the live stream, got {tags:?}"
         );
+    }
+
+    /// The whole shape of an over, on the wire: a Header frame first, then
+    /// Communications frames whose FN cycles 0..=6 carrying the callsign
+    /// blocks, then a Terminator with the end flag set.
+    ///
+    /// This is `iax-ysfdch` as an end-to-end assertion. Every piece of it
+    /// was missing before: the header carried voice instead of CSD, FN never
+    /// moved off zero, the data channel was zeroed, and the terminator was
+    /// five frames of silence. A receiver reading any of those decided the
+    /// over belonged to nobody.
+    #[test]
+    fn an_over_opens_with_a_header_cycles_its_frame_numbers_and_closes() {
+        let (mut audio, _rx, mic) = test_audio_with_capture();
+        let (socket, addr, peer) = udp_pair();
+        let me = Callsign::new("AJ7HR").expect("legal");
+        let shared = Arc::new(Shared::new());
+
+        shared.ptt_request.store(true, Ordering::Relaxed);
+        run_ptt_step(&mut audio, &shared, &socket, addr, &me);
+
+        // Three payloads' worth of speech, so the frame number has to move.
+        for _ in 0..(3 * FRAMES_PER_PAYLOAD) {
+            mic.send(vec![7i16; 160]).expect("send");
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            pump_tx(&mut audio, &socket, addr, &me);
+            if (audio.mic_pending.is_empty() && audio.ambe.in_flight_encoded() == 0)
+                || Instant::now() >= deadline
+            {
+                break;
+            }
+        }
+        shared.ptt_request.store(false, Ordering::Relaxed);
+        run_ptt_step(&mut audio, &shared, &socket, addr, &me);
+
+        let mut buf = [0u8; 512];
+        let mut sent = Vec::new();
+        while let Ok(n) = peer.recv(&mut buf) {
+            let Some(astar_ysf::Packet::Data(d)) = astar_ysf::wire::parse(&buf[..n]) else {
+                continue;
+            };
+            let frame = Frame::new(&d.frame).expect("120 bytes");
+            let fich = frame.fich().expect("every frame's FICH must decode");
+            let payload: [u8; astar_ysf::PAYLOAD_LEN] =
+                frame.payload().try_into().expect("ninety bytes");
+            sent.push((fich, d.end, payload));
+        }
+
+        assert!(
+            sent.len() >= 4,
+            "expected an over, got {} frames",
+            sent.len()
+        );
+
+        let (head, head_end, head_payload) = &sent[0];
+        assert_eq!(
+            head.frame_info,
+            FrameInfo::Header,
+            "an over opens with a Header frame, before any voice"
+        );
+        assert!(!head_end);
+        let (csd1, _) = dch::read_csd(head_payload).expect("the header's CSD must decode");
+        assert_eq!(&csd1[10..], b"AJ7HR     ", "the header names this station");
+
+        let (tail, tail_end, tail_payload) = sent.last().expect("frames");
+        assert_eq!(tail.frame_info, FrameInfo::Terminator);
+        assert!(tail_end, "the end flag is what closes the over");
+        assert!(
+            dch::read_csd(tail_payload).is_some(),
+            "the terminator carries callsigns, not silence"
+        );
+
+        let voice = &sent[1..sent.len() - 1];
+        for (i, (fich, end, payload)) in voice.iter().enumerate() {
+            assert_eq!(fich.frame_info, FrameInfo::Communications, "frame {i}");
+            assert!(!end, "only the terminator sets the end flag");
+            assert_eq!(
+                fich.frame_number,
+                u8::try_from(i).expect("small") % astar_ysf::SUPERFRAME,
+                "the frame number must cycle, not sit at zero"
+            );
+            assert_eq!(fich.frame_total, astar_ysf::FRAME_TOTAL);
+            assert_eq!(
+                dch::read_vd2(payload),
+                Some(dch::vd2_dch(fich.frame_number, &me, &me)),
+                "frame {i}'s data channel"
+            );
+        }
     }
 
     /// The other half of the same rule: on a pass that is not transmitting,

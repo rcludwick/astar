@@ -100,8 +100,9 @@
                 return
             }
             probeReadiness()
-            let timer = Timer.scheduledTimer(withTimeInterval: Self.readinessInterval, repeats: true)
-            { [weak self] _ in
+            let timer = Timer.scheduledTimer(
+                withTimeInterval: Self.readinessInterval, repeats: true
+            ) { [weak self] _ in
                 Task { @MainActor in self?.probeReadiness() }
             }
             RunLoop.main.add(timer, forMode: .common)

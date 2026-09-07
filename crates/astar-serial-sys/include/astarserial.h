@@ -156,6 +156,18 @@ extern "C" {
 #endif // __cplusplus
 
 /**
+ * Size in bytes of [`IaxSerialConfig`] as this library lays it out.
+ *
+ * `iax_serial_open` READS `size_of::<IaxSerialConfig>()` bytes through the
+ * pointer it is given, so a foreign binding whose hand-written mirror has
+ * fallen behind hands it a short allocation: an out-of-bounds read, and every
+ * field past the first divergence shifted by a slot — including `transport`,
+ * which selects the tty path that asserts RTS. Bindings should assert their
+ * mirror's size against this at load time. Carries no state, no credential.
+ */
+uintptr_t iax_serial_config_size(void);
+
+/**
  * Map an `IAX_ERR_*` code (or [`IAX_OK`]) to a `'static`, NUL-terminated,
  * no-credential C string. The pointer is owned by the library; never free it.
  */

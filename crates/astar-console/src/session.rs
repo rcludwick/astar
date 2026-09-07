@@ -28,7 +28,7 @@ use astar_iax_core::session::auth::Secret;
 #[cfg(feature = "dstar")]
 use crate::dstar::{DstarConfig, DstarSession, DstarSnapshotState};
 #[cfg(feature = "m17")]
-use crate::m17::{M17Config, M17Session};
+use crate::m17::{M17Config, M17Session, M17SnapshotState};
 use crate::metering::Gain;
 #[cfg(feature = "nxdn")]
 use crate::nxdn::{NxdnConfig, NxdnLink, NxdnSnapshot};
@@ -1944,6 +1944,25 @@ impl ConsoleSession {
         {
             false
         }
+    }
+
+    /// A poll-cheap snapshot of the live M17 session's state, or `None` when
+    /// none is active — the M17 half of what [`Self::dstar_state`] and
+    /// [`Self::ysf_state`] give for their networks.
+    ///
+    /// The network-agnostic fields (`ptt`, `remote_ptt`, `status`, the level
+    /// meters) are already mirrored into [`ConsoleState`] by `snapshot()`;
+    /// read them there. What is only here is
+    /// [`M17SnapshotState::talker`] — who last keyed up — which has no
+    /// `ConsoleState` equivalent, exactly as D-Star's talker has none.
+    ///
+    /// Unlike the other two this composes nothing from the lane: M17's
+    /// snapshot carries no console-owned level or capability fields to
+    /// overwrite.
+    #[cfg(feature = "m17")]
+    #[must_use]
+    pub fn m17_state(&self) -> Option<M17SnapshotState> {
+        self.m17.as_ref().map(M17Session::state)
     }
 
     /// Connect to a D-Star `DExtra` reflector, full-transceive (iax-a9d4

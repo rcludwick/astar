@@ -24,6 +24,9 @@ the same thing whichever network is live.
 
 ### Added
 
+- **Last heard: the popover names whoever keyed up on M17 and System Fusion,
+  as it already did on D-Star.**
+
 - **System Fusion (YSF): link a reflector, hear it, and transmit**, with the
   ThumbDV in DN mode. YSF sits beside AllStarLink, M17 and D-Star in the
   network switcher and gets everything the others get — its own audio

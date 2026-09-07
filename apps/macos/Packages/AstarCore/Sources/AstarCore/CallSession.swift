@@ -114,6 +114,32 @@ public final class CallSession: ObservableObject {
     /// The DExtra link's own state, or `nil` when no D-Star session is live.
     @Published public private(set) var dstarLink: DStarState.Link?
 
+    /// The callsign of the most recently heard M17 transmission — the LSF
+    /// source address of the last stream off the reflector — or `nil` until
+    /// one arrives. **Last heard, not talking now**, exactly like
+    /// `dstarTalker` and `ysfLastHeard`. Cleared when the session ends.
+    @Published public private(set) var m17Talker: String?
+
+    /// The M17 reflector link's own state, or `nil` when no session is live.
+    @Published public private(set) var m17Link: M17State.Link?
+
+    /// Who most recently keyed up on the network this call is on, or `nil`.
+    ///
+    /// ONE property for every digital-voice network: it is `dstarTalker` on
+    /// D-Star, `ysfLastHeard` on System Fusion, `m17Talker` on M17, and `nil`
+    /// on AllStar, which carries no talker identity in its audio path (a node
+    /// number is who you dialled, not who is speaking). A new network feeds
+    /// it by adding an arm to `refreshLastHeard()` and returning `true` from
+    /// `Network.isDigitalVoice` — nothing in the UI changes.
+    ///
+    /// **Last heard, not talking now**: every source persists past
+    /// end-of-transmission on purpose. `remotePTT`/`ysfReceiving` are what
+    /// say whether a transmission is in progress.
+    ///
+    /// **Attacker-controlled**: it is whatever callsign whoever keyed up put
+    /// on the wire. Render it as text, never as markup.
+    @Published public private(set) var lastHeard: String?
+
     /// The node most recently dialed (set at `connect`, cleared at `disconnect`).
     /// Surfaces who we're connected to — e.g. the menu-bar right-click menu.
     /// Display should still gate on `status`, since a stale value can outlive a
@@ -694,6 +720,18 @@ public final class CallSession: ObservableObject {
             } else if dstarLink != nil || dstarTalker != nil || dstarSlowText != nil {
                 clearDStarState()
             }
+            // M17's own fields are behind the same second ABI call D-Star's
+            // and YSF's are, and cost the same buffer crossing plus JSON
+            // parse — so they are asked for only while a session is live.
+            // `talker` is the whole reason to ask: PTT, remote PTT and the
+            // meters are already in the snapshot above.
+            if snap.m17Active {
+                let state = try? station.m17State()
+                if m17Talker != state?.talker { m17Talker = state?.talker }
+                if m17Link != state?.link { m17Link = state?.link }
+            } else if m17Link != nil || m17Talker != nil {
+                clearM17State()
+            }
             if ysfAvailable != snap.ysfAvailable { ysfAvailable = snap.ysfAvailable }
             // Same arrangement as D-Star's above, for the same reason: YSF's
             // own fields cost an ABI crossing and a JSON parse, so they are
@@ -713,6 +751,11 @@ public final class CallSession: ObservableObject {
             {
                 clearYSFState()
             }
+            // Fold the three per-network talkers into the one property the UI
+            // reads. Done here, after every source has been advanced, so a
+            // single poll can never publish a `lastHeard` from the network
+            // that was live a tick ago.
+            refreshLastHeard()
             // Quarter-second peak-hold for the VU meters (astar-f78a) so they read
             // steadily instead of flickering at the poll rate.
             let meterNow = Date()
@@ -792,6 +835,7 @@ public final class CallSession: ObservableObject {
             {
                 restoreStandardTxProcessing()
                 setActiveCallNetwork(nil)
+                clearM17State()
             }
             // The same edge for D-Star: a link the reflector dropped, or a
             // dongle pulled out of the USB port, never reaches `disconnect()`.
@@ -1507,6 +1551,7 @@ public final class CallSession: ObservableObject {
                 // The M17 call is ending — undo its TX override (astar-5d8e)
                 // before the network is cleared below.
                 restoreStandardTxProcessing()
+                clearM17State()
             }
             // Same belt-and-suspenders as M17's: `Station.disconnect()`
             // already tears a D-Star session down engine-side, but saying so
@@ -1535,6 +1580,7 @@ public final class CallSession: ObservableObject {
         dstarTalker = nil
         dstarSlowText = nil
         dstarLink = nil
+        refreshLastHeard()
     }
 
     /// Drop the last-heard YSF fields, on every path a link can end by — for
@@ -1547,6 +1593,38 @@ public final class CallSession: ObservableObject {
         ysfReceiving = false
         ysfLink = nil
         ysfUnsupportedMode = nil
+        refreshLastHeard()
+    }
+
+    /// Drop the last-heard M17 fields, for the same reason `clearDStarState`
+    /// and `clearYSFState` exist: a callsign left on screen after the session
+    /// is gone is a claim about the present that is no longer true.
+    private func clearM17State() {
+        m17Talker = nil
+        m17Link = nil
+        refreshLastHeard()
+    }
+
+    /// Recompute `lastHeard` from the active network's own talker field.
+    ///
+    /// The one place that knows which per-network property answers "who keyed
+    /// up" — a new digital network adds an arm here and nothing else changes.
+    /// AllStar and Hamlink have no talker identity on the wire, so they
+    /// answer `nil` rather than leaving a stale callsign from the previous
+    /// call on screen.
+    ///
+    /// Publish-on-change, like everything else `poll()` touches, and
+    /// main-thread only: `poll()` runs on the main run loop's timer and the
+    /// clear helpers are called from it.
+    private func refreshLastHeard() {
+        let value: String?
+        switch activeCallNetwork {
+        case .dstar: value = dstarTalker
+        case .ysf: value = ysfLastHeard
+        case .m17: value = m17Talker
+        case .allstar, .hamlink, nil: value = nil
+        }
+        if lastHeard != value { lastHeard = value }
     }
 
     /// Record (or clear) the dialed node. `@Published`, so hop to the main thread —
@@ -1566,8 +1644,14 @@ public final class CallSession: ObservableObject {
     private func setActiveCallNetwork(_ network: Network?) {
         if Thread.isMainThread {
             activeCallNetwork = network
+            // `lastHeard` is derived from this, so it would otherwise show the
+            // PREVIOUS network's talker until the next poll tick.
+            refreshLastHeard()
         } else {
-            DispatchQueue.main.async { [weak self] in self?.activeCallNetwork = network }
+            DispatchQueue.main.async { [weak self] in
+                self?.activeCallNetwork = network
+                self?.refreshLastHeard()
+            }
         }
     }
 

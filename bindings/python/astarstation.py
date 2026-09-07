@@ -43,6 +43,7 @@ from ctypes import (
     c_float,
     c_int,
     c_size_t,
+    c_uint,
     c_uint32,
     c_uint64,
     c_void_p,
@@ -56,12 +57,14 @@ __all__ = [
     "AuthPolicy",
     "Status",
     "EventKind",
+    "DenoiseChain",
     "NodeConfig",
     "Snapshot",
     "Event",
     "StationError",
     "Station",
     "load_library",
+    "AbiMismatchError",
 ]
 
 
@@ -134,6 +137,15 @@ class EventKind(enum.IntEnum):
     REGISTER_FAILED = 7  # Outbound node registration failed. Secret-free.
 
 
+class DenoiseChain(enum.IntEnum):
+    """Which mic noise-reduction chain is live (mirrors ``IaxDenoiseChain``)."""
+
+    NOT_CAPTURING = 0  # No mic lane is open, so no chain is running.
+    OFF = 1  # Capturing, but noise reduction is switched off.
+    NEURAL = 2  # Neural (RNNoise) at device rate, hum filter after it, no gate.
+    FILTER_GATE = 3  # Classical hum filter + noise gate (device below 48 kHz).
+
+
 # --------------------------------------------------------------------------- #
 # Public NodeConfig dataclass — secret-free node-mode configuration.
 # --------------------------------------------------------------------------- #
@@ -197,6 +209,15 @@ class _IaxNodeConfig(ctypes.Structure):
 
 
 class _IaxState(ctypes.Structure):
+    """Mirrors ``IaxState`` in astar.h — FIELD-FOR-FIELD, IN ORDER.
+
+    ``iax_station_snapshot`` writes ``sizeof(IaxState)`` bytes into a buffer
+    this class allocates. A field missing here is therefore not a cosmetic
+    omission: it is a heap overflow of the difference, plus a garbage read of
+    every field past the divergence. ``load_library`` asserts
+    ``sizeof(_IaxState) == iax_state_size()`` so drift fails at import.
+    """
+
     _fields_ = [
         ("status", c_int),  # IaxStatus
         ("ptt", c_bool),
@@ -208,15 +229,24 @@ class _IaxState(ctypes.Structure):
         ("mode", c_int),  # IaxMode
         ("tx_reanchors", c_uint64),  # cumulative TX ts-ladder re-anchors (iax-9e55)
         ("tx_capture_overruns", c_uint64),  # cumulative cpal capture overruns
-        ("negotiated_format", c_uint32),  # IAX2 format bit; 0 = none (iax-3e53)
-        ("dtmf_played", c_uint32),  # send_dtmf_string progress; 0 = none (iax-4b7a)
-        ("dtmf_total", c_uint32),  # send_dtmf_string total; 0 = none (iax-4b7a)
+        ("denoise_chain", c_int),  # IaxDenoiseChain — which mic NR chain is live
+        ("denoise_device_rate", c_uint),  # capture stream rate in Hz; 0 = no mic lane
+        ("denoise_live", c_bool),  # True = measured, False = predicted
+        ("negotiated_format", c_uint),  # IAX2 format bit; 0 = none (iax-3e53)
+        ("dtmf_played", c_uint),  # send_dtmf_string progress; 0 = none (iax-4b7a)
+        ("dtmf_total", c_uint),  # send_dtmf_string total; 0 = none (iax-4b7a)
         ("m17_available", c_bool),  # M17 feature + a working codec2 backend (iax-f2b8 Task 5)
         ("m17_active", c_bool),  # an M17 session is live (iax-f2b8 Task 5)
+        ("dstar_available", c_bool),  # dstar feature + a ThumbDV attached NOW (iax-4c8e)
+        ("dstar_active", c_bool),  # a D-Star session is live
+        ("ysf_available", c_bool),  # ysf feature + a ThumbDV attached now
+        ("ysf_active", c_bool),  # a YSF link is live
     ]
 
 
 class _IaxEvent(ctypes.Structure):
+    """Mirrors ``IaxEvent``; size-checked against ``iax_event_size()``."""
+
     _fields_ = [
         ("kind", c_int),  # IaxEventKind
         ("remote_ptt", c_bool),
@@ -263,12 +293,19 @@ class Snapshot:
     mode: Mode  # current top-level operating mode (WT dial-out vs Node)
     tx_reanchors: int  # cumulative voice-ts-ladder re-anchors; growth = choppy TX
     tx_capture_overruns: int  # cumulative cpal capture overruns on the routed mic
+    denoise_chain: DenoiseChain  # which mic noise-reduction chain is live
+    denoise_device_rate: int  # capture stream rate in Hz; 0 when no mic lane is open
+    denoise_live: bool  # True = measured from a running stream; False = a prediction
     negotiated_format: int  # negotiated codec as its IAX2 format bit; 0 = none
     # (4 = ulaw, 8 = alaw, 64 = slin, 32768 = slin16 wideband; iax-3e53)
     dtmf_played: int  # digits sent of the active send_dtmf_string sequence; 0 = none
     dtmf_total: int  # total digits of the active sequence; 0 = none (iax-4b7a)
     m17_available: bool  # M17 feature compiled in AND a working codec2 backend found
     m17_active: bool  # an M17 session is currently live (iax-f2b8 Task 5)
+    dstar_available: bool  # dstar feature compiled in AND a ThumbDV attached now
+    dstar_active: bool  # a D-Star session is currently live (iax-4c8e)
+    ysf_available: bool  # ysf feature compiled in AND a ThumbDV attached now
+    ysf_active: bool  # a YSF link is currently live
 
 
 @dataclass(frozen=True)
@@ -350,6 +387,7 @@ def load_library() -> ctypes.CDLL:
         if os.path.isfile(path):
             lib = ctypes.CDLL(path)
             _bind(lib)
+            _check_abi(lib)
             return lib
 
     raise FileNotFoundError(
@@ -466,6 +504,42 @@ def _bind(lib: ctypes.CDLL) -> None:
 
     lib.iax_error_text.argtypes = [c_int]
     lib.iax_error_text.restype = c_char_p
+
+    lib.iax_state_size.argtypes = []
+    lib.iax_state_size.restype = c_size_t
+
+    lib.iax_event_size.argtypes = []
+    lib.iax_event_size.restype = c_size_t
+
+
+class AbiMismatchError(RuntimeError):
+    """The loaded cdylib lays out a struct differently than this module does.
+
+    Raised at load time rather than letting a caller-allocated buffer be
+    overflowed by ``iax_station_snapshot`` / ``iax_station_next_event``.
+    """
+
+
+def _check_abi(lib: ctypes.CDLL) -> None:
+    """Assert every caller-allocated mirror matches the library's layout.
+
+    The library fills these structs by writing ``sizeof`` bytes into memory
+    ctypes allocated from the Python heap. If a field is added on the Rust side
+    and not here, that write runs past the end of the allocation — a silent heap
+    corruption whose symptom is a segfault somewhere else entirely (typically in
+    the GC), plus garbage in every field after the divergence. So refuse to run.
+    """
+    for struct, size_fn in ((_IaxState, lib.iax_state_size), (_IaxEvent, lib.iax_event_size)):
+        want = int(size_fn())
+        have = ctypes.sizeof(struct)
+        if have != want:
+            raise AbiMismatchError(
+                f"{struct.__name__} is {have} bytes here but {want} bytes in the "
+                "loaded astar-sys cdylib. The ctypes mirror has drifted from "
+                "IaxState/IaxEvent in crates/astar-sys/include/astar.h — "
+                "regenerate the header with `just cbindgen` and bring the "
+                "_fields_ list back in step, field for field, in order."
+            )
 
 
 def _encode(value: str | None) -> bytes | None:
@@ -852,11 +926,18 @@ class Station:
             mode=Mode(out.mode),
             tx_reanchors=int(out.tx_reanchors),
             tx_capture_overruns=int(out.tx_capture_overruns),
+            denoise_chain=DenoiseChain(out.denoise_chain),
+            denoise_device_rate=int(out.denoise_device_rate),
+            denoise_live=bool(out.denoise_live),
             negotiated_format=int(out.negotiated_format),
             dtmf_played=int(out.dtmf_played),
             dtmf_total=int(out.dtmf_total),
             m17_available=bool(out.m17_available),
             m17_active=bool(out.m17_active),
+            dstar_available=bool(out.dstar_available),
+            dstar_active=bool(out.dstar_active),
+            ysf_available=bool(out.ysf_available),
+            ysf_active=bool(out.ysf_active),
         )
 
     def next_event(self) -> Event | None:

@@ -27,8 +27,14 @@ workspace = true
 # refuses on the feature-independent `dstar_active` snapshot flag instead of a
 # `#[cfg]` (iax-d9f4). Do not weaken that guard on the assumption that the
 # node is built without `dstar`: in a workspace build, it is not.
-default = ["dstar", "ysf"]
+default = ["dstar", "ysf", "m17"]
 dstar = ["astar-station/dstar"]
+# M17, ON by default — it mirrors `astar-station`'s OWN default, so this
+# feature does not turn anything on that a plain build did not already have.
+# It exists so the M17-shaped entry points (`iax_station_m17_state`) have a
+# `#[cfg]` to hang off, exactly as `dstar`/`ysf` do for theirs, instead of
+# silently assuming the facade below was built with its default set.
+m17 = ["astar-station/m17"]
 # System Fusion, ON by default for the same reason `dstar` is: the Swift
 # binding is generated from this crate and reaching YSF from astar is the
 # point of these entry points. It costs a dongle-free user nothing —

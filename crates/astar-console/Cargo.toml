@@ -93,8 +93,7 @@ dstar = ["dep:astar-dstar", "astar-codec/ambe-hw"]
 # voice is AMBE+2, there is no software AMBE, so decoding it needs
 # `astar-codec/ambe-hw` and the vendored `ThumbDV` driver behind it. A link
 # can still be opened without a dongle (`YsfLink::connect`) — it just makes
-# no sound. Receive only: see this crate's `ysf` module docs for why transmit
-# is blocked at the vendored deframer rather than merely unwritten.
+# no sound. Transmit rides the same dongle and the same feature.
 ysf = ["dep:astar-ysf", "astar-codec/ambe-hw"]
 # NXDN (iax-b9c2). OFF by default for exactly the reason `ysf` is: NXDN
 # voice is AMBE+2 — the same 49-bit frame and the same RATEP word YSF DN

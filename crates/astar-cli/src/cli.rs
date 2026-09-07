@@ -163,8 +163,7 @@ OPTIONS:
     --options <TEXT>    YCS room request. Omit for a plain YSFReflector.
     -h, --help          Print this help and exit.
 
-RECEIVE ONLY. There is no PTT here and astar has no YSF transmit path at all
-— see `iax-ysftx` in the backlog for the specific reason.
+RECEIVE ONLY. This command has no PTT; keying is the operator's, in the app.
 
 YSF is hardware-only: a ThumbDV USB dongle must be attached (AMBE+2, no
 software fallback). Links, prints \"linked <host>:<port> (backend: thumbdv)\",

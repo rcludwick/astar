@@ -570,25 +570,49 @@ The cheap way to settle it: capture a known-length transmission into a local
 clock, with nothing else running. If the cadence is the cause, the fix is to
 drive the writer from a real-time clock rather than the pull loop's own pace.
 
-### iax-ysfdch — a YSF transmission carries no in-payload data channel
+### iax-ysfdch — SHIPPED 2026-09-06: the in-payload data channel on transmit
 *P3 low · feature · labels: ysf, protocol, cx:3*
 
-Found 2026-09-06 while building YSF transmit. The DN payload has a data
-channel alongside the voice — the one a Yaesu radio reads to show a callsign
-— and astar does not build it. `pack_dn` writes voice bits only, by design,
-and `build_frame` in `astar-console/src/ysf.rs` leaves the rest zeroed.
+**Built, and the original guess about why it mattered was too mild.**
+Investigated and designed in `docs/design/ysf-dch.md`, which carries the
+citations.
 
-**This does not stop a transmission being heard or attributed.** The `YSFD`
-routing header carries gateway/source/destination in clear, every reflector
-and gateway reads it, and that is where astar's own receive path takes the
-talker from. What may be missing is the callsign on a radio's display.
+The original entry said a zeroed data channel "does not stop a transmission
+being heard or attributed" because the `YSFD` routing header carries the
+callsigns in clear. That is true of a reflector's own last-heard and false of
+everything downstream of it. `MMDVMHost`'s `CYSFControl::writeNetwork` calls
+`processNetCallsigns` only when `processHeaderData`/`processVDMode2Data`
+return true — which needs a data channel whose CRC checks — and the code that
+regenerates the DCH for the air is inside the same `if`, so a zeroed channel
+was passed to a Yaesu radio unchanged. `processVDMode2Data` returns
+`ret && (fn == 0 || fn == 1)` on top of that, and astar pinned FN and FT at
+zero, so even a valid channel would never have been read. And
+`pYSFReflector3` opens the stream it relays on a frame whose FICH says
+Header — astar's header carried voice where the CSD belongs.
 
-Unverified either way: it needs a Yaesu radio on the far end, which is Rob's
-checkpoint. If it turns out radios do show the header callsign, this closes as
-won't-fix.
+**What shipped.** `astar-ysf`'s new `dch` module: the whitening (derived from
+its PN9 definition, and now the single copy `astar-codec` uses too), the
+CRC-over-whitened-bytes order, the rate-1/2 convolutional code and dibit
+interleave at both widths, `write_vd2`/`read_vd2` for a Communications
+frame's ten bytes and `write_csd`/`read_csd` for a Header/Terminator's two
+twenty-byte callsign blocks, plus `vd2_dch` and `header_csd` for what a
+client puts in each. `Fich` grew `call_sign_path` (CS), which was being sent
+as zero where a softclient sends 2. `astar-console`'s transmit path now sends
+a real Header frame at key-down, cycles FN 0..=6 with FT 6 filling each
+frame's data channel, and closes with a real Terminator carrying callsigns
+rather than five frames of silence.
 
-Building it means the VD mode 2 DCH with its own FEC and interleave, read out
-of the reference implementations to the same standard the voice layout was.
+**Known fragility, and it is reference parity.** One Header frame opens an
+over, and a reflector will not relay a stream it never opened — so a single
+lost `YSFD` datagram at key-down drops the whole transmission. `MMDVMHost`
+and `DroidStar` have exactly the same exposure and nobody repeats the header;
+worth knowing before blaming the DCH if an over goes missing again.
+
+**What still needs Rob's radio.** Whether a Yaesu handheld actually shows the
+callsign, and whether KC-Wide's monitor picks the over up. Everything here is
+verified against the references and by round-trip, known-answer and
+end-to-end tests; none of that can be the same as a radio's display. Reopen
+with what the radio shows.
 
 ### iax-ysftx — DONE 2026-09-06: YSF transmit
 *P3 low · feature · labels: ysf, vendor, cx:3*
@@ -603,8 +627,8 @@ substitution is `DnFrame::MUTE` for YSF rather than a D-Star null codeword.
 `astar-console::ysf` transmits: the station's voice route (shared with every
 digital network, since the one-audio-lane refactor), a PTT request the run
 loop applies, AMBE+2 half-rate encode, five frames to a payload,
-header/communications/terminator with the end flag set. See `iax-ysfdch` for
-the one thing it still does not carry.
+header/communications/terminator with the end flag set. The payload's data
+channel followed in `iax-ysfdch`.
 
 Original text follows.
 

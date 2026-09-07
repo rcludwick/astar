@@ -96,6 +96,13 @@ public protocol StationDriving {
     /// Costlier than `readSnapshot()`: it crosses the ABI with a buffer and
     /// parses JSON. Poll the snapshot for meters; call this at UI rate.
     func dstarState() throws -> DStarState?
+    /// The live M17 session's own state — link, whether a stream is arriving,
+    /// PTT, and the last-heard talker — or `nil` when none is active. Mirrors
+    /// `Station.m17State()` 1:1.
+    ///
+    /// Costlier than `readSnapshot()`: it crosses the ABI with a buffer and
+    /// parses JSON. Poll the snapshot for meters; call this at UI rate.
+    func m17State() throws -> M17State?
 
     // MARK: System Fusion
 

@@ -1917,6 +1917,32 @@ pub unsafe extern "C" fn iax_station_set_devices(
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
+// ABI layout parity
+// ---------------------------------------------------------------------------
+
+/// Size in bytes of [`IaxState`] as this library lays it out.
+///
+/// Every foreign binding mirrors `IaxState` by hand (ctypes `Structure`, a
+/// Swift `struct`, …) and `iax_station_snapshot` writes `size_of::<IaxState>()`
+/// bytes into the caller's buffer. A mirror that has fallen behind is therefore
+/// not a cosmetic mismatch but a **heap overflow** in the caller, plus garbage
+/// reads from every field past the first divergence. Bindings should assert
+/// their mirror's size against this at load time so the drift fails loudly and
+/// immediately instead of corrupting memory. Carries no state and no secret.
+#[unsafe(no_mangle)]
+pub extern "C" fn iax_state_size() -> usize {
+    core::mem::size_of::<IaxState>()
+}
+
+/// Size in bytes of [`IaxEvent`] as this library lays it out. Same contract as
+/// [`iax_state_size`]: `iax_station_next_event` fills a caller-allocated
+/// `IaxEvent`, so a stale mirror overflows the caller's buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn iax_event_size() -> usize {
+    core::mem::size_of::<IaxEvent>()
+}
+
+// ---------------------------------------------------------------------------
 // Error text
 // ---------------------------------------------------------------------------
 
@@ -2531,6 +2557,75 @@ pub unsafe extern "C" fn iax_station_m17_disconnect(st: *mut IaxStation) -> c_in
         IAX_OK
     }))
     .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Write the live M17 session's state as JSON into the caller buffer `buf` of
+/// `len` bytes (NUL-terminated, truncate-safe; same contract as
+/// [`iax_station_dstar_state`] — returns the byte length the full JSON needs,
+/// excluding the NUL, so a `len == 0` call is a sizing query).
+///
+/// ```json
+/// {"link":"linked","receiving":true,"ptt":false,"talker":"N0CALL"}
+/// ```
+///
+/// `link` is one of `idle`/`linking`/`linked`/`failed` — the same vocabulary
+/// D-Star and YSF use, minus the `unlinking` M17 has no state for.
+///
+/// `talker` is the source callsign from the LSF of the most recently heard
+/// stream, `null` until one arrives, and it PERSISTS past end-of-stream — it
+/// is "most recently heard", not "transmitting right now". `receiving` is the
+/// field that says whether a transmission is in progress.
+///
+/// Every field is credential-free: one callsign and two flags. The
+/// network-agnostic state (the level meters, the call status) is in
+/// [`IaxSnapshot`] — poll that on a metering tick and call this only for the
+/// talker.
+///
+/// Writes `{}` when no session is active or the `m17` feature isn't compiled
+/// in. Returns [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_m17_state(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let json = m17_state_json(station);
+        unsafe { fill_buf(&json, buf, len) }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Render the live M17 session's state as JSON, or `"{}"` when there is none.
+/// Split out of [`iax_station_m17_state`] so it is reachable from tests
+/// without an FFI buffer dance.
+fn m17_state_json(station: &IaxStation) -> String {
+    #[cfg(feature = "m17")]
+    {
+        let Some(s) = station.inner.m17_state() else {
+            return "{}".to_string();
+        };
+        // Built through serde_json rather than `format!`: `talker` is
+        // attacker-supplied — it is whatever callsign whoever keyed up put in
+        // their LSF — so a quote or backslash in it must not be able to break
+        // out of the string.
+        serde_json::json!({
+            "link": s.link.as_str(),
+            "receiving": s.receiving,
+            "ptt": s.ptt,
+            "talker": s.talker,
+        })
+        .to_string()
+    }
+    #[cfg(not(feature = "m17"))]
+    {
+        let _ = station;
+        "{}".to_string()
+    }
 }
 
 /// Set extra directories to search for a runtime `libcodec2`, ahead of the

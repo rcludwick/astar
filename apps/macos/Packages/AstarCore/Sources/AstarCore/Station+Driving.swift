@@ -40,7 +40,8 @@ extension Station: StationDriving {
     // sugar only — it doesn't affect conformance), so they need no adapter either.
     // connectDStar/dstarDisconnect/dstarState (iax-4c8e) likewise: the vendored
     // signatures are already the protocol's, defaulted arguments included.
-    // connectYSF/ysfDisconnect/ysfState the same, for the same reason.
+    // connectYSF/ysfDisconnect/ysfState the same, for the same reason, and
+    // m17State alongside them.
 }
 
 /// Errors from the fallback `NullStation` (no real engine available).
@@ -74,6 +75,9 @@ public struct NullStation: StationDriving {
     /// No engine, so no session — the same answer the real station gives while
     /// idle, which keeps the talker line absent rather than wrong.
     public func dstarState() throws -> DStarState? { nil }
+    /// No engine, so no session — the same answer the real station gives
+    /// while idle, which keeps the last-heard line absent rather than wrong.
+    public func m17State() throws -> M17State? { nil }
     public func connectYSF(host: String, callsign: String, options: String?) throws {
         throw NullStationError.noEngine
     }
