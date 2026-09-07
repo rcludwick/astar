@@ -49,8 +49,8 @@ ctrlc = { version = "3", features = ["termination"], optional = true }
 # `cargo tree -p astar-cli --features dstar` (`ambe-thumbdv` present).
 # System Fusion receive-only listen mode (astar-e7b3 §2), OFF by default for
 # the same reason `dstar` is: YSF voice is AMBE+2, so this pulls
-# `astar-codec/ambe-hw` and the vendored ThumbDV driver. Receive only — the
-# command has no PTT, because astar has no YSF transmit path.
+# `astar-codec/ambe-hw` and the vendored ThumbDV driver. The engine does
+# transmit YSF; this command deliberately does not — it has no PTT.
 ysf = [
     "dep:astar-station",
     "astar-station/ysf",

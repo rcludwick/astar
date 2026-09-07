@@ -31,13 +31,14 @@ const BLOCKS: usize = 4;
 /// Data bits into the convolutional coder: four Golay codewords.
 const CODED_BITS: usize = BLOCKS * 24;
 
+/// Columns in the FICH's dibit interleave — five of twenty, the shape
+/// `INTERLEAVE_TABLE` in the references spells out longhand. The rule itself
+/// is [`conv::dibit_interleave`], shared with the data channel.
+const INTERLEAVE_COLS: usize = 5;
+
 /// Where interleaved bit-pair `i` lands in the 200-bit FICH field.
-///
-/// The published tables spell out all one hundred entries; they are this
-/// expression. Five columns of twenty, written down the columns and read
-/// across the rows, which is what an interleaver is.
 const fn interleave(i: usize) -> usize {
-    (i / 5) * 2 + (i % 5) * 40
+    conv::dibit_interleave(i, INTERLEAVE_COLS)
 }
 
 /// Frame Information — what kind of frame this is.
@@ -155,6 +156,12 @@ pub struct Fich {
     pub frame_info: FrameInfo,
     /// What the payload holds.
     pub data_type: DataType,
+    /// Call sign path (CS). Kept raw, like [`Fich::call_mode`]. A softclient
+    /// sends 2 — `DroidStar`'s `encode_header`/`encode_dv2` both `setCS(2)` —
+    /// and `pYSFReflector3` logs it verbatim in its `FICH-Data:` line, so a
+    /// field astar left at zero was visible on other people's dashboards as
+    /// a value no radio sends.
+    pub call_sign_path: u8,
     /// Call mode — group, individual, and so on. Kept raw: astar has no
     /// behaviour that turns on it, and inventing an enum for a field
     /// nothing reads is how enums come to disagree with the wire.
@@ -182,6 +189,7 @@ impl Default for Fich {
         Fich {
             frame_info: FrameInfo::Communications,
             data_type: DataType::VDMode2,
+            call_sign_path: 2,
             call_mode: 0,
             block_number: 0,
             block_total: 0,
@@ -211,6 +219,7 @@ impl Fich {
     fn to_raw(self) -> [u8; RAW_LEN] {
         let mut raw = [0u8; RAW_LEN];
         raw[0] = (self.frame_info.bits() << 6)
+            | ((self.call_sign_path & 0x03) << 4)
             | ((self.call_mode & 0x03) << 2)
             | (self.block_number & 0x03);
         raw[1] = ((self.block_total & 0x03) << 6)
@@ -229,6 +238,7 @@ impl Fich {
     fn from_raw(raw: [u8; RAW_LEN]) -> Fich {
         Fich {
             frame_info: FrameInfo::from_bits(raw[0] >> 6),
+            call_sign_path: (raw[0] >> 4) & 0x03,
             call_mode: (raw[0] >> 2) & 0x03,
             block_number: raw[0] & 0x03,
             block_total: (raw[1] >> 6) & 0x03,
@@ -325,12 +335,27 @@ mod tests {
     #[test]
     fn the_interleave_expression_matches_the_published_table() {
         // The first two rows and the last entry of the hundred-entry table
-        // every implementation writes out longhand.
+        // every implementation writes out longhand. `conv` owns the rule;
+        // this pins that the FICH is wired to the five-column width of it.
         assert_eq!(
             (0..10).map(interleave).collect::<Vec<_>>(),
             vec![0, 40, 80, 120, 160, 2, 42, 82, 122, 162]
         );
         assert_eq!(interleave(99), 198);
+    }
+
+    #[test]
+    fn the_call_sign_path_defaults_to_what_a_softclient_sends() {
+        assert_eq!(Fich::default().call_sign_path, 2);
+        for cs in 0..=3u8 {
+            let fich = Fich {
+                call_sign_path: cs,
+                ..Fich::default()
+            };
+            let mut field = [0u8; FICH_LEN];
+            fich.encode(&mut field);
+            assert_eq!(Fich::decode(&field).map(|f| f.call_sign_path), Ok(cs));
+        }
     }
 
     #[test]
@@ -349,6 +374,7 @@ mod tests {
         Fich {
             frame_info: FrameInfo::Communications,
             data_type: DataType::VDMode2,
+            call_sign_path: 1,
             call_mode: 2,
             block_number: 1,
             block_total: 3,
