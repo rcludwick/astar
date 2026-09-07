@@ -75,13 +75,10 @@ current.
 
 - **astar-server prefers signed 16-bit linear by default** and rejects a peer
   with no usable codec instead of accepting one it cannot decode; µ-law-only
-  nodes are still accepted. The reject carries Asterisk's own CAUSE and
-  CAUSECODE, and — like the two older inbound rejects, which had the same bug —
-  it now tears the call leg down instead of leaving it holding a call number
-  and a slot against `max_calls`. In the other direction, a peer that answers
-  with a format the station never offered is hung up on rather than transmitted
-  to: a `ulaw_only` node no longer ends up sending wideband because the far end
-  asked for it.
+  nodes are still accepted, and the reject carries Asterisk's own CAUSE and
+  CAUSECODE. In the other direction, a peer that answers with a format the
+  station never offered is hung up on rather than transmitted to: a `ulaw_only`
+  node no longer ends up sending wideband because the far end asked for it.
 
 - **Versions are real SemVer from here on**, this one included, and the app and
   the Rust workspace now spell a release identically — they had been carrying
@@ -104,6 +101,9 @@ current.
   did not enumerate.
 
 ### Fixed
+
+- **A rejected inbound call — bad CALLTOKEN, failed auth, or no common codec —
+  no longer leaves a call number and a `max_calls` slot held forever.**
 
 - **Failures say what actually went wrong.** A dial that failed used to read
   something like "astarstation error -7: audio error" — a number and a

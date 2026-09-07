@@ -1643,13 +1643,13 @@ impl Fsm {
 /// when the peer named something outside our CAPABILITY, which the caller turns
 /// into a HANGUP.
 ///
-/// The gate is `policy.capability_mask()`, NOT `CodecPolicy::is_encodable` —
-/// the fixed four formats the media path can code at all. Those are different
-/// questions and the difference has a bandwidth bill attached: a `ulaw_only`
-/// station can *encode* slin16 perfectly well, so the old `is_encodable` gate
-/// let a peer's `ACCEPT FORMAT=slin16` put the link on 256 kbps when the
-/// operator had capped it at 64. We offered a mask; honouring anything outside
-/// it silently overrides the config.
+/// The gate is `policy.capability_mask()` — what we actually offered — not
+/// "can the media path code this at all", which is what it used to be. Those
+/// are different questions and the difference has a bandwidth bill attached: a
+/// `ulaw_only` station can *encode* slin16 perfectly well, so the old gate let
+/// a peer's `ACCEPT FORMAT=slin16` put the link on 256 kbps when the operator
+/// had capped it at 64. We offered a mask; honouring anything outside it
+/// silently overrides the config.
 ///
 /// The policy here is the call profile's, which `Manager::dial` has already run
 /// through `capped_to_rate`, so the mask is what this station can really carry
@@ -1671,9 +1671,9 @@ fn accepted_format(ies: &Ies, policy: CodecPolicy) -> Option<VoiceFormat> {
 /// directions of a failed negotiation read identically in a log, and Asterisk
 /// on the far end sees the sentence it uses itself.
 ///
-/// The caller cancels its own setup timers first; this arms `HangupRetry` and
-/// surfaces `Disconnected` so the app tears the leg down rather than sitting on
-/// a call that will never carry audio.
+/// The caller cancels its own setup timers first; this surfaces `Disconnected`
+/// so the app tears the leg down rather than sitting on a call that will never
+/// carry audio.
 fn hangup_unnegotiable_accept(
     our_call: CallNo,
     peer_call: CallNo,
@@ -1696,6 +1696,10 @@ fn hangup_unnegotiable_accept(
         peer_call,
         Some(CAUSE),
     )));
+    // This timer never fires: `Disconnected` below terminates the runtime in
+    // the same dispatch batch, so the HANGUP goes out exactly once and loss
+    // recovery is the peer's re-NEW, not our retransmit. Kept for the shape's
+    // sake (every other Hangup transition arms it); do not "fix" its absence.
     out.push(Action::SetTimer(
         TimerKind::HangupRetry,
         Duration::from_secs(1),

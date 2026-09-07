@@ -977,8 +977,8 @@ fn ulaw_link_coexists_with_a_slin16_client_without_downgrading_it() {
 
 // ---------------------------------------------------------------------------
 // Test 5: a peer ACCEPTing a format we never offered is hung up on, not
-// adopted (iax-c0de). The old gate was `CodecPolicy::is_encodable` — the four
-// formats the media path can code at all — so a `ulaw_only` station handed
+// adopted (iax-c0de). The old gate asked only whether the media path could
+// code the format at all — the fixed four — so a `ulaw_only` station handed
 // `ACCEPT FORMAT=slin16` happily transmitted slin16, eight times the bandwidth
 // the operator had capped it at. The gate is now the policy's own CAPABILITY
 // mask, and a format outside it earns the same "Unable to negotiate codec"

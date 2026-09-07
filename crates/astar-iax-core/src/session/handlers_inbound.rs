@@ -28,6 +28,22 @@ use crate::frame::Subclass;
 use crate::ie::Ies;
 use crate::subclass::{IaxCommand, VoiceFormat};
 
+/// Asterisk's `AST_CAUSE_BEARERCAPABILITY_NOTAVAIL` (Q.931 cause 65), the
+/// CAUSECODE it pairs with "Unable to negotiate codec". Peers that key their
+/// retry logic off the number rather than the sentence need this IE present.
+const CAUSE_BEARERCAPABILITY_NOTAVAIL: u8 = 65;
+
+/// Codecs best-fidelity first, used only to degrade a request we cannot meet.
+/// Distinct from any policy's `preference_order`, which encodes what a node
+/// WANTS; this encodes what is least bad when the caller cannot have what it
+/// asked for. Linear beats companded; 16 kHz beats 8 kHz.
+const QUALITY_ORDER: &[VoiceFormat] = &[
+    VoiceFormat::Slin16,
+    VoiceFormat::Slin,
+    VoiceFormat::G711U,
+    VoiceFormat::G711A,
+];
+
 /// Pick the codec for the ACCEPT FORMAT IE, or `None` when the peer stated a
 /// CAPABILITY with nothing in it we can carry.
 ///
@@ -49,22 +65,6 @@ use crate::subclass::{IaxCommand, VoiceFormat};
 /// path and connects rather than being rejected. That is the right way round:
 /// a peer that advertises nothing is far more often one that only sent FORMAT
 /// than one genuinely claiming to support no codec at all.
-/// Asterisk's `AST_CAUSE_BEARERCAPABILITY_NOTAVAIL` (Q.931 cause 65), the
-/// CAUSECODE it pairs with "Unable to negotiate codec". Peers that key their
-/// retry logic off the number rather than the sentence need this IE present.
-const CAUSE_BEARERCAPABILITY_NOTAVAIL: u8 = 65;
-
-/// Codecs best-fidelity first, used only to degrade a request we cannot meet.
-/// Distinct from any policy's `preference_order`, which encodes what a node
-/// WANTS; this encodes what is least bad when the caller cannot have what it
-/// asked for. Linear beats companded; 16 kHz beats 8 kHz.
-const QUALITY_ORDER: &[VoiceFormat] = &[
-    VoiceFormat::Slin16,
-    VoiceFormat::Slin,
-    VoiceFormat::G711U,
-    VoiceFormat::G711A,
-];
-
 fn choose_codec(
     offered: CodecMask,
     peer_pref: Option<VoiceFormat>,
