@@ -248,6 +248,7 @@ dependencies = [
  "astar-iax",
  "astar-iax-core",
  "astar-m17",
+ "astar-nxdn",
  "astar-ptt",
  "astar-wireguard",
  "astar-ysf",

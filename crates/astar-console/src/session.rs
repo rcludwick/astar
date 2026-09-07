@@ -165,6 +165,10 @@ pub enum ConsoleError {
     /// the `ysf` feature isn't compiled in, or by [`crate::ysf::YsfLink`]
     /// classifying a bind, resolve or callsign failure.
     Ysf(String),
+    /// An NXDN link could not be opened or used: raised by
+    /// [`crate::nxdn::NxdnLink`] classifying a callsign, radio-id, resolve
+    /// or bind failure.
+    Nxdn(String),
     /// A key-down was refused because the live voice route has no capture
     /// device it could open (none resolved, permission denied, or the device
     /// is held exclusively). Receiving still works; transmitting cannot.
@@ -184,6 +188,7 @@ impl std::fmt::Display for ConsoleError {
             Self::M17(msg) => write!(f, "m17: {msg}"),
             Self::Dstar(msg) => write!(f, "dstar: {msg}"),
             Self::Ysf(msg) => write!(f, "ysf: {msg}"),
+            Self::Nxdn(msg) => write!(f, "nxdn: {msg}"),
             Self::NoCaptureDevice => write!(f, "no capture device: cannot transmit"),
         }
     }

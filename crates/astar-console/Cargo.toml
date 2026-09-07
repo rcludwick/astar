@@ -18,6 +18,11 @@ astar-m17 = { path = "../astar-m17", optional = true }
 # feature (OFF by default — see that feature's doc below) below.
 astar-dstar = { path = "../astar-dstar", optional = true }
 astar-ysf = { path = "../astar-ysf", optional = true }
+# NXDN protocol primitives (iax-b9c2 Task 2): the NXDNReflector wire, the
+# 33-byte network frame and a link FSM, plus a loopback reflector to test
+# against. Pure but for that reflector; optional + gated behind the `nxdn`
+# feature (OFF by default — see below).
+astar-nxdn = { path = "../astar-nxdn", version = "0.1.11-beta", optional = true }
 # Underlay socket for applying a deferred `WireGuard` link transport when the
 # engine is first built (iax-5bbd); config/status types come via `astar-iax`.
 astar-wireguard = { path = "../astar-wireguard" }
@@ -91,6 +96,13 @@ dstar = ["dep:astar-dstar", "astar-codec/ambe-hw"]
 # no sound. Receive only: see this crate's `ysf` module docs for why transmit
 # is blocked at the vendored deframer rather than merely unwritten.
 ysf = ["dep:astar-ysf", "astar-codec/ambe-hw"]
+# NXDN (iax-b9c2). OFF by default for exactly the reason `ysf` is: NXDN
+# voice is AMBE+2 — the same 49-bit frame and the same RATEP word YSF DN
+# uses — so decoding it needs `astar-codec/ambe-hw` and the vendored
+# `ThumbDV` driver behind it. A link can still be opened without a dongle
+# (`NxdnLink::connect`); it just makes no sound. Receive only for now: see
+# this crate's `nxdn` module docs for the gate transmit is behind.
+nxdn = ["dep:astar-nxdn", "astar-codec/ambe-hw"]
 
 [lints]
 workspace = true

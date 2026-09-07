@@ -2269,6 +2269,12 @@ fn map_console_err(e: astar_console::ConsoleError) -> StationError {
         C::M17(m) => StationError::M17(m),
         C::Dstar(m) => StationError::Dstar(m),
         C::Ysf(m) => StationError::Ysf(m),
+        // NXDN reaches the facade as a link-layer failure with its network
+        // named in the message. A typed `StationError::Nxdn` belongs with
+        // the station wiring that can actually raise one — the console link
+        // is not reachable from `Station` yet — and inventing the variant
+        // here would put a value across the C ABI that nothing produces.
+        C::Nxdn(m) => StationError::Link(format!("nxdn: {m}")),
         C::NoCaptureDevice => StationError::Audio("no capture device: cannot transmit".into()),
     }
 }
