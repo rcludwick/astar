@@ -95,14 +95,57 @@ fn a_station_refuses_a_radio_id_past_twenty_four_bits() {
     assert!(matches!(e, Err(StationError::Dmr(_))), "got {e:?}");
 }
 
+/// A `system` is required, and an empty one is the only shape refused.
+///
+/// It used to be the other way round — anything that was not one of the nine
+/// family slugs was refused — which made every directory row undialable, since
+/// not one of the feed's 111 `system` values equals a family slug. See
+/// `a_directory_slug_is_accepted` below.
 #[test]
-fn a_station_refuses_an_unknown_system_slug() {
-    // astar_dmr::DmrNetwork::from_slug answers None rather than guessing, and
-    // a target that names a network this build does not know must be refused
-    // rather than pointed somewhere else under the operator's own ID.
+fn a_station_refuses_an_empty_system() {
+    let station = test_station();
+    for system in ["", "   "] {
+        let e = station.dmr_connect(
+            system,
+            "127.0.0.1",
+            62031,
+            3_153_591,
+            "KC0ABC",
+            31_313,
+            2,
+            PASSWORD.into(),
+        );
+        let Err(StationError::Dmr(message)) = e else {
+            panic!("a refusal for {system:?}")
+        };
+        assert!(!message.contains(PASSWORD));
+    }
+}
+
+/// The seam this file exists to pin: **a directory row's `system` reaches the
+/// station verbatim and must be dialable.**
+///
+/// `freedmr-network` is a real 2026-09-07 `DVRef` value. It is not a
+/// `DmrNetwork` slug and never will be — `DVRef` names servers, `DmrNetwork`
+/// names families — so the station resolves it through
+/// `DmrNetwork::from_system_slug` and dials it. The assertion is on the
+/// refusal's *identity*: with no dongle reachable this cannot succeed, but
+/// the failure must be the vocoder's, never "unknown DMR network".
+///
+/// Valid arguments, so this reaches `DmrLink::connect_with_audio` — it takes
+/// `env_lock` and pins `IAX_THUMBDV_PORT` at a path no VID/PID scan can
+/// return, exactly as `an_independent_network_is_not_gated` does.
+#[test]
+fn a_directory_slug_is_accepted() {
+    let _env = env_lock();
+    // SAFETY: serialized by `env_lock`; no other test in this binary reads or
+    // writes `IAX_THUMBDV_PORT` while the guard is held.
+    unsafe {
+        std::env::set_var("IAX_THUMBDV_PORT", "/dev/cu.usbserial-NOSUCHDEVICE");
+    }
     let station = test_station();
     let e = station.dmr_connect(
-        "not-a-network",
+        "freedmr-network",
         "127.0.0.1",
         62031,
         3_153_591,
@@ -111,7 +154,86 @@ fn a_station_refuses_an_unknown_system_slug() {
         2,
         PASSWORD.into(),
     );
-    assert!(matches!(e, Err(StationError::Dmr(_))), "got {e:?}");
+    // SAFETY: same serialization as the `set_var` above.
+    unsafe {
+        std::env::remove_var("IAX_THUMBDV_PORT");
+    }
+
+    let Err(StationError::Dmr(message)) = e else {
+        panic!("no ThumbDV is reachable, so this cannot succeed")
+    };
+    assert!(
+        !message.contains("unknown DMR network"),
+        "a directory system must not be refused as unknown: {message:?}"
+    );
+    assert!(!message.contains("BrandMeister"), "{message:?}");
+    assert!(!message.contains(PASSWORD));
+}
+
+/// And a `system` no family claims — `xlx696`, a real feed value — is dialed
+/// too. `None` from the bridge means "independent, unrecognised", never
+/// "refuse": the family is consulted for the consent gate and nothing else,
+/// and a network astar cannot name is not BrandMeister.
+#[test]
+fn an_unknown_system_is_still_dialable() {
+    let _env = env_lock();
+    // SAFETY: serialized by `env_lock`; no other test in this binary reads or
+    // writes `IAX_THUMBDV_PORT` while the guard is held.
+    unsafe {
+        std::env::set_var("IAX_THUMBDV_PORT", "/dev/cu.usbserial-NOSUCHDEVICE");
+    }
+    let station = test_station();
+    let e = station.dmr_connect(
+        "xlx696",
+        "127.0.0.1",
+        62031,
+        3_153_591,
+        "KC0ABC",
+        31_313,
+        2,
+        PASSWORD.into(),
+    );
+    // SAFETY: same serialization as the `set_var` above.
+    unsafe {
+        std::env::remove_var("IAX_THUMBDV_PORT");
+    }
+
+    let Err(StationError::Dmr(message)) = e else {
+        panic!("no ThumbDV is reachable, so this cannot succeed")
+    };
+    assert!(
+        !message.contains("unknown DMR network"),
+        "an unrecognised system is independent, not refused: {message:?}"
+    );
+    assert!(!message.contains("BrandMeister"), "{message:?}");
+    assert!(!message.contains(PASSWORD));
+}
+
+/// The gate does not lose its grip on the way through the new door.
+/// `brandmeister-3102` is what a BrandMeister server row is called, and it
+/// must be refused exactly as the bare family slug is — before a socket or a
+/// dongle is touched, so this needs no pin.
+#[test]
+fn brandmeister_with_a_suffix_is_refused() {
+    let station = test_station();
+    let e = station.dmr_connect(
+        "brandmeister-3102",
+        "127.0.0.1",
+        62031,
+        3_153_591,
+        "KC0ABC",
+        91,
+        2,
+        PASSWORD.into(),
+    );
+    let Err(StationError::Dmr(message)) = e else {
+        panic!("a refusal")
+    };
+    assert!(
+        message.contains("BrandMeister"),
+        "the refusal must name the network: {message:?}"
+    );
+    assert!(!message.contains(PASSWORD));
 }
 
 #[test]
@@ -235,11 +357,7 @@ fn a_station_refuses_an_empty_callsign_and_an_empty_password() {
 #[test]
 fn no_station_error_ever_carries_the_password() {
     let station = test_station();
-    for (system, id) in [
-        ("tgif", 0u32),
-        ("nope", 3_153_591),
-        ("brandmeister", 3_153_591),
-    ] {
+    for (system, id) in [("tgif", 0u32), ("", 3_153_591), ("brandmeister", 3_153_591)] {
         let Err(e) = station.dmr_connect(
             system,
             "127.0.0.1",
@@ -280,7 +398,7 @@ fn a_refused_argument_leaves_no_route_reserved() {
     // The tell: a later connect fails at ITS OWN validation rather than with
     // `AlreadyConnected` from a lane the first attempt never gave back.
     match station.dmr_connect(
-        "not-a-network",
+        "",
         "127.0.0.1",
         62031,
         3_153_591,

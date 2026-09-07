@@ -163,9 +163,11 @@ pub fn parse(args: impl Iterator<Item = String>) -> Result<Parsed, String> {
     };
 
     // The network is part of the address, not a label on it. Passed through
-    // verbatim: `Station::dmr_connect` resolves it against
-    // `astar_dmr::DmrNetwork` and lists what this build knows when it cannot,
-    // which is one table rather than two that drift.
+    // verbatim, and only checked for being there: `Station::dmr_connect`
+    // accepts an engine family slug (`tgif`) or a directory server name
+    // (`freedmr-network`, `xlx696`) alike, because those are two vocabularies
+    // and neither is derivable from the other. Re-deciding which names are
+    // valid here would be a second table to drift against the engine's.
     let system = raw
         .system
         .ok_or_else(|| format!("missing --system (required)\n\n{DMR_LISTEN_USAGE}"))?;
@@ -687,6 +689,28 @@ mod tests {
             "0",
         ]);
         assert!(e.contains("--tg"), "{e}");
+    }
+
+    /// A directory row's `system` is a server name, not one of the engine's
+    /// nine family slugs, and this command must carry it through untouched —
+    /// it is what names the master and what the master password is saved
+    /// under.
+    #[test]
+    fn a_directory_system_is_carried_verbatim() {
+        for system in ["freedmr-network", "ipsc2-poland", "xlx696"] {
+            let o = opts(&[
+                "m.example",
+                "--system",
+                system,
+                "--callsign",
+                "KC0ABC",
+                "--radio-id",
+                "3153591",
+                "--tg",
+                "91",
+            ]);
+            assert_eq!(o.system, system);
+        }
     }
 
     #[test]

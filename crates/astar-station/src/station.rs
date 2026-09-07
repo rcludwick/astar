@@ -1349,14 +1349,19 @@ impl Station {
     /// Link to a DMR master's talkgroup and decode the audio on it
     /// (iax-d4f7).
     ///
-    /// `system` is a network slug — `tgif`, `brandmeister`, … — resolved with
-    /// `astar_dmr::DmrNetwork::from_slug`, which answers `None` rather than
-    /// guessing: a near-miss that resolved to the wrong network would put the
-    /// operator on the wrong system under their own registered ID. `radio_id`
-    /// is that registration (radioid.net), `talkgroup` the room and
-    /// `timeslot` 1 or 2. DMR addresses stations by NUMBER — a `DMRD` carries
-    /// `srcId` and no callsign at all — so `callsign` rides only in the
-    /// `RPTC` config.
+    /// `system` names the network this master belongs to and is carried
+    /// through verbatim. **Any non-empty string is accepted**, because two
+    /// vocabularies arrive at this argument: a family slug
+    /// (`astar_dmr::DmrNetwork::from_slug` — `tgif`, `brandmeister`, nine of
+    /// them) and a directory row's server name
+    /// (`DmrNetwork::from_system_slug` — `freedmr-network`, `ipsc2-poland`,
+    /// `xlx696`, 111 of them in the 2026-09-07 feed, none of which equals a
+    /// family slug). Both doors are tried; a `system` neither claims is dialed
+    /// anyway, since the family is read for the consent gate and nothing
+    /// else. `radio_id` is the operator's registration (radioid.net),
+    /// `talkgroup` the room and `timeslot` 1 or 2. DMR addresses stations by
+    /// NUMBER — a `DMRD` carries `srcId` and no callsign at all — so
+    /// `callsign` rides only in the `RPTC` config.
     ///
     /// Primitive args rather than an `astar_console::DmrConfig` for the same
     /// reason [`Station::nxdn_connect`] takes them: that type only exists when
@@ -1399,7 +1404,7 @@ impl Station {
     /// poll-and-snapshot.
     ///
     /// # Errors
-    /// [`StationError::Dmr`] for an unknown system slug, an ungated
+    /// [`StationError::Dmr`] for an empty system, an ungated
     /// BrandMeister target, a zero or over-wide radio id, an empty callsign,
     /// a zero talkgroup, a timeslot that is not 1 or 2, an empty password,
     /// when the `dmr` feature isn't compiled in, and for every
@@ -1422,27 +1427,49 @@ impl Station {
         // OFF as well as on, so an operator who mistypes gets the same answer
         // either way and no lane is opened for a connect that cannot succeed.
         //
-        // The network is resolved FIRST because the consent gate hangs off
-        // it, and the consent gate must run before anything is opened.
-        let Some(network) = astar_dmr::DmrNetwork::from_slug(system) else {
-            return Err(StationError::Dmr(format!(
-                "unknown DMR network {system:?}: this build knows {}",
-                astar_dmr::ALL
-                    .iter()
-                    .map(|n| n.slug())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )));
-        };
+        // The family is resolved FIRST because the consent gate hangs off it,
+        // and the consent gate must run before anything is opened.
+        //
+        // **`system` is a name, not an enumeration.** Two vocabularies meet
+        // at this argument: `DmrNetwork::slug` names one of nine families,
+        // and a directory row's `system` names one server — `freedmr-network`,
+        // `ipsc2-poland`, `xlx696` — of which a family has many. Checked
+        // 2026-09-07: not one of the feed's 111 `system` values equals a
+        // family slug, so refusing everything that is not a slug (which this
+        // did until the seam was found) made every one of the app's 185
+        // directory rows undialable. Both doors are tried, and a `system` no
+        // family claims is dialed anyway with `family: None`: the family is
+        // consulted for the consent gate and nothing else, and a network
+        // astar cannot name is not BrandMeister.
+        let trimmed = system.trim();
+        if trimmed.is_empty() {
+            return Err(StationError::Dmr(
+                "a DMR target must name its network: a talkgroup number means a different room \
+                 on each of them"
+                    .into(),
+            ));
+        }
+        let family = astar_dmr::DmrNetwork::from_slug(trimmed)
+            .or_else(|| astar_dmr::DmrNetwork::from_system_slug(trimmed));
+        // Belt and braces: the family answer AND the raw spelling. The bridge
+        // above already resolves `brandmeister`, `brandmeister-3102` and
+        // `brandmeister_uk`, but this gate protects an operator's account on
+        // somebody else's private network, so a spelling that slips past the
+        // separator rule (`brandmeister3102`) must not slip past this.
+        let is_brandmeister = family == Some(astar_dmr::DmrNetwork::BrandMeister)
+            || trimmed.to_ascii_lowercase().starts_with("brandmeister");
         // `dialable` is the gate written once so no call site can forget it,
         // and this facade is a call site. Asking it — rather than testing
         // `requires_consent()` here — is what keeps the policy in one place.
-        if !astar_dmr::dialable(BRANDMEISTER_CONSENTED).contains(&network) {
+        if is_brandmeister
+            && !astar_dmr::dialable(BRANDMEISTER_CONSENTED)
+                .contains(&astar_dmr::DmrNetwork::BrandMeister)
+        {
             return Err(StationError::Dmr(format!(
                 "{} requires the operator to opt in first: it is a private network whose \
                  operators set the terms, and connecting with a third-party client is a risk \
                  to your own access there",
-                network.label()
+                astar_dmr::DmrNetwork::BrandMeister.label()
             )));
         }
         // A radio id is a registration, not a default. Zero is what an unset
@@ -1491,7 +1518,8 @@ impl Station {
             // caches it, and `DmrConfig` is deliberately not `Clone` — the
             // password inside it is moved, not copied.
             let cfg = astar_console::DmrConfig {
-                system: network,
+                system: trimmed.to_string(),
+                family,
                 host: host.to_string(),
                 port,
                 radio_id,

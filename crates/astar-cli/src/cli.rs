@@ -242,12 +242,16 @@ ARGS:
 OPTIONS:
     --port <u16>        Master UDP port. Equivalent to host:port; giving both
                          is an error if they disagree.
-    --system <slug>     Which DMR this is (required). A talkgroup number names
+    --system <name>     Which DMR this is (required). A talkgroup number names
                          nothing on its own — TG 91 is a different room on
                          every one of these networks — so the network is part
-                         of the address, not a label. `astar-cli dmr-listen`
-                         passes it through verbatim; the engine refuses one it
-                         does not know and lists the ones it does.
+                         of the address, not a label. Any non-empty name is
+                         accepted and passed through verbatim: an engine
+                         family slug (tgif, freedmr, dmrplus, systemx,
+                         amcomm, vkdmr, freestar, adn) or a directory server
+                         name (freedmr-network, ipsc2-poland, xlx696). Only
+                         BrandMeister is refused, and only because this build
+                         cannot reach it at all.
     --callsign <CS>     This station's callsign (required). Rides in the
                          login, not in a voice burst — DMR addresses stations
                          by number on the wire.

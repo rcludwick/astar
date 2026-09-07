@@ -3603,17 +3603,23 @@ mod dmr_tests {
         unsafe { iax_station_free(st) };
     }
 
-    /// An unknown system slug is refused before a socket or a dongle is
-    /// touched, so this holds with or without hardware — and with or without
-    /// the feature compiled in.
+    /// An empty system is refused before a socket or a dongle is touched, so
+    /// this holds with or without hardware — and with or without the feature
+    /// compiled in.
+    ///
+    /// Empty rather than `not-a-network`, which is what this asked before:
+    /// an unrecognised system is now DIALED (a directory row's `system` names
+    /// a server, and 111 of the feed's do not match any family slug), so a
+    /// nonsense one here would reach the dongle probe — and on a machine with
+    /// a `ThumbDV` attached, seize it.
     #[test]
-    fn an_unknown_system_is_refused_with_the_dmr_code() {
+    fn an_empty_system_is_refused_with_the_dmr_code() {
         let st = station();
         assert_eq!(
             unsafe {
                 iax_station_connect_dmr(
                     st,
-                    c"not-a-network".as_ptr(),
+                    c"".as_ptr(),
                     c"127.0.0.1".as_ptr(),
                     62031,
                     1_234_567,

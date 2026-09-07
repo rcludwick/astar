@@ -613,13 +613,18 @@ final class StationTests: XCTestCase {
         XCTAssertNoThrow(try station.dmrDisconnect())
     }
 
-    /// An unknown network slug is refused before a socket or a dongle is
-    /// touched, so this holds with or without a dongle attached.
-    func testConnectDMRRejectsAnUnknownSystem() throws {
+    /// An empty system is refused before a socket or a dongle is touched, so
+    /// this holds with or without a dongle attached.
+    ///
+    /// Empty, not `not-a-network`: an unrecognised system is DIALED now — a
+    /// directory row's `system` names a server, and none of the feed's 111
+    /// values equals an engine family slug — so a nonsense one here would
+    /// reach the dongle probe and, with a ThumbDV attached, seize it.
+    func testConnectDMRRejectsAnEmptySystem() throws {
         let station = try Station()
         XCTAssertThrowsError(
             try station.connectDMR(
-                system: "not-a-network", host: "127.0.0.1", port: 62031, radioID: 1_234_567,
+                system: "", host: "127.0.0.1", port: 62031, radioID: 1_234_567,
                 callsign: "N0CALL", talkgroup: 31313, timeslot: 2, password: "passw0rd")
         ) { error in
             // IAX_ERR_DMR == -22

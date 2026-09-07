@@ -718,11 +718,20 @@ in-arg once that read stands); (2) **transmit**, Tasks 12–13 of the plan,
 fenced until Rob confirms a clean YSF parrot round trip, then the parrot on
 127.0.0.1 before TGIF and nothing else (iax-f4c1 lists what transmit owes);
 (3) talkgroup lists for the networks whose directory rows carry none, and for
-TGIF, which publishes no server rows at all; (4) one stale doc comment —
-`astar_dmr::network` still says a slug is the identifier used in "directory
-rows", which Task 10 disproved (DVRef names servers, 111 distinct `system`
-values across 185 rows; `DmrNetwork` names families). The design doc carries
-the correction; the comment is a one-line fix nobody has made.
+TGIF, which publishes no server rows at all.
+
+**Fixed 2026-09-07 (whole-branch review):** the two `system` vocabularies met
+at the ABI with no bridge on the Rust side, so `Station::dmr_connect` refused
+every one of the app's 185 directory rows as an "unknown DMR network" — DVRef
+names servers (111 distinct `system` values), `DmrNetwork` names families, and
+not one server name equals a family slug. `dmr_connect` now takes any
+non-empty `system`, resolving the family through `DmrNetwork::from_slug` then
+the new `DmrNetwork::from_system_slug` (the twin of the app's
+`DmrDial.family(ofSystem:)`, same table, same order) and dialing with
+`family: None` when neither answers; BrandMeister is refused on the resolved
+family AND on the raw spelling. `DmrConfig` carries `system: String` beside
+`family: Option<DmrNetwork>`. The stale "directory rows" doc comment on
+`DmrNetwork::slug` went with it.
 
 **Not here, deliberately:** master hostnames, ports and passwords. Passwords
 are per-network secrets — connect-time in-args only. Endpoints are directory

@@ -298,7 +298,13 @@ hardware gate as D-Star/YSF/NXDN), and the target is four parts —
 timeslot to TS2. The directory's 185 DMR rows are grouped by `DmrFamily` via
 `DmrDial.family(ofSystem:)`, which answers `nil` for "independent,
 unrecognised" rather than guessing — most rows do, and every one of them is
-still listed and still dialable. The master password is a per-system
+still listed and still dialable. That last word became true on 2026-09-07:
+until the whole-branch review the engine resolved `system` with
+`DmrNetwork::from_slug` alone and refused all 185 rows as "unknown DMR
+network", since no directory server name equals a family slug.
+`astar_dmr::DmrNetwork::from_system_slug` is now the Rust twin of
+`family(ofSystem:)` — same table, same order — and a name added to one belongs
+in both. The master password is a per-system
 credential, and the BrandMeister consent checkbox is present, off by default,
 with help text saying in as many words that this build cannot reach
 BrandMeister at all. Receive only: no PTT button is offered, because the

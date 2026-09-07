@@ -54,8 +54,8 @@ the same thing whichever network is live.
 
 - **DMR in the bundled reflector directory.** The 2026-09-07 snapshot
   carries 3,415 reflectors across seven networks, now including hamcall-db's
-  DMR masters — 185 servers, named and counted. astar has no DMR client yet,
-  so they are listed rather than dialable.
+  DMR masters — 185 servers, named and counted, grouped by the network family
+  that runs them, and every one of them dialable by the DMR client below.
 
 - **The node daemon has a voice.** `astar-server` depended on `tracing` and
   never installed a subscriber, so 35 log sites in the engine dispatched to
@@ -69,7 +69,8 @@ the same thing whichever network is live.
   TGIF, FreeDMR, DMR+, SystemX and the rest — and it speaks the MMDVM/homebrew
   repeater protocol, joins a talkgroup on a timeslot, and decodes the AMBE+2 on
   it through the same ThumbDV D-Star, Fusion and NXDN use. The network switcher,
-  the directory's 185 DMR rows, and last-heard. Your radio ID and each
+  the directory's 185 DMR rows — pick one and connect, or type an address for a
+  network the directory does not list, TGIF included — and last-heard. Your radio ID and each
   network's own password are separate credentials and stay that way; the
   password is used to log in and never stored anywhere else. BrandMeister is
   listed and not dialable: it is a private network whose operators set the

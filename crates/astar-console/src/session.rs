@@ -5361,7 +5361,8 @@ mod tests {
         let handle = m.run();
         let link = crate::dmr::DmrLink::connect_with_stream(
             crate::dmr::DmrConfig {
-                system: astar_dmr::DmrNetwork::Tgif,
+                system: "tgif".into(),
+                family: Some(astar_dmr::DmrNetwork::Tgif),
                 host: addr.ip().to_string(),
                 port: addr.port(),
                 radio_id: 3_153_591,

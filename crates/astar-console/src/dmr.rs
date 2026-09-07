@@ -258,10 +258,26 @@ pub struct DmrSnapshot {
 /// dropped. It is not on [`DmrLink`], not in [`DmrSnapshot`], not in any
 /// error, and this struct's `Debug` prints `password: <redacted>`.
 pub struct DmrConfig {
-    /// Which DMR this is. A talkgroup number names nothing on its own — TG 91
-    /// exists on several of these networks and is a different room on each —
-    /// so the network is part of the address, not a label.
-    pub system: DmrNetwork,
+    /// Which DMR this is, as the caller spelled it. A talkgroup number names
+    /// nothing on its own — TG 91 exists on several of these networks and is a
+    /// different room on each — so the network is part of the address, not a
+    /// label.
+    ///
+    /// A **string**, not a [`DmrNetwork`], because a directory row's `system`
+    /// names one server (`freedmr-network`, `ipsc2-poland`, `xlx696`) while
+    /// `DmrNetwork` names one of nine families, and neither vocabulary can be
+    /// derived from the other by renaming. This carries what the operator or
+    /// the directory said; [`Self::family`] carries what the engine made of
+    /// it.
+    pub system: String,
+    /// The family [`Self::system`] resolved to, or `None` for one this build
+    /// does not recognise.
+    ///
+    /// `None` is "independent, unrecognised", never "refuse" — most directory
+    /// rows answer it. Resolved by `Station::dmr_connect` through
+    /// `DmrNetwork::from_slug` then `DmrNetwork::from_system_slug`, and read
+    /// only for the consent gate and for the log line below.
+    pub family: Option<DmrNetwork>,
     /// The master's hostname or address.
     pub host: String,
     /// Its port. 62031 is the homebrew convention; nothing here assumes it.
@@ -287,6 +303,7 @@ impl std::fmt::Debug for DmrConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DmrConfig")
             .field("system", &self.system)
+            .field("family", &self.family)
             .field("host", &self.host)
             .field("port", &self.port)
             .field("radio_id", &self.radio_id)
@@ -619,7 +636,8 @@ impl DmrLink {
         let shared = Arc::new(Shared::new(cfg.talkgroup, cfg.timeslot));
 
         tracing::debug!(
-            system = cfg.system.slug(),
+            system = cfg.system.as_str(),
+            family = cfg.family.map_or("unrecognised", DmrNetwork::slug),
             talkgroup = cfg.talkgroup,
             timeslot = cfg.timeslot.as_str(),
             "dmr: linking"
@@ -1238,7 +1256,8 @@ mod tests {
 
     fn cfg(addr: SocketAddr) -> DmrConfig {
         DmrConfig {
-            system: DmrNetwork::Tgif,
+            system: "tgif".into(),
+            family: Some(DmrNetwork::Tgif),
             host: addr.ip().to_string(),
             port: addr.port(),
             radio_id: RADIO_ID,

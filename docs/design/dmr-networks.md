@@ -241,6 +241,29 @@ families**. Neither vocabulary can be derived from the other by renaming.
 | `ReflectorDial.mmdvm(system:host:port)` | carries the directory's `system` **verbatim** — it is what names the master, its login and its upstream talkgroup list, and it is the key the master password is saved under |
 | `DmrFamily` (the app's mirror of `DmrNetwork`) | what the picker groups by and what the consent gate reads |
 | `DmrDial.family(ofSystem:)` | the documented bridge, a prefix/alias table with the 2026-09-07 evidence in its doc comment |
+| `DmrNetwork::from_system_slug` | **the same bridge on the Rust side**, over the same table in the same order — added 2026-09-07 after review found the app's rows could not connect |
+
+**Both sides of the ABI need the bridge, and for a while only one had it.**
+The app resolved a family for its picker and its consent gate, then handed
+`connectDMR(system:)` the directory's `system` verbatim — which is right —
+but `Station::dmr_connect` resolved that string with `DmrNetwork::from_slug`
+alone and refused everything that was not one of the nine family slugs. Every
+one of the 185 directory rows was therefore listed, grouped, dialable in the
+UI and refused at the engine with "unknown DMR network"; only a hand-typed
+`tgif:tgif.network:62031/31313/2` worked. The fix is the ruling above applied
+in Rust: **`system` is a name, not an enumeration.** `dmr_connect` accepts any
+non-empty string, resolves the family through `from_slug` then
+`from_system_slug`, and dials with `family: None` when neither answers.
+BrandMeister is the one refusal, and it is checked twice — the resolved family
+AND the raw spelling, so `brandmeister3102` cannot slip past the separator
+rule. `DmrConfig` carries both halves: `system: String` (what was dialed) and
+`family: Option<DmrNetwork>` (what the engine made of it).
+
+The two tables are twins and must stay in step. Adding a spelling to
+`familyNames` in `ReflectorAddressDial.swift` without adding it to
+`SYSTEM_NAMES` in `crates/astar-dmr/src/network.rs` makes the picker and the
+gate disagree about which rows are BrandMeister; each table's doc comment says
+so, and both are tested against the same rows.
 
 `family(ofSystem:)` answers **`nil` for "independent, unrecognised"** rather
 than guessing. Most rows answer `nil` — 111 systems against nine families —
@@ -253,11 +276,10 @@ all.** They are listed and not dialable, which `ReflectorDial.unsupported`
 already models — dropping them would make a directory that lists 185 networks
 look like one that lists 155.
 
-**Still owed:** `astar_dmr::network`'s own doc comment still says a slug is
-"the stable identifier used in dial grammar, **directory rows** and saved
-configuration". Two of those three are true. Correcting the comment is a
-one-line change nobody has made yet; it is tracked in `docs/BACKLOG.md`, and
-until it lands this document is the authority and that comment is not.
+`astar_dmr::network`'s own doc comment used to claim a slug was "the stable
+identifier used in dial grammar, **directory rows** and saved configuration".
+Two of those three were true; it now says so, and points at
+`from_system_slug` for the third.
 
 ### TGIF has no server rows
 
@@ -290,7 +312,7 @@ picker entry would be worse than none.
 
 | | |
 |---|---|
-| `network` | `DmrNetwork` — TGIF, FreeDMR, DMR+, SystemX, AmComm, VKDMR, FreeSTAR, ADN, BrandMeister — each with a UI `label` and a stable `slug`; `NetworkClass` (`Independent` / `BrandMeister`), the one distinction with teeth; `dialable(consented)`, the gate written once so no call site can forget it |
+| `network` | `DmrNetwork` — TGIF, FreeDMR, DMR+, SystemX, AmComm, VKDMR, FreeSTAR, ADN, BrandMeister — each with a UI `label` and a stable `slug`; `from_system_slug`, the bridge from a directory row's server name to its family; `NetworkClass` (`Independent` / `BrandMeister`), the one distinction with teeth; `dialable(consented)`, the gate written once so no call site can forget it |
 | `wire` | `RPTL`/`RPTK`/`RPTC`/`RPTPING`/`RPTCL` and the 55-byte `DMRD`, built and parsed by definition from the references (`dmr-wire.md` §1–§4); `RadioId` (24 bits, 0 refused) and `Timeslot` |
 | `fsm` | The login state machine — salt, `SHA256(salt ‖ password)`, config, ping/pong, timeouts and retries — with the password moved in and dropped after one digest |
 | `fec` | BPTC(196,96) and BPTC(128,77), Hamming (16,11,4)/(13,9,3)/(15,11,3), Golay(20,8), QR(16,7,6), Reed–Solomon(12,9) and the 5-bit embedded-LC checksum — each written from its definition rather than transcribed (§8) |
@@ -298,7 +320,7 @@ picker entry would be worse than none.
 | `master` | A real master for the bench — `just dmr-parrot` — that binds, runs the whole handshake, and relays or replays verbatim. It never dials anything |
 | `astar-codec` | `VocoderMode::Dmr`: 2450 + 1150, nine bytes, on the same `ThumbDV` — see the vocoder correction above |
 | `astar-console` | `DmrLink` + `DmrSnapshot`, receive-only, on the one shared audio lane; `Failed` published on a timeout and on a send failure, with the step it failed at |
-| `astar-station` | `dmr_connect(system, host, port, radio_id, callsign, talkgroup, timeslot, password)` — the password by value, the consent gate checked before a socket or a dongle is touched, mutual exclusion with every other network |
+| `astar-station` | `dmr_connect(system, host, port, radio_id, callsign, talkgroup, timeslot, password)` — the password by value, any non-empty `system` (family slug or directory server name), the consent gate checked before a socket or a dongle is touched, mutual exclusion with every other network |
 | C ABI / Swift / Python | `IAX_ERR_DMR = -22`, `iax_station_connect_dmr` / `iax_station_dmr_disconnect` / `iax_station_dmr_state`, and the snapshot's `dmr_available` / `dmr_active` — mirrored in all three bindings |
 | macOS app | `Network.dmr` in the switcher, the `system:host[:port]/tg[/ts]` dial grammar, the directory's 185 rows grouped by family, the master password, and the consent checkbox |
 | `astar-cli` | `dmr-listen` — the hardware checkpoint in one command, `--features dmr` |
