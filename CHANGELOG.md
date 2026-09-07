@@ -13,6 +13,126 @@ pre-release to the patch number, which sorts wrongly: `0.1.10beta` is newer
 than `0.1.9beta` and a string comparison says the opposite. Shipped versions
 are left as they were spelled.
 
+## 0.1.11-beta — 2026-09-07
+
+System Fusion is the third digital network astar speaks: link a reflector,
+hear it, and key back into it with a ThumbDV. The node daemon now runs
+wideband by default, refuses a peer it cannot decode instead of failing
+silently, and finally writes a log. And every digital network shares one
+audio lane, so the meters, the spectrum and your microphone settings mean
+the same thing whichever network is live.
+
+### Added
+
+- **System Fusion (YSF): link a reflector, hear it, and transmit**, with the
+  ThumbDV in DN mode. YSF sits beside AllStarLink, M17 and D-Star in the
+  network switcher and gets everything the others get — its own audio
+  profile, level meters, spectrum, last-heard, a timeline that records your
+  own overs, and a live link that reports as connected rather than looking
+  like a failed one.
+
+  One dongle means one direction at a time. While you are keyed, received
+  voice is not decoded — there is a single AMBE-3000 behind the ThumbDV, and
+  D-Star has always made the same trade. Callsigns cost no vocoder, so
+  last-heard stays truthful while you talk; a busy reflector simply goes
+  quiet for the length of your over.
+
+  **Receive is verified on live reflectors; transmit so far only against a
+  parrot on the bench.** D-Star and M17 transmit are the ones verified on
+  live reflectors.
+
+- **`ysf-listen` and `ysf-parrot`, for the bench.** `just ysf-listen
+  <host> <callsign>` links a reflector and plays it — or captures it with
+  `--wav` — which is the hardware checkpoint in one command. `just
+  ysf-parrot <port>` runs a System Fusion parrot on your own machine, the
+  twin of `just m17-parrot`: key into it from astar and hear yourself, with
+  nothing on the air. Frames are relayed verbatim, so it hides no framing
+  bug.
+
+- **DMR in the bundled reflector directory.** The 2026-09-07 snapshot
+  carries 3,415 reflectors across seven networks, now including hamcall-db's
+  DMR masters — 185 servers, named and counted. astar has no DMR client yet,
+  so they are listed rather than dialable.
+
+- **The node daemon has a voice.** `astar-server` depended on `tracing` and
+  never installed a subscriber, so 35 log sites in the engine dispatched to
+  nothing and a hub could run for days emitting one line. It now installs
+  one — `info` by default, `RUST_LOG` overrides, timestamps and no ANSI
+  because this lands in journald — and codec negotiation prints a line per
+  inbound call naming the caller, what it can carry, what it asked for and
+  what was accepted.
+
+### Changed
+
+- **astar-server prefers signed 16-bit linear by default** and rejects a peer
+  with no usable codec instead of accepting one it cannot decode; µ-law-only
+  nodes are still accepted, and the reject carries Asterisk's own CAUSE and
+  CAUSECODE. In the other direction, a peer that answers with a format the
+  station never offered is hung up on rather than transmitted to: a `ulaw_only`
+  node no longer ends up sending wideband because the far end asked for it.
+
+- **One audio lane**: M17, D-Star and System Fusion now share the station's
+  single audio router; level meters and spectrum are computed once at the
+  microphone and the speaker for every network.
+
+- **The docs say a licence is required before first contact.** The page
+  someone follows from download to first QSO listed a Mac, an account and a
+  headset and stopped there, while every step on it ends with a real
+  transmitter keying on a real band. The DVstick 30 is also documented as
+  known-working rather than buy-at-your-own-risk: it enumerates as the same
+  FT230X the dongle scan looks for, and it is what astar is developed
+  against day to day.
+
+### Fixed
+
+- **The beat on System Fusion receive.** YSF delivers five 20 ms frames at
+  once every 100 ms, and handing each burst straight to the output bus left
+  it starved for the remaining 60 — roughly two audible gaps a second, worse
+  the longer somebody talked. Decoded audio is now released one frame per
+  20 ms behind a small cushion, the same arrangement D-Star uses, at the same
+  cost of about 60 ms of latency.
+
+- **Garbled System Fusion transmit.** The encoder dropped every microphone
+  frame past the fourth in a pass, which is dropped speech, and the last
+  frames of an over were lost or arrived during the *next* one as somebody
+  else's audio. Captured frames are now queued the way received ones already
+  were, and the encoder is drained before the over closes.
+
+- **A rejected inbound call — bad CALLTOKEN, failed auth, or no common codec —
+  no longer leaves a call number and a `max_calls` slot held forever.**
+
+- **The app dials as a slin16 station again whichever network it used first.**
+  Digital voice now rides a 16 kHz station through an exact 8↔16 kHz bridge
+  instead of pinning the engine to 8 kHz.
+
+- **A node that answers calls keeps its own codec policy.** Turning the
+  inbound listener on pinned the station to µ-law at 8 kHz whatever it had
+  been configured for, and on an engine already running at 16 kHz the
+  mismatch meant the node answered nothing at all.
+
+- **A stated FORMAT is honoured as a request, not treated as a hint.** A node
+  that lists 16-bit linear for completeness but asks for µ-law was answered
+  with slin16 and dropped the call silently — the worst shape a negotiation
+  failure can take. Nor is a wideband codec asserted over a peer that sent no
+  CAPABILITY at all: its stated format is the only thing it actually told us.
+
+- **Registration fails over between a registrar's addresses.** A registrar
+  hostname is commonly several hosts and they do not all answer a given
+  source address, so pinning one is a bet that gets re-lost whenever the far
+  end changes — silently, with REGREQs going out forever and nothing coming
+  back. The retry ladder now advances one candidate per attempt and stays on
+  whichever address answered.
+
+- **VOX pre-roll and speech onset are no longer lost on D-Star/YSF key-down**,
+  and YSF key-ups now appear in the timeline.
+
+- **A live D-Star or System Fusion session draws its spectrum.** The graphs
+  dispatched to AllStarLink and M17 only, so the two dongle networks showed
+  empty bars.
+
+- The self-hosted M17 parrot (`just m17-parrot`) replays at exactly 40 ms per
+  packet; it drifted 4 % slow and was audible as a beat after a few seconds.
+
 ## 0.1.10-beta — 2026-08-30
 
 Noise reduction that works while you are talking — new, and off until you turn
@@ -71,17 +191,7 @@ current.
 - **A Discord server**, linked from the site header, the front page and the
   README.
 
-- **System Fusion (YSF): link a reflector, hear it, and transmit**, with the
-  ThumbDV in DN mode; `ysf-listen` and `ysf-parrot` for the bench.
-
 ### Changed
-
-- **astar-server prefers signed 16-bit linear by default** and rejects a peer
-  with no usable codec instead of accepting one it cannot decode; µ-law-only
-  nodes are still accepted, and the reject carries Asterisk's own CAUSE and
-  CAUSECODE. In the other direction, a peer that answers with a format the
-  station never offered is hung up on rather than transmitted to: a `ulaw_only`
-  node no longer ends up sending wideband because the far end asked for it.
 
 - **Versions are real SemVer from here on**, this one included, and the app and
   the Rust workspace now spell a release identically — they had been carrying
@@ -103,17 +213,7 @@ current.
   output selections still resolve; cpal 0.18 also finds output devices 0.15
   did not enumerate.
 
-- **One audio lane**: M17, D-Star and System Fusion now share the station's
-  single audio router; level meters and spectrum are computed once at the
-  microphone and the speaker for every network.
-
 ### Fixed
-
-- **A rejected inbound call — bad CALLTOKEN, failed auth, or no common codec —
-  no longer leaves a call number and a `max_calls` slot held forever.**
-- **The app dials as a slin16 station again whichever network it used first.**
-  Digital voice now rides a 16 kHz station through an exact 8↔16 kHz bridge
-  instead of pinning the engine to 8 kHz.
 
 - **Failures say what actually went wrong.** A dial that failed used to read
   something like "astarstation error -7: audio error" — a number and a
@@ -147,12 +247,6 @@ current.
   never matched `CHANGELOG.md` — the file the site renders is a symlink to
   it — so a release that touched nothing else would not have rebuilt the
   page announcing it.
-
-- **VOX pre-roll and speech onset are no longer lost on D-Star/YSF key-down**,
-  and YSF key-ups now appear in the timeline.
-
-- The self-hosted M17 parrot (`just m17-parrot`) replays at exactly 40 ms per
-  packet; it drifted 4 % slow and was audible as a beat after a few seconds.
 
 ## 0.1.9beta — 2026-08-29
 
