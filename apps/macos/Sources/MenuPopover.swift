@@ -119,6 +119,13 @@
         @State private var dtmfHistory: [String] = []
         /// The most recently pressed dialpad key, for the tap-flash animation.
         @State private var flashedKey: String?
+        /// The DMR picker's groups, cached.
+        ///
+        /// Grouping walks all 3,415 directory rows and sorts what it keeps,
+        /// and this pane re-renders at the 20 Hz poll rate while the meters
+        /// are live — so it is recomputed when one of its two inputs changes
+        /// (the loaded feed, the consent flag) and not on every tick.
+        @State private var dmrGroupsCache: [DmrSystemCatalog.Group] = []
         /// Whether the in-call "Levels & Spectrum" disclosure is expanded (remembered
         /// across launches). Default collapsed so the call card stays compact and the
         /// FFT poll stays off until opened (astar-8b5b).
@@ -678,6 +685,9 @@
                 if selectedNetwork == .dmr {
                     dmrTargetRow
                         .transition(.opacity.combined(with: .move(edge: .top)))
+                        .onAppear(perform: refreshDMRGroups)
+                        .onChange(of: session.brandmeisterConsent) { _ in refreshDMRGroups() }
+                        .onChange(of: reflectors.entries.count) { _ in refreshDMRGroups() }
                 }
                 // Connecting via AllStar requires an account (guest mode removed,
                 // au-1517) — `.m17` doesn't (astar-c2e5 Task 9 fix: this used to
@@ -847,7 +857,7 @@
         /// not something anyone can scan.
         private var dmrSystemMenu: some View {
             Menu {
-                ForEach(dmrGroups) { group in
+                ForEach(dmrGroupsCache) { group in
                     Menu(group.title) {
                         ForEach(group.systems) { system in
                             Button(system.name) { selectDMRSystem(system.entryID) }
@@ -861,11 +871,11 @@
             }
             .menuStyle(.borderlessButton)
             .frame(maxWidth: 140)
-            .disabled(dmrGroups.isEmpty)
+            .disabled(dmrGroupsCache.isEmpty)
             .accessibilityLabel("DMR network")
             .accessibilityValue(dmrSystemLabel)
             .help(
-                dmrGroups.isEmpty
+                dmrGroupsCache.isEmpty
                     ? "No DMR masters in the directory yet — type an address as "
                         + "system:host:port/talkgroup/timeslot."
                     : "Pick the network and master to log in to. Each issues its own password.")
@@ -901,24 +911,33 @@
             }
         }
 
-        /// The picker's groups, recomputed from the loaded directory and the
-        /// consent flag — both `@Published`, so this refreshes when either
-        /// changes.
-        private var dmrGroups: [DmrSystemCatalog.Group] {
-            DmrSystemCatalog.grouped(
+        /// Refill `dmrGroupsCache`. Called when the feed loads or is replaced
+        /// by a sync, and when the consent flag flips — the only two things
+        /// that can change the answer.
+        private func refreshDMRGroups() {
+            dmrGroupsCache = DmrSystemCatalog.grouped(
                 reflectors.entries, consented: session.brandmeisterConsent)
         }
 
         /// What the master picker reads: the chosen row's name, or a prompt.
+        /// Looked up in the cached groups (185 masters at most) rather than in
+        /// the whole 3,415-row directory.
         private var dmrSystemLabel: String {
             let address = DmrDialText.parts(node).address
             guard !address.isEmpty else { return "Network…" }
-            return reflectors.entries.first { $0.network == .dmr && $0.id == address }?.name
-                ?? address
+            for group in dmrGroupsCache {
+                if let match = group.systems.first(where: { $0.entryID == address }) {
+                    return match.name
+                }
+            }
+            return address
         }
 
         /// The talkgroups published for the selected master's network, if any.
+        /// Nothing publishes them yet, so the empty check short-circuits before
+        /// any lookup runs.
         private var dmrTalkgroupOptions: [DmrTalkgroup] {
+            guard !session.dmrTalkgroups.isEmpty else { return [] }
             let address = DmrDialText.parts(node).address
             guard let slug = DmrSystemCatalog.slug(forEntryID: address, in: reflectors.entries)
             else { return [] }
