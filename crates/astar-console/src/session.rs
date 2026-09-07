@@ -1558,20 +1558,26 @@ impl ConsoleSession {
                 .note(if on { "LocalKey" } else { "LocalUnkey" }, String::new());
             return Ok(());
         }
-        // iax-2f6b: a live D-Star session now transmits — dispatch exactly
-        // like the M17 branch above, INCLUDING the `self.state.ptt` mirror.
-        // D-Star's richer state (talker/slow text/link/backend) is read
-        // through `dstar_state()`, but `ptt` is not D-Star-specific: it is
-        // the shared `ConsoleState` field every `Station::snapshot()`
+        // A live digital-voice session dispatches exactly like the M17
+        // branch above, INCLUDING the `self.state.ptt` mirror and the tracer
+        // note. Each network's richer state is read through its own accessor
+        // (`ysf_state()`, `dstar_state()`), but `ptt` is not network-specific:
+        // it is the shared `ConsoleState` field every `Station::snapshot()`
         // consumer reads for "is this station transmitting", and a UI — or
         // any PTT source that reconciles against the snapshot — must never
-        // see `false` while a D-Star transmission is on the air. `snapshot()`
-        // then mirrors the run loop's ACTUALLY-applied state back on every
-        // poll, so a refused key-down or a forced unkey (link lost, time-out
-        // timer) shows up here too.
+        // see `false` while a transmission is on the air. `snapshot()` then
+        // mirrors the run loop's ACTUALLY-applied state back on every poll,
+        // so a forced unkey (link lost, time-out timer) shows up here too.
+        //
+        // The tracer note is the non-transient half: a timeline that records
+        // IAX2, M17 and D-Star keys but not YSF ones is missing the network
+        // outright, not merely late.
         #[cfg(feature = "ysf")]
         if let Some(link) = self.ysf.as_ref() {
             link.set_ptt(on);
+            self.state.ptt = on;
+            self.tracer
+                .note(if on { "LocalKey" } else { "LocalUnkey" }, String::new());
             return Ok(());
         }
         #[cfg(feature = "dstar")]
@@ -2836,10 +2842,12 @@ impl ConsoleSession {
         if let Some(link) = self.ysf.as_ref() {
             let snap = link.snapshot();
             self.state.remote_ptt = snap.receiving;
-            // The ACTUALLY-APPLIED key state, so a key-down refused for want
-            // of a capture device corrects the optimistic value `set_ptt`
-            // wrote, on the very next poll. A snapshot must never report a
-            // station as transmitting when it is not.
+            // The ACTUALLY-APPLIED key state, so the optimistic value
+            // `set_ptt` wrote is corrected on the very next poll — by a
+            // forced unkey, or simply confirmed. A snapshot must never
+            // report a station as transmitting when it is not. (A key-down
+            // with no capture device never gets this far: `set_ptt` refuses
+            // it with `NoCaptureDevice` and forwards nothing.)
             self.state.ptt = snap.ptt;
             // Fully qualified: the bare `LinkState` in this scope is M17's.
             self.state.status = match link.link_state() {
@@ -3822,6 +3830,50 @@ mod tests {
             "a key-down with no capture device must be refused, and nothing forwarded"
         );
         assert!(!s.snapshot().ptt, "a refused key never reports as keyed");
+
+        s.ysf_disconnect();
+        reflector.shutdown();
+    }
+
+    /// A YSF key must reach `ConsoleState::ptt` IMMEDIATELY — before any
+    /// `snapshot()`, and without waiting for the link's run loop to apply the
+    /// edge — and must land on the timeline, exactly as an M17 or D-Star key
+    /// does.
+    ///
+    /// Two different bugs live here. The optimistic mirror is the transient
+    /// one: a consumer polling faster than one 20 ms link pass would see
+    /// `ptt: false` on YSF where the other networks show `true`. The tracer
+    /// note is not transient at all — without it a YSF transmission never
+    /// appears in the timeline, ever.
+    #[cfg(feature = "ysf")]
+    #[test]
+    fn keying_ysf_mirrors_ptt_and_records_the_timeline_immediately() {
+        let mut s = ConsoleSession::new();
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        let (reflector, link) = loopback_ysf(audio);
+        s.ysf_adopt(link).expect("adopt");
+
+        s.set_ptt(true).expect("the route has a capture device");
+        assert!(
+            s.state.ptt,
+            "the mirror must be written by set_ptt itself, not by the next snapshot"
+        );
+        let kinds = |s: &ConsoleSession| -> Vec<String> {
+            s.timeline_since(0).iter().map(|e| e.kind.clone()).collect()
+        };
+        assert!(
+            kinds(&s).contains(&"LocalKey".to_string()),
+            "a YSF key must be on the timeline, got {:?}",
+            kinds(&s)
+        );
+
+        s.set_ptt(false).expect("unkey");
+        assert!(!s.state.ptt, "and the release mirrors too");
+        assert!(
+            kinds(&s).contains(&"LocalUnkey".to_string()),
+            "as must the release, got {:?}",
+            kinds(&s)
+        );
 
         s.ysf_disconnect();
         reflector.shutdown();

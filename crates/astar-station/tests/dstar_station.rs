@@ -607,11 +607,12 @@ impl AudioBackend for PullBackend {
         _sink: Box<dyn InputSink>,
         _overruns: Arc<AtomicU64>,
     ) -> Result<Box<dyn StreamHandle>, AudioError> {
-        // iax-2f6b: D-Star opens its mic lane lazily, on the first key-down
-        // (see `astar_console::dstar::MicLane`), so this only has to
-        // succeed for the tests here that actually key. The sink is dropped:
-        // no test in this file pushes TX audio. The no-capture-device path is
-        // covered in `dstar_thumbdv_hardware.rs` (hardware) and
+        // The capture lane is `ConsoleSession`'s one voice route
+        // (`astar_console::voice_route`), opened at connect and gated on
+        // PTT, so this has to succeed for every test here — not just the
+        // ones that key. The sink is dropped: no test in this file pushes TX
+        // audio. The no-capture-device path is covered in
+        // `dstar_thumbdv_hardware.rs` (hardware) and
         // `astar-console/tests/dstar_session_pipeline.rs` (hardware-free).
         Ok(Box::new(NullHandle))
     }

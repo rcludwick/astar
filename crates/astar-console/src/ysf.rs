@@ -192,8 +192,11 @@ pub struct YsfSnapshot {
     /// audio. An ABI string via [`AmbeBackend::as_str`].
     pub backend: Option<&'static str>,
     /// `true` while this station is actually transmitting — the applied
-    /// state, not an echo of the last [`YsfLink::set_ptt`] request. A
-    /// key-down refused for want of a capture device never sets it.
+    /// state, not an echo of the last [`YsfLink::set_ptt`] request, so it
+    /// lags a key by up to one run-loop pass. The refusal a key-down can
+    /// meet is not this link's: `ConsoleSession::set_ptt` returns
+    /// `ConsoleError::NoCaptureDevice` and forwards nothing, so a refused
+    /// key never reaches [`YsfLink::set_ptt`] at all.
     pub ptt: bool,
     /// Transmit level in dBFS. CONSOLE-OWNED, exactly as
     /// [`crate::dstar::DstarSnapshotState`]'s levels are: the link always
@@ -248,8 +251,11 @@ struct Shared {
     /// What the operator asked for. NOTHING in this module sets it except
     /// [`YsfLink::set_ptt`], which is the only path a key-down can take.
     ptt_request: AtomicBool,
-    /// What the run loop actually applied. A key-down with no capture device
-    /// is refused, so the two can differ and a UI must read this one.
+    /// What the run loop actually applied. The two differ only for the one
+    /// pass between the request and the edge — a key-down with no capture
+    /// device is refused by `ConsoleSession::set_ptt` before it ever reaches
+    /// this module — but a UI must still read this one, since it is the only
+    /// value that is true when the station is genuinely on the air.
     ptt: AtomicBool,
 }
 
