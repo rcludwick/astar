@@ -600,10 +600,11 @@ device declared instead of requiring 0x48 — the check moved to
 rate they configured. Encode is mode-aware end to end, and the timeout
 substitution is `DnFrame::MUTE` for YSF rather than a D-Star null codeword.
 
-`astar-console::ysf` transmits: lazy mic lane (shared with D-Star), a PTT
-request the run loop applies, AMBE+2 half-rate encode, five frames to a
-payload, header/communications/terminator with the end flag set. See
-`iax-ysfdch` for the one thing it still does not carry.
+`astar-console::ysf` transmits: the station's voice route (shared with every
+digital network, since the one-audio-lane refactor), a PTT request the run
+loop applies, AMBE+2 half-rate encode, five frames to a payload,
+header/communications/terminator with the end flag set. See `iax-ysfdch` for
+the one thing it still does not carry.
 
 Original text follows.
 
@@ -635,9 +636,10 @@ bit count the packet declares (and carry it), rather than assuming 72.
 **Also needed once the deframer can read it:** `pack_dn` and
 `dn_frame_from_channel` already exist and are tested; the encode side of
 `AmbeStream` needs the mode plumbed through the way decode's now is, and
-`YsfLink` needs a mic lane. And the node key guard already refuses YSF
-(`key_refusal` in `astar-server`), so remote keying stays refused whatever
-lands here.
+`YsfLink` needs its audio from the station's voice route (as it now gets,
+since the one-audio-lane refactor). And the node key guard already refuses
+YSF (`key_refusal` in `astar-server`), so remote keying stays refused
+whatever lands here.
 
 ### iax-d4f7 — DMR engine backend: MMDVM/homebrew, TGIF first
 *P4 backlog · feature · labels: dmr, protocol, cx:8*
@@ -1550,3 +1552,24 @@ Open questions from iax-bbc6 (astar-cli): (1) Manager::dial returns immediately 
 *P3 low · task · labels: cx:1, node*
 
 *(no description recorded)*
+
+### iax-onelane-iax2prefs — Route the IAX2 dial's pref push through push_prefs
+*P3 low · chore · labels: audio, console, refactor, cx:2*
+
+Left out of scope by the one-audio-lane refactor (`docs/superpowers/implemented/2026-09-06-one-audio-lane-design.md`). `ConsoleSession::open_voice_route` pushes the standing preference set (gains, DSP toggles, compressor, trim, RX compression, VOX pre-roll, calibrated profile) onto the router through one `fn push_prefs(&self, router, mic, out)`. The IAX2 dial path still does its own eleven-line push at `connect` instead of calling it, because at the point `connect` builds the call the mic/out `MixCallId`s are not yet known the way `open_voice_route`'s caller knows them — the design doc calls this out as "the same eleven-line block `connect` uses for an IAX2 dial, moved into one `fn push_prefs`" but the move only happened on the digital-voice side. Thread the IAX2 dial through `push_prefs` once its call's mic/out are resolved, so there is exactly one place a preference reaches the router, on every path.
+
+### iax-ambe-pipeline — Shared AMBE pending/pacing object for D-Star + YSF
+*P3 low · task · labels: dstar, ysf, ambe, refactor, cx:3*
+
+Recorded out of scope in the one-audio-lane design
+(`docs/superpowers/implemented/2026-09-06-one-audio-lane-design.md`): "A
+shared AMBE pipeline object for D-Star and YSF (they still duplicate
+pending-queue/pacing logic; a follow-up once both are stable)." Both
+`DstarSession` and `YsfLink` drive the same ThumbDV request/response
+protocol — a pending-request queue keyed to the dongle's reply order, plus
+timeout/pacing so a stalled dongle degrades to silence instead of blocking
+the run loop — and each grew its own copy while D-Star's and YSF's transmit
+paths were being built. Now that both are stable (D-Star and YSF transmit
+both shipped 2026-09-06), extract one `astar-codec` type both sessions hold
+instead of parallel hand-rolled queues, so a pacing fix lands once instead
+of twice.
