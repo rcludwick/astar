@@ -56,6 +56,7 @@
 //! self-consistent one — see `the_two_modes_carry_the_same_three_fields`.
 
 use astar_ysf::DataType;
+use astar_ysf::dch::WHITENING;
 use astar_ysf::golay;
 
 /// Bytes of payload a YSF radio frame carries — [`astar_ysf::PAYLOAD_LEN`].
@@ -146,33 +147,11 @@ fn write_bit(buf: &mut [u8], i: usize, value: bool) {
 
 // ── The scrambler ───────────────────────────────────────────────────────
 
-/// Bytes of scrambling sequence the references publish.
-const WHITENING_LEN: usize = 20;
-
-/// The YSF scrambler: 160 bits of the PN9 sequence `x^9 + x^5 + 1`, run
-/// from state `0b1_0010_0111`, most significant stage out first.
-///
-/// The reference implementations print this as twenty magic bytes
-/// (`WHITENING_DATA` in `MMDVMHost`, `scramble_code` in `DroidStar`). It is
-/// not magic: a nine-stage Fibonacci LFSR with taps on stages 9 and 5
-/// reproduces all 160 of those bits, which
-/// `the_scrambler_is_the_published_sequence` asserts. Only 160 bits are
-/// published, so only 160 are generated — a DN payload never needs more.
-const fn whitening() -> [u8; WHITENING_LEN] {
-    let mut out = [0u8; WHITENING_LEN];
-    let mut state: u16 = 0b1_0010_0111;
-    let mut i = 0;
-    while i < WHITENING_LEN * 8 {
-        out[i / 8] |= ((state >> 8) as u8 & 1) << (7 - (i % 8));
-        let feedback = ((state >> 8) ^ (state >> 4)) & 1;
-        state = ((state << 1) | feedback) & 0x1FF;
-        i += 1;
-    }
-    out
-}
-
-/// The scrambling sequence, generated once at compile time.
-const WHITENING: [u8; WHITENING_LEN] = whitening();
+// [`WHITENING`] — the 160-bit PN9 sequence the references print as twenty
+// magic bytes — is derived once in `astar_ysf::dch` and imported at the top
+// of this file. The same bits whiten the voice channel here and the data
+// channel there, so one definition in the protocol crate is what keeps the
+// two halves of a payload from coming to disagree.
 
 // ── V/D mode 2: five [5-byte DCH][13-byte VCH] blocks ───────────────────
 
