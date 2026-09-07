@@ -86,6 +86,21 @@ call to make and not ours.
 That is a genuine, specific risk to the *user's own network access*, created by
 using our software. Presenting it plainly is the only honest option.
 
+**Checked, 2026-09-07** (`dmr-brandmeister-position.md`): BrandMeister's wiki —
+the most likely place for them to state a position on the Homebrew/MMDVM
+login versus the Open DMR Terminal Protocol — answered every fetch with an
+Anubis anti-bot interstitial, not the page. Every other page of theirs that
+did render (`help.brandmeister.network` in full, their news site, their
+homepage) states no position either way. That is outcome (b): no published
+BrandMeister position astar could confirm, so the gate stands exactly as
+designed below, off by default. It is not a clean bill of health — several
+independent third-party accounts (forum threads, softclient documentation)
+describe BrandMeister restricting the Homebrew login to hardware repeaters and
+hotspots and blocking at least one softclient over it, consistently enough
+that the real answer is probably a **permanent closure**, per the IMBE
+precedent below. Nobody has read BrandMeister's own wording of it yet; a human
+with a browser can, in about a minute, where an automated fetch could not.
+
 ### What the gate looks like
 
 * A checkbox in Settings, **off by default**, that must be ticked before
@@ -144,8 +159,12 @@ than one it reaches dishonestly.
   behaviour.
 * Where does the timeslot live in `ReflectorDial`? A new kind, almost certainly,
   rather than stretching an existing one.
-* What does BrandMeister's policy actually say about third-party clients today?
-  **Check before building, not after.**
+* ~~What does BrandMeister's policy actually say about third-party clients
+  today? Check before building, not after.~~ **Checked (2026-09-07):**
+  BrandMeister's own material that could be read that day states no position
+  either way; see `dmr-brandmeister-position.md` for the fetch log, why the
+  wiki couldn't be read, and the community evidence that makes this an open
+  question worth revisiting rather than a closed one.
 
 ## Where this stands
 
