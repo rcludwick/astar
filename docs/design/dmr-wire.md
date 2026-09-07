@@ -44,6 +44,8 @@ ones, read in full across the cited functions.
 | `nostar/DroidStar` | `serialambe.cpp` | `.../nostar/DroidStar/master/serialambe.cpp` |
 | `nostar/DroidStar` | `dmr.cpp` | `.../nostar/DroidStar/master/dmr.cpp` |
 | `nostar/DroidStar` | `dmr.h` | `.../nostar/DroidStar/master/dmr.h` |
+| `nostar/DroidStar` | `CRCenc.h` — read to check the embedded-LC checksum citation in §6 | `.../nostar/DroidStar/master/CRCenc.h` |
+| `nostar/DroidStar` | `CRCenc.cpp` — same | `.../nostar/DroidStar/master/CRCenc.cpp` |
 | `nostar/DroidStar` | `mode.h` — read to settle the colour-code question in §10 | `.../nostar/DroidStar/master/mode.h` |
 | `HBLink-org/hblink3` | `hblink.py` | `.../HBLink-org/hblink3/master/hblink.py` |
 | `HBLink-org/hblink3` | `playback.py` | `.../HBLink-org/hblink3/master/playback.py` |
@@ -425,7 +427,13 @@ fragments across bursts B–E.
 
 `MMDVMHost/CRC.cpp: CCRC::encodeFiveBit` reads the 72 LC bits as nine bytes,
 **sums them as unsigned integers**, and takes the total **mod 31**. Write it as
-that, not as a polynomial. `DroidStar` calls the same function from `CRCenc.h`.
+that, not as a polynomial.
+
+`DroidStar` carries its own copy: `CRCenc.h` declares
+`CCRC::encodeFiveBit(const bool*, uint32_t&)` and `CRCenc.cpp` defines it as
+the identical loop — nine bytes read big-endian out of the 72 bits, summed,
+`% 31` — called from `dmr.cpp: encode_embedded_data`. Two projects, the same
+arithmetic; neither is a polynomial CRC.
 
 ---
 
@@ -658,6 +666,19 @@ configuration and drops a peer after `PING_TIME × MAX_MISSED` of silence, so a
 master's tolerance is a deployment choice, not a protocol constant. 5 s is
 inside every window seen here; it is what astar uses, and 60 s remains the
 right link-timeout.
+
+**`RPTACK` answers three requests, not two.** The brief's handshake table calls
+the 10-byte `RPTACK` + id "the reply to `RPTK` and to `RPTC`". `hblink.py`'s
+master also answers `RPTO` with `RPTACK + _peer_id`, and
+`CDMRNetwork::clock`'s `WAITING_OPTIONS` state expects exactly that. Recorded
+in §1's table. Not load-bearing for astar, which sends no `RPTO`.
+
+**DroidStar's `RPTC` power and colour code are sprintf literals.** The brief
+cites `m_txcc(1)` (`dmr.cpp:44`) for the colour-code default, which is real,
+but the `RPTC` sprintf passes a literal `1` for tx power, a literal `1` for
+colour code and a literal `0` for height — it never reads `m_txcc`. Both routes
+give 1, so §3's value is unchanged; the citation is kept as `m_txcc(1)` because
+that is the field a later task will actually wire up.
 
 **Do not copy DroidStar's colour-code handling.** `DroidStar dmr.cpp` reads
 `m_modeinfo.cc` when building both the EMB (`get_emb_data`) and the slot type
