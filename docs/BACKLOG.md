@@ -1647,3 +1647,32 @@ deliberately rather than opportunistically; the tests that pin the property
 (`codec_edge`'s `cross_rate_*_emits_exactly_one_*_frame_*` pair and
 `voice_route`'s `a_16k_bridge_frames_exactly_and_keeps_pitch_both_ways`)
 should move with it.
+
+### iax-linkfail-idle — a lost reflector link reports Idle, never Failed
+*P3 low · bug · labels: m17, dstar, ysf, nxdn, cx:2*
+
+Found 2026-09-07 in the NXDN whole-branch review, and inherited verbatim from
+the YSF and D-Star run loops. When the link FSM times out, the run loop breaks
+out before `publish()` runs and the post-loop store writes `LinkState::Idle`,
+so `Failed` is only ever published from the initial-send failure. The
+console maps `Idle | Linking` to `CallStatus::Dialing`, so a reflector that
+goes away leaves the popover saying *connecting* with no thread behind it,
+and `*-listen`'s `link_state == "failed"` exit path is unreachable. Fix all
+three (four) networks together: publish `Failed` on `FsmAction::Timeout`
+before leaving the loop, and pin it with a scripted-reflector test that
+stops answering polls.
+
+### astar-nxdn-polish — small NXDN follow-ups from the whole-branch review
+*P4 backlog · task · labels: nxdn, app, cx:1*
+
+From the 2026-09-07 review, none blocking: `receiving` is set for data
+(non-voice) frames (`nxdn.rs`, store `!end && !packet.data`); a refused
+`ptt_request` latches on an audio-less link (settle with the transmit task);
+`canDial` and `nxdnTarget` disagree on a directory row whose id is not a
+valid NXDN id (`CallSession.swift`, one line); a typed talkgroup only checks
+`> 0` where the directory path enforces `1…65519` (`ReflectorAddressDial`);
+no UI gate for a missing NXDN ID (Connect enabled, refused on press); no
+`connectFailureMessage` arm for `IAX_ERR_NXDN`/`IAX_ERR_YSF` (the engine's
+detail does reach the operator, the framing does not); `message_type` in
+`astar-nxdn::frame` is returned unmasked where Layer 3 masks `0x3F`;
+`read_bit`/`write_bit` duplicated between `astar-codec`'s `ysf` and `nxdn`.

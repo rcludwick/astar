@@ -68,7 +68,7 @@ the same thing whichever network is live.
 - **NXDN: link a talkgroup and hear it.** Point astar at an NXDNReflector
   talkgroup and it decodes the AMBE+2 on it through the same ThumbDV D-Star
   and Fusion use — the network switcher, the directory's 297 NXDN rows,
-  last-heard, and its own audio profile. Receive only for now: astar has no
+  and last-heard. Receive only for now: astar has no
   NXDN transmit path yet and says so instead of offering a PTT button that
   would do nothing.
 
