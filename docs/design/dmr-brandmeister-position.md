@@ -139,12 +139,11 @@ Open_DMR_Terminal_Protocol, Boxchip — were unreachable behind Anubis on
 clients, Network Radio, Radio-over-IP, or the Open DMR Terminal Protocol in
 either direction.
 
-This is the exact case the task brief anticipated: *"If the wiki was
-unreadable and nothing else published by BrandMeister speaks to it, that is
-outcome (b) with the fetch log as evidence."* The consent gate stands as
-designed in `dmr-networks.md` — off by default, one explicit opt-in, plain
-wording, no dark patterns — and this file is the evidence that the question
-was asked rather than assumed away.
+The wiki was unreadable, and nothing else published by BrandMeister speaks to
+the question — so this is outcome (b), with the fetch log above as the
+evidence. The consent gate stands as designed in `dmr-networks.md` — off by
+default, one explicit opt-in, plain wording, no dark patterns — and this file
+is the evidence that the question was asked rather than assumed away.
 
 **This is not the same as a clean bill of health.** The community-reports
 section above is consistent enough, across independent sources spanning

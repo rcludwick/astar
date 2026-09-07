@@ -193,6 +193,8 @@ target *is* had to be settled before any wire code could be written against it.
 out of the reference implementations and verified rather than recalled; then
 AMBE+2 frame packing, which YSF's vocoder work pays for; then the talkgroup
 dial grammar and the timeslot, which still has nowhere to live in
-`ReflectorDial`. The BrandMeister policy check in "Open questions" is still
-outstanding and still blocks that network specifically — the gate is built, the
-question of whether the gate should ever open is not answered.
+`ReflectorDial`. The BrandMeister policy check in "Open questions" was done on
+2026-09-07 (`dmr-brandmeister-position.md`): outcome (b), no published
+BrandMeister position found, so the gate stays off by default as built — and
+BrandMeister's wiki is still owed a human read before that finding can be
+trusted.
