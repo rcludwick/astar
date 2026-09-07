@@ -38,6 +38,30 @@ pub enum LinkState {
     Failed,
 }
 
+impl LinkState {
+    /// A stable lowercase name for this state.
+    ///
+    /// This is an ABI string, not a debug convenience: it crosses the C-ABI
+    /// in `iax_station_m17_state`'s JSON and is matched by name in
+    /// front-ends. Renaming a variant is free; changing one of these strings
+    /// breaks every consumer, so treat them as fixed.
+    ///
+    /// `Connecting` spells itself `"linking"` on the wire so the one set of
+    /// link strings covers every network — D-Star and YSF already emit
+    /// `idle`/`linking`/`linked`/`unlinking`/`failed`, and a front-end that
+    /// decodes one decodes all of them. M17 has no half-open teardown, so it
+    /// never emits `unlinking`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            LinkState::Idle => "idle",
+            LinkState::Connecting => "linking",
+            LinkState::Linked => "linked",
+            LinkState::Failed => "failed",
+        }
+    }
+}
+
 /// What the caller should do in response to [`SessionFsm::on_packet`] or
 /// [`SessionFsm::tick`].
 #[derive(Debug, Clone, PartialEq, Eq)]

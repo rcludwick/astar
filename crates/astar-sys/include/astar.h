@@ -1297,6 +1297,34 @@ int iax_station_connect_m17(IaxStation *st,
 int iax_station_m17_disconnect(IaxStation *st);
 
 /**
+ * Write the live M17 session's state as JSON into the caller buffer `buf` of
+ * `len` bytes (NUL-terminated, truncate-safe; same contract as
+ * [`iax_station_dstar_state`] — returns the byte length the full JSON needs,
+ * excluding the NUL, so a `len == 0` call is a sizing query).
+ *
+ * ```json
+ * {"link":"linked","receiving":true,"ptt":false,"talker":"N0CALL"}
+ * ```
+ *
+ * `link` is one of `idle`/`linking`/`linked`/`failed` — the same vocabulary
+ * D-Star and YSF use, minus the `unlinking` M17 has no state for.
+ *
+ * `talker` is the source callsign from the LSF of the most recently heard
+ * stream, `null` until one arrives, and it PERSISTS past end-of-stream — it
+ * is "most recently heard", not "transmitting right now". `receiving` is the
+ * field that says whether a transmission is in progress.
+ *
+ * Every field is credential-free: one callsign and two flags. The
+ * network-agnostic state (the level meters, the call status) is in
+ * [`IaxSnapshot`] — poll that on a metering tick and call this only for the
+ * talker.
+ *
+ * Writes `{}` when no session is active or the `m17` feature isn't compiled
+ * in. Returns [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
+ */
+int iax_station_m17_state(IaxStation *st, char *buf, uintptr_t len);
+
+/**
  * Set extra directories to search for a runtime `libcodec2`, ahead of the
  * hard-coded system paths (iax-f2b8 Task 4/5). `dirs` is a single
  * NUL-terminated string of `':'`-separated filesystem paths (e.g.

@@ -378,6 +378,68 @@ public struct YSFState: Equatable, Sendable {
     }
 }
 
+/// The M17-shaped state of a live session, from ``Station/m17State()``.
+///
+/// Everything network-agnostic — the level meters, the call status, PTT as
+/// the snapshot sees it — lives on ``Station/Snapshot``. What is only here is
+/// ``talker``. Credential-free: one callsign and two flags.
+public struct M17State: Equatable, Sendable {
+    /// State of the reflector link.
+    ///
+    /// The same vocabulary ``DStarState/Link`` and ``YSFState/Link`` use, so
+    /// one decoder covers every network. M17 has no half-open teardown, so it
+    /// never reports ``Link/unlinking``.
+    public enum Link: String, Sendable {
+        case idle, linking, linked, unlinking, failed
+    }
+
+    public let link: Link
+    /// `true` while voice-stream packets are arriving from the reflector.
+    public let receiving: Bool
+    /// `true` while this station is transmitting — the engine's
+    /// ACTUALLY-APPLIED state, not an echo of the last key request.
+    public let ptt: Bool
+    /// The callsign of the most recently heard transmission, or `nil` until
+    /// one arrives.
+    ///
+    /// Read from the stream's LSF — no vocoder involved. PERSISTS past
+    /// end-of-transmission: this is "last heard", not "transmitting right
+    /// now". Read ``receiving`` for that.
+    ///
+    /// Attacker-controlled: it is whatever callsign whoever keyed up put in
+    /// their LSF. Render it as text, never as markup.
+    public let talker: String?
+
+    /// Construct one directly.
+    ///
+    /// Public, like ``YSFState``'s and unlike ``DStarState``'s, because a
+    /// SwiftUI preview or a client test that renders the last-heard line
+    /// needs a value and has no reflector to hand.
+    public init(link: Link, receiving: Bool = false, ptt: Bool = false, talker: String? = nil) {
+        self.link = link
+        self.receiving = receiving
+        self.ptt = ptt
+        self.talker = talker
+    }
+
+    /// Decode from the C-ABI's JSON. Returns `nil` for the `{}` no-session
+    /// document.
+    ///
+    /// An unrecognized `link` string means a newer engine is talking to an
+    /// older binding, and lands as ``Link/failed`` — the safe direction,
+    /// since a UI that believes the link is down will not offer PTT.
+    init?(json: String) {
+        guard let data = json.data(using: .utf8),
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let linkString = obj["link"] as? String
+        else { return nil }
+        link = Link(rawValue: linkString) ?? .failed
+        receiving = obj["receiving"] as? Bool ?? false
+        ptt = obj["ptt"] as? Bool ?? false
+        talker = obj["talker"] as? String
+    }
+}
+
 /// The D-Star-shaped state of a live session, from ``Station/dstarState()``
 /// (iax-4c8e).
 ///
@@ -1608,6 +1670,25 @@ public final class Station {
         }
         if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
         return YSFState(json: String(cString: buf))
+    }
+
+    /// The live M17 session's own state, or `nil` when none is active.
+    ///
+    /// Cheap, but not as cheap as ``snapshot()`` — it crosses the ABI with a
+    /// buffer and parses JSON. Poll ``snapshot()`` for meters and PTT; call
+    /// this at UI rate for the talker and the link, exactly as with
+    /// ``dstarState()`` and ``ysfState()``.
+    public func m17State() throws -> M17State? {
+        let needed = iax_station_m17_state(handle, nil, 0)
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
+        if needed == 0 { return nil }
+        // +1 for the NUL the C-ABI writes.
+        var buf = [CChar](repeating: 0, count: Int(needed) + 1)
+        let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+            iax_station_m17_state(handle, ptr.baseAddress, UInt(ptr.count))
+        }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
+        return M17State(json: String(cString: buf))
     }
 
     /// Disconnect the live D-Star session, if any (iax-4c8e). Idempotent — a

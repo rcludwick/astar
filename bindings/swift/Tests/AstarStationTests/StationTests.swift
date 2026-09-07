@@ -401,6 +401,39 @@ final class StationTests: XCTestCase {
         )
     }
 
+    func testM17StateDecodesTheEngineJSON() throws {
+        let json = """
+            {"link":"linked","receiving":true,"ptt":false,"talker":"N0CALL"}
+            """
+        let state = try XCTUnwrap(M17State(json: json))
+        XCTAssertEqual(state.link, .linked)
+        XCTAssertTrue(state.receiving)
+        XCTAssertFalse(state.ptt)
+        XCTAssertEqual(state.talker, "N0CALL")
+    }
+
+    func testM17StateTreatsAMissingTalkerAsNilAndDegradesOnAnUnknownLink() throws {
+        let quiet = """
+            {"link":"linking","receiving":false,"ptt":false,"talker":null}
+            """
+        let state = try XCTUnwrap(M17State(json: quiet))
+        XCTAssertEqual(state.link, .linking)
+        XCTAssertNil(state.talker, "JSON null must decode as nil, not the string \"null\"")
+
+        XCTAssertNil(M17State(json: "{}"), "the no-session document decodes as nil")
+        // A newer engine naming a link state this binding does not know must
+        // degrade to .failed — the direction that will not offer PTT.
+        let odd = """
+            {"link":"reticulating","receiving":false,"ptt":false,"talker":null}
+            """
+        XCTAssertEqual(try XCTUnwrap(M17State(json: odd)).link, .failed)
+    }
+
+    func testM17StateIsNilOnAFreshStation() throws {
+        let st = try Station()
+        XCTAssertNil(try st.m17State(), "a never-connected station has no M17 state")
+    }
+
     func testDStarStateDecodesTheEngineJSON() throws {
         let json = """
             {"link":"linked","talker":"AJ7HR","slow_text":"hi there",\
