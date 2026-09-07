@@ -65,6 +65,18 @@ the same thing whichever network is live.
   inbound call naming the caller, what it can carry, what it asked for and
   what was accepted.
 
+- **DMR: log in to a talkgroup and hear it.** Point astar at a DMR master —
+  TGIF, FreeDMR, DMR+, SystemX and the rest — and it speaks the MMDVM/homebrew
+  repeater protocol, joins a talkgroup on a timeslot, and decodes the AMBE+2 on
+  it through the same ThumbDV D-Star, Fusion and NXDN use. The network switcher,
+  the directory's 185 DMR rows, and last-heard. Your radio ID and each
+  network's own password are separate credentials and stay that way; the
+  password is used to log in and never stored anywhere else. BrandMeister is
+  listed and not dialable: it is a private network whose operators set the
+  terms, and astar has not confirmed where they stand on third-party clients.
+  Receive only for now: astar has no DMR transmit path yet and says so instead
+  of offering a PTT button that would do nothing.
+
 - **NXDN: link a talkgroup and hear it.** Point astar at an NXDNReflector
   talkgroup and it decodes the AMBE+2 on it through the same ThumbDV D-Star
   and Fusion use — the network switcher, the directory's 297 NXDN rows,

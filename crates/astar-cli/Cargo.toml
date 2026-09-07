@@ -73,6 +73,19 @@ nxdn = [
     "astar-codec/ambe-hw",
     "dep:ctrlc",
 ]
+# DMR receive-only listen mode (iax-d4f7), OFF by default for the same reason
+# `nxdn` is: DMR voice is AMBE+2 at 2450 + 1150 on the same AMBE-3000, so this
+# pulls `astar-codec/ambe-hw` and the vendored ThumbDV driver. astar has no DMR
+# transmit path yet, so this command deliberately has no PTT.
+dmr = [
+    "dep:astar-station",
+    "astar-station/dmr",
+    "dep:astar-console",
+    "astar-console/dmr",
+    "dep:astar-codec",
+    "astar-codec/ambe-hw",
+    "dep:ctrlc",
+]
 dstar = [
     "dep:astar-station",
     "astar-station/dstar",
