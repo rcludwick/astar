@@ -42,7 +42,16 @@
 //! is AGPL-3.0-only; the two do not mix.
 
 pub mod fsm;
+pub mod master;
 pub mod network;
 pub mod wire;
 
+pub use fsm::{
+    DmrFsm, FailureStage, FsmAction, LINK_TIMEOUT, LOGIN_RETRY, LinkState, PING_INTERVAL,
+};
+pub use master::{Master, MasterHandle};
 pub use network::{ALL, DmrNetwork, NetworkClass, dialable};
+pub use wire::{
+    BURST_LEN, CallType, ConfigFields, DATA_LEN, DataPacket, FrameType, Packet, RadioId,
+    RadioIdError, Timeslot,
+};
