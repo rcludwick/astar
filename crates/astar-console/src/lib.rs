@@ -19,6 +19,8 @@ pub mod parrot;
 pub mod session;
 pub mod state;
 pub mod tracer;
+/// The one audio lane every digital-voice session runs on.
+mod voice_route;
 #[cfg(feature = "ysf")]
 pub mod ysf;
 

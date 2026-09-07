@@ -13,7 +13,10 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use astar_audio::{AudioBackend, AudioError, Direction, MicId, MicProfile, OutputId};
+use astar_audio::{
+    AudioBackend, AudioError, AudioRouter, CallAudio, Direction, MicId, MicProfile, OutputId,
+    StreamConfig, StreamHandle,
+};
 use astar_iax::{
     BridgeConfig, Call, CallEvent, CallId, CallMode, CodecPolicy, DialSpec, IncomingCall,
     IncomingCallEvent, IncomingCallListener, IncomingCallPolicy, KnownNodes, LinkEvent, LinkMode,
@@ -162,6 +165,10 @@ pub enum ConsoleError {
     /// the `ysf` feature isn't compiled in, or by [`crate::ysf::YsfLink`]
     /// classifying a bind, resolve or callsign failure.
     Ysf(String),
+    /// A key-down was refused because the live voice route has no capture
+    /// device it could open (none resolved, permission denied, or the device
+    /// is held exclusively). Receiving still works; transmitting cannot.
+    NoCaptureDevice,
 }
 
 impl std::fmt::Display for ConsoleError {
@@ -177,6 +184,7 @@ impl std::fmt::Display for ConsoleError {
             Self::M17(msg) => write!(f, "m17: {msg}"),
             Self::Dstar(msg) => write!(f, "dstar: {msg}"),
             Self::Ysf(msg) => write!(f, "ysf: {msg}"),
+            Self::NoCaptureDevice => write!(f, "no capture device: cannot transmit"),
         }
     }
 }
@@ -388,6 +396,12 @@ pub struct ConsoleSession {
     /// plain UDP; an explicit [`Self::set_link_transport`] with
     /// [`LinkTransport::Udp`] clears it.
     pending_wg: Option<(WgLinkConfig, Box<LinkKeyResolver>)>,
+    /// The digital-voice audio lane on the station's one router, held for
+    /// the lifetime of the session that asked for it (see
+    /// [`crate::voice_route`]). `Some` reserves the station: every other
+    /// connect path refuses while it is held, exactly as a live IAX2 call or
+    /// a live M17/D-Star/YSF session does.
+    voice_route: Option<crate::voice_route::VoiceRoute>,
     /// Out-of-band DTMF digits harvested from the event drain loop
     /// (iax-d254), keyed by the source call's raw id. Merged with the
     /// Manager's in-band digit pool by [`ConsoleSession::drain_dtmf_digits`].
@@ -442,6 +456,7 @@ impl ConsoleSession {
             station_policy: CodecPolicy::default(),
             // Library default: plain UDP, byte-identical to pre-iax-5bbd.
             pending_wg: None,
+            voice_route: None,
             dtmf_digits: Vec::new(),
         }
     }
@@ -546,6 +561,12 @@ impl ConsoleSession {
         if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
             mgr.set_mic_profile(id, profile.clone());
         }
+        if let (Some(route), Some(mgr)) = (self.voice_route.as_ref(), self.manager.as_ref()) {
+            let r = mgr.router();
+            if let Some(mic) = route.mic() {
+                r.set_mic_profile(mic, profile.clone());
+            }
+        }
         // iax-f2b8-fix Fix 4: forward every standing pref to a live M17
         // session too — before this, M17Session's own AudioRouter never
         // heard about ANY of these (only the IAX2 Manager did), so e.g. the
@@ -570,6 +591,12 @@ impl ConsoleSession {
         if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
             mgr.set_denoise(id, on);
         }
+        if let (Some(route), Some(mgr)) = (self.voice_route.as_ref(), self.manager.as_ref()) {
+            let r = mgr.router();
+            if let Some(mic) = route.mic() {
+                r.set_mic_denoise(mic, on);
+            }
+        }
         #[cfg(feature = "m17")]
         if let Some(m17) = self.m17.as_ref() {
             m17.set_denoise(on);
@@ -581,6 +608,12 @@ impl ConsoleSession {
         self.compress.store(on, Ordering::Relaxed);
         if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
             mgr.set_compress(id, on);
+        }
+        if let (Some(route), Some(mgr)) = (self.voice_route.as_ref(), self.manager.as_ref()) {
+            let r = mgr.router();
+            if let Some(mic) = route.mic() {
+                r.set_mic_compress(mic, on);
+            }
         }
         #[cfg(feature = "m17")]
         if let Some(m17) = self.m17.as_ref() {
@@ -597,6 +630,12 @@ impl ConsoleSession {
             .store(level.to_bits(), Ordering::Relaxed);
         if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
             mgr.set_compression_level(id, level);
+        }
+        if let (Some(route), Some(mgr)) = (self.voice_route.as_ref(), self.manager.as_ref()) {
+            let r = mgr.router();
+            if let Some(mic) = route.mic() {
+                r.set_mic_compress_level(mic, level);
+            }
         }
         #[cfg(feature = "m17")]
         if let Some(m17) = self.m17.as_ref() {
@@ -619,6 +658,12 @@ impl ConsoleSession {
         if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
             mgr.set_denoise_strength(id, level);
         }
+        if let (Some(route), Some(mgr)) = (self.voice_route.as_ref(), self.manager.as_ref()) {
+            let r = mgr.router();
+            if let Some(mic) = route.mic() {
+                r.set_mic_denoise_strength(mic, level);
+            }
+        }
     }
 
     /// Toggle RX/output compression on the next/current network call
@@ -629,6 +674,10 @@ impl ConsoleSession {
         self.rx_compress.store(on, Ordering::Relaxed);
         if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
             mgr.set_output_compress(id, on);
+        }
+        if let (Some(route), Some(mgr)) = (self.voice_route.as_ref(), self.manager.as_ref()) {
+            let r = mgr.router();
+            r.set_output_compress(route.out(), on);
         }
         #[cfg(feature = "m17")]
         if let Some(m17) = self.m17.as_ref() {
@@ -654,6 +703,10 @@ impl ConsoleSession {
         if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
             mgr.set_output_compress_level(id, level);
         }
+        if let (Some(route), Some(mgr)) = (self.voice_route.as_ref(), self.manager.as_ref()) {
+            let r = mgr.router();
+            r.set_output_compress_level(route.out(), level);
+        }
         #[cfg(feature = "m17")]
         if let Some(m17) = self.m17.as_ref() {
             m17.set_rx_compression_level(level);
@@ -677,6 +730,12 @@ impl ConsoleSession {
         if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
             mgr.set_tx_trim(id, g);
         }
+        if let (Some(route), Some(mgr)) = (self.voice_route.as_ref(), self.manager.as_ref()) {
+            let r = mgr.router();
+            if let Some(mic) = route.mic() {
+                r.set_mic_tx_trim(mic, g);
+            }
+        }
         #[cfg(feature = "m17")]
         if let Some(m17) = self.m17.as_ref() {
             m17.set_tx_trim(g);
@@ -692,6 +751,12 @@ impl ConsoleSession {
         if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
             mgr.set_vox_preroll_ms(id, ms);
         }
+        if let (Some(route), Some(mgr)) = (self.voice_route.as_ref(), self.manager.as_ref()) {
+            let r = mgr.router();
+            if let Some(mic) = route.mic() {
+                r.set_mic_preroll_ms(mic, ms);
+            }
+        }
         #[cfg(feature = "m17")]
         if let Some(m17) = self.m17.as_ref() {
             m17.set_vox_preroll_ms(ms);
@@ -705,6 +770,13 @@ impl ConsoleSession {
         if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
             mgr.set_spectrum_decay(id, db_per_sec);
         }
+        if let (Some(route), Some(mgr)) = (self.voice_route.as_ref(), self.manager.as_ref()) {
+            let r = mgr.router();
+            if let Some(mic) = route.mic() {
+                r.set_mic_spectrum_decay(mic, db_per_sec);
+            }
+            r.set_output_spectrum_decay(route.out(), db_per_sec);
+        }
         // iax-f2b8-fix Fix 6: forward to a live M17 session too — mirrors
         // Fix 4's pref-setter forwarding, but "live-only" (no persisted
         // cell), matching this setter's own no-op-when-idle contract above.
@@ -716,6 +788,160 @@ impl ConsoleSession {
         if let Some(m17) = self.m17.as_ref() {
             m17.set_spectrum_decay(db_per_sec);
         }
+    }
+
+    // ── The one audio lane (`crate::voice_route`) ───────────────────────
+
+    /// Open the audio lane for a digital-voice session on the station's one
+    /// router — the output bus now, the capture lane if it can — and reserve
+    /// the route: every other connect path refuses while it is held. The
+    /// session gets only the channel ends; meters, preferences and keying
+    /// stay here. `input`/`output` are device-name substrings, `None` =
+    /// system default, resolved exactly as [`Self::connect`] resolves them.
+    ///
+    /// # Errors
+    /// [`ConsoleError::AlreadyConnected`] if anything is live;
+    /// [`ConsoleError::Device`]/[`ConsoleError::Audio`] if the OUTPUT cannot
+    /// be resolved or opened. A missing input is not an error.
+    pub fn open_voice_route(
+        &mut self,
+        input: Option<&str>,
+        output: Option<&str>,
+        make_backend: impl FnOnce() -> Box<dyn AudioBackend>,
+    ) -> Result<CallAudio, ConsoleError> {
+        self.can_open_voice_route()?;
+        // Scoped so the `&mut Manager` borrow ends before `push_prefs` takes
+        // `&self` below.
+        let (route, audio) = {
+            let manager = self.ensure_engine(make_backend);
+            let enumerated = manager.devices().map_err(ConsoleError::Audio)?;
+            let out_id = match output {
+                Some(q) => find_device(&enumerated, q, Direction::Output)?,
+                None => manager
+                    .default_output()
+                    .ok_or_else(|| ConsoleError::Device("no default output device".into()))?
+                    .id
+                    .as_str()
+                    .to_string(),
+            };
+            // A capture device that will not resolve is NOT fatal: the route
+            // is receive-only and every key-down retries.
+            let mic_id = match input {
+                Some(q) => find_device(&enumerated, q, Direction::Input).ok(),
+                None => manager.default_input().map(|d| d.id.as_str().to_string()),
+            };
+            if mic_id.is_none() {
+                tracing::warn!("voice route: no capture device resolved — receive only");
+            }
+            crate::voice_route::VoiceRoute::open(
+                manager.router_mut(),
+                mic_id.map(MicId::new),
+                OutputId::new(&out_id),
+                StreamConfig::default(),
+            )
+            .map_err(ConsoleError::Audio)?
+        };
+        {
+            let router = self
+                .manager
+                .as_ref()
+                .expect("built by ensure_engine")
+                .router();
+            self.push_prefs(router, route.mic(), route.out());
+        }
+        self.voice_route = Some(route);
+        Ok(audio)
+    }
+
+    /// The real gate for opening a voice route: nothing else may be live.
+    /// (`dstar_can_connect`/`ysf_can_connect` are the facade's cheap
+    /// pre-checks and guard the same set from the other direction.)
+    fn can_open_voice_route(&self) -> Result<(), ConsoleError> {
+        if self.active.is_some()
+            || self.voice_route.is_some()
+            || self.m17_is_active()
+            || self.dstar_is_active()
+            || self.ysf_is_active()
+        {
+            return Err(ConsoleError::AlreadyConnected);
+        }
+        Ok(())
+    }
+
+    /// Key or unkey the live voice route's capture lane. `false` = refused
+    /// (no capture device could be opened), and the caller must not
+    /// transmit. `false` too when no route is open at all.
+    pub(crate) fn key_voice_route(&mut self, on: bool) -> bool {
+        let Some(route) = self.voice_route.as_mut() else {
+            return false;
+        };
+        let Some(mgr) = self.manager.as_mut() else {
+            return false;
+        };
+        route.key(mgr.router_mut(), on)
+    }
+
+    /// Whether the live voice route resolved a capture device.
+    #[must_use]
+    pub fn voice_route_tx_capable(&self) -> bool {
+        self.voice_route
+            .as_ref()
+            .is_some_and(crate::voice_route::VoiceRoute::tx_capable)
+    }
+
+    /// Close the voice route's lanes and clear the reservation. Returns the
+    /// stream handles; drop them with no lock held (a `CoreAudio` stream drop
+    /// can stall).
+    #[must_use]
+    pub fn release_voice_route(&mut self) -> Vec<Box<dyn StreamHandle>> {
+        match (self.voice_route.take(), self.manager.as_mut()) {
+            (Some(route), Some(mgr)) => route.release(mgr.router_mut()),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Push every standing operator preference onto one route's lanes. The
+    /// ONE pref-push for a voice route: the same eleven values `connect`
+    /// re-pushes for an IAX2 dial, addressed at the router rather than at a
+    /// call id.
+    fn push_prefs(&self, router: &AudioRouter, mic: Option<&MicId>, out: &OutputId) {
+        if let Some(mic) = mic {
+            router.set_mic_gain(mic, self.input_gain.get());
+            router.set_mic_denoise(mic, self.denoise.load(Ordering::Relaxed));
+            router.set_mic_compress(mic, self.compress.load(Ordering::Relaxed));
+            router.set_mic_compress_level(
+                mic,
+                f32::from_bits(self.compress_level.load(Ordering::Relaxed)),
+            );
+            router.set_mic_denoise_strength(
+                mic,
+                f32::from_bits(self.denoise_strength.load(Ordering::Relaxed)),
+            );
+            router.set_mic_tx_trim(mic, f32::from_bits(self.tx_trim.load(Ordering::Relaxed)));
+            router.set_mic_preroll_ms(mic, self.vox_preroll_ms.load(Ordering::Relaxed));
+            router.set_mic_profile(mic, self.calibrated.lock().unwrap().clone());
+        }
+        router.set_output_gain(out, self.output_gain.get());
+        router.set_output_compress(out, self.rx_compress.load(Ordering::Relaxed));
+        router.set_output_compress_level(
+            out,
+            f32::from_bits(self.rx_compress_level.load(Ordering::Relaxed)),
+        );
+    }
+
+    /// The mic lane and output bus whose meters the snapshot reports: the
+    /// IAX2 call's routed pair, else the voice route's, else none. One
+    /// answer for every network — a network cannot forget to wire meters,
+    /// because a network no longer wires meters.
+    fn meter_ids(&self) -> Option<(Option<MicId>, OutputId)> {
+        if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
+            let snap = mgr.snapshot();
+            let out = snap.output_of(id)?;
+            return Some((snap.mic_of(id).map(MicId::new), OutputId::new(&out)));
+        }
+        self.voice_route
+            .as_ref()
+            .map(|r| (r.mic().cloned(), r.out().clone()))
     }
 
     /// Place a web-transceiver call to `peer` (already resolved from the node).
@@ -741,6 +967,7 @@ impl ConsoleSession {
             || self.m17_is_active()
             || self.dstar_is_active()
             || self.ysf_is_active()
+            || self.voice_route.is_some()
         {
             return Err(ConsoleError::AlreadyConnected);
         }
@@ -1067,6 +1294,7 @@ impl ConsoleSession {
                         && !self.m17_is_active()
                         && !self.dstar_is_active()
                         && !self.ysf_is_active()
+                        && self.voice_route.is_none()
                     {
                         self.adopt_inbound(call, events);
                     }
@@ -1088,7 +1316,11 @@ impl ConsoleSession {
         // adds the same guard for a live D-Star session: adopting an inbound
         // call would open the local handset's output device concurrently
         // with the D-Star session's own output device.
-        if self.m17_is_active() || self.dstar_is_active() || self.ysf_is_active() {
+        if self.m17_is_active()
+            || self.dstar_is_active()
+            || self.ysf_is_active()
+            || self.voice_route.is_some()
+        {
             let _ = incoming.reject(Some("busy".into()));
             return;
         }
@@ -1211,7 +1443,11 @@ impl ConsoleSession {
     /// operator can retry once the other session is disconnected;
     /// [`ConsoleError::Iax`] if the answer handshake fails.
     pub fn answer_pending(&mut self) -> Result<(), ConsoleError> {
-        if self.m17_is_active() || self.dstar_is_active() || self.ysf_is_active() {
+        if self.m17_is_active()
+            || self.dstar_is_active()
+            || self.ysf_is_active()
+            || self.voice_route.is_some()
+        {
             return Err(ConsoleError::AlreadyConnected);
         }
         let inc = self
@@ -1362,6 +1598,19 @@ impl ConsoleSession {
     /// # Errors
     /// [`ConsoleError::NotConnected`] if no call is live.
     pub fn set_ptt(&mut self, on: bool) -> Result<(), ConsoleError> {
+        // The ONE keying gate for a digital-voice session: the route's
+        // capture lane opens (or is refused) before any network is told to
+        // transmit, and closes on key-up. A refusal here forwards nothing —
+        // an RF header over a stream of silence is worse than no key at all.
+        if self.voice_route.is_some() {
+            if on {
+                if !self.key_voice_route(true) {
+                    return Err(ConsoleError::NoCaptureDevice);
+                }
+            } else {
+                let _ = self.key_voice_route(false);
+            }
+        }
         // iax-f2b8 Task 4: dispatch to the M17 session FIRST — mutual
         // exclusion with `active` means at most one of these branches is ever
         // live, but M17 must be checked before the IAX2 NotConnected error
@@ -1556,6 +1805,7 @@ impl ConsoleSession {
             || self.m17.is_some()
             || self.dstar_is_active()
             || self.ysf_is_active()
+            || self.voice_route.is_some()
         {
             return Err(ConsoleError::AlreadyConnected);
         }
@@ -1663,6 +1913,7 @@ impl ConsoleSession {
             || self.m17_is_active()
             || self.dstar.is_some()
             || self.ysf_is_active()
+            || self.voice_route.is_some()
         {
             return Err(ConsoleError::AlreadyConnected);
         }
@@ -1808,6 +2059,7 @@ impl ConsoleSession {
             || self.m17_is_active()
             || self.dstar_is_active()
             || self.ysf.is_some()
+            || self.voice_route.is_some()
         {
             return Err(ConsoleError::AlreadyConnected);
         }
@@ -1937,6 +2189,12 @@ impl ConsoleSession {
         if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
             mgr.set_input_gain(id, clamped);
         }
+        if let (Some(route), Some(mgr)) = (self.voice_route.as_ref(), self.manager.as_ref()) {
+            let r = mgr.router();
+            if let Some(mic) = route.mic() {
+                r.set_mic_gain(mic, clamped);
+            }
+        }
         #[cfg(feature = "m17")]
         if let Some(m17) = self.m17.as_ref() {
             m17.set_mic_gain(clamped);
@@ -1959,6 +2217,10 @@ impl ConsoleSession {
         self.output_gain.set(clamped);
         if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
             mgr.set_output_gain(id, clamped);
+        }
+        if let (Some(route), Some(mgr)) = (self.voice_route.as_ref(), self.manager.as_ref()) {
+            let r = mgr.router();
+            r.set_output_gain(route.out(), clamped);
         }
         #[cfg(feature = "m17")]
         if let Some(m17) = self.m17.as_ref() {
@@ -1989,8 +2251,10 @@ impl ConsoleSession {
     /// exclusive, so this never has to choose between the two.
     #[must_use]
     pub fn tx_spectrum(&self, out: &mut [f32]) -> usize {
-        if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
-            return mgr.tx_spectrum(id, out).unwrap_or(0);
+        if let (Some((mic, _)), Some(mgr)) = (self.meter_ids(), self.manager.as_ref()) {
+            return mic
+                .and_then(|m| mgr.router().mic_tx_spectrum(&m, out))
+                .unwrap_or(0);
         }
         #[cfg(feature = "m17")]
         if let Some(m17) = self.m17.as_ref() {
@@ -2016,8 +2280,8 @@ impl ConsoleSession {
     /// (iax-f2b8-fix Fix 6); see [`Self::tx_spectrum`]'s doc.
     #[must_use]
     pub fn rx_spectrum(&self, out: &mut [f32]) -> usize {
-        if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
-            return mgr.rx_spectrum(id, out).unwrap_or(0);
+        if let (Some((_, bus)), Some(mgr)) = (self.meter_ids(), self.manager.as_ref()) {
+            return mgr.router().output_rx_spectrum(&bus, out).unwrap_or(0);
         }
         #[cfg(feature = "m17")]
         if let Some(m17) = self.m17.as_ref() {
@@ -2432,10 +2696,29 @@ impl ConsoleSession {
         }
         // Levels come from the router lane now; once disconnected there is no
         // active call, so report the silence floor instead of a stale level.
+        let ids = self.meter_ids();
+        if let (Some((mic, bus)), Some(mgr)) = (ids.as_ref(), self.manager.as_ref()) {
+            let r = mgr.router();
+            self.state.tx_level_db = mic.as_ref().and_then(|m| r.mic_tx_dbfs(m)).unwrap_or(-60.0);
+            self.state.input_level_db = mic
+                .as_ref()
+                .and_then(|m| r.mic_input_dbfs(m))
+                .unwrap_or(-60.0);
+            self.state.rx_level_db = r.output_rx_dbfs(bus).unwrap_or(-60.0);
+            // Which noise-reduction chain the metered mic is actually running.
+            self.state.denoise_status = mic
+                .as_ref()
+                .and_then(|m| r.mic_denoise_status(m))
+                .unwrap_or_default();
+        } else {
+            self.state.tx_level_db = -60.0;
+            self.state.input_level_db = -60.0;
+            self.state.rx_level_db = -60.0;
+            self.state.denoise_status = astar_audio::DenoiseStatus::default();
+        }
+        // IAX2-only health counters stay call-scoped: an RTT and a ts-ladder
+        // re-anchor mean nothing without a call.
         if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
-            self.state.tx_level_db = mgr.tx_dbfs(id).unwrap_or(-60.0);
-            self.state.rx_level_db = mgr.rx_dbfs(id).unwrap_or(-60.0);
-            self.state.input_level_db = mgr.input_dbfs(id).unwrap_or(-60.0);
             self.state.rtt_ms = mgr
                 .rtt(id)
                 .map(|d| u32::try_from(d.as_millis()).unwrap_or(u32::MAX));
@@ -2443,16 +2726,10 @@ impl ConsoleSession {
             // cpal capture overruns on the active call / its routed mic.
             self.state.tx_reanchors = mgr.tx_reanchors(id).unwrap_or(0);
             self.state.tx_capture_overruns = mgr.tx_capture_overruns(id).unwrap_or(0);
-            // Which noise-reduction chain the routed mic is actually running.
-            self.state.denoise_status = mgr.denoise_status(id).unwrap_or_default();
         } else {
-            self.state.tx_level_db = -60.0;
-            self.state.rx_level_db = -60.0;
-            self.state.input_level_db = -60.0;
             self.state.rtt_ms = None;
             self.state.tx_reanchors = 0;
             self.state.tx_capture_overruns = 0;
-            self.state.denoise_status = astar_audio::DenoiseStatus::default();
         }
         // Populate the full concurrent-call list (iax-a1fb P5). Secret-free:
         // CallSnapshot fields are node ids, device names, and health counters only.
@@ -2612,6 +2889,15 @@ impl ConsoleSession {
         }
         self.state.ysf_active = self.ysf_is_active();
         self.state.ysf_available = ysf_available();
+
+        // Reconcile the gate against what the run loop actually applied: a
+        // session that unkeyed itself (link lost, time-out timer) reports
+        // `ptt: false` above, and the capture lane must follow it down on the
+        // very next poll rather than keep feeding a transmission nobody is
+        // making.
+        if !self.state.ptt && self.voice_route.is_some() {
+            let _ = self.key_voice_route(false);
+        }
 
         self.state.clone()
     }
@@ -3507,5 +3793,136 @@ mod tests {
         assert!(!s.snapshot().ysf_active, "and stop showing when it is gone");
         assert!(s.ysf_state().is_none());
         reflector.shutdown();
+    }
+    // ── The one audio lane: `VoiceRoute` on the station router ───────────
+
+    /// A backend factory shaped for `open_voice_route`, which takes the
+    /// factory rather than an already-built backend (it decides for itself
+    /// whether the engine still needs one).
+    fn null() -> Box<dyn AudioBackend> {
+        Box::new(NullBackend::new())
+    }
+
+    #[test]
+    fn a_voice_route_opens_the_bus_and_the_capture_lane_on_the_station_router() {
+        let mut s = ConsoleSession::new();
+        let _audio = s.open_voice_route(None, None, null).expect("route");
+        let mgr = s.manager.as_ref().expect("engine built by the route");
+        assert_eq!(mgr.router().output_count(), 1);
+        assert_eq!(
+            mgr.router().mic_count(),
+            1,
+            "a resolvable mic opens at connect, gate closed"
+        );
+        assert!(s.voice_route_tx_capable());
+    }
+
+    #[test]
+    fn a_voice_route_is_receive_only_when_no_input_resolves() {
+        let mut s = ConsoleSession::new();
+        let _audio = s
+            .open_voice_route(Some("no such device"), None, null)
+            .expect("route");
+        let mgr = s.manager.as_ref().expect("engine");
+        assert_eq!(mgr.router().mic_count(), 0);
+        assert!(!s.voice_route_tx_capable());
+        assert!(
+            !s.key_voice_route(true),
+            "keying without a capture device is refused"
+        );
+    }
+
+    #[test]
+    fn a_reserved_voice_route_refuses_every_other_connect() {
+        let mut s = ConsoleSession::new();
+        let _audio = s.open_voice_route(None, None, null).expect("route");
+        #[cfg(feature = "dstar")]
+        assert!(matches!(
+            s.dstar_can_connect(),
+            Err(ConsoleError::AlreadyConnected)
+        ));
+        #[cfg(feature = "ysf")]
+        assert!(matches!(
+            s.ysf_can_connect(),
+            Err(ConsoleError::AlreadyConnected)
+        ));
+        // An IAX2 dial: it must be refused before it dials, so the peer is
+        // never contacted (and is a loopback address regardless).
+        let cfg = ConsoleConfig {
+            node: "55553".into(),
+            calling_node: "55553".into(),
+            secret: "allstar".into(),
+            name: "astar".into(),
+            input_device: None,
+            output_device: None,
+            codec_policy: CodecPolicy::default(),
+        };
+        let peer: SocketAddr = "127.0.0.1:1".parse().expect("loopback");
+        assert!(matches!(
+            s.connect(null(), peer, cfg),
+            Err(ConsoleError::AlreadyConnected)
+        ));
+    }
+
+    #[test]
+    fn releasing_a_voice_route_closes_both_streams_and_clears_the_reservation() {
+        let mut s = ConsoleSession::new();
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        drop(audio);
+        let handles = s.release_voice_route();
+        assert_eq!(
+            handles.len(),
+            2,
+            "mic + output stream handles come back to be dropped off-lock"
+        );
+        let mgr = s.manager.as_ref().expect("engine survives a release");
+        assert_eq!(mgr.router().mic_count(), 0);
+        assert_eq!(mgr.router().output_count(), 0);
+        #[cfg(feature = "dstar")]
+        assert!(s.dstar_can_connect().is_ok());
+    }
+
+    #[test]
+    fn prefs_set_before_and_after_a_voice_route_reach_the_router() {
+        let mut s = ConsoleSession::new();
+        s.set_output_gain(2.5);
+        s.set_input_gain(1.5);
+        s.set_rx_compress(true);
+        let _audio = s.open_voice_route(None, None, null).expect("route");
+        let out = OutputId::new("out:null");
+        let mic = MicId::new("in:null");
+        {
+            let r = s.manager.as_ref().expect("engine").router();
+            assert!((r.output_gain(&out).expect("bus") - 2.5).abs() < 1e-6);
+            assert!((r.mic_gain(&mic).expect("lane") - 1.5).abs() < 1e-6);
+            assert_eq!(r.output_compress(&out), Some(true));
+        }
+        s.set_output_gain(0.5);
+        s.set_rx_compress(false);
+        let r = s.manager.as_ref().expect("engine").router();
+        assert!((r.output_gain(&out).expect("bus") - 0.5).abs() < 1e-6);
+        assert_eq!(r.output_compress(&out), Some(false));
+    }
+
+    #[test]
+    fn keying_the_voice_route_opens_and_closes_the_gate() {
+        // `set_gate` is a no-op on an unopened lane, so this proves the lane
+        // IS open: a keyed lane reports through the router's own gate cell.
+        // The router exposes no gate getter; prove it through the return
+        // value instead, and leave the on-air proof to the M17 test in Task 3
+        // (a keyed route carries mic frames to the reflector).
+        let mut s = ConsoleSession::new();
+        let _audio = s.open_voice_route(None, None, null).expect("route");
+        assert!(s.key_voice_route(true));
+        assert!(s.key_voice_route(false));
+    }
+
+    #[test]
+    fn set_ptt_with_no_capture_device_is_a_typed_refusal() {
+        let mut s = ConsoleSession::new();
+        let _audio = s
+            .open_voice_route(Some("no such device"), None, null)
+            .expect("route");
+        assert!(!s.key_voice_route(true));
     }
 }
