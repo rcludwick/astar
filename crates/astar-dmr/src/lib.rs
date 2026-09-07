@@ -21,6 +21,14 @@
 //! *master*, the fixture the link is tested against, not a way to reach a
 //! network.
 //!
+//! [`fec`] is the block codes DMR's signalling is wrapped in — BPTC(196,96),
+//! BPTC(128,77), Golay(20,8), QR(16,7,6), RS(12,9) and the embedded LC's
+//! five-bit sum. Each is written out from the parameters
+//! `docs/design/dmr-wire.md` §8 records — parity equations, generator
+//! polynomial, field, interleave — and not one of the reference tables was
+//! copied. It is arithmetic over bits and nothing else: no I/O, no state, and
+//! no knowledge of a burst beyond the offsets BPTC(196,96) must write between.
+//!
 //! One dependency beyond `std`, and only one: `sha2`, for the login digest.
 //! astar writes wire formats out from their definitions; it does not write
 //! its own crypto.
@@ -28,10 +36,12 @@
 //! **The 33-byte burst is carried, not decoded.** Voice on DMR is AMBE+2,
 //! which on astar means the AMBE-3000 in a `ThumbDV` and nothing else;
 //! [`wire::DataPacket::burst`] hands its bytes over intact and this crate
-//! makes no claim about what is inside them. The sync patterns, the embedded
-//! LC and the three 9-byte vocoder frames are `docs/design/dmr-wire.md`
-//! §5–§9's business and a later crate's. Transmit, the talkgroup dial
-//! grammar and the session layer are not here yet.
+//! makes no claim about what is inside them. Laying the sync patterns, the
+//! embedded-LC fragments and the three 9-byte vocoder frames out inside those
+//! 33 bytes is `docs/design/dmr-wire.md` §5–§7's business and is not done
+//! here yet — [`fec`] has the codes those layers are built from, but nothing
+//! assembles or takes apart a burst. Transmit, the talkgroup dial grammar and
+//! the session layer are not here yet either.
 //!
 //! # The identity this assumes
 //!
@@ -78,6 +88,7 @@
 //! polynomial, parity equations, field — rather than transcribing somebody's
 //! table.
 
+pub mod fec;
 pub mod fsm;
 pub mod master;
 pub mod network;
