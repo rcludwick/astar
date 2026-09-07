@@ -167,6 +167,16 @@ pub enum ConsoleError {
     /// the `ysf` feature isn't compiled in, or by [`crate::ysf::YsfLink`]
     /// classifying a bind, resolve or callsign failure.
     Ysf(String),
+    /// A DMR link could not be opened or used: raised by
+    /// [`crate::dmr::DmrLink`] classifying a radio-id, callsign, password,
+    /// resolve or bind failure — and, like every other variant here,
+    /// SECRET-FREE. A DMR master authenticates with a password, and no
+    /// message this carries interpolates one.
+    ///
+    /// Present whether or not the `dmr` feature is compiled in, so a caller
+    /// that must name the case (the `Station` facade reporting "this build
+    /// has no DMR") does not need a `cfg` of its own.
+    Dmr(String),
     /// An NXDN link could not be opened or used: raised by
     /// [`crate::nxdn::NxdnLink`] classifying a callsign, radio-id, resolve
     /// or bind failure.
@@ -190,6 +200,7 @@ impl std::fmt::Display for ConsoleError {
             Self::M17(msg) => write!(f, "m17: {msg}"),
             Self::Dstar(msg) => write!(f, "dstar: {msg}"),
             Self::Ysf(msg) => write!(f, "ysf: {msg}"),
+            Self::Dmr(msg) => write!(f, "dmr: {msg}"),
             Self::Nxdn(msg) => write!(f, "nxdn: {msg}"),
             Self::NoCaptureDevice => write!(f, "no capture device: cannot transmit"),
         }

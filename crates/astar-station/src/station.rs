@@ -2444,6 +2444,14 @@ fn map_console_err(e: astar_console::ConsoleError) -> StationError {
         C::Dstar(m) => StationError::Dstar(m),
         C::Ysf(m) => StationError::Ysf(m),
         C::Nxdn(m) => StationError::Nxdn(m),
+        // DMR has no `StationError` of its own yet: the variant, its ABI code
+        // and the `Station::dmr_*` methods that raise it are Task 8 of
+        // docs/superpowers/plans/2026-09-07-dmr-network.md. Nothing reaches
+        // this arm until then — no station path builds a `ConsoleError::Dmr`
+        // — and a link failure is what a DMR failure is, so the interim
+        // mapping says so rather than inventing a code the header does not
+        // carry.
+        C::Dmr(m) => StationError::Link(format!("dmr: {m}")),
         C::NoCaptureDevice => StationError::Audio("no capture device: cannot transmit".into()),
     }
 }
