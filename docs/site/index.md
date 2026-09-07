@@ -11,9 +11,10 @@ astar is a digital-voice client for **AllStarLink** and **M17**. It connects ove
 the network as a softclient — no radio, no hotspot, no repeater in the path —
 and handles audio, push-to-talk, DTMF and level metering itself.
 
-**D-Star** is implemented in the engine — DExtra, XLX/XRF reflectors, AMBE+2 on
-a ThumbDV or DV3000 dongle — but is **not yet exposed in the macOS client**. It
-is reachable from the Rust crates today; the network picker does not offer it.
+**D-Star** and **System Fusion** are in the macOS app too — DExtra to XLX/XRF
+reflectors, and YSF reflectors — with the AMBE+2 vocoder running on a USB
+dongle: a **DVMEGA DVstick 30** or a **ThumbDV / DV3000**. Plug one in and
+both networks appear in the picker; there is nothing to configure.
 
 Protocol, codec and audio handling live in one Rust engine; each platform gets a
 native front-end over it rather than a shared web shell.
@@ -49,6 +50,7 @@ native front-end over it rather than a shared web shell.
 | AllStarLink | IAX2 (RFC 5456), UDP 4569 | µ-law / A-law / signed-linear (8 or 16 kHz), negotiated | Node numbers | Node number, via the allstarlink.org portal |
 | M17 | UDP 17000 | Codec 2 3200 | Reflector + module | Callsign |
 | D-Star *(needs a dongle)* | DExtra, UDP 30001 | AMBE+2, on the dongle | XLX/XRF reflector + module | Callsign |
+| System Fusion *(needs a dongle)* | YSF reflector protocol, UDP 42000 | AMBE+2 DN, on the dongle | YSF reflector | Callsign |
 
 M17 transmits your callsign on the air; AllStarLink identifies by node number
 instead, and authenticates against the portal rather than a per-node secret.
@@ -94,9 +96,10 @@ device, not a special case. Raw USB is the default transport and needs no
 driver; the tty path is opt-in and on macOS needs WCH's driver. See
 [Hardware](macos/hardware.md).
 
-D-Star, in the engine, is hardware-only. AMBE+2 has no freely licensable
-software implementation, so the codec runs on a ThumbDV or DV3000 dongle —
-Codec 2 you can install, AMBE you have to own.
+D-Star and System Fusion are hardware-only. AMBE+2 has no freely licensable
+software implementation, so the codec runs on a dongle — a DVMEGA DVstick 30
+or a ThumbDV / DV3000, either works — Codec 2 you can install, AMBE you have
+to own.
 
 ## Architecture
 
