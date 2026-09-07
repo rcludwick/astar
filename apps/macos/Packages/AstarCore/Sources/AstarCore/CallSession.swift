@@ -731,6 +731,19 @@ public final class CallSession: ObservableObject {
     /// when a sync replaces the feed, not only when the operator next types.
     @Published public var reflectorIndex: ReflectorIndex = .empty
 
+    /// Talkgroup lists per DMR system slug, when there are any.
+    ///
+    /// `[:]` is a first-class state and today's ONLY state:
+    /// `api/v1/reflectors/dmr/<system>/talkgroups.json` is a separate
+    /// hamcall-db task and does not exist yet, so nothing populates this and
+    /// the talkgroup field is a number the operator types. That is a complete
+    /// product — it is how every DMR radio codeplug works — and a list only
+    /// ever saves the typing.
+    ///
+    /// A value rather than a fetcher, exactly like `reflectorIndex`: whatever
+    /// loads the lists assigns them here, and dialling never waits on I/O.
+    @Published public var dmrTalkgroups: [String: [DmrTalkgroup]] = [:]
+
     /// Interpret dial-field text against the directory, ahead of any address
     /// grammar. The single seam through which "directory first, address
     /// second" is enforced for every caller — see `ReflectorIndex.resolveDial`.

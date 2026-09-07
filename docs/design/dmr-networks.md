@@ -166,6 +166,48 @@ than one it reaches dishonestly.
   wiki couldn't be read, and the community evidence that makes this an open
   question worth revisiting rather than a closed one.
 
+## The directory's `system` is not `DmrNetwork::slug()` — a correction
+
+`astar_dmr::network`'s doc says a slug is "the stable identifier used in dial
+grammar, **directory rows** and saved configuration". For dial grammar and
+saved configuration that is true. **For directory rows it is not, and cannot
+be.**
+
+Checked against the live feed on 2026-09-07
+(`api/v1/reflectors/dmr.json`, 185 rows, DVRef via CC BY 4.0): the rows carry
+**111 distinct `system` values** — `freedmr-network`, `dmrplus-ipsc2-uk`,
+`ipsc2-poland`, `adn-systems-espana`, `hb_it_trani_conference`, `xlx696` — and
+not one of them equals a `DmrNetwork` slug. The reason is structural, not a
+data-quality problem: **DVRef enumerates servers**, one row per operator
+instance (19 rows are `freedmr-network`), while **`DmrNetwork` enumerates
+families**. Neither vocabulary can be derived from the other by renaming.
+
+**The ruling: they are two different things and both are kept.**
+
+| | |
+|---|---|
+| `ReflectorDial.mmdvm(system:host:port)` | carries the directory's `system` **verbatim** — it is what names the master, its login and its upstream talkgroup list, and it is the key the master password is saved under |
+| `DmrFamily` (the app's mirror of `DmrNetwork`) | what the picker groups by and what the consent gate reads |
+| `DmrDial.family(ofSystem:)` | the documented bridge, a prefix/alias table with the 2026-09-07 evidence in its doc comment |
+
+`family(ofSystem:)` answers **`nil` for "independent, unrecognised"** rather
+than guessing. Most rows answer `nil` — 111 systems against nine families —
+and every one of them is still listed, still grouped (under "Independent
+networks") and still dialable. The only thing a family decides is
+`requiresConsent`, and a network astar does not recognise is not BrandMeister.
+
+Two consequences worth stating:
+
+* **TGIF is not in the directory at all.** No row's `system` contains `tgif`
+  — TGIF publishes talkgroups to DVRef but not servers. So astar's first and
+  recommended target is reachable only by typing an address
+  (`tgif:tgif.network:62031/31313/2`), which is not a gap to work around but
+  the reason the manual form exists. The address stays in documentation and in
+  the app's help text; it is never compiled into the engine.
+* **30 of the 185 rows have no `dial` at all.** They are listed and not
+  dialable, which `ReflectorDial.unsupported` already models — dropping them
+  would make a directory that lists 185 networks look like one that lists 155.
+
 ## Where this stands
 
 `crates/astar-dmr` exists. It contains `network` and nothing else: no I/O, no

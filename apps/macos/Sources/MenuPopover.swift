@@ -670,7 +670,14 @@
                     .accessibilityValue(session.isConnecting ? "connecting" : "")
                     .disabled(
                         needsCredentials || !isDialTargetValid || needsM17CallsignToConnect
-                            || session.isConnecting)
+                            || needsDMRRadioIDToConnect || session.isConnecting)
+                }
+                // DMR's target is four things and the field can only hold two
+                // of them comfortably, so the network and the slot get
+                // controls of their own — see `dmrTargetRow`.
+                if selectedNetwork == .dmr {
+                    dmrTargetRow
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                 }
                 // Connecting via AllStar requires an account (guest mode removed,
                 // au-1517) — `.m17` doesn't (astar-c2e5 Task 9 fix: this used to
@@ -683,6 +690,17 @@
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         // Same fade/slide as the M17 callsign field above.
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+                // DMR's other credential. Said here, with Connect already off,
+                // rather than thrown on press: the operator cannot supply a
+                // radioid.net registration from this field, so the useful thing
+                // to do is name where it goes.
+                if needsDMRRadioIDToConnect {
+                    Text("Enter your DMR radio ID in Settings to connect via DMR.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
                 // The one place the directory is visible so far
@@ -774,13 +792,175 @@
                 // the same callsign. Naming the network the operator is
                 // actually on keeps that concrete without implying there are
                 // two settings.
+                // DMR is the odd one: a `DMRD` frame carries a number and no
+                // callsign at all, so the callsign rides in the LOGIN. Saying
+                // "transmits" there would be wrong, and the difference is the
+                // whole reason the radio ID is a separate field.
                 Text(
-                    "\(selectedNetwork.displayName) transmits your callsign — "
-                        + "set it once here or in Settings."
+                    selectedNetwork == .dmr
+                        ? "DMR logs in with your callsign — set it once here or in Settings."
+                        : "\(selectedNetwork.displayName) transmits your callsign — "
+                            + "set it once here or in Settings."
                 )
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             }
+        }
+
+        /// DMR's target row: the network, the talkgroup and the timeslot.
+        ///
+        /// A DMR target is four things — the network, the master, the talkgroup
+        /// and the slot — because a talkgroup number names nothing on its own:
+        /// TG 91 exists on several of these networks and is a different room on
+        /// each. The dial field alone would mean typing all four; these three
+        /// controls fill it in instead.
+        ///
+        /// **They edit the dial field, they do not shadow it.** Every control
+        /// here reads its third of `node` and writes back the whole string
+        /// (`DmrDialText`), so the field stays the single source of truth for
+        /// what will be dialled — the same rule the D-Star module picker
+        /// follows, and for the same reason: two places each holding half a
+        /// target is how a UI comes to show one thing and dial another.
+        private var dmrTargetRow: some View {
+            HStack(spacing: 8) {
+                dmrSystemMenu
+                dmrTalkgroupField
+                Picker("", selection: dmrTimeslotBinding) {
+                    Text("TS1").tag(UInt8(1))
+                    Text("TS2").tag(UInt8(2))
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 96)
+                .accessibilityLabel("Timeslot")
+                .help("Which of the master's two timeslots to join. TS2 is the hotspot convention.")
+            }
+        }
+
+        /// The master picker, grouped by network family — nine families over
+        /// the directory's 111 system slugs, with everything they do not claim
+        /// under one heading and dialled exactly the same way.
+        ///
+        /// BrandMeister's group is absent until the consent box in Settings is
+        /// ticked (`DmrSystemCatalog.grouped(_:consented:)`). A submenu per
+        /// family rather than one flat list: 185 masters in a single menu is
+        /// not something anyone can scan.
+        private var dmrSystemMenu: some View {
+            Menu {
+                ForEach(dmrGroups) { group in
+                    Menu(group.title) {
+                        ForEach(group.systems) { system in
+                            Button(system.name) { selectDMRSystem(system.entryID) }
+                        }
+                    }
+                }
+            } label: {
+                Text(dmrSystemLabel)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .menuStyle(.borderlessButton)
+            .frame(maxWidth: 140)
+            .disabled(dmrGroups.isEmpty)
+            .accessibilityLabel("DMR network")
+            .accessibilityValue(dmrSystemLabel)
+            .help(
+                dmrGroups.isEmpty
+                    ? "No DMR masters in the directory yet — type an address as "
+                        + "system:host:port/talkgroup/timeslot."
+                    : "Pick the network and master to log in to. Each issues its own password.")
+        }
+
+        /// The talkgroup: typed, and picked from a list where one exists.
+        ///
+        /// Typing the number is the normal case and a complete one — it is how
+        /// every DMR radio codeplug works. `session.dmrTalkgroups` is empty
+        /// today because the directory publishes no per-system list yet, so the
+        /// menu appears only if one ever arrives.
+        private var dmrTalkgroupField: some View {
+            HStack(spacing: 4) {
+                TextField("Talkgroup", text: dmrTalkgroupBinding)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 84)
+                    .accessibilityLabel("Talkgroup")
+                if !dmrTalkgroupOptions.isEmpty {
+                    Menu {
+                        ForEach(dmrTalkgroupOptions) { talkgroup in
+                            Button("\(talkgroup.tg) · \(talkgroup.name)") {
+                                dmrTalkgroupBinding.wrappedValue = String(talkgroup.tg)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "list.bullet")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .frame(width: 22)
+                    .accessibilityLabel("Choose a talkgroup")
+                }
+            }
+        }
+
+        /// The picker's groups, recomputed from the loaded directory and the
+        /// consent flag — both `@Published`, so this refreshes when either
+        /// changes.
+        private var dmrGroups: [DmrSystemCatalog.Group] {
+            DmrSystemCatalog.grouped(
+                reflectors.entries, consented: session.brandmeisterConsent)
+        }
+
+        /// What the master picker reads: the chosen row's name, or a prompt.
+        private var dmrSystemLabel: String {
+            let address = DmrDialText.parts(node).address
+            guard !address.isEmpty else { return "Network…" }
+            return reflectors.entries.first { $0.network == .dmr && $0.id == address }?.name
+                ?? address
+        }
+
+        /// The talkgroups published for the selected master's network, if any.
+        private var dmrTalkgroupOptions: [DmrTalkgroup] {
+            let address = DmrDialText.parts(node).address
+            guard let slug = DmrSystemCatalog.slug(forEntryID: address, in: reflectors.entries)
+            else { return [] }
+            return session.dmrTalkgroups[slug] ?? []
+        }
+
+        private var dmrTalkgroupBinding: Binding<String> {
+            Binding(
+                get: { DmrDialText.parts(node).talkgroup },
+                set: { talkgroup in
+                    let parts = DmrDialText.parts(node)
+                    node = DmrDialText.compose(
+                        address: parts.address, talkgroup: talkgroup, timeslot: parts.timeslot)
+                })
+        }
+
+        private var dmrTimeslotBinding: Binding<UInt8> {
+            Binding(
+                get: { DmrDialText.parts(node).timeslot },
+                set: { timeslot in
+                    let parts = DmrDialText.parts(node)
+                    node = DmrDialText.compose(
+                        address: parts.address, talkgroup: parts.talkgroup, timeslot: timeslot)
+                })
+        }
+
+        private func selectDMRSystem(_ entryID: String) {
+            let parts = DmrDialText.parts(node)
+            node = DmrDialText.compose(
+                address: entryID, talkgroup: parts.talkgroup, timeslot: parts.timeslot)
+        }
+
+        /// Whether DMR's radio-ID requirement is unmet right now — mirrors
+        /// `ConnectError.missingDMRRadioID` so Connect is off for the same
+        /// reason it would otherwise throw.
+        ///
+        /// The master PASSWORD is deliberately not gated the same way: reading
+        /// it means a Keychain round trip, and a view body runs at 20 Hz while
+        /// the meters are live. Its refusal is explained on press instead, by a
+        /// message that names where the network issues one.
+        private var needsDMRRadioIDToConnect: Bool {
+            selectedNetwork == .dmr && RadioID.sanitized(session.dmrRadioID).isEmpty
         }
 
         /// Commit the local callsign draft into `session.m17Callsign` (whose
