@@ -25,6 +25,8 @@ use astar_iax::{
 };
 use astar_iax_core::session::auth::Secret;
 
+#[cfg(feature = "dmr")]
+use crate::dmr::{DmrConfig, DmrLink, DmrSnapshot};
 #[cfg(feature = "dstar")]
 use crate::dstar::{DstarConfig, DstarSession, DstarSnapshotState};
 #[cfg(feature = "m17")]
@@ -383,6 +385,15 @@ pub struct ConsoleSession {
     /// arrangement, and same reason, as [`Self::ysf`].
     #[cfg(feature = "nxdn")]
     nxdn: Option<NxdnLink>,
+    /// The live DMR link, if any. Read through [`Self::dmr_state`], never
+    /// mirrored into [`ConsoleState`] beyond the two flags — same
+    /// arrangement, and same reason, as [`Self::nxdn`].
+    ///
+    /// It holds no password: [`DmrConfig::password`] was moved into the link
+    /// at connect, spent on one `RPTK` digest, and dropped. There is nothing
+    /// here for a snapshot, an error or a log to leak.
+    #[cfg(feature = "dmr")]
+    dmr: Option<DmrLink>,
     /// The live outbound node registration handle (Task 3.1). `Some` only while
     /// a registration is in flight; `Drop` sends REGREL when cleared.
     /// Secret-free: the resolved password was consumed into the `Registrar`
@@ -476,6 +487,8 @@ impl ConsoleSession {
             ysf: None,
             #[cfg(feature = "nxdn")]
             nxdn: None,
+            #[cfg(feature = "dmr")]
+            dmr: None,
             reg_handle: None,
             reg_events: None,
             reg_queue: VecDeque::new(),
@@ -854,6 +867,7 @@ impl ConsoleSession {
             || self.dstar_is_active()
             || self.ysf_is_active()
             || self.nxdn_is_active()
+            || self.dmr_is_active()
         {
             return Err(ConsoleError::AlreadyConnected);
         }
@@ -960,6 +974,7 @@ impl ConsoleSession {
             || self.dstar_is_active()
             || self.ysf_is_active()
             || self.nxdn_is_active()
+            || self.dmr_is_active()
             || self.voice_route.is_some()
         {
             return Err(ConsoleError::AlreadyConnected);
@@ -1295,6 +1310,7 @@ impl ConsoleSession {
                         && !self.dstar_is_active()
                         && !self.ysf_is_active()
                         && !self.nxdn_is_active()
+                        && !self.dmr_is_active()
                         && self.voice_route.is_none()
                     {
                         self.adopt_inbound(call, events);
@@ -1321,6 +1337,7 @@ impl ConsoleSession {
             || self.dstar_is_active()
             || self.ysf_is_active()
             || self.nxdn_is_active()
+            || self.dmr_is_active()
             || self.voice_route.is_some()
         {
             let _ = incoming.reject(Some("busy".into()));
@@ -1449,6 +1466,7 @@ impl ConsoleSession {
             || self.dstar_is_active()
             || self.ysf_is_active()
             || self.nxdn_is_active()
+            || self.dmr_is_active()
             || self.voice_route.is_some()
         {
             return Err(ConsoleError::AlreadyConnected);
@@ -1613,6 +1631,16 @@ impl ConsoleSession {
         if on && self.nxdn.is_some() {
             return Err(ConsoleError::Nxdn("transmit is not built yet".into()));
         }
+        // DMR, for the identical reason and at the identical point. It
+        // matters more here than it did for NXDN: a DMR master routes by the
+        // radio ID this link logged in with, so a key that opened the
+        // capture lane and then quietly dropped every burst would be a live
+        // microphone attached to the operator's own registration. See
+        // `crate::dmr`'s Transmit section.
+        #[cfg(feature = "dmr")]
+        if on && self.dmr.is_some() {
+            return Err(ConsoleError::Dmr("transmit is not built yet".into()));
+        }
         // The ONE keying gate for a digital-voice session: the route's
         // capture lane opens (or is refused) before any network is told to
         // transmit, and closes on key-up. A refusal here forwards nothing —
@@ -1666,6 +1694,16 @@ impl ConsoleSession {
         // release lands on the timeline like any other.
         #[cfg(feature = "nxdn")]
         if let Some(link) = self.nxdn.as_ref() {
+            link.set_ptt(on);
+            self.state.ptt = on;
+            self.tracer
+                .note(if on { "LocalKey" } else { "LocalUnkey" }, String::new());
+            return Ok(());
+        }
+        // DMR reaches this branch only on a key-UP, exactly as NXDN does:
+        // the key-DOWN was refused at the top of this function.
+        #[cfg(feature = "dmr")]
+        if let Some(link) = self.dmr.as_ref() {
             link.set_ptt(on);
             self.state.ptt = on;
             self.tracer
@@ -1808,6 +1846,23 @@ impl ConsoleSession {
             link.disconnect();
             // The route the link rode is this session's too: released here,
             // exactly as `nxdn_disconnect` does, or the station stays
+            // reserved against every later connect.
+            let handles = self.release_voice_route();
+            drop(handles);
+            self.state.status = CallStatus::Idle;
+            self.state.ptt = false;
+            self.state.remote_ptt = false;
+            self.state.rtt_ms = None;
+            self.state.tx_level_db = -60.0;
+            self.state.rx_level_db = -60.0;
+            self.state.input_level_db = -60.0;
+            return Ok(());
+        }
+        #[cfg(feature = "dmr")]
+        if let Some(link) = self.dmr.take() {
+            link.disconnect();
+            // The route the link rode is this session's too: released here,
+            // exactly as `dmr_disconnect` does, or the station stays
             // reserved against every later connect.
             let handles = self.release_voice_route();
             drop(handles);
@@ -2042,6 +2097,7 @@ impl ConsoleSession {
             || self.dstar.is_some()
             || self.ysf_is_active()
             || self.nxdn_is_active()
+            || self.dmr_is_active()
             || self.voice_route.is_some()
         {
             return Err(ConsoleError::AlreadyConnected);
@@ -2083,6 +2139,7 @@ impl ConsoleSession {
             || self.dstar.is_some()
             || self.ysf_is_active()
             || self.nxdn_is_active()
+            || self.dmr_is_active()
             || self.voice_route.is_none()
         {
             session.disconnect();
@@ -2219,6 +2276,7 @@ impl ConsoleSession {
             || self.dstar_is_active()
             || self.ysf.is_some()
             || self.nxdn_is_active()
+            || self.dmr_is_active()
             || self.voice_route.is_some()
         {
             return Err(ConsoleError::AlreadyConnected);
@@ -2254,6 +2312,7 @@ impl ConsoleSession {
             || self.dstar_is_active()
             || self.ysf.is_some()
             || self.nxdn_is_active()
+            || self.dmr_is_active()
             || self.voice_route.is_none()
         {
             link.disconnect();
@@ -2380,6 +2439,7 @@ impl ConsoleSession {
             || self.dstar_is_active()
             || self.ysf_is_active()
             || self.nxdn.is_some()
+            || self.dmr_is_active()
             || self.voice_route.is_some()
         {
             return Err(ConsoleError::AlreadyConnected);
@@ -2413,6 +2473,7 @@ impl ConsoleSession {
             || self.dstar_is_active()
             || self.ysf_is_active()
             || self.nxdn.is_some()
+            || self.dmr_is_active()
             || self.voice_route.is_none()
         {
             link.disconnect();
@@ -2476,6 +2537,173 @@ impl ConsoleSession {
     #[must_use]
     pub fn nxdn_state(&self) -> Option<NxdnSnapshot> {
         let mut st = self.nxdn.as_ref().map(NxdnLink::snapshot)?;
+        st.tx_dbfs = self.state.tx_level_db;
+        st.rx_dbfs = self.state.rx_level_db;
+        Some(st)
+    }
+
+    /// Link to a DMR master's talkgroup and decode the audio on it
+    /// (iax-d4f7). The console-side counterpart of [`Self::nxdn_connect`],
+    /// step for step: the route is the reservation, the mutual exclusion AND
+    /// the pref push, all at once.
+    ///
+    /// `input`/`output` are device-name substrings for the lane the link
+    /// will ride (`None` = system default); the link itself is handed only
+    /// the lane's channel ends.
+    ///
+    /// `cfg` is taken **by value**, unlike every other network's here,
+    /// because [`DmrConfig::password`] is a secret: moving it means this
+    /// session's caller no longer holds it, and the compiler says so. It is
+    /// moved on into the link, spent on one `RPTK` digest and dropped —
+    /// nothing on this session ever holds it.
+    ///
+    /// Receive only. [`Self::set_ptt`] refuses a key-down while this link is
+    /// live — see [`crate::dmr`]'s Transmit section for why a refusal beats
+    /// a key that silently does nothing.
+    ///
+    /// # Errors
+    /// [`ConsoleError::AlreadyConnected`] from [`Self::open_voice_route`]
+    /// while any other network holds the lane;
+    /// [`ConsoleError::Device`]/[`ConsoleError::Audio`] if the OUTPUT device
+    /// cannot be resolved or opened; otherwise whatever
+    /// [`DmrLink::connect_with_audio`] returns — never carrying the
+    /// password.
+    #[cfg(feature = "dmr")]
+    pub fn dmr_connect(
+        &mut self,
+        backend: Box<dyn AudioBackend>,
+        cfg: DmrConfig,
+        input: Option<&str>,
+        output: Option<&str>,
+    ) -> Result<(), ConsoleError> {
+        let audio = self.open_voice_route(input, output, || backend)?;
+        match DmrLink::connect_with_audio(cfg, audio) {
+            Ok(link) => self.dmr_adopt(link),
+            Err(e) => {
+                // The route opened but the link did not: give the lanes
+                // back, or the station stays reserved forever.
+                let handles = self.release_voice_route();
+                drop(handles);
+                Err(e)
+            }
+        }
+    }
+
+    /// An embedder-facing query: *would a DMR connect be refused right now?*
+    /// — answered without opening anything, so a front-end can grey a button
+    /// out, or a caller building the link OUTSIDE this session's mutex can
+    /// decide not to scan for a dongle. Not a step of the facade's connect
+    /// flow: [`Self::open_voice_route`]'s own check is the gate. Same
+    /// reasoning as [`Self::nxdn_can_connect`].
+    ///
+    /// # Errors
+    /// [`ConsoleError::AlreadyConnected`] while any other network is live.
+    #[cfg(feature = "dmr")]
+    pub fn dmr_can_connect(&self) -> Result<(), ConsoleError> {
+        if self.active.is_some()
+            || self.m17_is_active()
+            || self.dstar_is_active()
+            || self.ysf_is_active()
+            || self.nxdn_is_active()
+            || self.dmr.is_some()
+            || self.voice_route.is_some()
+        {
+            return Err(ConsoleError::AlreadyConnected);
+        }
+        Ok(())
+    }
+
+    /// Install an already-constructed [`DmrLink`], re-checking exclusion.
+    ///
+    /// Exists so `astar-station` can run the `ThumbDV` scan and init cookbook
+    /// — and DMR's multi-round-trip homebrew login on top of it — with the
+    /// session mutex NOT held. Every `Station` method takes it, and the
+    /// contract is poll-and-snapshot, never blocking.
+    ///
+    /// On refusal the link is disconnected here rather than handed back: it
+    /// has already bound a socket, logged in to a master under the
+    /// operator's own radio ID and taken the dongle, and leaking any of
+    /// those would be worse than the error the caller is about to see — and
+    /// the route it rode is released with it.
+    ///
+    /// The link must ARRIVE with the route already reserved on its behalf, so
+    /// a `voice_route` of `None` here means the link has channel ends nothing
+    /// is feeding. Same rule, same reason, as [`Self::nxdn_adopt`].
+    ///
+    /// # Errors
+    /// [`ConsoleError::AlreadyConnected`] when an IAX2 call or another
+    /// digital session is live, or when no route was reserved.
+    #[cfg(feature = "dmr")]
+    pub fn dmr_adopt(&mut self, link: DmrLink) -> Result<(), ConsoleError> {
+        if self.active.is_some()
+            || self.m17_is_active()
+            || self.dstar_is_active()
+            || self.ysf_is_active()
+            || self.nxdn_is_active()
+            || self.dmr.is_some()
+            || self.voice_route.is_none()
+        {
+            link.disconnect();
+            let handles = self.release_voice_route();
+            drop(handles);
+            return Err(ConsoleError::AlreadyConnected);
+        }
+        self.dmr = Some(link);
+        Ok(())
+    }
+
+    /// Disconnect the live DMR link, if any. No-op when none is active.
+    #[cfg(feature = "dmr")]
+    pub fn dmr_disconnect(&mut self) {
+        // Everything here is inside the `if let`, route release included:
+        // `Station::disconnect` calls every network's disconnect in turn, so
+        // an unconditional release would close the lanes out from under a
+        // live M17, D-Star, YSF or NXDN session that legitimately holds them
+        // — and an unconditional state reset would blank their mirror.
+        if let Some(link) = self.dmr.take() {
+            link.disconnect();
+            let handles = self.release_voice_route();
+            drop(handles);
+            // Reset every field the snapshot's DMR branch writes, exactly as
+            // `nxdn_disconnect` does and for the identical reason: the
+            // mirror simply STOPS running once `self.dmr` is `None`, so
+            // without this the last values it wrote stay frozen in
+            // `self.state` forever. The levels go with it: the meter block
+            // only writes while a lane is live, and this released the last
+            // one.
+            self.state.status = CallStatus::Idle;
+            self.state.remote_ptt = false;
+            self.state.ptt = false;
+            self.state.rx_level_db = -60.0;
+            self.state.tx_level_db = -60.0;
+            self.state.input_level_db = -60.0;
+        }
+    }
+
+    /// `true` while a DMR link is live. Always `false` when the `dmr`
+    /// feature isn't compiled in, so callers never need their own `#[cfg]`.
+    #[allow(clippy::unused_self)]
+    fn dmr_is_active(&self) -> bool {
+        #[cfg(feature = "dmr")]
+        {
+            self.dmr.is_some()
+        }
+        #[cfg(not(feature = "dmr"))]
+        {
+            false
+        }
+    }
+
+    /// A poll-cheap snapshot of the live DMR link, or `None`.
+    ///
+    /// The two levels are the CONSOLE's, not the link's, and are composed
+    /// here from the one meter read `snapshot()` already does at the lane —
+    /// exactly as [`Self::nxdn_state`] composes NXDN's. A session owns no
+    /// meters; see [`DmrSnapshot::tx_dbfs`].
+    #[cfg(feature = "dmr")]
+    #[must_use]
+    pub fn dmr_state(&self) -> Option<DmrSnapshot> {
+        let mut st = self.dmr.as_ref().map(DmrLink::snapshot)?;
         st.tx_dbfs = self.state.tx_level_db;
         st.rx_dbfs = self.state.rx_level_db;
         Some(st)
@@ -2915,7 +3143,8 @@ impl ConsoleSession {
             && !self.m17_is_active()
             && !self.dstar_is_active()
             && !self.ysf_is_active()
-            && !self.nxdn_is_active();
+            && !self.nxdn_is_active()
+            && !self.dmr_is_active();
         if !idle {
             return;
         }
@@ -3325,6 +3554,55 @@ impl ConsoleSession {
         self.state.nxdn_active = self.nxdn_is_active();
         self.state.nxdn_available = nxdn_available();
 
+        // DMR, mirrored exactly as the four branches above are and for the
+        // same reason: a front-end drives ONE connection state machine off
+        // `status`, whatever the network. Without this a live DMR link
+        // leaves `status` at whatever it was — `Idle` on a fresh station —
+        // so the link comes up, holds the vocoder, and the UI reports
+        // nothing connected.
+        //
+        // `remote_ptt` carries "somebody is transmitting", which DMR states
+        // in the `DMRD` header (the frame type and the stream id) rather
+        // than inferring from audio level.
+        //
+        // DMR has THREE states before `Linked` where the others have one —
+        // homebrew logs in, authenticates, then configures — and all three
+        // map to `Dialing`. A front-end that wanted to name the stage reads
+        // `dmr_state().link_state` for it; `status` stays the shared
+        // vocabulary.
+        //
+        // Levels are NOT read here: the one meter block above already read
+        // them off the voice route's own lanes (`meter_ids`), which is where
+        // every network's meters come from.
+        #[cfg(feature = "dmr")]
+        if let Some(link) = self.dmr.as_ref() {
+            let snap = link.snapshot();
+            self.state.remote_ptt = snap.receiving;
+            // The ACTUALLY-APPLIED key state. Always `false` while transmit
+            // is gated, which is exactly the point: a snapshot must never
+            // report a station as transmitting when it is not.
+            self.state.ptt = snap.ptt;
+            // Fully qualified: the bare `LinkState` in this scope is M17's.
+            self.state.status = match link.link_state() {
+                astar_dmr::LinkState::Idle
+                | astar_dmr::LinkState::LoggingIn
+                | astar_dmr::LinkState::Authenticating
+                | astar_dmr::LinkState::Configuring => CallStatus::Dialing,
+                astar_dmr::LinkState::Linked => CallStatus::Answered,
+                // Closing reports as ending rather than connected, matching
+                // NXDN's `Unlinking` and D-Star's: the link is going away
+                // and an operator should not be told otherwise.
+                astar_dmr::LinkState::Closing => CallStatus::Hangup {
+                    reason: "dmr closing".into(),
+                },
+                astar_dmr::LinkState::Failed => CallStatus::Hangup {
+                    reason: "dmr link lost".into(),
+                },
+            };
+        }
+        self.state.dmr_active = self.dmr_is_active();
+        self.state.dmr_available = dmr_available();
+
         // The capture gate is driven by `set_ptt` ONLY, never reconciled
         // here. `state.ptt` above is the run loop's ACTUALLY-APPLIED value,
         // which lags a key-down by up to one poll interval — closing the gate
@@ -3420,7 +3698,7 @@ pub fn m17_available() -> bool {
 /// "available" means the same thing to both and there is no second scan to
 /// keep in step with this one — see [`dstar_available`] for why the probe is
 /// enumeration-only and why it is cached on a short TTL rather than once.
-#[cfg(any(feature = "dstar", feature = "ysf", feature = "nxdn"))]
+#[cfg(any(feature = "dstar", feature = "ysf", feature = "nxdn", feature = "dmr"))]
 fn thumbdv_available_cached() -> bool {
     static CACHE: std::sync::Mutex<Option<(std::time::Instant, bool)>> =
         std::sync::Mutex::new(None);
@@ -3483,6 +3761,30 @@ pub fn nxdn_available() -> bool {
     }
 }
 
+/// `true` when DMR voice is available: the `dmr` feature is compiled in AND a
+/// `ThumbDV` is attached.
+///
+/// Deliberately the same probe as [`dstar_available`], [`ysf_available`] and
+/// [`nxdn_available`], not a fourth one. DMR voice is AMBE+2 off the same
+/// dongle — a different rate word, the same chip — and two probes with two
+/// caches would eventually disagree about whether it is plugged in, greying
+/// out one network and not another for the same hardware.
+///
+/// Always `false` when the `dmr` feature isn't compiled in, and callable
+/// either way: `astar-server` reads `dmr_active` off a snapshot in a build
+/// that may not compile the session at all.
+#[must_use]
+pub fn dmr_available() -> bool {
+    #[cfg(feature = "dmr")]
+    {
+        thumbdv_available_cached()
+    }
+    #[cfg(not(feature = "dmr"))]
+    {
+        false
+    }
+}
+
 /// `true` when D-Star voice is available: the `dstar` feature is compiled in
 /// AND a `ThumbDV` dongle is attached (iax-b3e7 M0 — D-Star is hardware-only,
 /// so "available" means exactly "the dongle is plugged in").
@@ -3519,7 +3821,7 @@ pub fn dstar_available() -> bool {
 /// being recomputed. Long enough that a UI polling on a 100 ms tick scans
 /// ~twice a second; short enough that plugging the dongle in shows up
 /// promptly.
-#[cfg(any(feature = "dstar", feature = "ysf", feature = "nxdn"))]
+#[cfg(any(feature = "dstar", feature = "ysf", feature = "nxdn", feature = "dmr"))]
 const DSTAR_AVAILABLE_TTL: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Map an engine error from a link-transport switch (iax-5bbd):
@@ -4209,10 +4511,10 @@ mod tests {
     /// `DstarSession::connect_with_stream` to build a session with no
     /// `ThumbDV` attached. Neither direction is exercised by these tests —
     /// what they assert is decided before a frame is ever encoded.
-    #[cfg(any(feature = "dstar", feature = "ysf", feature = "nxdn"))]
+    #[cfg(any(feature = "dstar", feature = "ysf", feature = "nxdn", feature = "dmr"))]
     struct InertVocoder;
 
-    #[cfg(any(feature = "dstar", feature = "ysf", feature = "nxdn"))]
+    #[cfg(any(feature = "dstar", feature = "ysf", feature = "nxdn", feature = "dmr"))]
     impl astar_codec::ambe::AmbeStream for InertVocoder {
         fn submit_decode(&mut self, _frame: astar_codec::ambe::ChannelFrame) {}
         fn poll_decoded(&mut self) -> Option<[i16; 160]> {
@@ -5031,6 +5333,261 @@ mod tests {
         );
         assert!(s.nxdn_state().is_none(), "and not installed");
         reflector.shutdown();
+    }
+
+    // ── DMR wiring (iax-d4f7 Task 8) ────────────────────────────────────
+
+    /// A session with the one audio lane already reserved on its behalf, and
+    /// the lane's channel ends, ready to hand to a link constructor. Exactly
+    /// what `astar-station`'s three-step facade does: open the route under
+    /// the lock, build the link off it, adopt under the lock again.
+    #[cfg(feature = "dmr")]
+    fn session_with_reserved_route() -> (ConsoleSession, astar_audio::CallAudio) {
+        let mut s = ConsoleSession::new();
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        (s, audio)
+    }
+
+    /// A link that needs no dongle, riding the lane the console opened for
+    /// it: enough to prove exclusion, the mirror and the teardown, none of
+    /// which is about the vocoder. Everything binds `127.0.0.1`.
+    #[cfg(feature = "dmr")]
+    fn loopback_dmr(
+        audio: astar_audio::CallAudio,
+    ) -> (astar_dmr::MasterHandle, crate::dmr::DmrLink) {
+        let m = astar_dmr::Master::bind("127.0.0.1:0".parse().expect("v4"), "passw0rd")
+            .expect("bind master");
+        let addr = m.local_addr();
+        let handle = m.run();
+        let link = crate::dmr::DmrLink::connect_with_stream(
+            crate::dmr::DmrConfig {
+                system: astar_dmr::DmrNetwork::Tgif,
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                radio_id: 3_153_591,
+                callsign: "KC0ABC".into(),
+                talkgroup: 31_313,
+                timeslot: astar_dmr::Timeslot::Ts2,
+                password: "passw0rd".into(),
+            },
+            audio,
+            Box::new(InertVocoder),
+            astar_codec::ambe::AmbeBackend::Hardware,
+        )
+        .expect("connect");
+        (handle, link)
+    }
+
+    #[cfg(feature = "dmr")]
+    #[test]
+    fn a_dmr_link_mirrors_linked_as_answered() {
+        // The whole point of the status mirror: one connection state machine
+        // in the front end, not a per-network special case.
+        let (mut s, audio) = session_with_reserved_route();
+        let (master, link) = loopback_dmr(audio);
+        s.dmr_adopt(link).expect("adopt onto the reserved route");
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let snap = s.snapshot();
+            if snap.status == CallStatus::Answered || std::time::Instant::now() > deadline {
+                assert_eq!(snap.status, CallStatus::Answered);
+                assert!(snap.dmr_active);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        s.dmr_disconnect();
+        assert_eq!(s.snapshot().status, CallStatus::Idle);
+        assert!(!s.snapshot().dmr_active);
+        master.shutdown();
+    }
+
+    #[cfg(feature = "dmr")]
+    #[test]
+    fn dmr_is_excluded_by_every_other_network_and_excludes_them() {
+        // Five networks, one dongle, one audio lane. The exclusion has to be
+        // symmetric or the second connect wins a race with the first.
+        let (mut s, audio) = session_with_reserved_route();
+        let (master, link) = loopback_dmr(audio);
+        s.dmr_adopt(link).expect("adopt");
+        assert!(matches!(
+            s.dmr_can_connect(),
+            Err(ConsoleError::AlreadyConnected)
+        ));
+        // Each `*_can_connect` exists only when its own feature is compiled
+        // in, so each assertion carries that feature's `cfg`. A run with
+        // every network on (`--features dmr,nxdn,ysf,dstar`) asserts the
+        // whole matrix; `--features dmr` alone asserts the part that exists.
+        #[cfg(feature = "nxdn")]
+        assert!(matches!(
+            s.nxdn_can_connect(),
+            Err(ConsoleError::AlreadyConnected)
+        ));
+        #[cfg(feature = "ysf")]
+        assert!(matches!(
+            s.ysf_can_connect(),
+            Err(ConsoleError::AlreadyConnected)
+        ));
+        #[cfg(feature = "dstar")]
+        assert!(matches!(
+            s.dstar_can_connect(),
+            Err(ConsoleError::AlreadyConnected)
+        ));
+        // M17 is the fifth. It has no `m17_can_connect` — its gate is
+        // `open_voice_route`'s own check inside `m17_connect` — so this asks
+        // the question the only way M17 answers it. The brief's list omitted
+        // M17 entirely, and an omission here is exactly the asymmetry that
+        // lets a second connect win a race with the first.
+        #[cfg(feature = "m17")]
+        {
+            let target = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind silent target");
+            let addr = target.local_addr().expect("local addr");
+            assert!(
+                matches!(
+                    s.m17_connect(Box::new(NullBackend::new()), m17_cfg(addr), None, None),
+                    Err(ConsoleError::AlreadyConnected)
+                ),
+                "M17 must be refused while DMR holds the lane"
+            );
+        }
+        s.dmr_disconnect();
+        master.shutdown();
+    }
+
+    /// The other direction for M17: a live M17 session must refuse DMR.
+    #[cfg(all(feature = "dmr", feature = "m17"))]
+    #[test]
+    fn a_live_m17_session_excludes_dmr() {
+        let target = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind silent target");
+        let addr = target.local_addr().expect("local addr");
+        let mut s = ConsoleSession::new();
+        s.m17_connect(Box::new(NullBackend::new()), m17_cfg(addr), None, None)
+            .expect("m17 connect");
+        assert!(
+            matches!(s.dmr_can_connect(), Err(ConsoleError::AlreadyConnected)),
+            "DMR must be refused while M17 holds the lane"
+        );
+        s.m17_disconnect();
+        assert!(s.dmr_can_connect().is_ok(), "and allowed once it is gone");
+    }
+
+    /// And the other direction for the dongle networks that can be made live
+    /// here: a live YSF link must refuse DMR.
+    #[cfg(all(feature = "dmr", feature = "ysf"))]
+    #[test]
+    fn a_live_ysf_link_excludes_dmr() {
+        let mut s = ConsoleSession::new();
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        let (reflector, link) = loopback_ysf(audio);
+        s.ysf_adopt(link).expect("adopt");
+        assert!(
+            matches!(s.dmr_can_connect(), Err(ConsoleError::AlreadyConnected)),
+            "DMR must be refused while YSF holds the dongle"
+        );
+        s.ysf_disconnect();
+        reflector.shutdown();
+    }
+
+    /// And a live NXDN link must refuse DMR.
+    #[cfg(all(feature = "dmr", feature = "nxdn"))]
+    #[test]
+    fn a_live_nxdn_link_excludes_dmr() {
+        let mut s = ConsoleSession::new();
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        let (reflector, link) = loopback_nxdn(audio);
+        s.nxdn_adopt(link).expect("adopt");
+        assert!(
+            matches!(s.dmr_can_connect(), Err(ConsoleError::AlreadyConnected)),
+            "DMR must be refused while NXDN holds the dongle"
+        );
+        s.nxdn_disconnect();
+        reflector.shutdown();
+    }
+
+    #[cfg(feature = "dmr")]
+    #[test]
+    fn disconnecting_dmr_releases_the_route_and_clears_the_mirror() {
+        let (mut s, audio) = session_with_reserved_route();
+        let (master, link) = loopback_dmr(audio);
+        s.dmr_adopt(link).expect("adopt");
+        s.dmr_disconnect();
+        assert!(s.dmr_state().is_none());
+        assert!(!s.snapshot().dmr_active);
+        assert!(s.dmr_can_connect().is_ok(), "the route came back");
+        #[cfg(feature = "ysf")]
+        assert!(
+            s.ysf_can_connect().is_ok(),
+            "for every network, not just DMR"
+        );
+        master.shutdown();
+    }
+
+    /// `dmr_adopt` installs a link that arrived with the route already
+    /// reserved on its behalf — and refuses (tearing the link down) one that
+    /// did not, because its channel ends would have nothing feeding them.
+    #[cfg(feature = "dmr")]
+    #[test]
+    fn dmr_adopt_requires_a_reserved_route() {
+        let mut orphan = astar_audio::AudioRouter::new(Box::new(NullBackend::new()));
+        let (audio, _mic_tx, _mix) = orphan
+            .open_monitor_call(&OutputId::new("out:null"), StreamConfig::default())
+            .expect("bus");
+        let (master, link) = loopback_dmr(audio);
+
+        let mut s = ConsoleSession::new();
+        assert!(
+            matches!(s.dmr_adopt(link), Err(ConsoleError::AlreadyConnected)),
+            "a link with no route reserved for it must be refused"
+        );
+        assert!(s.dmr_state().is_none(), "and not installed");
+        master.shutdown();
+    }
+
+    /// `dmr_disconnect` on a session whose route belongs to another network
+    /// must leave that route alone — `Station::disconnect` calls every
+    /// network's disconnect in turn.
+    #[cfg(feature = "dmr")]
+    #[test]
+    fn dmr_disconnect_leaves_a_route_it_does_not_own_alone() {
+        let mut s = ConsoleSession::new();
+        let _audio = s.open_voice_route(None, None, null).expect("route");
+        s.dmr_disconnect();
+        assert!(
+            s.meter_ids().is_some(),
+            "a route this session did not open for DMR must survive dmr_disconnect"
+        );
+    }
+
+    /// The levels a UI reads off `dmr_state()` are the CONSOLE's — read
+    /// once, at the lane, by `snapshot()` — not the link's.
+    #[cfg(feature = "dmr")]
+    #[test]
+    fn a_dmr_link_reports_the_router_meters_through_dmr_state() {
+        let (mut s, audio) = session_with_reserved_route();
+        let (master, link) = loopback_dmr(audio);
+        assert!(
+            (link.snapshot().rx_dbfs + 60.0).abs() < 1e-6,
+            "the link itself always reports the floor; the console fills it in"
+        );
+        s.dmr_adopt(link).expect("adopt");
+
+        let snap = s.snapshot();
+        let st = s.dmr_state().expect("a live link");
+        assert!(
+            (st.rx_dbfs - snap.rx_level_db).abs() < 1e-6
+                && (st.tx_dbfs - snap.tx_level_db).abs() < 1e-6,
+            "dmr_state must report the SAME numbers the snapshot does, got {st:?}"
+        );
+        s.dmr_disconnect();
+        master.shutdown();
+    }
+
+    #[test]
+    fn dmr_available_answers_without_the_feature() {
+        // Feature-independent by construction: astar-server reads
+        // `dmr_active` off a snapshot in a build that may not compile the
+        // session at all.
+        let _ = dmr_available();
     }
 
     // ── The one audio lane: `VoiceRoute` on the station router ───────────
