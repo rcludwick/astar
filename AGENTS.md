@@ -90,9 +90,10 @@ committed `astar.h` / `astarserial.h` must not drift.
 ## D-Star / AMBE
 
 D-Star is hardware-only: the ThumbDV / DV3000 dongle via `vendor/ambe-thumbdv`.
-There is **no** software AMBE backend — the old `ambe-soft` feature and its
-`SoftAmbe` type were removed, and there is no dependency on the external `ambe`
-repo. `astar-codec`'s `ambe-hw` feature is off by default.
+There is **no** software AMBE backend, and none is ever to be added, referenced
+or described here — not in code, docs, comments, backlog or commit messages.
+The vendored driver is the whole AMBE story. `astar-codec`'s `ambe-hw` feature
+is off by default.
 
 `vendor/ambe-thumbdv/Cargo.toml` hard-codes `license`/`version`/`edition`/
 `repository` on purpose. Do not convert them to `.workspace = true` — that would

@@ -31,12 +31,12 @@ dependency from the build, so a clean checkout builds fully offline.
 ambe-thumbdv = { path = "../../vendor/ambe-thumbdv", optional = true }
 ```
 
-## What is *not* vendored
+## What is vendored, and only that
 
-The `ambe-core` / `ambe-dstar` **software** vocoder crates from the same
-upstream repo were deliberately dropped. D-Star in this repository is
-hardware-only (ThumbDV); the `ambe-soft` feature and the `SoftAmbe` backend that
-used them no longer exist.
+`src/` — the packet driver and its `thumbdv-rig` binary. Nothing else from
+upstream is used: D-Star, System Fusion and every other AMBE network in this
+repository decode and encode on the dongle, and there is no software AMBE
+backend of any kind here.
 
 ## Updating
 

@@ -48,8 +48,7 @@ Three options, in order of preference:
 * **A software IMBE decoder.** The obvious candidate is `mbelib`, and it is
   **legally grey** — the algorithms are patented and its distribution status is
   contested. astar's position on this is already settled for D-Star: hardware
-  only, no software AMBE, no `ambe-soft`, and the old feature was *removed*
-  rather than left off. Applying a different standard to IMBE would undo that
+  only, no software AMBE, full stop. Applying a different standard to IMBE would undo that
   decision quietly. **Do not take this option without an explicit, recorded
   decision from Rob.**
 
