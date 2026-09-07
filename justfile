@@ -85,12 +85,29 @@ ysf-test:
     cargo test -p astar-station --features ysf
     cargo test -p astar-cli --features ysf
 
+# Run a self-hosted YSF parrot reflector on [::]:<port>, dual-stack (so both
+# 127.0.0.1 and localhost reach it). The System Fusion twin of `m17-parrot`.
+#
+# Key into it from astar and hear yourself, the way `m17-parrot` works for
+# M17: astar transmits YSF in DN mode through the ThumbDV, and the parrot
+# replays your own transmission back once you unkey. One dongle is enough —
+# YSF here is half-duplex, so the replay decodes after the key-up ends. Any
+# other transmitter works too: a radio through a hotspot, Pi-Star, DroidStar.
+# Frames are relayed VERBATIM, so it hides no framing bug — what you hear is
+# what astar actually put on the wire. Nothing goes on the air.
+#
+#     just ysf-parrot 42000            # terminal 1
+#     just ysf-listen 127.0.0.1:42000 AJ7HR   # terminal 2, to watch
+#     ...then key up, from astar or from the hotspot.
+ysf-parrot port:
+    cargo run -p astar-ysf --example ysf_parrot -- --port {{port}}
+
 # The YSF hardware checkpoint — ROB RUNS THIS, not an agent.
 #
 # Needs a ThumbDV attached and a live reflector, so it is the one thing the
 # rest of the YSF suites cannot answer: they prove bytes in and bytes out,
-# this proves the result is speech. Receive only — `ysf-listen` has no PTT
-# and astar has no YSF transmit path, so nothing here can go on the air.
+# this proves the result is speech. Receive only — `ysf-listen` has no PTT,
+# so nothing here can go on the air.
 #
 # KC-Wide's two, from the design doc:
 #     just ysf-listen ysf.kcwide.net:42000 AJ7HR      # US-KCWIDE
