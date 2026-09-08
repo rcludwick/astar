@@ -20,4 +20,11 @@ final class HeardAgeTests: XCTestCase {
         XCTAssertEqual(HeardAge.label(ms: 3_600_000), "1 h")
         XCTAssertEqual(HeardAge.label(ms: 90_000_000), "25 h")
     }
+
+    /// The spoken form VoiceOver reads: "now" becomes "just now" rather than
+    /// "now ago", every other age gets "ago".
+    func testSpokenAgesReadAloudCorrectly() {
+        XCTAssertEqual(HeardAge.spoken(callsign: "W6VS", age: "now"), "W6VS, just now")
+        XCTAssertEqual(HeardAge.spoken(callsign: "W6VS", age: "12 s"), "W6VS, 12 s ago")
+    }
 }

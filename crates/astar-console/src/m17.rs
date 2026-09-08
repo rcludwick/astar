@@ -761,21 +761,27 @@ fn poll_socket(
 /// `""` for a null/reserved address, and "Last heard " with nothing after it
 /// is worse than no line at all.
 fn note_talker(pkt: &StreamPacket, shared: &SharedState, rx_stream: &mut Option<u16>) {
-    if *rx_stream != Some(pkt.stream_id) {
-        *rx_stream = Some(pkt.stream_id);
+    // A stream counts as open here only once one of its packets has named a
+    // talker. A null/reserved source leaves `rx_stream` unset, so a later
+    // packet of the same stream can still name it — and so its EOS has no
+    // clock to refresh, because the only name in `talker` would be the
+    // PREVIOUS station's. The EOS packet itself never names anybody: its
+    // header is the one a reflector may rewrite or zero.
+    if *rx_stream != Some(pkt.stream_id) && !pkt.is_last() {
         let call = decode_callsign(&pkt.lsf.src);
         if !call.is_empty() {
+            *rx_stream = Some(pkt.stream_id);
             shared.heard.note("m17", &call);
             *shared.talker.lock().expect("talker mutex") = Some(call);
         }
     }
-    if pkt.is_last() {
+    if pkt.is_last() && rx_stream.is_some() {
         // Refresh from `talker`, not from this packet's own LSF: the EOS
         // packet is the one frame of an over whose header a reflector may
         // rewrite or zero, and re-decoding it can name somebody the stream
         // never belonged to. `talker` is what the stream's first packet
         // established, which is the station whose age this is refreshing.
-        // Same read as the silence-timeout branch and D-Star's end-of-over.
+        // Same read as the silence-timeout branch.
         let last = shared
             .talker
             .lock()
@@ -786,6 +792,8 @@ fn note_talker(pkt: &StreamPacket, shared: &SharedState, rx_stream: &mut Option<
         {
             shared.heard.note("m17", &call);
         }
+    }
+    if pkt.is_last() {
         *rx_stream = None;
     }
 }
@@ -1009,6 +1017,58 @@ mod tests {
             "every queued frame must have been drained, none left for the next transmission"
         );
         assert!(tx.pending.is_none());
+    }
+
+    /// A stream whose source is null names nobody — and its EOS, even one a
+    /// reflector rewrote to carry a real callsign, must neither name that
+    /// station nor refresh the previous station's clock.
+    #[test]
+    fn an_unnamed_stream_neither_names_nor_refreshes_anyone() {
+        let shared = SharedState::new();
+        let mut rx_stream: Option<u16> = None;
+        let packet = |stream_id: u16, src: [u8; 6], frame_number: u16| StreamPacket {
+            stream_id,
+            lsf: Lsf {
+                dst: BROADCAST,
+                src,
+                type_field: Lsf::TYPE_VOICE_3200_STREAM,
+                meta: [0; 14],
+            },
+            frame_number,
+            payload: [0u8; 16],
+        };
+        let n0call = encode_callsign("N0CALL").expect("a valid callsign encodes");
+        let aj7hr = encode_callsign("AJ7HR").expect("a valid callsign encodes");
+
+        // N0CALL talks and finishes.
+        note_talker(&packet(0x1234, n0call, 0), &shared, &mut rx_stream);
+        note_talker(
+            &packet(0x1234, n0call, StreamPacket::EOS_BIT),
+            &shared,
+            &mut rx_stream,
+        );
+        assert_eq!(shared.snapshot().talker.as_deref(), Some("N0CALL"));
+
+        // A stream with a null source: nobody is named and it never opens.
+        note_talker(&packet(0x5678, [0; 6], 0), &shared, &mut rx_stream);
+        assert_eq!(rx_stream, None, "a nameless stream is not an open one");
+        assert_eq!(shared.snapshot().talker.as_deref(), Some("N0CALL"));
+
+        // Its EOS carries a rewritten, valid source: still nobody.
+        note_talker(
+            &packet(0x5678, aj7hr, StreamPacket::EOS_BIT),
+            &shared,
+            &mut rx_stream,
+        );
+        assert_eq!(rx_stream, None);
+        assert_eq!(shared.snapshot().talker.as_deref(), Some("N0CALL"));
+        let heard = shared.heard.snapshot();
+        assert_eq!(
+            heard.len(),
+            1,
+            "no row for a station only an EOS named: {heard:?}"
+        );
+        assert_eq!(heard[0].callsign, "N0CALL");
     }
 
     /// One received voice packet must name its talker in the snapshot, and
