@@ -36,6 +36,13 @@
 
         /// Show the analyzer pane, defaulting the mic picker to `input`.
         ///
+        /// `input` is the caller's explicit choice, if it has one — Quick Config and
+        /// Setups both know which device they're editing. `MicAnalyzerSeed` fills in
+        /// the rest: the device the active profile is using, else the system default.
+        /// So the three buttons pass what they know and the seed fills the rest —
+        /// Mic Profiles, which passes nothing, opens on the microphone the operator is
+        /// actually using instead of the system default.
+        ///
         /// Seeding before the switch matters: the pane is built by
         /// `switch navigation.pane`, so the view's `onAppear` starts the monitor on
         /// whatever `selectedInput` already says.
@@ -44,7 +51,8 @@
         /// Settings (Mic Profiles, a saved config) and from Quick settings on the
         /// call card, so Back has to return to whichever one opened it.
         func open(input: String?) {
-            vm.selectedInput = input
+            vm.selectedInput = MicAnalyzerSeed.input(
+                explicit: input, stored: UserDefaultsAudioSettingsStore().load().input)
             navigation?.show(.micAnalyzer)
         }
     }
