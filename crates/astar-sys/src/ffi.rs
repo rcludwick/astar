@@ -17,9 +17,10 @@ use zeroize::Zeroize;
 
 use astar_station::LinkMode;
 use astar_station::{
-    AnswerPolicy, CallMode, CallStatus, CodecPolicy, DtmfMode, InboundConfig, IncomingAuthPolicy,
-    IncomingCallPolicy, NodeConfig, OperatingMode, PortalCredentials, RegisterConfig, Station,
-    StationConfig, StationError, StationEvent, VoiceFormat, WgConfigError, WgLinkConfig,
+    AnswerPolicy, CallMode, CallStatus, CodecPolicy, DtmfMode, HeardEntry, InboundConfig,
+    IncomingAuthPolicy, IncomingCallPolicy, NodeConfig, OperatingMode, PortalCredentials,
+    RegisterConfig, Station, StationConfig, StationError, StationEvent, VoiceFormat, WgConfigError,
+    WgLinkConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -2292,6 +2293,30 @@ pub unsafe extern "C" fn iax_station_link_roster_json(
     .unwrap_or(IAX_ERR_PANIC)
 }
 
+/// Render a heard snapshot as the ABI's JSON array, newest first — the row
+/// order the log already hands us, preserved.
+///
+/// Built through `serde_json` rather than `format!` for the same reason the
+/// NXDN renderer is: a callsign is whatever the far end put on the wire, so a
+/// quote or a backslash in one must not be able to break out of the string.
+///
+/// Split out of [`iax_station_heard_json`] so the exact JSON text — the three
+/// key names and the newest-first order a Swift or Python decoder mirrors —
+/// can be pinned by a unit test without a live link.
+fn heard_json(rows: Vec<HeardEntry>) -> Result<String, serde_json::Error> {
+    let rows: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "callsign": e.callsign,
+                "network": e.network,
+                "age_ms": e.age_ms,
+            })
+        })
+        .collect();
+    serde_json::to_string(&rows)
+}
+
 /// Write who has keyed up on the live digital link as a JSON array, newest
 /// first (`[{"callsign":"..","network":"m17","age_ms":1234}]`, `[]` when
 /// nothing has been heard) into the caller buffer. Same contract as
@@ -2309,26 +2334,67 @@ pub unsafe extern "C" fn iax_station_heard_json(
     }
     let station = unsafe { &*st };
     catch_unwind(AssertUnwindSafe(|| {
-        // A callsign is whatever the far end sent, so the JSON is built by the
-        // serializer and never by string formatting.
-        let rows: Vec<serde_json::Value> = station
-            .inner
-            .heard()
-            .into_iter()
-            .map(|e| {
-                serde_json::json!({
-                    "callsign": e.callsign,
-                    "network": e.network,
-                    "age_ms": e.age_ms,
-                })
-            })
-            .collect();
-        match serde_json::to_string(&rows) {
+        match heard_json(station.inner.heard()) {
             Ok(json) => unsafe { fill_buf(&json, buf, len) },
             Err(_) => IAX_ERR_IAX,
         }
     }))
     .unwrap_or(IAX_ERR_PANIC)
+}
+
+#[cfg(test)]
+mod heard_tests {
+    //! The exact text `iax_station_heard_json` publishes. A Swift or Python
+    //! decoder is written against these three key names and this row order,
+    //! so they are pinned here in literal JSON rather than left to whatever
+    //! the serializer happens to do.
+    use super::*;
+
+    #[test]
+    fn heard_json_pins_the_key_names_and_keeps_the_rows_newest_first() {
+        let rows = vec![
+            HeardEntry {
+                callsign: "W6VS".to_string(),
+                network: "m17",
+                age_ms: 1234,
+            },
+            HeardEntry {
+                callsign: "KF5ILA".to_string(),
+                network: "m17",
+                age_ms: 9000,
+            },
+        ];
+        assert_eq!(
+            heard_json(rows).expect("a heard row always serializes"),
+            r#"[{"age_ms":1234,"callsign":"W6VS","network":"m17"},{"age_ms":9000,"callsign":"KF5ILA","network":"m17"}]"#,
+            "keys sort alphabetically (serde_json's default map) and the log's \
+             newest-first row order survives"
+        );
+    }
+
+    #[test]
+    fn heard_json_of_nothing_heard_is_an_empty_array() {
+        assert_eq!(heard_json(Vec::new()).expect("serializes"), "[]");
+    }
+
+    #[test]
+    fn a_callsign_cannot_break_out_of_its_json_string() {
+        // Whatever the far end put on the wire lands in `callsign`; the
+        // serializer escapes it, `format!` would not have.
+        let rows = vec![HeardEntry {
+            callsign: r#"A"B\C"#.to_string(),
+            network: "ysf",
+            age_ms: 0,
+        }];
+        let json = heard_json(rows).expect("serializes");
+        assert_eq!(
+            json,
+            r#"[{"age_ms":0,"callsign":"A\"B\\C","network":"ysf"}]"#
+        );
+        // And it still parses back to the callsign that went in.
+        let back: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(back[0]["callsign"], r#"A"B\C"#);
+    }
 }
 
 /// Drain the next pending link lifecycle event. Returns 1 and fills `out`
