@@ -223,6 +223,30 @@ public final class CallSession: ObservableObject {
     /// on the wire. Render it as text, never as markup.
     @Published public private(set) var lastHeard: String?
 
+    /// The last few stations heard on the live digital link, newest first.
+    ///
+    /// The list behind `lastHeard`: same source, same rules, more than one
+    /// row. It holds at most ``heardHistoryLimit`` entries, and only rows from
+    /// the network `activeCallNetwork` names — a callsign heard on a Fusion
+    /// link a minute ago is not part of the M17 link that is up now.
+    ///
+    /// **Last heard, not talking now**: a row persists past
+    /// end-of-transmission, exactly like `lastHeard`. `remotePTT` and the
+    /// per-network `*Receiving` flags are what say a transmission is in
+    /// progress.
+    ///
+    /// Ages are rounded down to whole seconds, so the list publishes when the
+    /// displayed age changes rather than once per poll.
+    ///
+    /// **Attacker-controlled**: every callsign is whatever whoever keyed up
+    /// put on the wire. Render as text, never as markup, and interpret
+    /// nothing.
+    @Published public private(set) var heardHistory: [HeardEntry] = []
+
+    /// How many rows ``heardHistory`` keeps. Three is what the popover has
+    /// room for without pushing the controls off the bottom.
+    public static let heardHistoryLimit = 3
+
     /// The node most recently dialed (set at `connect`, cleared at `disconnect`).
     /// Surfaces who we're connected to — e.g. the menu-bar right-click menu.
     /// Display should still gate on `status`, since a stale value can outlive a
@@ -943,6 +967,7 @@ public final class CallSession: ObservableObject {
             // reads. Done here, after every source has been advanced, so a
             // single poll can never publish a `lastHeard` from the network
             // that was live a tick ago.
+            refreshHeardHistory(snapshot: snap)
             refreshLastHeard()
             // Quarter-second peak-hold for the VU meters (astar-f78a) so they read
             // steadily instead of flickering at the poll rate.
@@ -2123,6 +2148,7 @@ public final class CallSession: ObservableObject {
         dstarTalker = nil
         dstarSlowText = nil
         dstarLink = nil
+        if !heardHistory.isEmpty { heardHistory = [] }
         refreshLastHeard()
     }
 
@@ -2136,6 +2162,7 @@ public final class CallSession: ObservableObject {
         ysfReceiving = false
         ysfLink = nil
         ysfUnsupportedMode = nil
+        if !heardHistory.isEmpty { heardHistory = [] }
         refreshLastHeard()
     }
 
@@ -2146,6 +2173,7 @@ public final class CallSession: ObservableObject {
         nxdnLastHeard = nil
         nxdnReceiving = false
         nxdnLink = nil
+        if !heardHistory.isEmpty { heardHistory = [] }
         refreshLastHeard()
     }
 
@@ -2156,6 +2184,7 @@ public final class CallSession: ObservableObject {
         dmrLastHeard = nil
         dmrReceiving = false
         dmrLink = nil
+        if !heardHistory.isEmpty { heardHistory = [] }
         refreshLastHeard()
     }
 
@@ -2165,7 +2194,36 @@ public final class CallSession: ObservableObject {
     private func clearM17State() {
         m17Talker = nil
         m17Link = nil
+        if !heardHistory.isEmpty { heardHistory = [] }
         refreshLastHeard()
+    }
+
+    /// Read the engine's heard log while a digital link is live, keep the
+    /// active network's rows, cap them, and publish only when a callsign or a
+    /// whole second of age changed.
+    ///
+    /// The rounding is the publish gate: ages tick at the poll rate, so
+    /// storing them to the millisecond would hand the view a new array four
+    /// times a second to redraw the same text. With no link, the list goes —
+    /// who was heard on a link that no longer exists is a claim about the
+    /// present that is no longer true.
+    private func refreshHeardHistory(snapshot snap: CallSnapshot) {
+        let linkIsLive =
+            snap.m17Active || snap.dstarActive || snap.ysfActive || snap.nxdnActive
+            || snap.dmrActive
+        guard linkIsLive, let network = activeCallNetwork?.rawValue else {
+            if !heardHistory.isEmpty { heardHistory = [] }
+            return
+        }
+        let rows = ((try? station.heard()) ?? [])
+            .filter { $0.network == network }
+            .prefix(Self.heardHistoryLimit)
+            .map {
+                HeardEntry(
+                    callsign: $0.callsign, network: $0.network,
+                    ageMs: $0.ageMs / 1_000 * 1_000)
+            }
+        if heardHistory != rows { heardHistory = rows }
     }
 
     /// Recompute `lastHeard` from the active network's own talker field.

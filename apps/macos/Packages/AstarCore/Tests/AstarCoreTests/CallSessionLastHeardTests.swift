@@ -3,6 +3,7 @@
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 
 import AstarStation
+import Combine
 import XCTest
 
 @testable import AstarCore
@@ -204,5 +205,76 @@ final class CallSessionLastHeardTests: XCTestCase {
         XCTAssertTrue(Network.ysf.isDigitalVoice)
         XCTAssertFalse(Network.allstar.isDigitalVoice, "IAX2 carries no talker identity")
         XCTAssertFalse(Network.hamlink.isDigitalVoice, "no engine link at all yet")
+    }
+
+    // MARK: - The heard history behind the line
+
+    /// `heardHistory` is the last few stations, newest first, on the network
+    /// that is live right now — a row from any other network never shows, and
+    /// the list never grows past `heardHistoryLimit`.
+    func testTheHeardHistoryFollowsTheActiveNetworkNewestFirstAndCapped() throws {
+        let (session, fake) = session()
+        try session.connect(node: "M17-002 A", network: .m17)
+        fake.snapshotToReturn = live(m17: true)
+        fake.m17StateValue = M17State(link: .linked, talker: "W6VS")
+        fake.heardValue = [
+            HeardEntry(callsign: "W6VS", network: "m17", ageMs: 500),
+            HeardEntry(callsign: "KF5ILA", network: "m17", ageMs: 9_000),
+            HeardEntry(callsign: "9A3DZL", network: "m17", ageMs: 40_000),
+            HeardEntry(callsign: "H4MLNK", network: "m17", ageMs: 70_000),
+            HeardEntry(callsign: "N0CALL", network: "ysf", ageMs: 1_000),
+        ]
+        session.poll()
+
+        XCTAssertEqual(
+            session.heardHistory.map(\.callsign), ["W6VS", "KF5ILA", "9A3DZL"],
+            "newest first, capped, and the Fusion row never appears on an M17 link")
+        XCTAssertEqual(session.heardHistory.count, CallSession.heardHistoryLimit)
+    }
+
+    /// A list of who was heard on a link that no longer exists is a claim
+    /// about the present that is no longer true — the same reason
+    /// `lastHeard` clears.
+    func testTheHeardHistoryClearsWhenTheLinkGoesAway() throws {
+        let (session, fake) = session()
+        try session.connect(node: "M17-002 A", network: .m17)
+        fake.snapshotToReturn = live(m17: true)
+        fake.m17StateValue = M17State(link: .linked, talker: "W6VS")
+        fake.heardValue = [HeardEntry(callsign: "W6VS", network: "m17", ageMs: 500)]
+        session.poll()
+        XCTAssertEqual(session.heardHistory.map(\.callsign), ["W6VS"])
+
+        fake.snapshotToReturn = live()
+        fake.m17StateValue = nil
+        session.poll()
+
+        XCTAssertTrue(session.heardHistory.isEmpty, "the list goes with the link")
+    }
+
+    /// Ages are stored rounded down to whole seconds, so the list publishes
+    /// when the displayed age changes — once a second — and not once per poll.
+    /// A view that redraws four times a second for nothing is the bug this
+    /// pins.
+    func testTheHeardHistoryPublishesOnceASecondNotOnceAPoll() throws {
+        let (session, fake) = session()
+        try session.connect(node: "M17-002 A", network: .m17)
+        fake.snapshotToReturn = live(m17: true)
+        fake.m17StateValue = M17State(link: .linked, talker: "W6VS")
+        fake.heardValue = [HeardEntry(callsign: "W6VS", network: "m17", ageMs: 500)]
+        session.poll()
+
+        var publishes = 0
+        let cancellable = session.$heardHistory.sink { _ in publishes += 1 }
+        defer { cancellable.cancel() }
+        XCTAssertEqual(publishes, 1, "@Published hands the current value to a new subscriber")
+
+        fake.heardValue = [HeardEntry(callsign: "W6VS", network: "m17", ageMs: 900)]
+        session.poll()
+        XCTAssertEqual(publishes, 1, "still under a second old — nothing to redraw")
+
+        fake.heardValue = [HeardEntry(callsign: "W6VS", network: "m17", ageMs: 1_600)]
+        session.poll()
+        XCTAssertEqual(publishes, 2, "the displayed second changed, so the list publishes")
+        XCTAssertEqual(session.heardHistory.first?.ageMs, 1_000, "rounded down to whole seconds")
     }
 }
