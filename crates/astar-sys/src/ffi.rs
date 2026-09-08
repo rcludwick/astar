@@ -2292,6 +2292,45 @@ pub unsafe extern "C" fn iax_station_link_roster_json(
     .unwrap_or(IAX_ERR_PANIC)
 }
 
+/// Write who has keyed up on the live digital link as a JSON array, newest
+/// first (`[{"callsign":"..","network":"m17","age_ms":1234}]`, `[]` when
+/// nothing has been heard) into the caller buffer. Same contract as
+/// [`iax_station_link_roster_json`]: NUL-terminated + truncate-safe; returns
+/// the byte length the full JSON needs (a `len == 0` call is a sizing query),
+/// or a negative `IAX_ERR_*`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_heard_json(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        // A callsign is whatever the far end sent, so the JSON is built by the
+        // serializer and never by string formatting.
+        let rows: Vec<serde_json::Value> = station
+            .inner
+            .heard()
+            .into_iter()
+            .map(|e| {
+                serde_json::json!({
+                    "callsign": e.callsign,
+                    "network": e.network,
+                    "age_ms": e.age_ms,
+                })
+            })
+            .collect();
+        match serde_json::to_string(&rows) {
+            Ok(json) => unsafe { fill_buf(&json, buf, len) },
+            Err(_) => IAX_ERR_IAX,
+        }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
 /// Drain the next pending link lifecycle event. Returns 1 and fills `out`
 /// when an event was pending (read the node label via
 /// [`iax_station_link_event_node`] before the next drain), 0 when none, or a

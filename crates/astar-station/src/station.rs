@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use astar_audio::AudioBackend;
 use astar_console::{
-    CallStatus, ConsoleConfig, ConsoleSession, ConsoleState, LinkConnectSpec, OperatingMode,
-    RegisterOutcome,
+    CallStatus, ConsoleConfig, ConsoleSession, ConsoleState, HeardEntry, LinkConnectSpec,
+    OperatingMode, RegisterOutcome,
 };
 use astar_iax::{CallMode, CodecPolicy, IncomingCallPolicy, LinkEvent, LinkMode, LinkRoster};
 use astar_iax_core::session::auth::Secret;
@@ -623,6 +623,16 @@ impl Station {
             .expect("station session poisoned")
             .link_roster()
             .unwrap_or(LinkRoster { links: Vec::new() })
+    }
+
+    /// Who has keyed up on the live digital link, newest first (empty on
+    /// `AllStar` and while idle). See `astar_console::HeardLog`.
+    #[must_use]
+    pub fn heard(&self) -> Vec<HeardEntry> {
+        self.session
+            .lock()
+            .expect("station session poisoned")
+            .heard()
     }
 
     /// Announce to every non-link conference member (iax-9e02) — the
