@@ -18,5 +18,5 @@ mod mint;
 mod resolve;
 
 pub use error::Asl3Error;
-pub use mint::{PortalCredentials, mint_wt_token, mint_wt_token_at};
+pub use mint::{PortalCredentials, mint_wt_token, mint_wt_token_at, mint_wt_token_legacy_at};
 pub use resolve::{resolve_addr, resolve_node};

@@ -177,6 +177,7 @@ dependencies = [
 name = "astar-asl3"
 version = "0.1.12-beta"
 dependencies = [
+ "serde_json",
  "tiny_http",
  "ureq",
 ]
