@@ -116,14 +116,6 @@ impl HeardLog {
             })
             .collect()
     }
-
-    /// Forget every recorded keyup.
-    pub fn clear(&self) {
-        self.inner
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-    }
 }
 
 #[cfg(test)]
@@ -179,13 +171,5 @@ mod tests {
         let s = log.snapshot();
         assert_eq!(s.len(), HEARD_CAPACITY);
         assert_eq!(s[0].callsign, format!("N{}CALL", HEARD_CAPACITY + 2));
-    }
-
-    #[test]
-    fn clear_forgets_everything() {
-        let log = HeardLog::new();
-        log.note("nxdn", "AJ7HR");
-        log.clear();
-        assert!(log.snapshot().is_empty());
     }
 }

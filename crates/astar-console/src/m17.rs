@@ -577,7 +577,11 @@ fn run_loop(p: RunLoopParams) {
             // arm would only push its age 400 ms newer than the end it
             // actually had.
             if rx_stream.is_some() {
-                let last = shared.talker.lock().expect("talker mutex").clone();
+                let last = shared
+                    .talker
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
                 if let Some(call) = last {
                     shared.heard.note("m17", &call);
                 }
@@ -747,8 +751,11 @@ fn poll_socket(
 /// The second [`crate::heard::HeardLog::note`] is on that `EOS`, and it is
 /// what makes [`crate::heard::HeardEntry::age_ms`] mean the same thing here
 /// as on the AMBE links: time since the station was last heard, not time
-/// since their over began. `note` moves an entry already at the front rather
-/// than repeating it, so the refresh never duplicates a row.
+/// since their over began. That refresh names whoever `talker` already
+/// holds rather than re-decoding the `EOS` packet's LSF, so a rewritten or
+/// zeroed final header cannot attribute the end of an over to the wrong
+/// station. `note` moves an entry already at the front rather than
+/// repeating it, so the refresh never duplicates a row.
 ///
 /// An empty decode is ignored rather than stored: `decode_callsign` yields
 /// `""` for a null/reserved address, and "Last heard " with nothing after it
@@ -763,8 +770,20 @@ fn note_talker(pkt: &StreamPacket, shared: &SharedState, rx_stream: &mut Option<
         }
     }
     if pkt.is_last() {
-        let call = decode_callsign(&pkt.lsf.src);
-        if !call.is_empty() {
+        // Refresh from `talker`, not from this packet's own LSF: the EOS
+        // packet is the one frame of an over whose header a reflector may
+        // rewrite or zero, and re-decoding it can name somebody the stream
+        // never belonged to. `talker` is what the stream's first packet
+        // established, which is the station whose age this is refreshing.
+        // Same read as the silence-timeout branch and D-Star's end-of-over.
+        let last = shared
+            .talker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(call) = last
+            && !call.is_empty()
+        {
             shared.heard.note("m17", &call);
         }
         *rx_stream = None;
