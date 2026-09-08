@@ -1703,10 +1703,22 @@ public final class Station {
         let needed = iax_station_heard_json(handle, nil, 0)
         if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
         var buf = [CChar](repeating: 0, count: Int(needed) + 1)
-        let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+        var rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
             iax_station_heard_json(handle, ptr.baseAddress, UInt(ptr.count))
         }
         if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
+        // A station can key between the sizing call and the fill, which makes
+        // the JSON longer than the buffer we just sized: the C ABI reports the
+        // size it wanted instead of truncating silently, so grow once and fill
+        // again. Once only — the same race can always recur, and a retry loop
+        // on a busy reflector would spin.
+        if rc > Int32(buf.count - 1) {
+            buf = [CChar](repeating: 0, count: Int(rc) + 1)
+            rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+                iax_station_heard_json(handle, ptr.baseAddress, UInt(ptr.count))
+            }
+            if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
+        }
         let json = String(cString: buf)
         guard let data = json.data(using: .utf8),
             let rows = try? JSONDecoder().decode([HeardEntry].self, from: data)

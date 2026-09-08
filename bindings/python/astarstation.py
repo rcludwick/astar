@@ -985,6 +985,16 @@ class Station:
         rc = fn(self._handle, buf, len(buf))
         if rc < 0:
             self._check(rc)
+        # A station can key between the sizing call and the fill, which makes
+        # the text longer than the buffer we just sized. The fill truncates
+        # and reports the size it wanted, so grow once and fill again -- once
+        # only, because the same race can always recur and a retry loop on a
+        # busy reflector would spin.
+        if rc > len(buf) - 1:
+            buf = ctypes.create_string_buffer(rc + 1)
+            rc = fn(self._handle, buf, len(buf))
+            if rc < 0:
+                self._check(rc)
         return buf.value.decode("utf-8", "replace")
 
     def heard(self) -> list[dict]:
@@ -997,18 +1007,14 @@ class Station:
     # -- devices ---------------------------------------------------------- #
 
     def _list(self, fn) -> list[str]:
-        self._require_handle()
-        # Query the required size (len == 0), then fill.
-        needed = fn(self._handle, None, 0)
-        if needed < 0:
-            self._check(needed)
-        if needed == 0:
-            return []
-        buf = ctypes.create_string_buffer(needed + 1)
-        rc = fn(self._handle, buf, len(buf))
-        if rc < 0:
-            self._check(rc)
-        text = buf.value.decode("utf-8", "replace")
+        """Read a newline-separated list out of a sizing-then-fill C function.
+
+        The read itself -- sizing, filling, and the once-only retry when the
+        device list grows between the two -- is ``_read_json``'s; this only
+        splits what comes back. An empty read is an empty list, and so is a
+        read that is nothing but separators.
+        """
+        text = self._read_json(fn)
         return [line for line in text.split("\n") if line]
 
     def list_inputs(self) -> list[str]:
