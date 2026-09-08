@@ -111,6 +111,40 @@ final class CallSessionMicTests: XCTestCase {
         XCTAssertEqual(fake.monitorStartInputs, ["in:a", "in:a"])
     }
 
+    func testAFailedSwitchStillCountsTheHold() throws {
+        // The analyzer marks itself as holding the lane whether or not the switch
+        // succeeded (`try?` + `holdsMonitor`), so a failed switch that didn't count
+        // would have its later release close the lane under the VOX meter.
+        let fake = FakeStation()
+        fake.monitorStartFailsFor = "in:b"
+        let session = CallSession(station: fake)
+
+        try session.monitorRetain(input: "in:a")
+        XCTAssertThrowsError(try session.monitorRetain(input: "in:b"))
+
+        try session.monitorRelease()  // 2 → 1: the other holder still has it
+        XCTAssertEqual(fake.monitorStopCount, 0, "a failed switch still counted its hold")
+        try session.monitorRelease()  // 1 → 0: now it closes
+        XCTAssertEqual(fake.monitorStopCount, 1)
+    }
+
+    func testAFailedSwitchForgetsTheDeviceSoTheNextRetainReopens() throws {
+        // The engine drops the old monitor before opening the new one, so after a
+        // failed switch nothing is open — retaining the ORIGINAL device again has
+        // to really reopen it, not compare equal and skip.
+        let fake = FakeStation()
+        fake.monitorStartFailsFor = "in:b"
+        let session = CallSession(station: fake)
+
+        try session.monitorRetain(input: "in:a")
+        XCTAssertThrowsError(try session.monitorRetain(input: "in:b"))
+        try session.monitorRetain(input: "in:a")
+
+        XCTAssertEqual(
+            fake.monitorStartInputs, ["in:a", "in:b", "in:a"],
+            "the lane is reopened after a failed switch")
+    }
+
     func testMonitorReleaseIsClampedAtZero() throws {
         // Over-releasing must not throw the count negative (which would let the
         // next retain skip the real open).

@@ -2520,18 +2520,30 @@ public final class CallSession: ObservableObject {
     /// Open the mic lane without a call so a front-end can preview/characterize it
     /// (the engine shares the live path if a call is active).
     public func monitorStart(input: String?) throws {
-        try station.monitorStart(input: input)
         // One lane, one record of which device it is on: a direct start moves the
         // lane, so the retain bookkeeping has to learn about it too or a later
-        // `monitorRetain` would think the wrong device was already asserted.
-        monitorInput = input
+        // `monitorRetain` would think the wrong device was already asserted. A
+        // FAILED start is recorded as "no device": the engine drops the old
+        // monitor before opening the new one, so on the throw path nothing is
+        // open and the next retain — even one naming the old device — has to
+        // really reopen it.
+        do {
+            try station.monitorStart(input: input)
+            monitorInput = input
+        } catch {
+            monitorInput = nil
+            throw error
+        }
         // The mic analyzer comes up at the engine's default decay; re-assert the
         // app-global value onto it now that it's live (astar-68a6). Best-effort.
         try? station.setSpectrumDecay(dbPerSecond: spectrumDecayDbPerSec)
     }
 
     /// Close the monitor mic lane (no-op if a call is using it).
-    public func monitorStop() throws { try station.monitorStop() }
+    public func monitorStop() throws {
+        monitorInput = nil
+        try station.monitorStop()
+    }
 
     /// How many front-ends currently want the monitor mic lane open (the Mic
     /// Analyzer and the VOX calibration meter can both want it at once). The lane
@@ -2553,14 +2565,14 @@ public final class CallSession: ObservableObject {
         // the device differs — that is how the analyzer's picker switches mics
         // while the VOX meter is still holding the lane. Naming the same device
         // again piggybacks on the already-open lane.
-        if monitorRetainCount == 0 || input != monitorInput {
-            try station.monitorStart(input: input)
-            monitorInput = input
-            // Fresh mic-analyzer lane → re-assert the app-global spectrum decay
-            // onto it (astar-68a6); the engine brings it up at its own default.
-            try? station.setSpectrumDecay(dbPerSecond: spectrumDecayDbPerSec)
-        }
+        let needsStart = monitorRetainCount == 0 || input != monitorInput
+        // Count the hold FIRST, and keep it even if the start throws: callers
+        // treat a failed retain as held anyway (`try?` + a `holdsMonitor` flag)
+        // and will release it later. Dropping the count here would let that
+        // release close the lane out from under the other holder.
         monitorRetainCount += 1
+        guard needsStart else { return }
+        try monitorStart(input: input)
     }
 
     /// Balance a `monitorRetain()`: close the lane only when the last holder

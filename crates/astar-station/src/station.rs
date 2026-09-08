@@ -2469,9 +2469,11 @@ impl Station {
     }
 
     /// The resolved capture-device name the mic monitor is open on, or `None`
-    /// when not monitoring. The front-end reads it to show which mic the
-    /// analyzer is actually listening to (which is not always the one the
-    /// picker last named — see [`Station::monitor_start`]).
+    /// when not monitoring — the mic the analyzer is actually listening to,
+    /// which is not always the one a picker last named (see
+    /// [`Station::monitor_start`]). Engine- and test-side only for now: it is on
+    /// neither the C ABI nor the Swift binding, so a front-end that wants to
+    /// display it needs that binding first.
     #[must_use]
     pub fn monitor_input(&self) -> Option<String> {
         self.monitor
