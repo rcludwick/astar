@@ -10,8 +10,12 @@
 //!   cargo run -p astar-asl3 --example live_mint
 //! ```
 //!
-//! `ASL_NODE` is optional: leave it unset to mint the way the app does when
-//! no node is saved (no `?node=` on the transceiver page), set it to compare.
+//! The engine tries the documented API first
+//! (`POST /api/v2/auth-wt-legacy`, no node involved) and only falls back to
+//! the portal scrape when that endpoint is unreachable. `ASL_NODE` is
+//! therefore optional and matters ONLY to that fallback, which cannot mint
+//! without a node the account owns: leave it unset to mint the way the app
+//! does for an account saved without one, set it to exercise the fallback.
 //!
 //! Prints the minted token on stdout (a per-session credential — treat like
 //! the Python script's output). On failure the error names its category —
