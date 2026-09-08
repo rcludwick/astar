@@ -872,6 +872,22 @@ fn a_new_header_never_replays_the_previous_talkers_audio() {
         Some("W1AW"),
         "the snapshot must report the new talker"
     );
+    // The one-name `talker` slot only ever holds the newest; the history
+    // keeps A too, which is the whole point of it.
+    let heard: Vec<_> = f
+        .session()
+        .heard()
+        .into_iter()
+        .map(|e| (e.network, e.callsign))
+        .collect();
+    assert_eq!(
+        heard,
+        [
+            ("dstar", "W1AW".to_string()),
+            ("dstar", "AJ7HR".to_string())
+        ],
+        "the history keeps the first talker after the second replaces the line"
+    );
 }
 
 /// The abandoned-stream guard: a tracked stream that simply goes quiet (no

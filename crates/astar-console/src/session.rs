@@ -29,6 +29,7 @@ use astar_iax_core::session::auth::Secret;
 use crate::dmr::{DmrConfig, DmrLink, DmrSnapshot};
 #[cfg(feature = "dstar")]
 use crate::dstar::{DstarConfig, DstarSession, DstarSnapshotState};
+use crate::heard::HeardEntry;
 #[cfg(feature = "m17")]
 use crate::m17::{M17Config, M17Session, M17SnapshotState};
 use crate::metering::Gain;
@@ -2987,6 +2988,38 @@ impl ConsoleSession {
         self.manager.as_ref().map(Manager::link_roster)
     }
 
+    /// Who has keyed up on the live digital link, newest first — see
+    /// [`crate::heard::HeardLog`]. Empty when no digital session is live:
+    /// `AllStar` carries no talker identity, so an IAX2 call has nothing to
+    /// report here.
+    ///
+    /// At most one digital session is ever live (every connect path guards on
+    /// the others), so the first `Some` found is the answer.
+    #[must_use]
+    pub fn heard(&self) -> Vec<HeardEntry> {
+        #[cfg(feature = "m17")]
+        if let Some(s) = &self.m17 {
+            return s.heard();
+        }
+        #[cfg(feature = "dstar")]
+        if let Some(s) = &self.dstar {
+            return s.heard();
+        }
+        #[cfg(feature = "ysf")]
+        if let Some(s) = &self.ysf {
+            return s.heard();
+        }
+        #[cfg(feature = "nxdn")]
+        if let Some(s) = &self.nxdn {
+            return s.heard();
+        }
+        #[cfg(feature = "dmr")]
+        if let Some(s) = &self.dmr {
+            return s.heard();
+        }
+        Vec::new()
+    }
+
     /// Drain all pending aggregated link lifecycle events (iax-62cf stream).
     /// Empty before the first `link_connect`.
     pub fn drain_link_events(&mut self) -> Vec<LinkEvent> {
@@ -3950,6 +3983,14 @@ mod tests {
             s.timeline_since(0).is_empty(),
             "no-call PTT records nothing"
         );
+    }
+
+    /// No digital link, nothing heard. `AllStar` carries no talker identity,
+    /// so an IAX2-only console has nothing to report either.
+    #[test]
+    fn heard_is_empty_with_no_digital_session() {
+        let s = ConsoleSession::new();
+        assert!(s.heard().is_empty());
     }
 
     #[test]

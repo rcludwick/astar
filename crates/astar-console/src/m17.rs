@@ -56,6 +56,7 @@ use astar_m17::{
     encode_callsign,
 };
 
+use crate::heard::{HeardEntry, HeardLog};
 use crate::session::ConsoleError;
 
 /// How long the RX path waits, after the last voice-stream packet, before
@@ -135,6 +136,10 @@ struct SharedState {
     /// atomic because it is a `String` — the same shape `DstarSession`'s
     /// shared `talker` uses, and touched at most once per received stream.
     talker: Mutex<Option<String>>,
+    /// Everyone heard on this link, newest first — `talker` keeps only the
+    /// most recent name, which a short courtesy tail overwrites a second
+    /// after the real talker unkeys.
+    heard: HeardLog,
 }
 
 impl SharedState {
@@ -144,6 +149,7 @@ impl SharedState {
             ptt: AtomicBool::new(false),
             receiving: AtomicBool::new(false),
             talker: Mutex::new(None),
+            heard: HeardLog::new(),
         }
     }
 
@@ -276,6 +282,14 @@ impl M17Session {
     #[must_use]
     pub fn state(&self) -> M17SnapshotState {
         self.shared.snapshot()
+    }
+
+    /// Who has keyed up on this link, newest first — see
+    /// [`crate::heard::HeardLog`]. Attacker-supplied text, like
+    /// [`M17SnapshotState::talker`].
+    #[must_use]
+    pub fn heard(&self) -> Vec<HeardEntry> {
+        self.shared.heard.snapshot()
     }
 
     /// Disconnect: requests the run-loop send `DISC` and exit, then joins the
@@ -722,6 +736,7 @@ fn note_talker(pkt: &StreamPacket, shared: &SharedState, rx_stream: &mut Option<
         *rx_stream = Some(pkt.stream_id);
         let call = decode_callsign(&pkt.lsf.src);
         if !call.is_empty() {
+            shared.heard.note("m17", &call);
             *shared.talker.lock().expect("talker mutex") = Some(call);
         }
     }
@@ -1012,5 +1027,19 @@ mod tests {
         second.lsf.src = src2;
         note_talker(&second, &shared, &mut rx_stream);
         assert_eq!(shared.snapshot().talker.as_deref(), Some("AJ7HR"));
+
+        // The one-name `talker` slot only ever holds the newest; the history
+        // keeps both, which is the whole point of it.
+        let heard: Vec<_> = shared
+            .heard
+            .snapshot()
+            .into_iter()
+            .map(|e| (e.network, e.callsign))
+            .collect();
+        assert_eq!(
+            heard,
+            [("m17", "AJ7HR".to_string()), ("m17", "N0CALL".to_string())],
+            "the history keeps the first talker after the second replaces the line"
+        );
     }
 }

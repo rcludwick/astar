@@ -32,6 +32,7 @@ pub struct HeardEntry {
 }
 
 /// One recorded keyup: a callsign, the network it came in on, and when.
+#[derive(Debug)]
 struct Heard {
     callsign: String,
     network: &'static str,
@@ -41,7 +42,10 @@ struct Heard {
 /// A bounded, newest-first log. A mutex rather than atomics because the
 /// payload is a `String`; it is touched once per received stream, never on
 /// the audio path.
-#[derive(Default)]
+///
+/// `Debug` because three of the link modules that own one derive it on their
+/// whole shared-state struct.
+#[derive(Debug, Default)]
 pub struct HeardLog {
     inner: Mutex<VecDeque<Heard>>,
 }

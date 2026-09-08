@@ -114,6 +114,7 @@ use astar_codec::ysf::DnFrame;
 use astar_nxdn::frame::{MESSAGE_TYPE_TX_REL, NetFrame, USC_SACCH_NS};
 use astar_nxdn::{FsmAction, LinkState, NxdnFsm, wire};
 
+use crate::heard::{HeardEntry, HeardLog};
 use crate::session::ConsoleError;
 
 /// How long the socket blocks before the loop runs `tick` anyway.
@@ -255,6 +256,10 @@ struct Shared {
     /// `LinkState` as its discriminant index; see `state_index`.
     link_state: AtomicU32,
     last_heard: Mutex<Option<String>>,
+    /// Everyone heard on this link, newest first — `last_heard` keeps only
+    /// the most recent id, which a short courtesy tail overwrites a second
+    /// after the real talker unkeys.
+    heard: HeardLog,
     /// The same id as a number, plus one sentinel: `u32::MAX` for "nobody
     /// has transmitted". A `u16` id cannot collide with it.
     last_heard_id: AtomicU32,
@@ -278,6 +283,7 @@ impl Shared {
         Shared {
             link_state: AtomicU32::new(state_index(LinkState::Idle)),
             last_heard: Mutex::new(None),
+            heard: HeardLog::new(),
             last_heard_id: AtomicU32::new(NO_TALKER),
             frames_rx: AtomicU64::new(0),
             receiving: AtomicBool::new(false),
@@ -519,6 +525,14 @@ impl NxdnLink {
         }
     }
 
+    /// Who has keyed up on this link, newest first — see
+    /// [`crate::heard::HeardLog`]. Far-end-supplied text, like
+    /// [`NxdnSnapshot::last_heard`].
+    #[must_use]
+    pub fn heard(&self) -> Vec<HeardEntry> {
+        self.shared.heard.snapshot()
+    }
+
     /// Request transmit on or off.
     ///
     /// Stores a request; the run loop applies the edge on its next pass —
@@ -672,8 +686,10 @@ fn handle(
             shared
                 .last_heard_id
                 .store(u32::from(packet.src_id), Ordering::Relaxed);
+            let src = packet.src_id.to_string();
+            shared.heard.note("nxdn", &src);
             if let Ok(mut slot) = shared.last_heard.lock() {
-                *slot = Some(packet.src_id.to_string());
+                *slot = Some(src);
             }
             let end = is_end_of_transmission(packet);
             shared.receiving.store(!end, Ordering::Relaxed);
@@ -1301,6 +1317,12 @@ mod tests {
         assert_eq!(
             shared.last_heard.lock().expect("mutex").as_deref(),
             Some("4242")
+        );
+        let heard = shared.heard.snapshot();
+        assert_eq!(
+            (heard[0].network, heard[0].callsign.as_str()),
+            ("nxdn", "4242"),
+            "the same id also lands in the history, tagged with its network"
         );
         assert!(shared.receiving.load(Ordering::Relaxed));
         assert_eq!(shared.frames_rx.load(Ordering::Relaxed), 1);
