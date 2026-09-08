@@ -24,8 +24,10 @@ no YSF either. Windows and Linux cannot reach either dongle network.
 This is the cross-platform principle unmet — "every feature ships on all
 platforms with per-platform native UI" — and it is one job, not two. The
 last-heard rows landed on the Iced status card (heard-history Task 7) — that
-part is done. What is still missing is the rest of the digital-voice layer
-for that client: the availability capability plumbed from the snapshot, the
+part is done, though they can only ever populate on M17 today, because the
+dial arms this client still lacks are exactly what would put a D-Star, YSF,
+NXDN or DMR link up for them to report. What is still missing is the rest of
+the digital-voice layer for that client: the availability capability plumbed from the snapshot, the
 dial arms for D-Star/YSF/NXDN/DMR, and the YSF unsupported-mode warning.
 `astar-station` is linked directly there, so none of it needs ABI work — §3
 of the YSF design is the whole story for this client.

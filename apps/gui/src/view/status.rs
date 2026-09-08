@@ -151,7 +151,7 @@ pub fn status_card<'a>(snap: &'a Snapshot, network: NetworkInfo<'a>) -> Element<
 /// Iced's `text()` renders that verbatim (no markup, no format string), so a
 /// hostile callsign is only ever a strange-looking row.
 #[must_use]
-pub fn heard_lines(rows: &[Heard]) -> Vec<String> {
+pub(super) fn heard_lines(rows: &[Heard]) -> Vec<String> {
     rows.iter()
         .take(3)
         .enumerate()
@@ -170,7 +170,7 @@ pub fn heard_lines(rows: &[Heard]) -> Vec<String> {
 /// table as the Mac's `HeardAge` so both clients read identically. Integer
 /// division throughout: 90 s is "1 min", not "1.5 min".
 #[must_use]
-pub fn age_label(ms: u64) -> String {
+pub(super) fn age_label(ms: u64) -> String {
     match ms {
         ms if ms < 2_000 => "now".to_string(),
         ms if ms < 60_000 => format!("{} s", ms / 1_000),
