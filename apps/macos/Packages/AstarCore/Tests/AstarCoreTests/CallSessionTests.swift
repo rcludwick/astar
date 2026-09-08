@@ -74,6 +74,13 @@ final class FakeStation: StationDriving {
     private(set) var setMicProfileCalls: [String?] = []
     private(set) var monitorStartCount = 0
     private(set) var monitorStopCount = 0
+    /// Every `monitorStart(input:)` argument, in order — so a test can see WHICH
+    /// device the lane was opened on, not just how many times.
+    private(set) var monitorStartInputs: [String?] = []
+    /// When set, `monitorStart` throws for this input (a device that won't open),
+    /// so a test can drive the failed-switch path. The attempt is still recorded.
+    var monitorStartFailsFor: String?
+    struct MonitorStartFailure: Error {}
 
     func readSnapshot() throws -> CallSnapshot { snapshotToReturn }
     func readEvent() throws -> Event? { events.isEmpty ? nil : events.removeFirst() }
@@ -143,7 +150,11 @@ final class FakeStation: StationDriving {
     func setDenoiseStrength(_ level: Float) throws { denoiseStrengthCalls.append(level) }
     func setRxCompression(_ on: Bool) throws { rxCompressionCalls.append(on) }
     func setRxCompressionLevel(_ level: Float) throws { rxCompressionLevelCalls.append(level) }
-    func monitorStart(input: String?) throws { monitorStartCount += 1 }
+    func monitorStart(input: String?) throws {
+        monitorStartCount += 1
+        monitorStartInputs.append(input)
+        if let failing = monitorStartFailsFor, input == failing { throw MonitorStartFailure() }
+    }
     func monitorStop() throws { monitorStopCount += 1 }
     func micSpectrum() throws -> [Float] { spectrumToReturn }
     func txSpectrum() throws -> [Float] { txSpectrumToReturn }

@@ -1337,12 +1337,20 @@ public final class Station {
 
     // MARK: Monitor mode
 
-    /// Start monitor mode (iax-2377): open the capture device and run the mic
+    /// Monitor THIS device (iax-2377): open the capture device and run the mic
     /// lane WITHOUT a call so a front-end can preview / characterize the mic
     /// before dialing. `input` is a capture-device name substring, or `nil` for
-    /// the system default. Idempotent and call-safe: a no-op if a call is
-    /// already active (the device is already open) or if a monitor is already
-    /// running. Stop it with `monitorStop()`.
+    /// the system default.
+    ///
+    /// Call it again to change mics: asking for a **different** resolved device
+    /// stops the running monitor and opens the new one — a device picker moves
+    /// the stream, not just its label — while asking for the device already
+    /// monitored is a no-op. The device is resolved before the running monitor
+    /// is touched, so a name that resolves to nothing throws and leaves the
+    /// current monitor running. Still call-safe: a no-op if a call is already
+    /// active (the device is already open on the call's mic lane).
+    ///
+    /// Stop it with `monitorStop()`.
     ///
     /// NOTE: opens an audio device (blocking); call it off any UI thread.
     public func monitorStart(input: String? = nil) throws {

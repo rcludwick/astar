@@ -6,11 +6,18 @@
     import AstarCore
     import SwiftUI
 
-    /// The Mic Analyzer window content: pick a mic, watch the live log-frequency
+    /// The Mic Analyzer pane's content: pick a mic, watch the live log-frequency
     /// spectrum, run a stay-silent Analyze, name + Save the resulting profile (or
     /// switch to the no-filter default).
+    ///
+    /// A pane of the main window, so it carries no chrome of its own — the header
+    /// and its Back chevron belong to `MenuPopover.micAnalyzerPane` — and no
+    /// minimum size: it has to lay out from the window's 310 pt minimum up.
     struct MicAnalyzerView: View {
-        @EnvironmentObject private var session: CallSession
+        /// The app's device list, already enumerated off the main thread — the
+        /// pane appears on a user gesture, and CoreAudio enumeration on the main
+        /// thread is a visible hitch on that path.
+        @EnvironmentObject private var deviceMonitor: AudioDeviceMonitor
         @ObservedObject var vm: MicCharacterization
         @State private var inputs: [String] = []
 
@@ -23,11 +30,15 @@
                         ForEach(inputs, id: \.self) { Text($0).tag(String?.some($0)) }
                     }
                     .labelsHidden()
+                    // Capped, not fixed: long device names get room in a wide
+                    // window and the popup compresses (with its own ellipsis)
+                    // rather than clipping in a narrow one.
+                    .frame(maxWidth: 320)
                     .onChange(of: vm.selectedInput) { _ in
                         vm.clear()  // switching mics → drop the previous mic's results
                         vm.start(input: vm.selectedInput)
                     }
-                    Spacer()
+                    Spacer(minLength: 0)
                 }
 
                 HStack {
@@ -35,7 +46,7 @@
                     TextField("e.g. fake icom", text: $vm.profileName)
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: 220)
-                    Spacer()
+                    Spacer(minLength: 0)
                 }
 
                 SpectrumCanvas(bins: vm.spectrum, peaks: vm.detectedPeaks)
@@ -50,40 +61,78 @@
                 Spacer()
             }
             .padding(16)
-            .frame(minWidth: 640, minHeight: 400)
             .onAppear {
-                inputs = session.inputs()
+                inputs = deviceMonitor.inputs
+                // A seeded device that is no longer plugged in has no row in the
+                // picker, which would render blank over a pane monitoring the
+                // system default anyway. Fall back to it explicitly instead.
+                if let want = vm.selectedInput, !inputs.contains(want) {
+                    vm.selectedInput = nil
+                }
                 vm.start(input: vm.selectedInput)
             }
             .onDisappear { vm.stop() }
         }
 
+        /// Analyze / Save / Clear and the harmonic-comb switch.
+        ///
+        /// The pane is as narrow as the window's 310 pt minimum, so the row folds
+        /// instead of clipping: one line while it fits, then the switch drops to a
+        /// second line, then the buttons shorten (the instruction moves to their
+        /// tooltip). There is no Close button — the pane header's Back chevron
+        /// (⌘[) is the way out, the same as every other pane.
+        ///
+        /// The "Saved" confirmation sits on its own line rather than in the button
+        /// row: it appears only after a save, and folding it into the row would
+        /// make the row's width depend on state the fold was measured without.
         @ViewBuilder
         private var controls: some View {
-            HStack(spacing: 10) {
-                if vm.analyzing {
+            if vm.analyzing {
+                HStack(spacing: 10) {
                     ProgressView().controlSize(.small)
                     Text("Analyzing… stay silent").foregroundStyle(.secondary)
-                } else {
-                    Button("Analyze (stay silent)") { vm.analyze() }
-                    Button("Save mic profile") { vm.save(now: Date()) }
-                        .disabled(!vm.canSave)
-                    Button("Clear") { vm.clear() }
-                        .disabled(
-                            !vm.hasResult && vm.detectedPeaks.isEmpty && vm.profileName.isEmpty
-                        )
-                        .help("Clear the detected frequencies to test another mic")
+                    Spacer(minLength: 0)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 10) {
+                            actionButtons(shortTitles: false)
+                            harmonicCombToggle
+                        }
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 10) { actionButtons(shortTitles: false) }
+                            harmonicCombToggle
+                        }
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 8) { actionButtons(shortTitles: true) }
+                            harmonicCombToggle
+                        }
+                    }
                     if vm.saved {
-                        Label("Saved", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                        Label("Saved", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
                     }
                 }
-                Spacer()
-                Toggle("Harmonic comb", isOn: $vm.harmonicComb)
-                    .toggleStyle(.checkbox)
-                    .help("Experimental harmonic-aware notch detection")
-                Button("Close") { vm.requestClose() }
-                    .help("Close the analyzer")
             }
+        }
+
+        @ViewBuilder
+        private func actionButtons(shortTitles: Bool) -> some View {
+            Button(shortTitles ? "Analyze" : "Analyze (stay silent)") { vm.analyze() }
+                .help("Stay silent while the analyzer measures the mic's noise")
+            Button(shortTitles ? "Save" : "Save mic profile") { vm.save(now: Date()) }
+                .disabled(!vm.canSave)
+                .help("Save the detected frequencies as a named mic profile")
+            Button("Clear") { vm.clear() }
+                .disabled(!vm.hasResult && vm.detectedPeaks.isEmpty && vm.profileName.isEmpty)
+                .help("Clear the detected frequencies to test another mic")
+        }
+
+        private var harmonicCombToggle: some View {
+            Toggle("Harmonic comb", isOn: $vm.harmonicComb)
+                .toggleStyle(.checkbox)
+                .help("Experimental harmonic-aware notch detection")
         }
     }
 

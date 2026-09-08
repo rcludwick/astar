@@ -3,47 +3,77 @@
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 
 #if os(macOS)
-    import AppKit
     import AstarCore
     import SwiftUI
 
-    /// Owns the single resizable Mic Analyzer `NSWindow`. The app is `LSUIElement`, so
-    /// `open` activates the app and brings the window to the front. Mirrors the
-    /// window pattern in `StatusItemController.makeWindow`.
+    /// Owns the Mic Analyzer's model and the way into (and out of) its pane.
+    ///
+    /// The analyzer is a **pane of the main window**, not a window of its own:
+    /// astar has one window and one navigation model, and a second window would be
+    /// a second place for "where am I" to live — reachable from Settings, from a
+    /// saved config and from Quick settings, each of which would have to find and
+    /// front it. It is also what makes the analyzer portable: an iOS navigation
+    /// stack can host a pane, and cannot host a second window.
+    ///
+    /// The model lives here rather than in the pane so the picker selection and any
+    /// unsaved profile name survive a trip back to the call card.
     @MainActor
     final class MicAnalyzerController: ObservableObject {
-        private let session: CallSession
-        private let vm = MicCharacterization()
-        private var window: NSWindow?
+        /// The analyzer's model; `MenuPopover.micAnalyzerPane` hands it to the view.
+        let vm = MicCharacterization()
+        /// Weak: the app delegate owns both this controller and the navigation.
+        private weak var navigation: AppNavigation?
 
-        init(session: CallSession) {
-            self.session = session
+        init(session: CallSession, navigation: AppNavigation) {
+            self.navigation = navigation
             vm.attach(session: session)
-            vm.onClose = { [weak self] in self?.window?.close() }
+            // The model's "close" is now "go back one pane". No macOS view calls
+            // `requestClose()` — the pane header's Back chevron does that job —
+            // but this is the seam the iOS port will drive its navigation stack
+            // from, so it stays wired.
+            vm.onClose = { [weak navigation] in navigation?.goBack() }
         }
 
-        /// Show the analyzer, defaulting the mic picker to `input`.
-        func open(input: String?) {
-            vm.selectedInput = input
-            let w = window ?? makeWindow()
-            window = w
-            NSApp.activate(ignoringOtherApps: true)
-            w.makeKeyAndOrderFront(nil)
-        }
-
-        private func makeWindow() -> NSWindow {
-            let hosting = NSHostingController(
-                rootView: MicAnalyzerView(vm: vm).environmentObject(session))
-            let w = NSWindow(contentViewController: hosting)
-            w.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-            w.title = "Mic Analyzer"
-            w.isReleasedWhenClosed = false
-            w.contentMinSize = NSSize(width: 640, height: 400)
-            w.setContentSize(NSSize(width: 640, height: 400))
-            // Bumped autosave key so the new default size takes effect once, instead
-            // of restoring a stale smaller frame.
-            w.setFrameAutosaveName("astarMicAnalyzer.640x400")
-            return w
+        /// Show the analyzer pane, defaulting the mic picker to `input`.
+        ///
+        /// `input` is the caller's explicit choice, if it has one — Quick Config and
+        /// Setups both know which device they're editing. `MicAnalyzerSeed` fills in
+        /// the rest: the device the active profile is using, else the system default.
+        /// So the three buttons pass what they know and the seed fills the rest —
+        /// Mic Profiles, which passes nothing, opens on the microphone the operator is
+        /// actually using instead of the system default.
+        ///
+        /// `seedsFromProfile` is that fill-in, and a caller turns it OFF when `nil`
+        /// is a real answer rather than an absent one: a saved config whose row says
+        /// "System Default" means the system default, and seeding it with the active
+        /// profile's named mic would analyze a microphone that config does not use.
+        /// Mic Profiles and Quick settings keep the default — neither of them can
+        /// say "system default" as a deliberate choice.
+        ///
+        /// Seeding before the switch matters: the pane is built by
+        /// `switch navigation.pane`, so the view's `onAppear` starts the monitor on
+        /// whatever `selectedInput` already says.
+        ///
+        /// `show(_:)` rather than assigning `pane`: the analyzer is reachable from
+        /// Settings (Mic Profiles, a saved config) and from Quick settings on the
+        /// call card, so Back has to return to whichever one opened it.
+        func open(input: String?, seedsFromProfile: Bool = true) {
+            let seed =
+                seedsFromProfile
+                ? MicAnalyzerSeed.input(
+                    explicit: input, stored: UserDefaultsAudioSettingsStore().load().input)
+                : input
+            // Clear on a device change, here rather than in the view: the analyzer
+            // is a pane now, so the view is destroyed between visits and its
+            // `.onChange(of: vm.selectedInput)` — which used to do this while the
+            // old window kept the view alive — never fires across one. Without
+            // this, a second visit on a different mic would open showing mic A's
+            // peaks and a Save would stamp them onto mic B.
+            if seed != vm.selectedInput {
+                vm.clear()
+            }
+            vm.selectedInput = seed
+            navigation?.show(.micAnalyzer)
         }
     }
 #endif

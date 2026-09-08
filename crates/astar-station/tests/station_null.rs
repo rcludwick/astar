@@ -241,6 +241,50 @@ fn monitor_start_is_idempotent() {
 }
 
 #[test]
+fn monitor_start_on_another_input_switches_devices() {
+    // The mic analyzer's device picker has to be able to change mics mid-session:
+    // asking the monitor for a DIFFERENT device must move the open, not be
+    // swallowed as "already monitoring".
+    let s = Station::with_backend_factory(
+        StationConfig::default(),
+        Box::new(|| Box::new(astar_audio::NullBackend::with_inputs(&["in:a", "in:b"]))),
+    );
+    s.monitor_start(Some("in:a")).expect("first open");
+    assert_eq!(s.monitor_input().as_deref(), Some("in:a"));
+    s.monitor_start(Some("in:a"))
+        .expect("same device is idempotent");
+    assert_eq!(s.monitor_input().as_deref(), Some("in:a"));
+    s.monitor_start(Some("in:b")).expect("switch");
+    assert_eq!(
+        s.monitor_input().as_deref(),
+        Some("in:b"),
+        "a different input replaces the monitor"
+    );
+    assert!(s.is_monitoring());
+    s.monitor_stop();
+    assert_eq!(s.monitor_input(), None);
+}
+
+#[test]
+fn monitor_start_with_an_unknown_input_keeps_the_running_monitor() {
+    // Resolution happens before the slot is touched, so a bad name is an error
+    // that leaves the mic the operator is watching exactly where it was.
+    let s = Station::with_backend_factory(
+        StationConfig::default(),
+        Box::new(|| Box::new(astar_audio::NullBackend::with_inputs(&["in:a", "in:b"]))),
+    );
+    s.monitor_start(Some("in:a")).expect("first open");
+    s.monitor_start(Some("in:nope"))
+        .expect_err("an unresolvable device is an error");
+    assert_eq!(
+        s.monitor_input().as_deref(),
+        Some("in:a"),
+        "the running monitor survives a failed switch"
+    );
+    s.monitor_stop();
+}
+
+#[test]
 fn monitor_start_resolves_a_named_input_device() {
     let s = test_station(StationConfig::default());
     // The NullBackend exposes "in:null"; a matching substring resolves.

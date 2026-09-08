@@ -31,8 +31,8 @@ noise-reduction** the user tunes per saved config (`Setup`) and live
 the same mic can keep different gains while sharing one characterization.)
 
 The mic profile is **exposed** (status + Analyze link + Apply toggle) wherever a
-mic is chosen — simple settings and each saved config — and **created** in a
-dedicated Mic Analyzer window.
+mic is chosen — simple settings and each saved config — and **created** in the
+Mic Analyzer, a pane of the main window.
 
 ## 1. Data model (`AstarCore`)
 
@@ -76,12 +76,14 @@ func setMicProfile(_ json: String?) throws
   `characterizeJSON: String`, plus call recording (`setMicProfileCalls: [String?]`,
   monitor start/stop flags) so the view-model + recall are TDD-able with no audio.
 
-## 3. Mic Analyzer window
+## 3. Mic Analyzer pane
 
-A **separate, resizable `NSWindow`** opened from Settings via a window controller
-(the app is `LSUIElement`; opening activates the app and shows the window — same
-pattern as the existing menu-bar popover window). It hosts `MicAnalyzerView`,
-driven by a `MicCharacterization` `@MainActor ObservableObject`:
+A **pane of the main window**, reached through the one navigation model
+(`AppNavigation.show(.micAnalyzer)`) from Settings, from a saved config and from
+Quick settings, with a Back chevron that returns to whichever one opened it —
+astar has one window, and a second one would be a second place for "where am I"
+to live. It hosts `MicAnalyzerView`, driven by a `MicCharacterization`
+`@MainActor ObservableObject`:
 
 - **Lifecycle:** on appear → `monitorStart(input: selectedDevice)` when no call is
   active (if a call is live, the engine shares the live mic path — it guards
@@ -106,7 +108,7 @@ device's** `MicProfile` (no data duplication):
 
 - **Simple settings (`QuickConfigView`)** — under the Mic gain row:
   `Mic profile: ✓ characterized · [Analyze…] · Apply ⃝` (or
-  `⊘ not characterized · [Analyze…]`). "Analyze…" opens the Analyzer window
+  `⊘ not characterized · [Analyze…]`). "Analyze…" opens the Analyzer pane
   defaulted to the current input; the Apply toggle is the per-device `enabled`
   flag.
 - **Saved config card (`ConfigCard`, expanded)** — next to the Input picker, the
@@ -141,18 +143,18 @@ sets the expectation ("Mic profiles are saved per microphone").
   `enabled` + presence (FakeStation); the `MicCharacterization` view-model's
   characterize→save flow (scriptable FakeStation). The `Canvas` spectrum render is
   visual — verified on-device, not unit-tested.
-- **Phasing:** **M1** = engine seam (`StationDriving` + fakes) + Analyzer window
+- **Phasing:** **M1** = engine seam (`StationDriving` + fakes) + Analyzer pane
   with live spectrum (monitor + 20 Hz poll + draw). **M2** = characterize + Save +
   per-device persistence + recall wiring + the two exposure rows. Both are
   unblocked (FFI vendored); the split keeps PRs reviewable.
 - **Errors:** `monitorStart` failure (device busy / mic permission) → inline
-  message in the window; `micSpectrum` throwing → stop polling + show error;
+  message in the pane; `micSpectrum` throwing → stop polling + show error;
   `characterize()` returning `""` (not enough buffered silence) → "Couldn't
   analyze — try again in a quiet moment."
 
 ## Resolved questions
 
-- **Analyzer home:** separate resizable window (not popover tabs / list section) —
+- **Analyzer home:** a pane of the main window, since 2026-09-08 (§3). It shipped first as a separate resizable window; that decision is superseded —
   the spectrum needs width + height.
 - **Profile scope:** characterization per-device; gain/NR/comp stay per-config.
 - **Notch display:** shown read-only (transparency); applied opaquely (no in-app

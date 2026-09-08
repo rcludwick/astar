@@ -364,8 +364,14 @@
                     }
                 }
                 .labelsHidden()
-                Button("Analyze…") { micAnalyzer.open(input: setup.inputDevice) }
-                    .buttonStyle(.link)
+                // `seedsFromProfile: false`: this row already says which device
+                // this config uses, and "System Default" (a nil `inputDevice`) is
+                // a deliberate answer here — seeding it from the active profile
+                // would analyze a mic this config never opens.
+                Button("Analyze…") {
+                    micAnalyzer.open(input: setup.inputDevice, seedsFromProfile: false)
+                }
+                .buttonStyle(.link)
                 if let id = setup.micProfileID {
                     Button(role: .destructive) {
                         session.deleteMicProfile(id: id)

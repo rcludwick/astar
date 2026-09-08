@@ -10,7 +10,8 @@
     ///
     /// Not a navigation stack: astar's window is one level deep everywhere, so
     /// a flat enum says exactly what a stack would and cannot get out of step
-    /// with itself. Every pane's Back returns to `.call`.
+    /// with itself. Back returns to `.call` unless the pane was entered through
+    /// `show(_:)`, which remembers where it came from.
     enum AppPane: Equatable {
         /// The dial card, status and meters — astar's actual job.
         case call
@@ -18,6 +19,9 @@
         case settings
         /// Browse and search the cached reflector directory.
         case reflectors
+        /// Live mic spectrum + the stay-silent characterization that saves a
+        /// mic profile.
+        case micAnalyzer
     }
 
     /// Which pane the main window is showing (astar-1f7d).
@@ -45,7 +49,40 @@
             set { pane = newValue ? .settings : .call }
         }
 
-        /// Back out of whatever pane is up. One level, because there is only one.
-        func goBack() { pane = .call }
+        /// One remembered "Back goes here instead of `.call`": the pane it applies
+        /// to (`onPane`) and where Back should land from it (`returnsTo`).
+        ///
+        /// One slot, not a stack: astar's window is still one level deep. What
+        /// changed is that a pane can be reached from *two* places (the mic
+        /// analyzer opens from Settings and from Quick settings on the call card),
+        /// and a Back that always went to `.call` threw the Settings context away.
+        ///
+        /// `onPane` is what keeps a stale target from firing: if something else
+        /// moved the window on (⌘, while the analyzer is up, say), the recorded
+        /// pane no longer matches and Back falls back to `.call`.
+        private var returnTarget: (onPane: AppPane, returnsTo: AppPane)?
+
+        /// Show `pane`, remembering the pane on screen as where Back returns to.
+        ///
+        /// Only for panes with more than one way in. Entries that are always
+        /// reached from the call card (`showsSettings`, the reflector directory)
+        /// set `pane` directly and record nothing, so their Back still lands on
+        /// `.call`.
+        func show(_ pane: AppPane) {
+            guard self.pane != pane else { return }
+            returnTarget = (onPane: pane, returnsTo: self.pane)
+            self.pane = pane
+        }
+
+        /// Back out of whatever pane is up — to whoever opened it, or the call
+        /// card. One level either way, because there is only one.
+        func goBack() {
+            if let target = returnTarget, target.onPane == pane {
+                pane = target.returnsTo
+            } else {
+                pane = .call
+            }
+            returnTarget = nil
+        }
     }
 #endif
