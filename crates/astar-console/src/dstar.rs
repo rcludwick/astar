@@ -2002,6 +2002,16 @@ fn handle_dsvt(pkt: DsvtPacket, rx: &mut RxState<'_>) {
                 // so the tail isn't clipped (spec §2) BEFORE resetting
                 // tracking — `talker`/`slow_text` deliberately persist past
                 // this point (last-heard semantics — see the module docs).
+                //
+                // The history's clock is refreshed here too, so
+                // `HeardEntry::age_ms` counts from the end of the over
+                // rather than its start — the same meaning the AMBE links'
+                // per-frame notes give it. `note` moves an entry already at
+                // the front, so this is never a duplicate row.
+                let last = rx.shared.talker.lock().expect("talker mutex").clone();
+                if let Some(call) = last {
+                    rx.shared.heard.note("dstar", &call);
+                }
                 flush_pipeline(rx, true);
                 rx.tracker.end();
             }

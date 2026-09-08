@@ -874,12 +874,21 @@ fn a_new_header_never_replays_the_previous_talkers_audio() {
     );
     // The one-name `talker` slot only ever holds the newest; the history
     // keeps A too, which is the whole point of it.
+    //
+    // B's last frame was `end`-flagged, which refreshes B's row so `age_ms`
+    // counts from the end of the over. That is a move-to-front: B must
+    // appear exactly once.
     let heard: Vec<_> = f
         .session()
         .heard()
         .into_iter()
         .map(|e| (e.network, e.callsign))
         .collect();
+    assert_eq!(
+        heard.iter().filter(|(_, c)| c == "W1AW").count(),
+        1,
+        "the end-of-over refresh must not duplicate the talker: {heard:?}"
+    );
     assert_eq!(
         heard,
         [

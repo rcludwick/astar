@@ -565,6 +565,15 @@ fn run_loop(p: RunLoopParams) {
             // next voice packet starts a new one. `talker` itself is NOT
             // cleared — it is "last heard", and outliving the stream is the
             // whole point.
+            //
+            // An over whose `EOS` was lost ends HERE instead, so this is the
+            // other place the history's clock is refreshed: without it that
+            // station's age would count from the start of their over. A
+            // move-to-front, never a duplicate row.
+            let last = shared.talker.lock().expect("talker mutex").clone();
+            if let Some(call) = last {
+                shared.heard.note("m17", &call);
+            }
             rx_stream = None;
         }
     }
@@ -718,15 +727,20 @@ fn poll_socket(
     }
 }
 
-/// Record who is talking, on the FIRST packet of each received stream.
+/// Record who is talking, at the START and the END of each received stream.
 ///
 /// M17 carries the source address in every packet's LSF, so this could run
 /// on all of them; it deliberately does not. The talker only changes when
-/// the stream does, and taking the callsign once per stream keeps a decode
-/// and a mutex off the 20 ms RX path.
+/// the stream does, and touching the callsign twice per stream keeps a
+/// decode and a mutex off the 20 ms RX path.
 ///
 /// A stream's `EOS` packet closes it out here too, so the next voice packet
 /// is read as a fresh stream even if the reflector reuses the `StreamID`.
+/// The second [`crate::heard::HeardLog::note`] is on that `EOS`, and it is
+/// what makes [`crate::heard::HeardEntry::age_ms`] mean the same thing here
+/// as on the AMBE links: time since the station was last heard, not time
+/// since their over began. `note` moves an entry already at the front rather
+/// than repeating it, so the refresh never duplicates a row.
 ///
 /// An empty decode is ignored rather than stored: `decode_callsign` yields
 /// `""` for a null/reserved address, and "Last heard " with nothing after it
@@ -741,6 +755,10 @@ fn note_talker(pkt: &StreamPacket, shared: &SharedState, rx_stream: &mut Option<
         }
     }
     if pkt.is_last() {
+        let call = decode_callsign(&pkt.lsf.src);
+        if !call.is_empty() {
+            shared.heard.note("m17", &call);
+        }
         *rx_stream = None;
     }
 }
@@ -1019,6 +1037,15 @@ mod tests {
             !shared.snapshot().receiving,
             "and `receiving` — never set by note_talker — is what says nobody is on"
         );
+        // The EOS refreshes the history's clock so `age_ms` counts from the
+        // end of the over. That is a move-to-front, not a second row.
+        let after_eos = shared.heard.snapshot();
+        assert_eq!(
+            after_eos.len(),
+            1,
+            "the EOS refresh must not duplicate the talker: {after_eos:?}"
+        );
+        assert_eq!(after_eos[0].callsign, "N0CALL");
 
         // A second talker replaces the first once their stream opens.
         let src2 = encode_callsign("AJ7HR").expect("a valid callsign encodes");

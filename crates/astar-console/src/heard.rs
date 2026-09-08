@@ -27,7 +27,11 @@ pub struct HeardEntry {
     pub callsign: String,
     /// The app's `Network.rawValue`: `"m17"`, `"dstar"`, `"ysf"`, `"nxdn"`, `"dmr"`.
     pub network: &'static str,
-    /// How long ago this station was heard, measured at snapshot time.
+    /// How long ago this station was LAST heard, measured at snapshot time:
+    /// their most recent frame on the AMBE links, or the end of their over
+    /// on M17 and D-Star. Never the moment their over began — a station who
+    /// unkeyed a second ago reads as one second old however long they
+    /// talked.
     pub age_ms: u64,
 }
 
@@ -40,8 +44,15 @@ struct Heard {
 }
 
 /// A bounded, newest-first log. A mutex rather than atomics because the
-/// payload is a `String`; it is touched once per received stream, never on
-/// the audio path.
+/// payload is a `String`.
+///
+/// How often it is touched depends on where the network puts the talker's
+/// name. The AMBE links (YSF, NXDN, DMR) carry it in every frame's header
+/// and already wrote their one-name last-heard slot per frame, so they note
+/// per frame too. M17 and D-Star note twice per stream — at its first packet
+/// and at its end — which keeps a callsign decode and a mutex off their
+/// 20 ms receive path while still giving [`HeardEntry::age_ms`] the same
+/// meaning everywhere. Nothing here ever touches decoded audio.
 ///
 /// `Debug` because three of the link modules that own one derive it on their
 /// whole shared-state struct.
