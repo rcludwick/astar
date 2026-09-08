@@ -62,28 +62,74 @@ A generic `connect` instead sends the real caller-id as `USERNAME`, includes the
 
 ### Stage 1 — Mint the portal token (`astar-asl3::mint_wt_token`)
 
-A three-step HTTPS sequence against the AllStar portal:
+The portal is `https://www.allstarlink.org/portal`. Minting is two HTTP
+requests and one string extraction, done fresh for every connect and for the
+Settings **Test** button. Nothing here is astar's invention: it replicates what
+the portal's own Web Transceiver page does in a browser, and what DroidStar's
+`obtain_asl_wt_creds()` and the old `scripts/asl-wt-token.py` did before the
+Rust port.
 
-1. `POST /portal/login.php` with `user=<account>&pass=<password>`. Redirects are
-   disabled so the `302`'s `Set-Cookie` (the `PHPSESSID` session cookie, and the
-   `allstar_token` JWT) can be read directly. Both cookies are kept (any
-   non-expired `Set-Cookie`) and forwarded — drop either and the next page
-   renders unauthenticated.
-2. `GET /portal/webtransceiver.php` with the cookie jar — `?node=<owned-node>`
-   only when a node is configured; the portal mints without one.
-3. Extract the token from the returned HTML — the `callingName` param
-   (e.g. `value="84906e5c0000"`).
+#### Request 1 — log in
 
-The result is a short token string destined for the IAX2 `CALLING_NAME` IE. The
-AllStar node's server-side validator maps that token back to the account's
-callsign.
+| | |
+|---|---|
+| Method / URL | `POST /portal/login.php` |
+| Body | `application/x-www-form-urlencoded`: `user=<callsign>&pass=<portal password>` |
+| What the portal expects | the **allstarlink.org account** callsign and its **account** password — not a node's IAX secret, not an ASL admin password |
+| Redirects | **not followed** (`ureq` `redirects(0)`). The live portal answers a good login with a `302` to `/portal/`, and the cookies ride on that `302`. Following it would drop them. A direct `200` is accepted the same way. |
+| Success signal | a `Set-Cookie` for **`PHPSESSID`**. No `PHPSESSID` → `Asl3Error::Login` ("portal login failed"). |
+| Cookies kept | every `Set-Cookie` name=value pair the response carries, **except** ones the server is expiring (`Max-Age=0` or `expires=Thu, 01 Jan 1970`). Live login sets `PHPSESSID` **and** an `allstar_token` JWT, and expires a stale `allstar_become`. Forwarding only `PHPSESSID` renders the next page unauthenticated — the portal authenticates on the whole jar. |
+| Timeout | 15 s per request |
 
-`PortalCredentials { user, password, node }` — note `user` is the **portal
-account callsign**, `password` is the **portal account password** (not any IAX2
-secret), and `node` is a node the account owns. The live portal answers a
-request with no `node` with a page that carries no token (checked 2026-09-08),
-so the macOS account panel asks for one; the engine still tolerates an empty
-`node` — it sends no query parameter — for configs that carry none.
+#### Request 2 — fetch the transceiver page
+
+| | |
+|---|---|
+| Method / URL | `GET /portal/webtransceiver.php?node=<node>` |
+| Header | `Cookie: PHPSESSID=…; allstar_token=…` — the jar from request 1, `; `-joined |
+| What the portal expects | a **node number the account owns** in `node`. With no `node` the page comes back with no token (checked live 2026-09-08; the Settings Test button read "rejected" for an account saved without one). Any owned node will do — the token is the account's, not the node's; the node is how the page decides you may have one. |
+| Empty node | the engine sends **no** `node` parameter rather than `node=`, for configs that carry none; expect `TokenNotFound` from the live portal in that case |
+| Success signal | the HTML contains `<param name="callingName" value="<TOKEN>"/>` (the applet parameter block of the page's embedded transceiver). A looser fallback scan for `callingName` followed by a quoted run of `[A-Za-z0-9_-]` covers markup drift. |
+| Token shape | a short opaque string, e.g. `84906e5c0000`. Treat it as a per-session credential: it is not logged, not stored, not put in any snapshot or event. |
+| Failure | no token in the page → `Asl3Error::TokenNotFound` ("no web-transceiver token in the portal response"). Causes, in the order to check: no node / a node the account does not own · a login that returned a cookie but is not actually authenticated (only `PHPSESSID` forwarded) · the portal changed its markup. |
+| Transport | any connect/TLS/timeout failure → `Asl3Error::Http(<message>)` |
+
+#### What the token is for
+
+The token goes out **once**, as the IAX2 `CALLING_NAME` IE of the `NEW` frame
+(`CallMode::WebTransceiver { node, name }` → `CallProfile.calling_name`), with
+`CALLING_NUMBER` = the destination node and `CALLED_NUMBER` = `"s"`. The
+AllStar node's dialplan hands `CALLING_NAME` to `authwebphone.pl`, which maps
+the token back to the account's callsign and decides whether this caller keys
+the radio. The IAX2 secret is still the guest `"allstar"`; the portal password
+never leaves request 1.
+
+#### Errors, as the layers see them
+
+| Engine (`Asl3Error`) | Station (`StationError::Portal`) | App |
+|---|---|---|
+| `Login` | `portal/token error: portal login failed (no session cookie)` | "The AllStarLink portal rejected these credentials. Check the callsign, password, and node." |
+| `TokenNotFound` | `portal/token error: no web-transceiver token in the portal response (…)` | same line |
+| `Http(msg)` | `portal/token error: portal HTTP error: <msg>` | same line |
+
+The app shows one line for all three today; the station text (since
+`71fa215`) carries the category, so a future build can say which.
+
+#### Checking it by hand
+
+`live_mint` does exactly what the app does and prints the token or the
+category of failure, nothing else. The password goes in the environment,
+never on a command line:
+
+```text
+ASL_USER=<callsign> ASL_PASS='<portal password>' ASL_NODE=<owned node> \
+  cargo run -q -p astar-asl3 --example live_mint
+```
+
+Leave `ASL_NODE` unset to reproduce the no-node case. The offline tests in
+`crates/astar-asl3/src/mint.rs` play the portal with a `tiny_http` stub —
+including the `302`-with-cookies login and the full-jar requirement — so the
+sequence above is pinned without touching the live site.
 
 ### Stage 2 — Resolve the node to an address (`astar-asl3::resolve_node`)
 
