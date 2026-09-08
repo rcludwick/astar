@@ -62,7 +62,8 @@
 
         // MARK: - Monitor lifecycle
 
-        /// Start monitoring `input` and polling the spectrum. Safe to call repeatedly.
+        /// Start monitoring `input` and polling the spectrum. Safe to call repeatedly;
+        /// calling it with a different device switches the mic being monitored.
         func start(input: String?) {
             selectedInput = input
             // Best-effort: a cold first open can fail/race the capture device here.
@@ -71,14 +72,18 @@
             // each retry until it's live. (Don't early-return on failure; that left
             // the timer uninstalled, so the first analyze could never recover.)
             //
-            // Retain (not raw start) so the lane is shared with the VOX calibration
-            // meter: whichever opens it first owns the open, and neither closing pulls
-            // the mic from the other. Retain only on the first start() so repeated
-            // calls don't leak retains; mid-session device changes still re-assert the
-            // input via the idempotent `monitorStart` in `analyze()`/`finishAnalyze()`.
+            // Retain (not raw start) on the FIRST start so the lane is shared with the
+            // VOX calibration meter: whichever opens it first owns the open, and
+            // neither closing pulls the mic from the other. One retain per start()
+            // would leak holds, so once we hold one, a later start() asks the engine
+            // to move the lane to `input` instead — that is what makes the device
+            // picker change the stream and not just the label. Naming the same device
+            // is a no-op down in the station.
             if !holdsMonitor {
                 try? session?.monitorRetain(input: input)
                 holdsMonitor = true
+            } else {
+                try? session?.monitorStart(input: input)
             }
             timer?.invalidate()
             timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in

@@ -2521,6 +2521,10 @@ public final class CallSession: ObservableObject {
     /// (the engine shares the live path if a call is active).
     public func monitorStart(input: String?) throws {
         try station.monitorStart(input: input)
+        // One lane, one record of which device it is on: a direct start moves the
+        // lane, so the retain bookkeeping has to learn about it too or a later
+        // `monitorRetain` would think the wrong device was already asserted.
+        monitorInput = input
         // The mic analyzer comes up at the engine's default decay; re-assert the
         // app-global value onto it now that it's live (astar-68a6). Best-effort.
         try? station.setSpectrumDecay(dbPerSecond: spectrumDecayDbPerSec)
@@ -2535,15 +2539,23 @@ public final class CallSession: ObservableObject {
     /// closing doesn't pull the mic out from under the other.
     private var monitorRetainCount = 0
 
-    /// Reference-counted `monitorStart`: open the mic lane if it isn't already
-    /// (re-asserting `input` each time is harmless — the engine guards a double
-    /// open). Pair every call with `monitorRelease()`. Lets independent UI (Mic
-    /// Analyzer, VOX calibration) share the live mic without fighting over it.
+    /// The device the open lane was last started on, so a retain naming another
+    /// one is recognised as a device CHANGE rather than a duplicate hold.
+    /// `nil` while nothing is held.
+    private var monitorInput: String?
+
+    /// Reference-counted `monitorStart`: open the mic lane if it isn't already,
+    /// and move it if this holder wants a different device. Pair every call with
+    /// `monitorRelease()`. Lets independent UI (Mic Analyzer, VOX calibration)
+    /// share the live mic without fighting over it.
     public func monitorRetain(input: String?) throws {
-        // Re-assert on the cold first retain so the chosen device is honored;
-        // later retains piggyback on the already-open lane.
-        if monitorRetainCount == 0 {
+        // Open on the cold first retain; on a later retain, re-assert only when
+        // the device differs — that is how the analyzer's picker switches mics
+        // while the VOX meter is still holding the lane. Naming the same device
+        // again piggybacks on the already-open lane.
+        if monitorRetainCount == 0 || input != monitorInput {
             try station.monitorStart(input: input)
+            monitorInput = input
             // Fresh mic-analyzer lane → re-assert the app-global spectrum decay
             // onto it (astar-68a6); the engine brings it up at its own default.
             try? station.setSpectrumDecay(dbPerSecond: spectrumDecayDbPerSec)
@@ -2557,6 +2569,7 @@ public final class CallSession: ObservableObject {
         guard monitorRetainCount > 0 else { return }
         monitorRetainCount -= 1
         if monitorRetainCount == 0 {
+            monitorInput = nil
             try station.monitorStop()
         }
     }

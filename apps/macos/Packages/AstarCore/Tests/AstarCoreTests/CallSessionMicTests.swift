@@ -80,6 +80,37 @@ final class CallSessionMicTests: XCTestCase {
         XCTAssertEqual(fake.monitorStopCount, 1)
     }
 
+    func testRetainingADifferentInputSwitchesTheMonitor() throws {
+        // The mic analyzer's picker changes device while the lane is already held;
+        // a retain on another device has to re-assert it, or the label moves and
+        // the stream doesn't.
+        let fake = FakeStation()
+        let session = CallSession(station: fake)
+
+        try session.monitorRetain(input: "in:a")
+        try session.monitorRetain(input: "in:b")
+        XCTAssertEqual(
+            fake.monitorStartInputs, ["in:a", "in:b"],
+            "a second retain on another device re-asserts it")
+        try session.monitorRetain(input: "in:b")
+        XCTAssertEqual(
+            fake.monitorStartInputs, ["in:a", "in:b"],
+            "the same device is not re-asserted")
+    }
+
+    func testMonitorInputIsForgottenOnLastRelease() throws {
+        // The remembered device is per-open: after the last holder releases, the
+        // next retain on the same device must really open it again.
+        let fake = FakeStation()
+        let session = CallSession(station: fake)
+
+        try session.monitorRetain(input: "in:a")
+        try session.monitorRelease()
+        try session.monitorRetain(input: "in:a")
+
+        XCTAssertEqual(fake.monitorStartInputs, ["in:a", "in:a"])
+    }
+
     func testMonitorReleaseIsClampedAtZero() throws {
         // Over-releasing must not throw the count negative (which would let the
         // next retain skip the real open).
