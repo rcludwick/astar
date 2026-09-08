@@ -31,8 +31,8 @@ noise-reduction** the user tunes per saved config (`Setup`) and live
 the same mic can keep different gains while sharing one characterization.)
 
 The mic profile is **exposed** (status + Analyze link + Apply toggle) wherever a
-mic is chosen — simple settings and each saved config — and **created** in a
-dedicated Mic Analyzer window.
+mic is chosen — simple settings and each saved config — and **created** in the
+Mic Analyzer, a pane of the main window.
 
 ## 1. Data model (`AstarCore`)
 
@@ -76,12 +76,14 @@ func setMicProfile(_ json: String?) throws
   `characterizeJSON: String`, plus call recording (`setMicProfileCalls: [String?]`,
   monitor start/stop flags) so the view-model + recall are TDD-able with no audio.
 
-## 3. Mic Analyzer window
+## 3. Mic Analyzer pane
 
-A **separate, resizable `NSWindow`** opened from Settings via a window controller
-(the app is `LSUIElement`; opening activates the app and shows the window — same
-pattern as the existing menu-bar popover window). It hosts `MicAnalyzerView`,
-driven by a `MicCharacterization` `@MainActor ObservableObject`:
+A **pane of the main window**, reached through the one navigation model
+(`AppNavigation.show(.micAnalyzer)`) from Settings, from a saved config and from
+Quick settings, with a Back chevron that returns to whichever one opened it —
+astar has one window, and a second one would be a second place for "where am I"
+to live. It hosts `MicAnalyzerView`, driven by a `MicCharacterization`
+`@MainActor ObservableObject`:
 
 - **Lifecycle:** on appear → `monitorStart(input: selectedDevice)` when no call is
   active (if a call is live, the engine shares the live mic path — it guards

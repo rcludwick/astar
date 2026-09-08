@@ -165,6 +165,12 @@
         /// front.
         private func toggleWindow() {
             if window.isVisible {
+                // Leave the analyzer before hiding: ordering the window out does
+                // not remove the hosting view, so `MicAnalyzerView.onDisappear`
+                // never fires and the capture device would stay open behind an
+                // invisible window — with the orange mic indicator lit and no UI
+                // that explains it.
+                if navigation.pane == .micAnalyzer { navigation.goBack() }
                 window.orderOut(nil)
             } else {
                 showWindow()

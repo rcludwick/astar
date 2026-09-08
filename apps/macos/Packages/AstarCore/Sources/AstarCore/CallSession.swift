@@ -2540,6 +2540,11 @@ public final class CallSession: ObservableObject {
     }
 
     /// Close the monitor mic lane (no-op if a call is using it).
+    ///
+    /// WARNING: this bypasses the retain count — stopping directly while another
+    /// holder still has a retain out desynchronises `monitorRetainCount` from the
+    /// lane. No app caller does that today; holders pair `monitorRetain` with
+    /// `monitorRelease`.
     public func monitorStop() throws {
         monitorInput = nil
         try station.monitorStop()

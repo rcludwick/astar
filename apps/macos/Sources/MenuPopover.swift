@@ -409,7 +409,7 @@
                     }
                     .buttonStyle(.borderless)
                     .keyboardShortcut("[", modifiers: .command)  // ⌘[ to go back
-                    Text("Mic analyzer").font(.headline)
+                    Text("Mic Analyzer").font(.headline)
                     Spacer()
                 }
                 .padding(.horizontal, 14)

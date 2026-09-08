@@ -14,7 +14,10 @@
     /// and its Back chevron belong to `MenuPopover.micAnalyzerPane` — and no
     /// minimum size: it has to lay out from the window's 310 pt minimum up.
     struct MicAnalyzerView: View {
-        @EnvironmentObject private var session: CallSession
+        /// The app's device list, already enumerated off the main thread — the
+        /// pane appears on a user gesture, and CoreAudio enumeration on the main
+        /// thread is a visible hitch on that path.
+        @EnvironmentObject private var deviceMonitor: AudioDeviceMonitor
         @ObservedObject var vm: MicCharacterization
         @State private var inputs: [String] = []
 
@@ -59,7 +62,13 @@
             }
             .padding(16)
             .onAppear {
-                inputs = session.inputs()
+                inputs = deviceMonitor.inputs
+                // A seeded device that is no longer plugged in has no row in the
+                // picker, which would render blank over a pane monitoring the
+                // system default anyway. Fall back to it explicitly instead.
+                if let want = vm.selectedInput, !inputs.contains(want) {
+                    vm.selectedInput = nil
+                }
                 vm.start(input: vm.selectedInput)
             }
             .onDisappear { vm.stop() }
