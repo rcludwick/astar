@@ -1090,13 +1090,22 @@ int iax_station_set_vox_preroll_ms(IaxStation *st, unsigned int ms);
 int iax_station_set_noise_reduction(IaxStation *st, bool on);
 
 /**
- * Start monitor mode (iax-2377): open the capture device and run the mic lane
+ * Monitor THIS device (iax-2377): open the capture device and run the mic lane
  * WITHOUT a call so a front-end can preview / characterize the mic before
  * dialing. `input` is a capture-device name substring, or NULL for the system
- * default. Idempotent and call-safe: a no-op if a call is already active (the
- * device is already open) or if a monitor is already running. Stop it with
- * [`iax_station_monitor_stop`]. Returns [`IAX_OK`], [`IAX_ERR_AUDIO`] (device
- * resolve/open failed), [`IAX_ERR_NULL`] (NULL `st`), or [`IAX_ERR_PANIC`].
+ * default.
+ *
+ * Call it again to change mics: asking for a DIFFERENT resolved device stops
+ * the running monitor and opens the new one, so a front-end's device picker
+ * moves the stream and not just its label; asking for the device already
+ * monitored is a no-op. The device is resolved before the running monitor is
+ * touched, so a name that resolves to nothing returns an error and leaves the
+ * current monitor running. Still call-safe: a no-op if a call is already
+ * active (the device is already open on the call's mic lane).
+ *
+ * Stop it with [`iax_station_monitor_stop`]. Returns [`IAX_OK`],
+ * [`IAX_ERR_AUDIO`] (device resolve/open failed), [`IAX_ERR_NULL`] (NULL `st`),
+ * or [`IAX_ERR_PANIC`].
  *
  * NOTE: opens an audio device (blocking); call it off any UI thread.
  */
