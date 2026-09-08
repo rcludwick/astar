@@ -6,7 +6,8 @@
 //!
 //! Flow (replicates `DroidStar`'s `obtain_asl_wt_creds()`):
 //! 1. POST `<portal>/login.php` form `user`/`pass` → `PHPSESSID` cookie.
-//! 2. GET `<portal>/webtransceiver.php?node=<node>` with that cookie.
+//! 2. GET `<portal>/webtransceiver.php` with that cookie — `?node=<node>`
+//!    only when a node is configured; the portal issues a token without one.
 //! 3. Extract the `callingName` token from the HTML.
 //!
 //! The token is used as the IAX2 `CALLING_NAME`; the node's dialplan resolves
@@ -26,7 +27,9 @@ pub struct PortalCredentials {
     pub user: String,
     /// Portal ACCOUNT password (not a node secret).
     pub password: String,
-    /// A node the account OWNS (minting requires it).
+    /// A node the account owns, or empty. The portal issues a token without
+    /// one, so this is a selector kept for configs that still carry it, not a
+    /// requirement: an empty node sends no `node` query at all.
     pub node: String,
 }
 
@@ -115,10 +118,13 @@ pub fn mint_wt_token_at(base_url: &str, creds: &PortalCredentials) -> Result<Str
     }
     let cookie = cookies.join("; ");
 
-    // 2. Fetch the WT page with the session cookies.
-    let html = agent
-        .get(&format!("{base_url}/webtransceiver.php"))
-        .query("node", &creds.node)
+    // 2. Fetch the WT page with the session cookies. The node is optional:
+    // an empty one is left off the query rather than sent as `node=`.
+    let mut wt = agent.get(&format!("{base_url}/webtransceiver.php"));
+    if !creds.node.is_empty() {
+        wt = wt.query("node", &creds.node);
+    }
+    let html = wt
         .set("Cookie", &cookie)
         .call()
         .map_err(|e| Asl3Error::Http(e.to_string()))?
@@ -279,6 +285,45 @@ mod tests {
         };
         let token = mint_wt_token_at(&base, &creds).expect("mint succeeds despite 302 login");
         assert_eq!(token, "tok-302302");
+        handle.join().unwrap();
+    }
+
+    /// An empty node sends no `node` query at all (the portal mints without
+    /// one); the stub refuses any request that still carries the parameter.
+    #[test]
+    fn empty_node_is_left_off_the_query() {
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub");
+        let base = format!("http://{}", server.server_addr());
+        let handle = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok(rq) = server.recv() else { return };
+                let url = rq.url().to_string();
+                if url.starts_with("/login.php") {
+                    let resp = tiny_http::Response::from_string("ok").with_header(
+                        tiny_http::Header::from_bytes(
+                            &b"Set-Cookie"[..],
+                            &b"PHPSESSID=stubnode; path=/"[..],
+                        )
+                        .unwrap(),
+                    );
+                    let _ = rq.respond(resp);
+                } else {
+                    let body = if url == "/webtransceiver.php" {
+                        r#"<param name="callingName" value="tok-nonode"/>"#
+                    } else {
+                        "unexpected query"
+                    };
+                    let _ = rq.respond(tiny_http::Response::from_string(body));
+                }
+            }
+        });
+        let creds = PortalCredentials {
+            user: "AJ7HR".into(),
+            password: "not-a-real-password".into(),
+            node: String::new(),
+        };
+        let token = mint_wt_token_at(&base, &creds).expect("mint succeeds without a node");
+        assert_eq!(token, "tok-nonode");
         handle.join().unwrap();
     }
 

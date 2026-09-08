@@ -62,13 +62,23 @@ pub trait AmbeVoice: Send {
 /// hardware: one `ThumbDV` is one physical link in one configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VocoderMode {
-    /// D-Star and DMR: AMBE+2 full-rate, 72-bit channel frames, FEC on.
+    /// D-Star: AMBE+2 at 2400 + 1200, 72-bit channel frames, FEC on.
+    ///
+    /// NOT DMR. [`Self::Dmr`] is the same 72 bits at a different rate word
+    /// (2450 + 1150), and five of the six RATEP words differ — a dongle
+    /// initialized for one cannot decode the other's frames, and will not
+    /// say so.
     #[default]
     Dstar,
     /// System Fusion DN (V/D modes 1 and 2): AMBE+2 half-rate, 49-bit
     /// channel frames, FEC off — YSF carries its own, and
     /// [`crate::ysf::unpack_dn`] has already stripped it.
     YsfDn,
+    /// DMR: AMBE+2 at 2450 + 1150, 72-bit channel frames, the chip's FEC
+    /// included in those 72 bits — which is exactly what an MMDVM/homebrew
+    /// burst carries, so nothing re-FECs and nothing permutes them. See
+    /// [`crate::dmr`] for the rate word and why it is not [`Self::Dstar`]'s.
+    Dmr,
 }
 
 impl VocoderMode {
@@ -76,7 +86,7 @@ impl VocoderMode {
     #[must_use]
     pub const fn channel_bytes(self) -> usize {
         match self {
-            Self::Dstar => 9,
+            Self::Dstar | Self::Dmr => 9,
             Self::YsfDn => crate::ysf::VOICE_BYTES,
         }
     }
@@ -88,7 +98,7 @@ impl VocoderMode {
     #[must_use]
     pub const fn channel_bits(self) -> usize {
         match self {
-            Self::Dstar => 72,
+            Self::Dstar | Self::Dmr => 72,
             Self::YsfDn => crate::ysf::VOICE_BITS,
         }
     }
@@ -100,6 +110,7 @@ impl VocoderMode {
         match self {
             Self::Dstar => "dstar",
             Self::YsfDn => "ysf-dn",
+            Self::Dmr => "dmr",
         }
     }
 }
@@ -115,10 +126,14 @@ impl VocoderMode {
 /// drop where it cannot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelFrame {
-    /// A 72-bit D-Star/DMR frame.
+    /// A 72-bit D-Star frame.
     Dstar([u8; 9]),
     /// A 49-bit YSF DN frame, FEC already stripped.
     YsfDn(crate::ysf::DnFrame),
+    /// A 72-bit DMR frame, the chip's FEC included — the nine bytes that go
+    /// into an MMDVM/homebrew burst unchanged. Same width as
+    /// [`Self::Dstar`], different vocoder configuration: see [`crate::dmr`].
+    Dmr([u8; 9]),
 }
 
 /// Rebuild the frame a stream in `mode` expects from a device response that
@@ -130,10 +145,27 @@ fn channel_frame_for(mode: VocoderMode, bits: u8, data: [u8; 9]) -> Option<Chann
     }
     Some(match mode {
         VocoderMode::Dstar => ChannelFrame::Dstar(data),
+        // Wrapped RAW, exactly as `Dstar` is, and deliberately NOT through
+        // a `dn_frame_from_channel`-style permutation: `DroidStar` applies
+        // `dvsi_interleave` in `ysf.cpp` and `nxdn.cpp` and never in
+        // `dmr.cpp`, which `::memcpy`s the chip's nine bytes straight into
+        // the burst. Permuting here would be the 2026-09-06 YSF garble in
+        // reverse -- invisible on receive, audible on transmit -- which is
+        // why `a_dmr_frame_off_the_chip_is_not_permuted` pins it.
+        VocoderMode::Dmr => ChannelFrame::Dmr(data),
         VocoderMode::YsfDn => {
+            // `dn_frame_from_channel`, not `DnFrame::from_bytes`: the chip
+            // emits its 49 bits in the AMBE-3000's own order, and a
+            // `DnFrame` is defined to hold them in the codec's LOGICAL
+            // order -- the order `pack_dn` writes onto the air and
+            // `channel_in_dn` permutes back on the way in. Wrapping the
+            // wire bytes raw would label chip order as logical, so the
+            // permutation would be applied twice on the round trip and 48
+            // of the 49 bits would land somewhere else. That is only
+            // visible on TRANSMIT: receive never loses the permutation.
             let mut seven = [0u8; crate::ysf::VOICE_BYTES];
             seven.copy_from_slice(&data[..crate::ysf::VOICE_BYTES]);
-            ChannelFrame::YsfDn(crate::ysf::DnFrame::from_bytes(seven))
+            ChannelFrame::YsfDn(crate::ysf::dn_frame_from_channel(&seven))
         }
     })
 }
@@ -145,6 +177,7 @@ impl ChannelFrame {
         match self {
             Self::Dstar(_) => VocoderMode::Dstar,
             Self::YsfDn(_) => VocoderMode::YsfDn,
+            Self::Dmr(_) => VocoderMode::Dmr,
         }
     }
 }
@@ -159,7 +192,24 @@ impl ChannelFrame {
     pub const fn as_dstar(self) -> Option<[u8; 9]> {
         match self {
             Self::Dstar(bytes) => Some(bytes),
-            Self::YsfDn(_) => None,
+            // A DMR frame is nine bytes too, and it is still the wrong nine
+            // bytes: it came off a chip configured for 2450 + 1150. Widening
+            // this to "any 72-bit frame" would put DMR audio on a D-Star
+            // link, sounding like static to everyone on it.
+            Self::YsfDn(_) | Self::Dmr(_) => None,
+        }
+    }
+
+    /// The nine bytes of a DMR frame, or `None` if this is not one.
+    ///
+    /// The mirror of [`Self::as_dstar`], and mutually exclusive with it for
+    /// the same reason: the widths match, the vocoder configurations do
+    /// not.
+    #[must_use]
+    pub const fn as_dmr(self) -> Option<[u8; 9]> {
+        match self {
+            Self::Dmr(bytes) => Some(bytes),
+            Self::Dstar(_) | Self::YsfDn(_) => None,
         }
     }
 
@@ -167,7 +217,7 @@ impl ChannelFrame {
     #[must_use]
     pub fn as_slice(&self) -> &[u8] {
         match self {
-            Self::Dstar(bytes) => &bytes[..],
+            Self::Dstar(bytes) | Self::Dmr(bytes) => &bytes[..],
             Self::YsfDn(dn) => &dn.as_bytes()[..],
         }
     }
@@ -892,6 +942,7 @@ fn hw_stream_init<T: ambe_thumbdv::Transport>(
     let ratep = match mode {
         VocoderMode::Dstar => ratep_dstar(),
         VocoderMode::YsfDn => crate::ysf::ratep_dn(),
+        VocoderMode::Dmr => crate::dmr::ratep_dmr(),
     };
     hw_stream_check_status(&hw_stream_transact(transport, &ratep)?, 0x0A)?;
     hw_stream_check_status(&hw_stream_transact(transport, &init_encdec())?, 0x0B)?;
@@ -936,6 +987,14 @@ fn null_frame(mode: VocoderMode) -> ChannelFrame {
     match mode {
         VocoderMode::Dstar => ChannelFrame::Dstar(NULL_AMBE_FRAME),
         VocoderMode::YsfDn => ChannelFrame::YsfDn(crate::ysf::DnFrame::MUTE),
+        // A deliberate stand-in, not a verified DMR silence frame: this is
+        // D-Star's null codeword handed to a chip configured for 2450 + 1150,
+        // which is the cross-mode reuse the paragraph above warns about. It
+        // is tolerable only because nothing transmits DMR yet. The transmit
+        // task owes a silence frame read out of the reference
+        // (`MMDVMHost/DMRDefines.h`'s silence pattern), and the hardware
+        // session is the arbiter if the two disagree.
+        VocoderMode::Dmr => ChannelFrame::Dmr(NULL_AMBE_FRAME),
     }
 }
 
@@ -1046,7 +1105,10 @@ fn hw_stream_write_decode<T: ambe_thumbdv::Transport>(
         return;
     }
     let packet = match frame {
-        ChannelFrame::Dstar(bytes) => ambe_thumbdv::channel_in(&bytes),
+        // `channel_in` hard-codes 72 bits (`0x48`), which is what both of
+        // these send; the rate word they were configured with is what makes
+        // the same packet mean two different things to the chip.
+        ChannelFrame::Dstar(bytes) | ChannelFrame::Dmr(bytes) => ambe_thumbdv::channel_in(&bytes),
         ChannelFrame::YsfDn(dn) => crate::ysf::channel_in_dn(dn),
     };
     match transport.send(&packet) {
@@ -1656,8 +1718,9 @@ pub(crate) mod test_support {
 mod hw_tests {
     use super::test_support::with_no_thumbdv;
     use super::{
-        AmbeBackend, AmbeStream, AmbeVoice, ChannelFrame, NULL_AMBE_FRAME, VocoderMode, open_ambe,
-        open_ambe_stream, open_hw_stream_with, open_hw_stream_with_handle, open_hw_with,
+        AmbeBackend, AmbeStream, AmbeVoice, ChannelFrame, NULL_AMBE_FRAME, VocoderMode,
+        channel_frame_for, open_ambe, open_ambe_stream, open_hw_stream_with,
+        open_hw_stream_with_handle, open_hw_with,
     };
     use ambe_thumbdv::{
         MockTransport, ThumbDv, channel_in, dcmode_off, ecmode_off, gain_zero, init_encdec,
@@ -1756,6 +1819,7 @@ mod hw_tests {
         let ratep = match mode {
             VocoderMode::Dstar => ratep_dstar(),
             VocoderMode::YsfDn => crate::ysf::ratep_dn(),
+            VocoderMode::Dmr => crate::dmr::ratep_dmr(),
         };
         m.expect(ratep, vec![hex("61 00 02 00 0A 00")]);
         m.expect(init_encdec(), vec![hex("61 00 02 00 0B 00")]);
@@ -1954,10 +2018,64 @@ mod hw_tests {
             .expect("the encoded frame must come back");
         assert_eq!(
             frame,
-            ChannelFrame::YsfDn(crate::ysf::DnFrame::from_bytes([
-                0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A, 0x5A
-            ])),
-            "a 49-bit reply is a DN frame, not nine bytes of something else"
+            ChannelFrame::YsfDn(crate::ysf::dn_frame_from_channel(&[0x5A; 7])),
+            "a 49-bit reply is a DN frame -- in the codec's LOGICAL bit order, not the \
+             AMBE-3000's wire order, which is what `dn_frame_from_channel` undoes. This \
+             assertion used to wrap the wire bytes raw; see \
+             `an_encoded_frame_goes_back_to_the_chip_bit_for_bit` for why that garbled \
+             every transmission"
+        );
+        drop(stream);
+        assert!(join_with_timeout(handle, Duration::from_secs(2)));
+    }
+
+    /// The 49 bits that came off the chip must be the 49 bits that go back
+    /// to it.
+    ///
+    /// The AMBE-3000 emits a channel frame in the CHIP's bit order, and
+    /// [`crate::ysf::channel_in_dn`] puts a `DnFrame` back on the wire by
+    /// applying the logical -> chip permutation. So the encode side owes the
+    /// inverse, [`crate::ysf::dn_frame_from_channel`]. Without it the bytes
+    /// handed to `pack_dn` are the chip's order mislabelled as logical, the
+    /// permutation is applied a second time on the way back in, and 48 of
+    /// the 49 bits land somewhere else. RECEIVE stays clean because that
+    /// direction never lost its permutation -- which is exactly what made
+    /// this look like a transmit-only fault.
+    #[test]
+    fn an_encoded_frame_goes_back_to_the_chip_bit_for_bit() {
+        use astar_ysf::DataType;
+
+        const WIRE: [u8; 7] = [0xA0, 0x2C, 0xC6, 0x70, 0x90, 0xE4, 0x00];
+
+        let mut mock = scripted_init_mode(VocoderMode::YsfDn);
+        let mut resp = hex("61 00 09 01 01 31");
+        resp.extend_from_slice(&WIRE);
+        mock.expect(ambe_thumbdv::speech_in(&[0i16; 160]), vec![resp]);
+
+        let (mut stream, handle) =
+            open_hw_stream_with_handle(mock, VocoderMode::YsfDn).expect("YSF init");
+        stream.submit_encode([0i16; 160]);
+        let frame = poll_encoded_until(&mut stream, Duration::from_secs(2))
+            .expect("the encoded frame must come back");
+        let ChannelFrame::YsfDn(dn) = frame else {
+            panic!("a YSF stream must never produce a D-Star frame");
+        };
+
+        // What the TX path puts on the air, then what any YSF receiver --
+        // ours, a parrot's echo, a Yaesu radio -- hands back to a chip.
+        let mut payload = [0u8; crate::ysf::PAYLOAD_LEN];
+        let voice = [dn; crate::ysf::FRAMES_PER_PAYLOAD];
+        crate::ysf::pack_dn(DataType::VDMode2, &voice, &mut payload).expect("pack");
+        let back = crate::ysf::unpack_dn(DataType::VDMode2, &payload).expect("unpack");
+        let packet = crate::ysf::channel_in_dn(back[0]);
+
+        assert_eq!(
+            &packet[6..],
+            &WIRE[..],
+            "the chip was sent {:02X?} but emitted {:02X?}: the encode side is not undoing \
+             the AMBE-3000 bit order, so transmitted audio is permuted twice",
+            &packet[6..],
+            &WIRE[..]
         );
         drop(stream);
         assert!(join_with_timeout(handle, Duration::from_secs(2)));
@@ -2007,6 +2125,69 @@ mod hw_tests {
                 .len(),
             crate::ysf::VOICE_BYTES
         );
+    }
+
+    #[test]
+    fn dmr_is_a_seventy_two_bit_mode_of_its_own() {
+        assert_eq!(VocoderMode::Dmr.channel_bytes(), 9);
+        assert_eq!(VocoderMode::Dmr.channel_bits(), 72);
+        assert_eq!(VocoderMode::Dmr.as_str(), "dmr");
+        assert_eq!(ChannelFrame::Dmr([0u8; 9]).mode(), VocoderMode::Dmr);
+        assert_eq!(ChannelFrame::Dmr([1u8; 9]).as_dmr(), Some([1u8; 9]));
+        assert_eq!(ChannelFrame::Dstar([1u8; 9]).as_dmr(), None);
+        assert_eq!(ChannelFrame::Dmr([1u8; 9]).as_dstar(), None);
+    }
+
+    #[test]
+    fn a_dmr_stream_is_initialised_with_the_dmr_rate_word() {
+        // `scripted_init_mode` scripts `crate::dmr::ratep_dmr()` and
+        // `MockTransport` panics on any send that is not the one it expects
+        // next. Init runs on THIS thread (before the worker is spawned), so
+        // a `ratep_for` arm that silently reused `ratep_dstar()` fails here
+        // rather than in a garbled QSO.
+        let mock = scripted_init_mode(VocoderMode::Dmr);
+        let (stream, handle) = open_hw_stream_with_handle(mock, VocoderMode::Dmr)
+            .expect("the DMR init cookbook must complete");
+        drop(stream);
+        assert!(
+            join_with_timeout(handle, Duration::from_secs(2)),
+            "worker must exit once the handle is dropped"
+        );
+    }
+
+    #[test]
+    fn a_dmr_frame_off_the_chip_is_not_permuted() {
+        // The 2026-09-06 YSF root cause was `channel_frame_for` wrapping the
+        // chip's wire bytes without undoing the AMBE-3000 channel-bit
+        // permutation, so the permutation was applied twice on the round
+        // trip. DMR's 72-bit path has NO permutation -- DroidStar's ysf.cpp
+        // applies `dvsi_interleave` and its dmr.cpp never does -- so the
+        // bytes must survive the round trip untouched. Invisible on receive;
+        // audible as garble on transmit, which is why it is pinned here.
+        let wire: [u8; 9] = [0xDA, 0x40, 0x80, 0x13, 0x37, 0x00, 0xC3, 0x3C, 0x5A];
+        let frame = channel_frame_for(VocoderMode::Dmr, 72, wire).expect("a 72-bit frame");
+        assert_eq!(frame, ChannelFrame::Dmr(wire));
+
+        // ...and the same bytes go back out to the chip untouched, in a
+        // 72-bit (`0x48`) channel packet, the way D-Star's do.
+        let mut mock = scripted_init_mode(VocoderMode::Dmr);
+        mock.expect(channel_in(&wire), vec![speech_response(4242)]);
+        let (mut stream, handle) =
+            open_hw_stream_with_handle(mock, VocoderMode::Dmr).expect("DMR init");
+        stream.submit_decode(frame);
+        let pcm =
+            poll_until(&mut stream, Duration::from_secs(2)).expect("the decoded frame must return");
+        assert_eq!(pcm[0], 4242, "the chip must get its own bytes back");
+        drop(stream);
+        assert!(join_with_timeout(handle, Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn a_forty_nine_bit_response_is_refused_by_a_dmr_stream() {
+        // A mode mismatch is silent on this chip. `channel_frame_for`
+        // returning None is the only thing that makes it loud.
+        assert_eq!(channel_frame_for(VocoderMode::Dmr, 49, [0u8; 9]), None);
+        assert_eq!(channel_frame_for(VocoderMode::YsfDn, 72, [0u8; 9]), None);
     }
 
     #[test]
@@ -2810,7 +2991,7 @@ mod hw_tests {
 #[cfg(all(test, feature = "ambe-hw"))]
 mod hw_hardware_tests {
     use super::test_support::{hardware_lock, hardware_opted_in};
-    use super::{AmbeBackend, VocoderMode, open_ambe_stream};
+    use super::{AmbeBackend, ChannelFrame, VocoderMode, open_ambe_stream};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -3074,6 +3255,246 @@ mod hw_hardware_tests {
              over {N} frames ({elapsed:?} total, max gap {max_gap:?}, {nontrivial}/{N} \
              non-substituted), budget {BUDGET:?}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Vocoder loopback (iax-ysfgarble). The ONE measurement that separates
+    // "the bits we put on the air are the bits we meant" from "they are a
+    // permutation of them": encode real audio on the real chip, feed every
+    // channel frame straight back to the same chip for decoding, and look
+    // at what comes out. No network, no reflector, nothing keyed -- the
+    // dongle is the whole loop.
+    //
+    // A bit-order fault in one direction only (which is what garbled every
+    // YSF transmission before `channel_frame_for` learned to call
+    // `dn_frame_from_channel`) shows up here and nowhere else in the
+    // hardware-free suite, because a fake vocoder round-trips any order.
+    //
+    //   IAX_THUMBDV_TESTS=1 cargo test -p astar-codec --features ambe-hw \
+    //       hardware_dn_encode_decode_loopback_preserves_a_tone -- --nocapture
+    //   IAX_THUMBDV_TESTS=1 cargo test -p astar-codec --features ambe-hw \
+    //       hardware_dstar_encode_decode_loopback_preserves_a_tone -- --nocapture
+    //
+    // Run them one at a time: only one process may hold the dongle, and
+    // `hardware_lock` only serializes within a single test binary.
+    // -----------------------------------------------------------------
+
+    /// Sample rate every AMBE-3000 path in this crate runs at.
+    const SAMPLE_RATE: usize = 8_000;
+    /// Samples in one 20 ms vocoder frame.
+    const FRAME: usize = 160;
+    /// The tone put in, and the tone that must come back.
+    const TONE_HZ: f64 = 1_000.0;
+    /// Roughly one second of speech.
+    const TONE_FRAMES: usize = 50;
+    /// Frames of vocoder warm-up ignored before measuring: AMBE+2 needs a
+    /// few frames to lock onto a pitch, and the first are legitimately
+    /// rubbish in both modes.
+    const WARMUP_FRAMES: usize = 10;
+
+    /// Counts as an `f64` without a lossy `as` cast: every count here is a
+    /// sample index or a frame number, far inside `u32`.
+    fn count(n: usize) -> f64 {
+        f64::from(u32::try_from(n).expect("loopback counts fit in a u32"))
+    }
+
+    /// A 1 kHz sine at a third of full scale, in 20 ms frames.
+    fn tone_frames() -> Vec<[i16; FRAME]> {
+        (0..TONE_FRAMES)
+            .map(|f| {
+                let mut frame = [0i16; FRAME];
+                for (i, sample) in frame.iter_mut().enumerate() {
+                    let n = count(f * FRAME + i);
+                    let phase = 2.0 * std::f64::consts::PI * TONE_HZ * n / count(SAMPLE_RATE);
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        *sample = (10_000.0 * phase.sin()) as i16;
+                    }
+                }
+                frame
+            })
+            .collect()
+    }
+
+    /// Root-mean-square amplitude of a PCM run.
+    fn rms(pcm: &[i16]) -> f64 {
+        if pcm.is_empty() {
+            return 0.0;
+        }
+        let sum: f64 = pcm.iter().map(|s| f64::from(*s) * f64::from(*s)).sum();
+        (sum / count(pcm.len())).sqrt()
+    }
+
+    /// Dominant frequency by zero-crossing rate. Crude, and that is the
+    /// point: it needs no FFT dependency and it cannot be fooled by the
+    /// kind of failure being hunted, which turns a tone into broadband
+    /// noise (a very HIGH crossing rate) or into silence (none at all).
+    fn zero_crossing_hz(pcm: &[i16]) -> f64 {
+        if pcm.len() < 2 {
+            return 0.0;
+        }
+        let crossings = pcm.windows(2).filter(|w| (w[0] < 0) != (w[1] < 0)).count();
+        (count(crossings) / 2.0) * (count(SAMPLE_RATE) / count(pcm.len()))
+    }
+
+    /// Encodes `tone_frames()` on the real chip, feeds every channel frame
+    /// straight back for decoding, and returns the decoded PCM together
+    /// with the first channel frame's bytes (for the failure message).
+    fn hardware_vocoder_loopback(mode: VocoderMode) -> (Vec<i16>, Vec<u8>) {
+        let (mut stream, backend) = open_ambe_stream(Some(AmbeBackend::Hardware), mode)
+            .expect("a real ThumbDV is required for this test");
+        assert_eq!(
+            backend,
+            AmbeBackend::Hardware,
+            "{} loopback must run on the dongle, never a substitute backend",
+            mode.as_str()
+        );
+
+        let mut mic = tone_frames().into_iter();
+        let mut channel: std::collections::VecDeque<ChannelFrame> =
+            std::collections::VecDeque::new();
+        let mut first_channel: Vec<u8> = Vec::new();
+        let mut out: Vec<i16> = Vec::new();
+        let mut encoded = 0usize;
+        let mut mic_done = false;
+
+        let hang_guard = Instant::now() + Duration::from_secs(30);
+        while out.len() < TONE_FRAMES * FRAME {
+            assert!(
+                Instant::now() < hang_guard,
+                "{} loopback stalled: {} of {} channel frames encoded, {} of {} PCM samples \
+                 decoded",
+                mode.as_str(),
+                encoded,
+                TONE_FRAMES,
+                out.len(),
+                TONE_FRAMES * FRAME
+            );
+
+            // Keep the encode side fed, never past its in-flight bound.
+            while !mic_done && stream.in_flight_encoded() < super::AMBE_STREAM_MAX_IN_FLIGHT {
+                match mic.next() {
+                    Some(frame) => stream.submit_encode(frame),
+                    None => mic_done = true,
+                }
+            }
+            while let Some(frame) = stream.poll_encoded() {
+                if first_channel.is_empty() {
+                    first_channel = frame.as_slice().to_vec();
+                }
+                encoded += 1;
+                channel.push_back(frame);
+            }
+            // ...and hand what came back straight to the decode side. The
+            // bound matters: `submit_decode` DROPS past it, which would
+            // silently shorten the measurement instead of failing it.
+            while stream.in_flight() < super::AMBE_STREAM_MAX_IN_FLIGHT {
+                let Some(frame) = channel.pop_front() else {
+                    break;
+                };
+                stream.submit_decode(frame);
+            }
+            match stream.poll_decoded() {
+                Some(pcm) => out.extend_from_slice(&pcm),
+                None => std::thread::yield_now(),
+            }
+            if mic_done && encoded >= TONE_FRAMES && channel.is_empty() && stream.in_flight() == 0 {
+                break;
+            }
+        }
+        (out, first_channel)
+    }
+
+    /// Asserts the decoded PCM is still the tone that went in.
+    fn assert_loopback_is_a_tone(mode: VocoderMode, out: &[i16], first_channel: &[u8]) {
+        /// The band a 1 kHz tone must land in after a round trip through a
+        /// lossy vocoder. Wide on purpose: AMBE+2 is a parametric coder and
+        /// a pure tone is not what it was designed for, so a few per cent
+        /// of pitch error is expected. Bit-order damage is not a few per
+        /// cent -- it scatters the pitch and gain parameters and the
+        /// crossing rate lands in the thousands or at zero.
+        const MIN_HZ: f64 = 600.0;
+        const MAX_HZ: f64 = 1_600.0;
+        /// The tone goes in at 10,000 peak (~7,071 RMS). Anything under
+        /// this is the chip emitting silence or near-silence.
+        const MIN_RMS: f64 = 300.0;
+
+        let measured = &out[(WARMUP_FRAMES * FRAME).min(out.len())..];
+        assert!(
+            measured.len() >= (TONE_FRAMES - WARMUP_FRAMES - 5) * FRAME,
+            "{} loopback returned only {} samples, too few to measure",
+            mode.as_str(),
+            out.len()
+        );
+        let hz = zero_crossing_hz(measured);
+        let level = rms(measured);
+        eprintln!(
+            "{} encode->decode loopback: {hz:.0} Hz, RMS {level:.0}, {} samples, first channel \
+             frame {:02X?}",
+            mode.as_str(),
+            measured.len(),
+            first_channel
+        );
+        assert!(
+            level >= MIN_RMS,
+            "{} loopback came back at RMS {level:.0} (needs >= {MIN_RMS}): the chip decoded \
+             silence, not the {TONE_HZ:.0} Hz tone it was given. First channel frame {:02X?}",
+            mode.as_str(),
+            first_channel
+        );
+        assert!(
+            (MIN_HZ..=MAX_HZ).contains(&hz),
+            "{} loopback came back at {hz:.0} Hz (needs {MIN_HZ}..={MAX_HZ}), RMS {level:.0}: \
+             the {TONE_HZ:.0} Hz tone did not survive its own vocoder. That is the signature \
+             of channel bits being handed back in a different order than they were emitted \
+             in -- see `an_encoded_frame_goes_back_to_the_chip_bit_for_bit`. First channel \
+             frame {:02X?}",
+            mode.as_str(),
+            first_channel
+        );
+    }
+
+    /// YSF DN: 49-bit half-rate channel frames, whose wire order is NOT the
+    /// codec's logical order. This is the test that fails if
+    /// `channel_frame_for` stops undoing the AMBE-3000 permutation.
+    #[test]
+    fn hardware_dn_encode_decode_loopback_preserves_a_tone() {
+        if !hardware_opted_in() {
+            return;
+        }
+        let _hw = hardware_lock();
+        let (out, first) = hardware_vocoder_loopback(VocoderMode::YsfDn);
+        assert_loopback_is_a_tone(VocoderMode::YsfDn, &out, &first);
+    }
+
+    /// The D-Star twin, and the control in the experiment: 72-bit full-rate
+    /// frames go to and from the chip in one order with no permutation at
+    /// all, and D-Star transmit is verified on the air. DN failing while
+    /// this passes localises the fault to the half-rate bit order rather
+    /// than to the dongle, the audio path or the pipeline.
+    #[test]
+    fn hardware_dstar_encode_decode_loopback_preserves_a_tone() {
+        if !hardware_opted_in() {
+            return;
+        }
+        let _hw = hardware_lock();
+        let (out, first) = hardware_vocoder_loopback(VocoderMode::Dstar);
+        assert_loopback_is_a_tone(VocoderMode::Dstar, &out, &first);
+    }
+
+    /// DMR: 72-bit full-rate frames at a rate word of their own (2450 +
+    /// 1150), and — like D-Star, unlike DN — no channel-bit permutation on
+    /// the way back. Both claims are only observable on transmit, so this
+    /// is where a wrong `ratep_for` arm or a stray permutation shows up as
+    /// something other than a garbled QSO.
+    #[test]
+    fn hardware_dmr_encode_decode_loopback_preserves_a_tone() {
+        if !hardware_opted_in() {
+            return;
+        }
+        let _hw = hardware_lock();
+        let (out, first) = hardware_vocoder_loopback(VocoderMode::Dmr);
+        assert_loopback_is_a_tone(VocoderMode::Dmr, &out, &first);
     }
 }
 

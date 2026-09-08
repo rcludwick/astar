@@ -57,7 +57,7 @@ with Station() as st:                       # context-manager: frees on exit
 AllStar WT path (pass portal creds at construction):
 
 ```python
-st = Station(portal_user="me", portal_pass="...", portal_node="1234")
+st = Station(portal_user="me", portal_pass="...")  # portal_node is optional
 st.connect_wt("55553")
 ```
 

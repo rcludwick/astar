@@ -96,6 +96,13 @@ public protocol StationDriving {
     /// Costlier than `readSnapshot()`: it crosses the ABI with a buffer and
     /// parses JSON. Poll the snapshot for meters; call this at UI rate.
     func dstarState() throws -> DStarState?
+    /// The live M17 session's own state — link, whether a stream is arriving,
+    /// PTT, and the last-heard talker — or `nil` when none is active. Mirrors
+    /// `Station.m17State()` 1:1.
+    ///
+    /// Costlier than `readSnapshot()`: it crosses the ABI with a buffer and
+    /// parses JSON. Poll the snapshot for meters; call this at UI rate.
+    func m17State() throws -> M17State?
 
     // MARK: System Fusion
 
@@ -121,6 +128,76 @@ public protocol StationDriving {
     /// Costlier than `readSnapshot()`: it crosses the ABI with a buffer and
     /// parses JSON. Poll the snapshot for meters; call this at UI rate.
     func ysfState() throws -> YSFState?
+
+    // MARK: NXDN
+
+    /// Link to an NXDNReflector and decode the audio on it, mutually
+    /// exclusive with every other network. Mirrors
+    /// `Station.connectNXDN(host:callsign:radioID:talkgroup:)` 1:1 — `host`
+    /// is `host:port`, because NXDN publishes a port per reflector.
+    ///
+    /// `radioID` is the operator's own NXDN number and `talkgroup` the TG to
+    /// join; both are 16-bit because NXDN addresses stations by number, not
+    /// by callsign, and a reflector relays exactly one talkgroup.
+    ///
+    /// RECEIVE ONLY: there is no NXDN transmit path, so nothing should offer
+    /// PTT while a link is live.
+    ///
+    /// HARDWARE-ONLY, from the same ThumbDV D-Star and YSF need, so callers
+    /// gate on `CallSnapshot.nxdnAvailable` rather than calling
+    /// speculatively. Blocks for a serial scan plus a per-port dongle init;
+    /// call it off the main thread.
+    func connectNXDN(host: String, callsign: String, radioID: UInt16, talkgroup: UInt16) throws
+    /// Disconnect the live NXDN link, if any. Idempotent — a no-op while idle.
+    func nxdnDisconnect() throws
+    /// The live NXDN link's own state — link, the last id heard, and whether
+    /// a transmission is in progress — or `nil` when none is active.
+    ///
+    /// Costlier than `readSnapshot()`: it crosses the ABI with a buffer and
+    /// parses JSON. Poll the snapshot for meters; call this at UI rate.
+    func nxdnState() throws -> NXDNState?
+
+    // MARK: DMR
+
+    /// Link to a DMR master's talkgroup and decode the audio on it, mutually
+    /// exclusive with every other network. Mirrors
+    /// `Station.connectDMR(system:host:port:radioID:callsign:talkgroup:timeslot:password:)`
+    /// 1:1.
+    ///
+    /// A DMR target is FOUR things — `system` (which network's login),
+    /// `host`/`port` (which master), `talkgroup` (which room) and `timeslot`
+    /// (which slot) — because a talkgroup number names nothing on its own:
+    /// TG 91 exists on several of these networks and is a different room on
+    /// each. `radioID` is the operator's 24-bit radioid.net registration, and
+    /// `callsign` rides only in the login, since a `DMRD` frame carries a
+    /// number and no callsign at all.
+    ///
+    /// `password` is the master password — a per-network SECRET. It is an
+    /// in-arg and nothing else: it is not stored on the session, never
+    /// published, never logged, and there is no field on a snapshot, an event
+    /// or an error it could occupy.
+    ///
+    /// RECEIVE ONLY: there is no DMR transmit path, so nothing should offer
+    /// PTT while a link is live.
+    ///
+    /// HARDWARE-ONLY, from the same ThumbDV D-Star, YSF and NXDN need, so
+    /// callers gate on `CallSnapshot.dmrAvailable` rather than calling
+    /// speculatively. Blocks for a serial scan, a per-port dongle init and
+    /// then a multi-round-trip login; call it off the main thread.
+    func connectDMR(
+        system: String, host: String, port: UInt16, radioID: UInt32, callsign: String,
+        talkgroup: UInt32, timeslot: UInt8, password: String
+    ) throws
+    /// Disconnect the live DMR link, if any. Idempotent — a no-op while idle.
+    func dmrDisconnect() throws
+    /// The live DMR link's own state — link stage, why a failed login failed,
+    /// the last id heard, and whether a transmission is in progress — or `nil`
+    /// when none is active. Credential-free: the master password is nowhere in
+    /// it.
+    ///
+    /// Costlier than `readSnapshot()`: it crosses the ABI with a buffer and
+    /// parses JSON. Poll the snapshot for meters; call this at UI rate.
+    func dmrState() throws -> DMRState?
 
     // Audio device selection + gain. Mirrors `Station`'s methods 1:1; a `nil`
     // device selects the system default for that direction.

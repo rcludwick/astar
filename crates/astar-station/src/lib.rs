@@ -67,6 +67,12 @@ pub use astar_iax::{
 // `astar-codec` as direct dependencies (iax-4c8e).
 #[cfg(feature = "dstar")]
 pub use astar_console::{AmbeBackend, DstarLinkState, DstarSnapshotState};
+// The DMR state surface returned by [`Station::dmr_state`], re-exported for
+// the same reason as the D-Star one above: `astar-sys` renders it into the C
+// ABI's JSON and must be able to NAME the type to build one in a test, without
+// taking `astar-console` as a direct dependency.
+#[cfg(feature = "dmr")]
+pub use astar_console::DmrSnapshot;
 
 /// Common imports for a station consumer.
 pub mod prelude {

@@ -13,6 +13,50 @@ pre-release to the patch number, which sorts wrongly: `0.1.10beta` is newer
 than `0.1.9beta` and a string comparison says the opposite. Shipped versions
 are left as they were spelled.
 
+## 0.1.12-beta — 2026-09-07
+
+A System Fusion release, mostly. Your over now carries your callsign, so the
+reflector and the radios on it know who is talking; the transmitted audio is
+no longer scrambled on the way out; last heard names the talker on every
+digital network; and the AllStarLink account asks for one thing less.
+
+### Added
+
+- **Last heard: the popover names whoever keyed up on M17 and System Fusion,
+  as it already did on D-Star.** M17 carries the source callsign in every
+  stream and astar used to throw it away; System Fusion's was decoded all
+  along with nothing to display it. One line now answers for whichever
+  digital network is live. AllStarLink stays blank on purpose: a node number
+  is who you dialled, not who is speaking.
+
+- **A System Fusion over says who is transmitting.** An over opens with a
+  real header frame at key-down, weaves your callsign through the data
+  channel beside the voice, and ends with a terminator that carries the
+  callsigns rather than five frames of silence. Before this the data channel
+  went out zeroed, and a reflector dashboard showed the over with nobody's
+  name on it.
+
+### Changed
+
+- **The AllStarLink account asks for a password, not a node number.** The
+  portal mints a WebTransceiver token without one, so the node field was a
+  hoop. The engine now sends the node only when a config carries one, and a
+  node saved by an earlier build is kept, unused, rather than deleted.
+
+- **The Python binding can no longer drift from the C ABI.** Its struct
+  mirrors are checked against the generated header in CI, the way the
+  header itself is checked against the Rust.
+
+### Fixed
+
+- **System Fusion transmit was permuted twice.** The decode path has always
+  mapped a received frame from the codec's bit order to the chip's; the
+  encode path wrapped the chip's bytes as if they were already in codec
+  order, so every transmitted frame was permuted a second time and 1 bit in
+  49 landed where a receiver expected it. Receive was clean, and so was
+  D-Star, which has no permutation. Pinned bit for bit in a test and by a
+  tone loopback on the dongle.
+
 ## 0.1.11-beta — 2026-09-07
 
 System Fusion is the third digital network astar speaks: link a reflector,

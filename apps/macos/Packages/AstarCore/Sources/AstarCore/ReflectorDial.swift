@@ -33,6 +33,20 @@ public enum ReflectorDial: Hashable, Sendable {
     case ysf(host: String, port: UInt16)
     /// NXDN reflector.
     case nxdn(host: String, port: UInt16)
+    /// A DMR master, reached by the MMDVM/homebrew login.
+    ///
+    /// `system` is the DIRECTORY's slug for the network this master belongs
+    /// to — `freedmr-network`, `ipsc2-poland`, `xlx696` — carried verbatim
+    /// because it is what names the master's talkgroup list upstream. It is
+    /// NOT `astar_dmr::DmrNetwork`'s slug and must never be mistaken for one;
+    /// `DmrDial.family(ofSystem:)` is the documented bridge between the two
+    /// vocabularies.
+    ///
+    /// Every dialable DMR row publishes `requires: ["dmr_id", "password"]`.
+    /// Neither is carried here: the radio ID is the operator's, and the
+    /// password is a credential that lives in the Keychain and reaches the
+    /// engine as a connect-time in-arg only.
+    case mmdvm(system: String, host: String, port: UInt16)
     /// P25 reflector.
     case p25(host: String, port: UInt16)
     /// URF reflector. The port is genuinely optional here and only here — all
@@ -50,6 +64,7 @@ public enum ReflectorDial: Hashable, Sendable {
         case .m17: return "m17"
         case .ysf: return "ysf"
         case .nxdn: return "nxdn"
+        case .mmdvm: return "mmdvm"
         case .p25: return "p25"
         case .urf: return "urf"
         case .unsupported(let kind): return kind
@@ -61,7 +76,7 @@ public enum ReflectorDial: Hashable, Sendable {
     /// to connect to.
     public var isDialable: Bool {
         switch self {
-        case .dextra, .m17, .ysf, .nxdn, .p25: return true
+        case .dextra, .m17, .ysf, .nxdn, .mmdvm, .p25: return true
         case .urf(_, let port, _): return port != nil
         case .unsupported: return false
         }
@@ -75,6 +90,7 @@ public enum ReflectorDial: Hashable, Sendable {
         case .m17(let host, let port, _, _): return (host, port)
         case .ysf(let host, let port): return (host, port)
         case .nxdn(let host, let port): return (host, port)
+        case .mmdvm(_, let host, let port): return (host, port)
         case .p25(let host, let port): return (host, port)
         case .urf(let host, let port, _): return port.map { (host, $0) }
         case .unsupported: return nil
@@ -104,7 +120,7 @@ public enum ReflectorDial: Hashable, Sendable {
 
 extension ReflectorDial: Codable {
     private enum CodingKeys: String, CodingKey {
-        case kind, host, port, callsign, modules
+        case kind, host, port, callsign, modules, system
     }
 
     public init(from decoder: Decoder) throws {
@@ -126,6 +142,7 @@ extension ReflectorDial: Codable {
         }
         let host = text(.host)
         let callsign = text(.callsign)
+        let system = text(.system)
         let port = ((try? c.decodeIfPresent(UInt16.self, forKey: .port)) ?? nil)
             .flatMap { $0 > 0 ? $0 : nil }
         let modules = ((try? c.decodeIfPresent([String].self, forKey: .modules)) ?? nil) ?? []
@@ -163,6 +180,16 @@ extension ReflectorDial: Codable {
                 return
             }
             self = .nxdn(host: host, port: port)
+        case "mmdvm":
+            // The system is as required as the host: a master with no network
+            // named is one astar cannot log in to, because the login is per
+            // network. Lenient in the same direction as every arm above —
+            // one unusable row, not a dropped feed.
+            guard let port, let system else {
+                self = .unsupported(kind: kind)
+                return
+            }
+            self = .mmdvm(system: system, host: host, port: port)
         case "p25":
             guard let port else {
                 self = .unsupported(kind: kind)
@@ -189,6 +216,7 @@ extension ReflectorDial: Codable {
             try c.encode(endpoint.port, forKey: .port)
         }
         try c.encodeIfPresent(callsign, forKey: .callsign)
+        if case .mmdvm(let system, _, _) = self { try c.encode(system, forKey: .system) }
         if !modules.isEmpty { try c.encode(modules, forKey: .modules) }
     }
 }

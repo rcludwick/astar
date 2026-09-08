@@ -175,7 +175,7 @@ dependencies = [
 
 [[package]]
 name = "astar-asl3"
-version = "0.1.11-beta"
+version = "0.1.12-beta"
 dependencies = [
  "tiny_http",
  "ureq",
@@ -183,7 +183,7 @@ dependencies = [
 
 [[package]]
 name = "astar-audio"
-version = "0.1.11-beta"
+version = "0.1.12-beta"
 dependencies = [
  "astar-audio",
  "astar-iax-core",
@@ -200,12 +200,13 @@ dependencies = [
 
 [[package]]
 name = "astar-cli"
-version = "0.1.11-beta"
+version = "0.1.12-beta"
 dependencies = [
  "astar-asl3",
  "astar-audio",
  "astar-codec",
  "astar-console",
+ "astar-dmr",
  "astar-dstar",
  "astar-iax",
  "astar-iax-core",
@@ -215,9 +216,11 @@ dependencies = [
 
 [[package]]
 name = "astar-codec"
-version = "0.1.11-beta"
+version = "0.1.12-beta"
 dependencies = [
  "ambe-thumbdv",
+ "astar-dmr",
+ "astar-nxdn",
  "astar-ysf",
  "codec2",
  "libloading 0.9.0",
@@ -227,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "astar-conformance"
-version = "0.1.11-beta"
+version = "0.1.12-beta"
 dependencies = [
  "astar-iax-core",
  "pcap-parser",
@@ -238,15 +241,17 @@ dependencies = [
 
 [[package]]
 name = "astar-console"
-version = "0.1.11-beta"
+version = "0.1.12-beta"
 dependencies = [
  "astar-asl3",
  "astar-audio",
  "astar-codec",
+ "astar-dmr",
  "astar-dstar",
  "astar-iax",
  "astar-iax-core",
  "astar-m17",
+ "astar-nxdn",
  "astar-ptt",
  "astar-wireguard",
  "astar-ysf",
@@ -258,15 +263,18 @@ dependencies = [
 
 [[package]]
 name = "astar-dmr"
-version = "0.1.11-beta"
+version = "0.1.12-beta"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "astar-dstar"
-version = "0.1.11-beta"
+version = "0.1.12-beta"
 
 [[package]]
 name = "astar-gui"
-version = "0.1.11-beta"
+version = "0.1.12-beta"
 dependencies = [
  "astar-station",
  "directories",
@@ -281,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "astar-iax"
-version = "0.1.11-beta"
+version = "0.1.12-beta"
 dependencies = [
  "astar-audio",
  "astar-codec",
@@ -299,7 +307,7 @@ dependencies = [
 
 [[package]]
 name = "astar-iax-core"
-version = "0.1.11-beta"
+version = "0.1.12-beta"
 dependencies = [
  "bitflags 2.13.1",
  "bytes",
@@ -315,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "astar-inspect"
-version = "0.1.11-beta"
+version = "0.1.12-beta"
 dependencies = [
  "astar-asl3",
  "astar-audio",
@@ -332,14 +340,18 @@ dependencies = [
 
 [[package]]
 name = "astar-m17"
-version = "0.1.11-beta"
+version = "0.1.12-beta"
 dependencies = [
  "rand 0.10.2",
 ]
 
 [[package]]
+name = "astar-nxdn"
+version = "0.1.12-beta"
+
+[[package]]
 name = "astar-ptt"
-version = "0.1.11-beta"
+version = "0.1.12-beta"
 dependencies = [
  "nusb",
  "serialport",
@@ -347,7 +359,7 @@ dependencies = [
 
 [[package]]
 name = "astar-serial-sys"
-version = "0.1.11-beta"
+version = "0.1.12-beta"
 dependencies = [
  "astar-ptt",
  "futures-lite",
@@ -356,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "astar-server"
-version = "0.1.11-beta"
+version = "0.1.12-beta"
 dependencies = [
  "astar-audio",
  "astar-iax",
@@ -374,12 +386,13 @@ dependencies = [
 
 [[package]]
 name = "astar-station"
-version = "0.1.11-beta"
+version = "0.1.12-beta"
 dependencies = [
  "astar-asl3",
  "astar-audio",
  "astar-codec",
  "astar-console",
+ "astar-dmr",
  "astar-dstar",
  "astar-iax",
  "astar-iax-core",
@@ -389,7 +402,7 @@ dependencies = [
 
 [[package]]
 name = "astar-sys"
-version = "0.1.11-beta"
+version = "0.1.12-beta"
 dependencies = [
  "astar-audio",
  "astar-station",
@@ -399,7 +412,7 @@ dependencies = [
 
 [[package]]
 name = "astar-wireguard"
-version = "0.1.11-beta"
+version = "0.1.12-beta"
 dependencies = [
  "base64 0.23.1",
  "boringtun",
@@ -409,7 +422,7 @@ dependencies = [
 
 [[package]]
 name = "astar-ysf"
-version = "0.1.11-beta"
+version = "0.1.12-beta"
 
 [[package]]
 name = "async-broadcast"
@@ -4573,6 +4586,17 @@ dependencies = [
  "scopeguard",
  "unescaper",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
 ]
 
 [[package]]

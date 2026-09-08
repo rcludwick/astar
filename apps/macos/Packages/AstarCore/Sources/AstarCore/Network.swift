@@ -38,6 +38,34 @@ public enum Network: String, CaseIterable, Codable, Sendable {
     /// offers no PTT. That is deliberate: a transmit affordance that put
     /// nothing on the air would be a worse lie than an absent one.
     case ysf
+    /// NXDN reflector linking (iax-b9c2).
+    ///
+    /// Availability is HARDWARE, exactly as for ``dstar`` and ``ysf`` and
+    /// from the same dongle: NXDN voice is AMBE+2 and astar has no software
+    /// vocoder, so this segment appears when a ThumbDV is attached and not
+    /// otherwise.
+    ///
+    /// RECEIVE ONLY today. The engine decodes an NXDN reflector's audio and
+    /// has no transmit path at all, so this network offers no PTT — see
+    /// `CallSession.canTransmit`. That is deliberate: a transmit affordance
+    /// that put nothing on the air would be a worse lie than an absent one.
+    case nxdn
+    /// DMR talkgroup linking, over the MMDVM/homebrew login.
+    ///
+    /// Availability is HARDWARE, exactly as for ``dstar``, ``ysf`` and
+    /// ``nxdn`` and from the same dongle: DMR voice is AMBE+2 and astar has
+    /// no software vocoder, so this segment appears when a ThumbDV is
+    /// attached and not otherwise.
+    ///
+    /// RECEIVE ONLY today. The engine decodes a master's talkgroup traffic
+    /// and has no transmit path at all, so this network offers no PTT — see
+    /// `CallSession.canTransmit`.
+    ///
+    /// The odd one out in one respect: a DMR target is FOUR things — the
+    /// network, the master, the talkgroup and the timeslot — because a
+    /// talkgroup number names nothing on its own (TG 91 is a different room
+    /// on every network that has one). `DmrDial` is where that is enforced.
+    case dmr
 
     /// The networks the engine can actually drive right now. AllStar is
     /// always available; `hamlink` stays unavailable until the engine gains
@@ -46,11 +74,16 @@ public enum Network: String, CaseIterable, Codable, Sendable {
     /// mirroring the engine's snapshot) says so — for `dstar` that flag
     /// means "a vocoder dongle is present", which is a fact about the desk,
     /// not about the build.
-    public static func available(m17: Bool, dstar: Bool = false, ysf: Bool = false) -> [Network] {
+    public static func available(
+        m17: Bool, dstar: Bool = false, ysf: Bool = false, nxdn: Bool = false,
+        dmr: Bool = false
+    ) -> [Network] {
         var networks: [Network] = [.allstar]
         if m17 { networks.append(.m17) }
         if dstar { networks.append(.dstar) }
         if ysf { networks.append(.ysf) }
+        if nxdn { networks.append(.nxdn) }
+        if dmr { networks.append(.dmr) }
         return networks
     }
 
@@ -59,10 +92,11 @@ public enum Network: String, CaseIterable, Codable, Sendable {
     /// (always the default; nothing user-actionable in the mismatch). `m17`
     /// mirrors `available(m17:)`'s flag.
     public static func resolve(
-        _ raw: String?, m17: Bool, dstar: Bool = false, ysf: Bool = false
+        _ raw: String?, m17: Bool, dstar: Bool = false, ysf: Bool = false, nxdn: Bool = false,
+        dmr: Bool = false
     ) -> Network {
         guard let raw, let network = Network(rawValue: raw),
-            available(m17: m17, dstar: dstar, ysf: ysf).contains(network)
+            available(m17: m17, dstar: dstar, ysf: ysf, nxdn: nxdn, dmr: dmr).contains(network)
         else { return .allstar }
         return network
     }
@@ -75,6 +109,8 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         case .m17: return "M17"
         case .dstar: return "D-Star"
         case .ysf: return "Fusion"
+        case .nxdn: return "NXDN"
+        case .dmr: return "DMR"
         }
     }
 
@@ -87,6 +123,8 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         case .m17: return "M17"
         case .dstar: return "DSTAR"
         case .ysf: return "YSF"
+        case .nxdn: return "NXDN"
+        case .dmr: return "DMR"
         }
     }
 
@@ -98,6 +136,10 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         case .m17: return "waveform"
         case .dstar: return "waveform.circle"
         case .ysf: return "waveform.badge.plus"
+        case .nxdn: return "waveform.badge.magnifyingglass"
+        // Stacked planes: a DMR master carries two timeslots, and the target
+        // names which one — the only network here where that is true.
+        case .dmr: return "square.stack.3d.up"
         }
     }
 
@@ -115,6 +157,17 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         // the address rather than a default, because YSF has no conventional
         // one and every directory row carries its own.
         case .ysf: return "Reflector name or host:port"
+        // Talkgroups, not reflector names: every NXDN row the directory
+        // carries is identified by its talkgroup number, and a typed address
+        // has to name one too — the reflector at a given host serves exactly
+        // one talkgroup and relays nothing else.
+        case .nxdn: return "Talkgroup, or host:port/talkgroup"
+        // Four things, not two: the picker supplies the network and the
+        // master, this field supplies the talkgroup and the slot. A typed
+        // address spells all four out — `system:host:port/talkgroup/slot` —
+        // which is the only way to reach a network the directory does not
+        // list, TGIF included.
+        case .dmr: return "Talkgroup, or system:host:port/talkgroup"
         }
     }
 
@@ -129,13 +182,41 @@ public enum Network: String, CaseIterable, Codable, Sendable {
             return c.isASCII && (c.isLetter || c.isNumber || ".:-*#".contains(c))
         case .hamlink:
             return (c.isASCII && (c.isLetter || c.isNumber)) || ".:-/#".contains(c)
-        case .m17, .dstar, .ysf:
+        case .dmr:
+            // DMR's own arm rather than the reflector one: the directory's
+            // row ids carry UNDERSCORES (`hb_it_trani_conference`,
+            // `freedmr_usa-central`), which no other network's grammar uses
+            // and which a shared filter would silently eat as the operator
+            // typed them. No space either — DMR's separator is `/` only, and
+            // admitting a space would let `XLX836 A` sit in the field looking
+            // dialable.
+            return (c.isASCII && (c.isLetter || c.isNumber)) || ".:-/_".contains(c)
+        case .m17, .dstar, .ysf, .nxdn:
             // `host[:port]/module` or `host[:port] module`
             // (`ReflectorAddressDial`) — unlike the node networks, the space
             // is part of the grammar (the alternate separator), not something
             // to drop. Both reflector networks share it because they share the
             // grammar; only the default port differs.
             return (c.isASCII && (c.isLetter || c.isNumber)) || ".:-/ ".contains(c)
+        }
+    }
+
+    /// Whether this network carries digital voice with a talker identity on
+    /// the wire — the networks whose engine state can name whoever last keyed
+    /// up, and so the ones the popover's "Last heard" line applies to.
+    ///
+    /// AllStar is `false` because IAX2 carries no callsign in the audio path:
+    /// a node number is who you dialled, not who is speaking. Hamlink is
+    /// `false` for now because the engine has no link at all. Every new
+    /// digital network opts in HERE — NXDN, DMR — and inherits the last-heard
+    /// line without the popover changing. NXDN's identity is a NUMBER rather
+    /// than a callsign — an `NXDND` frame carries `srcId` and no callsign at
+    /// all — and that is still who most recently keyed up, so it belongs on
+    /// the same line.
+    public var isDigitalVoice: Bool {
+        switch self {
+        case .allstar, .hamlink: return false
+        case .m17, .dstar, .ysf, .nxdn, .dmr: return true
         }
     }
 

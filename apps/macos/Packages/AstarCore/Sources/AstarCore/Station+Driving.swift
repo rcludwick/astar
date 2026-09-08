@@ -21,7 +21,9 @@ extension Station: StationDriving {
             dtmfPlayed: s.dtmfPlayed, dtmfTotal: s.dtmfTotal,
             m17Available: s.m17Available, m17Active: s.m17Active,
             dstarAvailable: s.dstarAvailable, dstarActive: s.dstarActive,
-            ysfAvailable: s.ysfAvailable, ysfActive: s.ysfActive
+            ysfAvailable: s.ysfAvailable, ysfActive: s.ysfActive,
+            nxdnAvailable: s.nxdnAvailable, nxdnActive: s.nxdnActive,
+            dmrAvailable: s.dmrAvailable, dmrActive: s.dmrActive
         )
     }
 
@@ -40,7 +42,9 @@ extension Station: StationDriving {
     // sugar only — it doesn't affect conformance), so they need no adapter either.
     // connectDStar/dstarDisconnect/dstarState (iax-4c8e) likewise: the vendored
     // signatures are already the protocol's, defaulted arguments included.
-    // connectYSF/ysfDisconnect/ysfState the same, for the same reason.
+    // connectYSF/ysfDisconnect/ysfState the same, for the same reason, and
+    // m17State alongside them. connectNXDN/nxdnDisconnect/nxdnState (iax-b9c2)
+    // likewise, and connectDMR/dmrDisconnect/dmrState the same again.
 }
 
 /// Errors from the fallback `NullStation` (no real engine available).
@@ -74,6 +78,9 @@ public struct NullStation: StationDriving {
     /// No engine, so no session — the same answer the real station gives while
     /// idle, which keeps the talker line absent rather than wrong.
     public func dstarState() throws -> DStarState? { nil }
+    /// No engine, so no session — the same answer the real station gives
+    /// while idle, which keeps the last-heard line absent rather than wrong.
+    public func m17State() throws -> M17State? { nil }
     public func connectYSF(host: String, callsign: String, options: String?) throws {
         throw NullStationError.noEngine
     }
@@ -81,6 +88,25 @@ public struct NullStation: StationDriving {
     /// No engine, so no link — the same answer the real station gives while
     /// idle, which keeps the last-heard line absent rather than wrong.
     public func ysfState() throws -> YSFState? { nil }
+    public func connectNXDN(
+        host: String, callsign: String, radioID: UInt16, talkgroup: UInt16
+    ) throws {
+        throw NullStationError.noEngine
+    }
+    public func nxdnDisconnect() throws {}
+    /// No engine, so no link — the same answer the real station gives while
+    /// idle, which keeps the last-heard line absent rather than wrong.
+    public func nxdnState() throws -> NXDNState? { nil }
+    public func connectDMR(
+        system: String, host: String, port: UInt16, radioID: UInt32, callsign: String,
+        talkgroup: UInt32, timeslot: UInt8, password: String
+    ) throws {
+        throw NullStationError.noEngine
+    }
+    public func dmrDisconnect() throws {}
+    /// No engine, so no link — the same answer the real station gives while
+    /// idle, which keeps the last-heard line absent rather than wrong.
+    public func dmrState() throws -> DMRState? { nil }
     public func setCodecDirs(_ dirs: [String]) throws {}
     public func listInputs() throws -> [String] { [] }
     public func listOutputs() throws -> [String] { [] }
@@ -148,6 +174,7 @@ extension CallSession {
     /// construction (astar-eb6c).
     public static func live(
         store: CredentialStore = KeychainCredentialStore(),
+        dmrPasswords: DmrPasswordStore = KeychainDmrPasswordStore(),
         audioStore: AudioSettingsStore = UserDefaultsAudioSettingsStore()
     ) -> CallSession {
         let audio = audioStore.load()
@@ -165,8 +192,14 @@ extension CallSession {
         // `credentials` is also passed through for the M17 callsign prefill
         // (astar-c2e5/iax-f2b8 Task 8) — many hams reuse their portal login as
         // their callsign; see `CallSession.callsignPrefill(from:)`.
+        // The DMR password store goes in beside the account: those passwords
+        // are read at the moment of a dial and handed straight to the engine,
+        // so the session holds the STORE and never a password. A separate
+        // Keychain item from `store`'s, and a separate lifetime — see
+        // `DmrPasswordStore`.
         let session = CallSession(
-            station: station, hasCredentials: hasCredentials, credentials: credentials)
+            station: station, hasCredentials: hasCredentials, credentials: credentials,
+            dmrPasswords: dmrPasswords)
         session.applyAudioSettings(audio)  // restore saved devices + gains
         return session
     }

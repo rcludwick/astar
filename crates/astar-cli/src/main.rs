@@ -18,12 +18,16 @@ mod audio;
 mod call;
 mod cli;
 mod dial;
+#[cfg(feature = "dmr")]
+mod dmr_listen;
 #[cfg(feature = "dstar")]
 mod dstar_listen;
+#[cfg(feature = "nxdn")]
+mod nxdn_listen;
 mod parrot;
 mod ptt;
 mod register;
-#[cfg(any(feature = "dstar", feature = "ysf"))]
+#[cfg(any(feature = "dmr", feature = "dstar", feature = "nxdn", feature = "ysf"))]
 mod wav_backend;
 #[cfg(feature = "ysf")]
 mod ysf_listen;
@@ -55,6 +59,23 @@ fn main() -> ExitCode {
         "ysf-listen" => ysf_listen::run(args),
         #[cfg(not(feature = "ysf"))]
         "ysf-listen" => Err("ysf-listen requires building with `--features ysf`".to_string()),
+        #[cfg(feature = "nxdn")]
+        "nxdn-listen" => nxdn_listen::run(args),
+        #[cfg(not(feature = "nxdn"))]
+        "nxdn-listen" => Err("nxdn-listen requires building with --features nxdn".to_string()),
+        // The master password is read HERE, from the environment, and moved
+        // into `run`. It is never an argument: every process on the machine
+        // can read another's command line, and a shell keeps it in history.
+        // An unset variable reaches `run` as an empty string so `--help`
+        // still works without one; `run` refuses an empty password before it
+        // opens anything.
+        #[cfg(feature = "dmr")]
+        "dmr-listen" => dmr_listen::run(
+            args,
+            std::env::var(dmr_listen::PASSWORD_ENV).unwrap_or_default(),
+        ),
+        #[cfg(not(feature = "dmr"))]
+        "dmr-listen" => Err("dmr-listen requires building with --features dmr".to_string()),
         other => {
             eprintln!("unknown command: {other}\n\n{USAGE}");
             return ExitCode::FAILURE;

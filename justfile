@@ -122,6 +122,67 @@ ysf-parrot port:
 ysf-listen host callsign *args:
     cargo run --release -p astar-cli --features ysf -- ysf-listen {{host}} --callsign {{callsign}} {{args}}
 
+# NXDN's hardware-free half: the protocol crate, the codec layer, the session
+# and the facade. `astar-nxdn` and `astar-codec::nxdn` are already covered by
+# `just ci`; the feature-gated halves are not.
+nxdn-test:
+    cargo test -p astar-nxdn
+    cargo test -p astar-console --features nxdn
+    cargo test -p astar-station --features nxdn
+    cargo test -p astar-cli --features nxdn
+
+# NXDN — hardware-free bench loop, then the hardware checkpoint.
+#
+#     just nxdn-parrot 41400 31313          # terminal 1
+#     just nxdn-listen 127.0.0.1:41400 KC0ABC 4242 31313   # terminal 2
+#
+# astar does not transmit NXDN yet, so this is not the round-trip bench
+# `ysf-parrot`/`m17-parrot` are. Its use today is a known stream on
+# 127.0.0.1 from a real transmitter through a hotspot, or from the loopback
+# tests — when transmit lands it becomes the round-trip bench.
+nxdn-parrot port tg="31313":
+    cargo run -p astar-nxdn --example nxdn_parrot -- --port {{port}} --tg {{tg}}
+
+# Link an NXDNReflector talkgroup and decode the voice on it. RECEIVE ONLY —
+# this command has no PTT, because astar has no NXDN transmit path yet.
+# Add --wav /tmp/nxdn.wav to capture instead of play.
+nxdn-listen host callsign radio_id tg *args:
+    cargo run --release -p astar-cli --features nxdn -- nxdn-listen {{host}} --callsign {{callsign}} --radio-id {{radio_id}} --tg {{tg}} {{args}}
+
+# DMR's hardware-free half: the protocol crate, the block codes, the codec
+# layer, the session and the facade. `astar-dmr` and `astar-codec::dmr` are
+# already covered by `just ci`; the feature-gated halves are not.
+dmr-test:
+    cargo test -p astar-dmr
+    cargo test -p astar-console --features dmr
+    cargo test -p astar-station --features dmr
+    cargo test -p astar-cli --features dmr
+
+# DMR — hardware-free bench loop, then the hardware checkpoint.
+#
+#     just dmr-parrot 62031                                        # terminal 1
+#     ASTAR_DMR_PASSWORD=passw0rd just dmr-listen 127.0.0.1:62031 tgif KC0ABC 3153591 31313
+#
+# The parrot is a MASTER: it binds and waits, and performs the real
+# RPTL/RPTK/RPTC handshake, so a client that gets the digest wrong fails here
+# rather than against somebody's network.
+#
+# Neither half takes a password on the command line: a secret in argv is
+# readable by every process on the machine and lands in shell history. The
+# parrot reads ASTAR_DMR_PARROT_PASSWORD and falls back to its own built-in
+# loopback default (which is what the ASTAR_DMR_PASSWORD above matches); the
+# listener reads ASTAR_DMR_PASSWORD and has no default at all.
+dmr-parrot port="62031":
+    cargo run -p astar-dmr --example dmr_parrot -- --port {{port}}
+
+# Log in to a DMR master, join a talkgroup on a timeslot, and decode the voice
+# on it. RECEIVE ONLY — this command has no PTT, because astar has no DMR
+# transmit path yet. The password comes from ASTAR_DMR_PASSWORD, never argv.
+# Add --ts 1 for timeslot 1 (the default is TS2, the hotspot convention), and
+# --wav /tmp/dmr.wav to capture instead of play.
+dmr-listen host system callsign radio_id tg *args:
+    cargo run --release -p astar-cli --features dmr -- dmr-listen {{host}} --system {{system}} --callsign {{callsign}} --radio-id {{radio_id}} --tg {{tg}} {{args}}
+
 dstar-test-hw:
     IAX_THUMBDV_TESTS=1 cargo test -p astar-codec --features ambe-hw
     IAX_THUMBDV_TESTS=1 cargo test -p astar-console --features dstar

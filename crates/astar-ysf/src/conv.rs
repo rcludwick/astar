@@ -36,6 +36,24 @@ pub fn set_bit(buf: &mut [u8], index: usize, value: bool) {
     }
 }
 
+/// Where interleaved dibit `i` of a `cols`-by-twenty block lands, as a bit
+/// index.
+///
+/// YSF interleaves the output of [`encode`] in bit *pairs*, and it does it in
+/// three places with three widths: the FICH and the V/D mode 2 data channel
+/// are five columns of twenty, the header and full-rate data channel is nine.
+/// The published tables (`INTERLEAVE_TABLE_5_20`, `INTERLEAVE_TABLE_9_20`)
+/// spell out every entry; they are this expression. Write down the columns,
+/// read across the rows, which is what an interleaver is — so the result is
+/// always even, because it addresses a pair.
+///
+/// (The one YSF interleave that is *not* this shape is the VCH's, which moves
+/// single bits and lives in `astar-codec`.)
+#[must_use]
+pub const fn dibit_interleave(i: usize, cols: usize) -> usize {
+    (i / cols) * 2 + (i % cols) * 40
+}
+
 /// The two output bits for input bit `input` from encoder state `state`.
 ///
 /// `state` holds the four previous input bits, newest in bit 0.
@@ -142,6 +160,36 @@ mod tests {
         let mut encoded = vec![0u8; (total * 2).div_ceil(8)];
         encode(&padded, &mut encoded, total);
         decode(&encoded, total)
+    }
+
+    #[test]
+    fn the_dibit_interleave_matches_both_published_tables() {
+        // The heads of `INTERLEAVE_TABLE_5_20` and `INTERLEAVE_TABLE_9_20`,
+        // and their last entries.
+        assert_eq!(
+            (0..10).map(|i| dibit_interleave(i, 5)).collect::<Vec<_>>(),
+            vec![0, 40, 80, 120, 160, 2, 42, 82, 122, 162]
+        );
+        assert_eq!(dibit_interleave(99, 5), 198);
+        assert_eq!(
+            (0..11).map(|i| dibit_interleave(i, 9)).collect::<Vec<_>>(),
+            vec![0, 40, 80, 120, 160, 200, 240, 280, 320, 2, 42]
+        );
+        assert_eq!(dibit_interleave(179, 9), 358);
+    }
+
+    #[test]
+    fn every_dibit_interleave_covers_its_block_exactly_once() {
+        for (cols, dibits) in [(5usize, 100usize), (9, 180)] {
+            let mut seen = vec![false; dibits * 2];
+            for i in 0..dibits {
+                let n = dibit_interleave(i, cols);
+                assert!(!seen[n] && !seen[n + 1], "bit pair {n} reused at {cols}");
+                seen[n] = true;
+                seen[n + 1] = true;
+            }
+            assert!(seen.iter().all(|&s| s), "{cols} columns left a gap");
+        }
     }
 
     #[test]

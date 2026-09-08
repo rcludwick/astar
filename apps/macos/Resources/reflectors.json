@@ -11,8 +11,8 @@
     "dmr": 185,
     "dstar": 947,
     "m17": 108,
-    "nxdn": 297,
-    "p25": 320,
+    "nxdn": 298,
+    "p25": 319,
     "urf": 98,
     "ysf": 1460
   },
@@ -4535,8 +4535,8 @@
         "DCS045"
       ],
       "country": "USA",
-      "dashboard": "http://xlx045.pennlinkgroup.com/xlxd/",
-      "description": "Penn-Link - info.pennlinkgroup.com - DSTAR/DMR/YSF/P25/NXDN/Wires-X",
+      "dashboard": "http://urf045.pennlinkgroup.com:8082/urfd",
+      "description": "PennLink Group URF045",
       "dial": {
         "callsign": "XRF045",
         "host": "70.44.20.24",
@@ -7538,8 +7538,8 @@
         "DCS208"
       ],
       "country": "France",
-      "dashboard": "http://urf208.f5kav.fr",
-      "description": "French Multimode Reflector, brought to you by F5KAV Club",
+      "dashboard": "http://xlx208.f5kav.fr",
+      "description": "French D-Star XLX Multiprotocol Reflector and Smart Group Server, brought to you by F5KAV",
       "dial": {
         "callsign": "XRF208",
         "host": "213.186.34.50",
@@ -8260,7 +8260,7 @@
       "description": "Hitachi Digipeater (DMR-SFR)",
       "dial": {
         "callsign": "XRF245",
-        "host": "153.218.133.190",
+        "host": "153.210.226.247",
         "kind": "dextra",
         "port": 30001
       },
@@ -8974,7 +8974,7 @@
       "description": "XLX288 / YSF IT-URF288 #22250",
       "dial": {
         "callsign": "XRF288",
-        "host": "79.52.136.35",
+        "host": "79.36.14.89",
         "kind": "dextra",
         "port": 30001
       },
@@ -12123,9 +12123,9 @@
         "REF479",
         "DCS479"
       ],
-      "country": "United States",
-      "dashboard": "http://imrs.amcomm.network",
-      "description": "AmComm Network IMRS",
+      "country": "USA",
+      "dashboard": "http://n9ink.net/db",
+      "description": "Welcome to Ozark Digital",
       "dial": {
         "callsign": "XRF479",
         "host": "198.58.106.10",
@@ -16749,8 +16749,8 @@
         "DCS845"
       ],
       "country": "USA",
-      "dashboard": "https://xlx845.pota.review/dashboard",
-      "description": "Sponsored by POTA News and Reviews https://pota.review",
+      "dashboard": "https://xlx845.pota.review",
+      "description": "Sponsored by POTA News and Review https://pota.review",
       "dial": {
         "callsign": "XRF845",
         "host": "71.174.60.28",
@@ -20125,7 +20125,7 @@
       "description": "New England MultiMode Group",
       "dial": {
         "callsign": "XRFMMG",
-        "host": "172.56.198.157",
+        "host": "137.103.112.175",
         "kind": "dextra",
         "port": 30001
       },
@@ -29098,9 +29098,21 @@
       "source": "dvref"
     },
     {
+      "country": "TH",
+      "dial": {
+        "host": "103.91.205.89",
+        "kind": "nxdn",
+        "port": 41400
+      },
+      "id": "9449",
+      "name": "SISAKET THAILAND",
+      "network": "nxdn",
+      "source": "dvref"
+    },
+    {
       "country": "US",
       "dashboard": "http://www.n6jet.com/urfjet/",
-      "description": "<p>n6jet.com/urfjetpurpose.html</p>",
+      "description": "<p>n6jet.com/urfjetpurpose.html&nbsp; &nbsp; P25 9511 is not in use at this time.&nbsp;</p>",
       "dial": {
         "host": "5.161.18.189",
         "kind": "nxdn",
@@ -33665,21 +33677,6 @@
       "sponsor": "N6LKA"
     },
     {
-      "country": "US",
-      "dashboard": "http://www.n6jet.com/urfjet/",
-      "description": "<p>n6jet.com/urfjetpurpose.html</p>",
-      "dial": {
-        "host": "5.161.18.189",
-        "kind": "p25",
-        "port": 41000
-      },
-      "id": "9511",
-      "name": "URFJET",
-      "network": "p25",
-      "source": "dvref",
-      "sponsor": "N6JET"
-    },
-    {
       "country": "AU",
       "dashboard": "https://m17-p25.vkradio.com/",
       "description": "<p>M17 Project - M17-M17 C Reflector bridge</p>",
@@ -35278,7 +35275,7 @@
     {
       "country": "US",
       "dashboard": "http://www.n6jet.com/urfjet/",
-      "description": "<p>n6jet.com/urfjetpurpose.html</p>",
+      "description": "<p>n6jet.com/urfjetpurpose.html&nbsp; &nbsp; P25 9511 is not in use at this time.&nbsp;</p>",
       "dial": {
         "host": "5.161.18.189",
         "kind": "urf",

@@ -49,4 +49,42 @@ final class CredentialStoreTests: XCTestCase {
         try store.save(fresh)
         XCTAssertEqual(store.load(), fresh, "save replaces rather than appends")
     }
+
+    // MARK: - DMR master passwords
+
+    /// Its own store, and its own Keychain item. The invariant that matters:
+    /// nothing here can produce a `Credentials`, so a DMR password can never
+    /// bring an empty AllStarLink account into existence.
+    func testTheDMRStoreRoundTripsPerSystemAndKnowsWhichAreSet() throws {
+        let store = InMemoryDmrPasswordStore()
+        XCTAssertNil(store.password(system: "tgif"))
+        XCTAssertTrue(store.systems().isEmpty)
+
+        try store.save("hunter2", system: "tgif")
+        try store.save("other", system: "freedmr-network")
+        XCTAssertEqual(store.password(system: "tgif"), "hunter2")
+        XCTAssertEqual(store.systems(), ["tgif", "freedmr-network"])
+
+        // Each network issues its own: one is never the other.
+        XCTAssertNotEqual(store.password(system: "tgif"), store.password(system: "freedmr-network"))
+
+        try store.remove(system: "tgif")
+        XCTAssertNil(store.password(system: "tgif"))
+        XCTAssertEqual(store.password(system: "freedmr-network"), "other")
+    }
+
+    /// A slug typed with different case or stray spaces must find the password
+    /// a picker saved, or the dial refuses with one sitting right there.
+    func testTheDMRStoreNormalisesTheSystemSlug() throws {
+        let store = InMemoryDmrPasswordStore(["TGIF": "hunter2"])
+        XCTAssertEqual(store.password(system: " tgif "), "hunter2")
+    }
+
+    /// A blank password is not a password: an empty login is a refusal the
+    /// operator cannot interpret, so it reads as absent and the dial says so.
+    func testABlankDMRPasswordCountsAsNone() throws {
+        let store = InMemoryDmrPasswordStore(["tgif": "   "])
+        XCTAssertNil(store.password(system: "tgif"))
+        XCTAssertTrue(store.systems().isEmpty)
+    }
 }

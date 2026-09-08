@@ -6,23 +6,32 @@
 //! exposes a pollable [`ConsoleState`]. Sync, no async runtime — consumed by
 //! the web harness, a later TUI, and the astar Tauri app.
 
+#[cfg(feature = "dmr")]
+pub mod dmr;
 #[cfg(feature = "dstar")]
 pub mod dstar;
 pub mod dtmf;
 #[cfg(feature = "m17")]
 pub mod m17;
 pub mod metering;
+#[cfg(feature = "nxdn")]
+pub mod nxdn;
 pub mod parrot;
 pub mod session;
 pub mod state;
 pub mod tracer;
 /// The one audio lane every digital-voice session runs on.
 mod voice_route;
+
 #[cfg(feature = "ysf")]
 pub mod ysf;
 
 pub use astar_audio::{MicProfile, NotchSpec};
+#[cfg(feature = "dmr")]
+pub use astar_dmr::{DmrNetwork, Timeslot};
 pub use astar_iax::{Direction, TracedFrame};
+#[cfg(feature = "dmr")]
+pub use dmr::{DmrConfig, DmrLink, DmrSnapshot};
 #[cfg(feature = "dstar")]
 pub use dstar::{DstarConfig, DstarSession, DstarSnapshotState};
 pub use dtmf::{DetectedDigit, DtmfShared, DtmfSource, DtmfTester};
@@ -39,9 +48,15 @@ pub use astar_dstar::LinkState as DstarLinkState;
 #[cfg(feature = "m17")]
 pub use m17::{M17Config, M17Session, M17SnapshotState};
 pub use metering::{Gain, Level, MeteringBackend, peak_to_dbfs};
+#[cfg(feature = "nxdn")]
+pub use nxdn::{NxdnConfig, NxdnLink, NxdnSnapshot};
 pub use parrot::{LocalParrot, ParrotPhase, ParrotShared, calibrate_mic};
+#[cfg(feature = "dmr")]
+pub use session::dmr_available;
 #[cfg(feature = "dstar")]
 pub use session::dstar_available;
+#[cfg(feature = "nxdn")]
+pub use session::nxdn_available;
 #[cfg(feature = "ysf")]
 pub use session::ysf_available;
 pub use session::{

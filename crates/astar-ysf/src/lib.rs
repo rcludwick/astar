@@ -6,22 +6,22 @@
 //!
 //! # What is here, and what is not
 //!
-//! `crc`/`golay`/`conv`/`fich`/`frame`/`wire`/`fsm` have no I/O and no
+//! `crc`/`golay`/`conv`/`fich`/`dch`/`frame`/`wire`/`fsm` have no I/O and no
 //! dependencies beyond `std`: the CRC and the two forward-error-correcting
-//! codes that protect a FICH, the FICH itself, the 120-byte radio frame it
-//! heads, the `YSFReflector` datagrams that carry that frame over UDP, and a
-//! client-side link state machine. `reflector` is the one module that owns
-//! I/O — a UDP socket and its run-loop thread — mirroring
-//! `astar_dstar::reflector`'s shape.
+//! codes that protect a FICH, the FICH itself, the payload's DATA channel,
+//! the 120-byte radio frame they head, the `YSFReflector` datagrams that
+//! carry that frame over UDP, and a client-side link state machine.
+//! `reflector` is the one module that owns I/O — a UDP socket and its
+//! run-loop thread — mirroring `astar_dstar::reflector`'s shape.
 //!
-//! **The ninety payload bytes are carried, not decoded.** Voice on YSF is
-//! AMBE+2, which on astar means the AMBE-3000 in a `ThumbDV` and nothing
-//! else; until the vocoder path exists, [`frame::Frame::payload`] hands the
-//! bytes over intact and this crate makes no claim about what is in them.
-//! That is deliberate. A payload parser with no vocoder behind it would be
-//! untestable against anything real, and the honest state — frames arrive,
-//! their FICH is readable, the audio is not yet — is a better place to
-//! stand than a half-decoder that nothing calls.
+//! **The voice is carried, not decoded; the data channel is both.** Voice on
+//! YSF is AMBE+2, which on astar means the AMBE-3000 in a `ThumbDV` and
+//! nothing else, so [`frame::Frame::payload`] hands those bits over intact
+//! and this crate makes no claim about what is in them — `astar-codec`'s
+//! `ysf` module is where they become sound. The ten or twenty bytes of
+//! callsign woven through the same payload need no vocoder at all, and
+//! [`dch`] reads and writes them: they are what a receiver attributes a
+//! transmission by, and leaving them out is what `iax-ysfdch` was.
 //!
 //! # DN and VW
 //!
@@ -46,6 +46,7 @@
 
 pub mod conv;
 pub mod crc;
+pub mod dch;
 pub mod fich;
 pub mod frame;
 pub mod fsm;
@@ -53,6 +54,7 @@ pub mod golay;
 pub mod reflector;
 pub mod wire;
 
+pub use dch::{CSD_LEN, DCH_LEN, FRAME_TOTAL, SUPERFRAME};
 pub use fich::{DataType, FICH_LEN, Fich, FichError, FrameInfo};
 pub use frame::{FRAME_LEN, Frame, PAYLOAD_LEN, SYNC};
 pub use fsm::{FsmAction, LINK_TIMEOUT, LinkState, POLL_INTERVAL, YsfFsm};

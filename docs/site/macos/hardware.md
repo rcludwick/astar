@@ -141,7 +141,8 @@ developed against day to day.
 |---|---|---|
 | **D-Star** | required | Works. XLX/XRF reflectors over DExtra. |
 | **DMR** | would be required | Not yet — astar can classify DMR networks and store a radio ID, but nothing dials. |
-| **YSF** | would be required | Not yet. |
+| **YSF** | required | Works. YSF reflectors, receive and transmit. |
+| **NXDN** | required | Receive only. Link a talkgroup on an NXDNReflector and hear it; astar has no NXDN transmit path yet. |
 | **M17** | not needed | Works. Codec 2, built in. |
 | **AllStarLink** | not needed | Works. |
 

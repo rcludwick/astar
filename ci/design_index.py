@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# astar — Copyright (c) 2026 Rob Ludwick.
+# SPDX-License-Identifier: AGPL-3.0-only
+# Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 """Generate the landing page for the internal design-docs site.
 
 `just design` runs this before `zensical serve`. It writes

@@ -401,6 +401,39 @@ final class StationTests: XCTestCase {
         )
     }
 
+    func testM17StateDecodesTheEngineJSON() throws {
+        let json = """
+            {"link":"linked","receiving":true,"ptt":false,"talker":"N0CALL"}
+            """
+        let state = try XCTUnwrap(M17State(json: json))
+        XCTAssertEqual(state.link, .linked)
+        XCTAssertTrue(state.receiving)
+        XCTAssertFalse(state.ptt)
+        XCTAssertEqual(state.talker, "N0CALL")
+    }
+
+    func testM17StateTreatsAMissingTalkerAsNilAndDegradesOnAnUnknownLink() throws {
+        let quiet = """
+            {"link":"linking","receiving":false,"ptt":false,"talker":null}
+            """
+        let state = try XCTUnwrap(M17State(json: quiet))
+        XCTAssertEqual(state.link, .linking)
+        XCTAssertNil(state.talker, "JSON null must decode as nil, not the string \"null\"")
+
+        XCTAssertNil(M17State(json: "{}"), "the no-session document decodes as nil")
+        // A newer engine naming a link state this binding does not know must
+        // degrade to .failed — the direction that will not offer PTT.
+        let odd = """
+            {"link":"reticulating","receiving":false,"ptt":false,"talker":null}
+            """
+        XCTAssertEqual(try XCTUnwrap(M17State(json: odd)).link, .failed)
+    }
+
+    func testM17StateIsNilOnAFreshStation() throws {
+        let st = try Station()
+        XCTAssertNil(try st.m17State(), "a never-connected station has no M17 state")
+    }
+
     func testDStarStateDecodesTheEngineJSON() throws {
         let json = """
             {"link":"linked","talker":"AJ7HR","slow_text":"hi there",\
@@ -438,6 +471,168 @@ final class StationTests: XCTestCase {
             "tx_capable":true,"ptt":false,"tx_db":-60.0,"rx_db":-60.0,"input_db":-60.0}
             """
         XCTAssertEqual(try XCTUnwrap(DStarState(json: odd)).link, .failed)
+    }
+
+    // MARK: - NXDN (iax-b9c2)
+
+    func testNXDNStateDecodesTheEngineJSON() throws {
+        let json = """
+            {"link":"linked","last_heard":"4242","last_heard_id":4242,"frames_rx":97,\
+            "receiving":true,"backend":"thumbdv","ptt":false,"rx_db":-31.2}
+            """
+        let state = try XCTUnwrap(NXDNState(json: json))
+        XCTAssertEqual(state.link, .linked)
+        XCTAssertEqual(state.lastHeard, "4242")
+        XCTAssertEqual(state.lastHeardID, 4242)
+        XCTAssertEqual(state.framesRX, 97)
+        XCTAssertTrue(state.receiving)
+        XCTAssertEqual(state.backend, .thumbdv)
+        XCTAssertFalse(state.ptt, "NXDN is receive-only: ptt is always false")
+    }
+
+    func testNXDNStateTreatsAMissingLastHeardAsNil() throws {
+        let json = """
+            {"link":"linking","last_heard":null,"last_heard_id":null,"frames_rx":0,\
+            "receiving":false,"backend":null,"ptt":false,"rx_db":-60.0}
+            """
+        let state = try XCTUnwrap(NXDNState(json: json))
+        XCTAssertEqual(state.link, .linking)
+        XCTAssertNil(state.lastHeard, "JSON null must decode as nil, not the string \"null\"")
+        XCTAssertNil(state.lastHeardID)
+        XCTAssertNil(state.backend, "a link opened without audio names no backend")
+    }
+
+    func testAnUnrecognisedNXDNLinkDecodesToTheSafeCase() throws {
+        // A UI that believes the link is down will not offer anything on it.
+        // An unknown string must never be read as `linked`. `failed` is what
+        // D-Star, YSF and M17 answer, so one decoder shape covers them all.
+        let json = #"{"link":"quantum","frames_rx":0,"receiving":false,"ptt":false}"#
+        let state = try XCTUnwrap(NXDNState(json: json))
+        XCTAssertEqual(state.link, .failed)
+    }
+
+    func testEmptyNXDNStateJSONIsNil() {
+        XCTAssertNil(NXDNState(json: "{}"), "the no-link document decodes as nil")
+    }
+
+    func testFreshStationHasNoNXDNLink() throws {
+        let station = try Station()
+        XCTAssertNil(try station.nxdnState())
+        XCTAssertFalse(try station.snapshot().nxdnActive)
+    }
+
+    func testNXDNDisconnectIsIdempotentWhileIdle() throws {
+        let station = try Station()
+        XCTAssertNoThrow(try station.nxdnDisconnect())
+        XCTAssertNoThrow(try station.nxdnDisconnect())
+    }
+
+    /// A zero radio id or talkgroup is refused before any hardware is touched,
+    /// so this holds with or without a dongle attached.
+    func testConnectNXDNRejectsAZeroRadioIDOrTalkgroup() throws {
+        let station = try Station()
+        for (radioID, talkgroup) in [(UInt16(0), UInt16(1)), (UInt16(1), UInt16(0))] {
+            XCTAssertThrowsError(
+                try station.connectNXDN(
+                    host: "127.0.0.1:41400", callsign: "N0CALL", radioID: radioID,
+                    talkgroup: talkgroup)
+            ) { error in
+                // IAX_ERR_NXDN == -21
+                XCTAssertEqual((error as? StationError)?.code, -21)
+            }
+        }
+    }
+
+    // MARK: - DMR (iax-d4f7)
+
+    func testDMRStateDecodesTheEngineJSON() throws {
+        let json = """
+            {"link":"linked","failure":null,"last_heard":"4242","last_heard_id":4242,\
+            "talkgroup":31313,"timeslot":2,"frames_rx":97,"receiving":true,\
+            "backend":"thumbdv","ptt":false,"rx_db":-31.2}
+            """
+        let state = try XCTUnwrap(DMRState(json: json))
+        XCTAssertEqual(state.link, .linked)
+        XCTAssertNil(state.failure, "a linked link has not failed")
+        XCTAssertEqual(state.lastHeard, "4242")
+        XCTAssertEqual(state.lastHeardID, 4242)
+        XCTAssertEqual(state.talkgroup, 31313)
+        XCTAssertEqual(state.timeslot, 2)
+        XCTAssertEqual(state.framesRX, 97)
+        XCTAssertTrue(state.receiving)
+        XCTAssertEqual(state.backend, .thumbdv)
+        XCTAssertFalse(state.ptt, "DMR is receive-only: ptt is always false")
+    }
+
+    func testDMRAuthFailureSurvivesTheCrossing() throws {
+        // The one failure an operator can actually fix themselves, and the
+        // only reason the engine reports a stage at all.
+        let json = """
+            {"link":"failed","failure":"auth","talkgroup":31313,"timeslot":2,\
+            "frames_rx":0,"receiving":false,"ptt":false}
+            """
+        let state = try XCTUnwrap(DMRState(json: json))
+        XCTAssertEqual(state.link, .failed)
+        XCTAssertEqual(state.failure, .auth)
+    }
+
+    func testAnUnrecognisedDMRLinkDecodesToTheSafeCase() throws {
+        // A UI that believes the link is down will not offer PTT. An unknown
+        // string must never be read as `linked`. `failed` is what D-Star,
+        // YSF, NXDN and M17 answer, so one decoder shape covers them all.
+        let json = """
+            {"link":"quantum","talkgroup":1,"timeslot":2,"frames_rx":0,\
+            "receiving":false,"ptt":false}
+            """
+        let state = try XCTUnwrap(DMRState(json: json))
+        XCTAssertEqual(state.link, .failed)
+    }
+
+    func testAnUnrecognisedDMRFailureDecodesToNil() throws {
+        let json = """
+            {"link":"failed","failure":"quantum","talkgroup":1,"timeslot":1,\
+            "frames_rx":0,"receiving":false,"ptt":false}
+            """
+        let state = try XCTUnwrap(DMRState(json: json))
+        XCTAssertNil(state.failure, "an unknown stage names nothing an operator could act on")
+    }
+
+    func testEmptyDMRStateJSONIsNil() {
+        XCTAssertNil(DMRState(json: "{}"), "the no-link document decodes as nil")
+    }
+
+    func testFreshStationHasNoDMRLink() throws {
+        let station = try Station()
+        XCTAssertNil(try station.dmrState())
+        XCTAssertFalse(try station.snapshot().dmrActive)
+    }
+
+    func testDMRDisconnectIsIdempotentWhileIdle() throws {
+        let station = try Station()
+        XCTAssertNoThrow(try station.dmrDisconnect())
+        XCTAssertNoThrow(try station.dmrDisconnect())
+    }
+
+    /// An empty system is refused before a socket or a dongle is touched, so
+    /// this holds with or without a dongle attached.
+    ///
+    /// Empty, not `not-a-network`: an unrecognised system is DIALED now — a
+    /// directory row's `system` names a server, and none of the feed's 111
+    /// values equals an engine family slug — so a nonsense one here would
+    /// reach the dongle probe and, with a ThumbDV attached, seize it.
+    func testConnectDMRRejectsAnEmptySystem() throws {
+        let station = try Station()
+        XCTAssertThrowsError(
+            try station.connectDMR(
+                system: "", host: "127.0.0.1", port: 62031, radioID: 1_234_567,
+                callsign: "N0CALL", talkgroup: 31313, timeslot: 2, password: "passw0rd")
+        ) { error in
+            // IAX_ERR_DMR == -22
+            XCTAssertEqual((error as? StationError)?.code, -22)
+            XCTAssertFalse(
+                (error as? StationError)?.detail.contains("passw0rd") ?? false,
+                "no refusal may echo the master password")
+        }
     }
 
 }

@@ -84,10 +84,12 @@ impl NetworkClass {
 /// One DMR network.
 ///
 /// The list is the one in `docs/design/dmr-networks.md`. It is not exhaustive
-/// and never will be — networks appear and merge — so [`DmrNetwork::from_slug`]
-/// answers `None` rather than guessing, and a directory row naming something
-/// unknown stays listed and undialable instead of being quietly pointed
-/// somewhere else.
+/// and never will be — networks appear and merge — so both parsers answer
+/// `None` rather than guessing. `None` is not a refusal: a target naming a
+/// network this build cannot name is dialed as an independent one, because
+/// the family is read for the consent gate and nothing else. What guessing
+/// would cost is worse than not knowing — it would put an operator on the
+/// wrong system under their own registered ID.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DmrNetwork {
     /// Small, permissive, straightforward registration — the first target,
@@ -123,6 +125,31 @@ pub const ALL: &[DmrNetwork] = &[
     DmrNetwork::BrandMeister,
 ];
 
+/// The names each family is spelled with in a **directory row's** `system`
+/// field, for [`DmrNetwork::from_system_slug`].
+///
+/// `ipsc2` and `ipsc3` are DMR+: those slugs name the server software the
+/// network runs (`ipsc2-poland`), not the network, and DMR+ is what it is.
+///
+/// The order is the order the twin Swift table
+/// (`DmrDial.familyNames`) carries, and first match wins in both — so a slug
+/// that could satisfy two entries resolves the same way on both sides of the
+/// ABI. Add a name to one and add it to the other.
+const SYSTEM_NAMES: &[(DmrNetwork, &[&str])] = &[
+    (DmrNetwork::BrandMeister, &["brandmeister"]),
+    (DmrNetwork::FreeDmr, &["freedmr"]),
+    (DmrNetwork::FreeStar, &["freestar"]),
+    (
+        DmrNetwork::DmrPlus,
+        &["dmrplus", "dmr-plus", "ipsc2", "ipsc3"],
+    ),
+    (DmrNetwork::SystemX, &["systemx", "system-x"]),
+    (DmrNetwork::AmComm, &["amcomm"]),
+    (DmrNetwork::VkDmr, &["vkdmr", "vk-dmr"]),
+    (DmrNetwork::Tgif, &["tgif"]),
+    (DmrNetwork::Adn, &["adn"]),
+];
+
 impl DmrNetwork {
     /// The name the operator knows this network by.
     #[must_use]
@@ -140,8 +167,15 @@ impl DmrNetwork {
         }
     }
 
-    /// The stable identifier used in dial grammar, directory rows and saved
-    /// configuration.
+    /// The stable identifier used in dial grammar and saved configuration.
+    ///
+    /// **Not what a directory row's `system` field holds.** `DVRef` enumerates
+    /// *servers* — `freedmr-network`, `ipsc2-poland`, `xlx696` — and this
+    /// enumerates *families*; checked on 2026-09-07, not one of the 111
+    /// distinct `system` values in the feed's 185 DMR rows equals a slug here.
+    /// [`DmrNetwork::from_system_slug`] is the bridge between the two, and
+    /// `docs/design/dmr-networks.md` §"The directory's system slug is not the
+    /// engine's family slug" is the reasoning.
     ///
     /// Lower-case ASCII, no spaces, and **fixed for the life of the field**:
     /// renaming one would strand every saved target that names it. The label
@@ -169,6 +203,57 @@ impl DmrNetwork {
     pub fn from_slug(slug: &str) -> Option<DmrNetwork> {
         let lowered = slug.trim().to_ascii_lowercase();
         ALL.iter().copied().find(|n| n.slug() == lowered)
+    }
+
+    /// Resolve a **directory** `system` value — `DVRef`'s, not [`Self::slug`] —
+    /// to the family that operates it, or `None` for one this build does not
+    /// recognise.
+    ///
+    /// # Two vocabularies meet here
+    ///
+    /// A directory row names a *server*: one operator instance, of which a
+    /// family has many (`freedmr-network` and `freedmr-reunion` are both
+    /// FreeDMR; 19 rows in the 2026-09-07 feed are the former). [`Self::slug`]
+    /// names a *family*, nine of them. Neither can be derived from the other
+    /// by renaming, so both are kept and this is the documented bridge. It is
+    /// what makes a directory row dialable at all: `Station::dmr_connect`
+    /// resolves `system` through [`Self::from_slug`] first and this second,
+    /// and a `system` that answers `None` here is still dialed — the family
+    /// is consulted only for the consent gate, and a network astar does not
+    /// recognise is not BrandMeister.
+    ///
+    /// # The twin that must stay in step
+    ///
+    /// `DmrDial.family(ofSystem:)` in
+    /// `apps/macos/Packages/AstarCore/Sources/AstarCore/ReflectorAddressDial.swift`
+    /// is this function in Swift, over the same table. The app groups its
+    /// picker with that one and the engine gates with this one, so a name
+    /// added to either belongs in both — they would otherwise disagree about
+    /// which rows are BrandMeister.
+    ///
+    /// # The rule
+    ///
+    /// The slug either **is** a family's name or is that name followed by
+    /// `-` or `_`, because the directory spells its systems
+    /// `<family>-<place>` (`adn-systems-espana`, `hb_it_trani_conference`).
+    /// Never a bare prefix test: `adn` would then claim `adnetwork`, and a
+    /// wrong family is a network filed under somebody else's terms.
+    #[must_use]
+    pub fn from_system_slug(system: &str) -> Option<DmrNetwork> {
+        let slug = system.trim().to_ascii_lowercase();
+        if slug.is_empty() {
+            return None;
+        }
+        SYSTEM_NAMES
+            .iter()
+            .find(|(_, names)| {
+                names.iter().any(|name| {
+                    slug.strip_prefix(name).is_some_and(|rest| {
+                        rest.is_empty() || rest.starts_with('-') || rest.starts_with('_')
+                    })
+                })
+            })
+            .map(|(network, _)| *network)
     }
 
     /// How astar treats this network.
@@ -250,6 +335,64 @@ mod tests {
         assert_eq!(DmrNetwork::from_slug("tg if"), None);
         assert_eq!(DmrNetwork::from_slug("brand-meister"), None);
         assert_eq!(DmrNetwork::from_slug(""), None);
+    }
+
+    /// The table the app's `DmrDial.family(ofSystem:)` is checked against,
+    /// with the same rows: real `system` values from the 2026-09-07 `DVRef`
+    /// feed, plus the two cases the rule exists for.
+    #[test]
+    fn a_directory_system_resolves_to_its_family() {
+        for (system, want) in [
+            ("tgif", Some(DmrNetwork::Tgif)),
+            ("freedmr-network", Some(DmrNetwork::FreeDmr)),
+            ("ipsc2-poland", Some(DmrNetwork::DmrPlus)),
+            ("dmrplus-ipsc2-uk", Some(DmrNetwork::DmrPlus)),
+            ("system-x-uk", Some(DmrNetwork::SystemX)),
+            ("brandmeister-3102", Some(DmrNetwork::BrandMeister)),
+            ("hb_it_trani_conference", None),
+            // A server row for a network this build has no name for. It is
+            // NOT a refusal: `None` means "independent, unrecognised".
+            ("xlx696", None),
+            // The reason the rule is not `starts_with`: `adn` must not claim
+            // a network whose name merely begins with those three letters.
+            ("adnetwork", None),
+            ("", None),
+        ] {
+            assert_eq!(
+                DmrNetwork::from_system_slug(system),
+                want,
+                "system {system:?}"
+            );
+        }
+    }
+
+    /// Case and padding are forgiven on the way in — a hand-edited config or
+    /// a directory row is not required to match our capitalisation — and the
+    /// separator is either of the two the feed uses.
+    #[test]
+    fn a_directory_system_forgives_case_and_padding_and_takes_either_separator() {
+        assert_eq!(
+            DmrNetwork::from_system_slug("  FreeDMR-Network "),
+            Some(DmrNetwork::FreeDmr)
+        );
+        assert_eq!(
+            DmrNetwork::from_system_slug("adn_systems_espana"),
+            Some(DmrNetwork::Adn)
+        );
+    }
+
+    /// Every family's own slug is also a system name, so a target saved with
+    /// the engine's spelling resolves through either door.
+    #[test]
+    fn every_slug_is_also_a_system_name() {
+        for &network in ALL {
+            assert_eq!(
+                DmrNetwork::from_system_slug(network.slug()),
+                Some(network),
+                "{}",
+                network.slug()
+            );
+        }
     }
 
     #[test]

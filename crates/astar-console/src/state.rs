@@ -39,7 +39,8 @@ pub enum OperatingMode {
 /// A snapshot of live call state for front-ends to render.
 // A plain poll/render DTO, not a control-flow state machine — the bools are
 // independently-meaningful UI flags (ptt/remote_ptt/m17_available/m17_active/
-// dstar_available/dstar_active/ysf_available/ysf_active),
+// dstar_available/dstar_active/ysf_available/ysf_active/nxdn_available/
+// nxdn_active/dmr_available/dmr_active),
 // not a hidden enum in disguise.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq)]
@@ -151,6 +152,41 @@ pub struct ConsoleState {
     /// the dongle, and must be able to read that without compiling the
     /// feature.
     pub ysf_active: bool,
+    /// `true` when NXDN voice is available: the `nxdn` feature is compiled in
+    /// AND a `ThumbDV` is currently attached. NXDN voice is AMBE+2 — the same
+    /// 49-bit frame YSF DN carries, off the same dongle — so this is
+    /// [`Self::dstar_available`]'s value read through the same cached probe
+    /// rather than a third scan of the USB bus. Always `false` when the
+    /// `nxdn` feature isn't compiled in.
+    pub nxdn_available: bool,
+    /// `true` while an [`crate::session::ConsoleSession`]'s NXDN link is live
+    /// (mutually exclusive with an IAX2 call, an M17 session, a D-Star
+    /// session and a YSF link — one `ThumbDV`, one link).
+    ///
+    /// Feature-INDEPENDENT for the same reason [`Self::dstar_active`] and
+    /// [`Self::ysf_active`] are: `astar-server` refuses remote keying while a
+    /// digital-voice link holds the dongle, and must be able to read that
+    /// without compiling the feature.
+    pub nxdn_active: bool,
+    /// `true` when DMR voice is available: the `dmr` feature is compiled in
+    /// AND a `ThumbDV` is currently attached. DMR voice is AMBE+2 off the
+    /// same dongle — a different rate word, the same chip — so this is
+    /// [`Self::dstar_available`]'s value read through the same cached probe
+    /// rather than a fourth scan of the USB bus. Always `false` when the
+    /// `dmr` feature isn't compiled in.
+    ///
+    /// A plain `bool`, feature-INDEPENDENT: this field exists and answers in
+    /// every build, so a consumer never needs a `#[cfg]` of its own.
+    pub dmr_available: bool,
+    /// `true` while an [`crate::session::ConsoleSession`]'s DMR link is live
+    /// (mutually exclusive with an IAX2 call, an M17 session, a D-Star
+    /// session, a YSF link and an NXDN link — one `ThumbDV`, one link).
+    ///
+    /// Feature-INDEPENDENT for the same reason [`Self::dstar_active`],
+    /// [`Self::ysf_active`] and [`Self::nxdn_active`] are: `astar-server`
+    /// refuses remote keying while a digital-voice link holds the dongle,
+    /// and must be able to read that without compiling the feature.
+    pub dmr_active: bool,
 }
 
 impl Default for ConsoleState {
@@ -178,6 +214,10 @@ impl Default for ConsoleState {
             dstar_active: false,
             ysf_available: false,
             ysf_active: false,
+            nxdn_available: false,
+            nxdn_active: false,
+            dmr_available: false,
+            dmr_active: false,
         }
     }
 }

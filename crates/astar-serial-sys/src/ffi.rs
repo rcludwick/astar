@@ -29,6 +29,19 @@ pub const IAX_ERR_NO_DEVICE: c_int = -5;
 /// A caller buffer was too small.
 pub const IAX_ERR_BUFFER: c_int = -6;
 
+/// Size in bytes of [`IaxSerialConfig`] as this library lays it out.
+///
+/// `iax_serial_open` READS `size_of::<IaxSerialConfig>()` bytes through the
+/// pointer it is given, so a foreign binding whose hand-written mirror has
+/// fallen behind hands it a short allocation: an out-of-bounds read, and every
+/// field past the first divergence shifted by a slot — including `transport`,
+/// which selects the tty path that asserts RTS. Bindings should assert their
+/// mirror's size against this at load time. Carries no state, no credential.
+#[unsafe(no_mangle)]
+pub extern "C" fn iax_serial_config_size() -> usize {
+    core::mem::size_of::<IaxSerialConfig>()
+}
+
 /// Map an `IAX_ERR_*` code (or [`IAX_OK`]) to a `'static`, NUL-terminated,
 /// no-credential C string. The pointer is owned by the library; never free it.
 #[unsafe(no_mangle)]

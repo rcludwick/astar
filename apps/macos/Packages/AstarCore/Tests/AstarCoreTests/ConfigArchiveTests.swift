@@ -119,7 +119,30 @@ final class ConfigArchiveTests: XCTestCase {
             ],
             selectedSetupID: "s1", defaultSetupID: "s1",
             directory: [NodeEntry(id: "n1", label: "AJ7HR", node: "12345")],
-            callsign: "AJ7HR")
+            callsign: "AJ7HR", radioID: "3153591", nxdnRadioID: "1234")
+    }
+
+    /// The NXDN id is withheld by the same checkbox as the callsign: it
+    /// identifies the operator, so a file shared without the identity section
+    /// must not carry it.
+    func testTheIdentitySectionCarriesBothRadioIDsOrNeither() {
+        let with = ConfigArchive.make(sections: [.callsign], from: sampleSources())
+        XCTAssertEqual(with.radioID, "3153591")
+        XCTAssertEqual(with.nxdnRadioID, "1234")
+
+        let without = ConfigArchive.make(sections: [.settings], from: sampleSources())
+        XCTAssertNil(without.radioID)
+        XCTAssertNil(without.nxdnRadioID)
+        XCTAssertNil(without.settings?["nxdn.radioId"], "never in a scalar slice")
+    }
+
+    /// A v1 file written before the field existed still imports, and reads as
+    /// "no NXDN id" rather than as a newer format.
+    func testAnArchiveWithNoNXDNIDStillNamesTheIdentitySection() throws {
+        let json = #"{"version":1,"exportedAt":"2026-08-01T00:00:00Z","callsign":"AJ7HR"}"#
+        let back = try ConfigArchive.decode(Data(json.utf8))
+        XCTAssertNil(back.nxdnRadioID)
+        XCTAssertEqual(back.presentSections, [.callsign])
     }
 
     func testAnEmptySelectionProducesAnArchiveWithNoSections() {
@@ -245,6 +268,12 @@ final class ConfigArchiveTests: XCTestCase {
         XCTAssertEqual(back.rigs?.setups.map(\.id), ["s1"])
         XCTAssertEqual(back.directory?.map(\.id), ["n1"])
         XCTAssertEqual(back.callsign, "AJ7HR")
+        // Both radio IDs travel with the callsign, in the same section and
+        // through the same checkbox. Added without moving `ConfigVersion`:
+        // an older reader ignores what it does not recognise.
+        XCTAssertEqual(back.radioID, "3153591")
+        XCTAssertEqual(back.nxdnRadioID, "1234")
+        XCTAssertEqual(back.version, 1, "an added field is not a new format")
         XCTAssertEqual(back.settings?["audio.inputGain"], .double(0.4))
         XCTAssertEqual(back.interface?["ui.showInDock"], .bool(true))
     }

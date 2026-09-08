@@ -29,7 +29,8 @@ final class NetworkTests: XCTestCase {
         XCTAssertEqual(
             Network.resolve("m17", m17: false), .allstar,
             "m17 is a known case but unavailable without the flag")
-        XCTAssertEqual(Network.resolve("dmr", m17: false), .allstar, "unknown strings fall back")
+        XCTAssertEqual(
+            Network.resolve("zzz", m17: false), .allstar, "unknown strings fall back")
         XCTAssertEqual(Network.resolve(nil, m17: false), .allstar)
         XCTAssertEqual(Network.resolve("", m17: false), .allstar)
     }
@@ -139,5 +140,30 @@ final class NetworkTests: XCTestCase {
         XCTAssertEqual(M17Dial.parse("m17.example/A")?.port, 17000)
         XCTAssertEqual(DStarDial.parse("host:30051 b")?.module, "B")
         XCTAssertNil(DStarDial.parse("XLX836"), "no module — not an address")
+    }
+
+    // MARK: - DMR
+
+    /// DMR rides the same ThumbDV D-Star, Fusion and NXDN do, so the segment
+    /// is a fact about the desk rather than the build — and a persisted
+    /// selection falls back when the dongle is gone, like every other
+    /// hardware-gated network.
+    func testDMRAppearsOnlyWhenTheEngineSaysItCan() {
+        XCTAssertFalse(Network.available(m17: false).contains(.dmr))
+        XCTAssertTrue(Network.available(m17: false, dmr: true).contains(.dmr))
+        XCTAssertEqual(Network.resolve("dmr", m17: false), .allstar)
+        XCTAssertEqual(Network.resolve("dmr", m17: false, dmr: true), .dmr)
+    }
+
+    /// The row ids the DMR feed publishes carry underscores
+    /// (`hb_it_trani_conference`), which no other network's grammar uses — a
+    /// filter that dropped them would make those rows untypeable.
+    func testDMRAdmitsTheCharactersItsOwnGrammarUses() {
+        XCTAssertTrue(Network.dmr.admitsDialCharacter("/"))
+        XCTAssertTrue(Network.dmr.admitsDialCharacter(":"))
+        XCTAssertTrue(Network.dmr.admitsDialCharacter("_"))
+        XCTAssertFalse(Network.dmr.admitsDialCharacter("*"))
+        XCTAssertFalse(Network.dmr.showsDialpad)
+        XCTAssertTrue(Network.dmr.isDigitalVoice, "a DMRD frame names who keyed up")
     }
 }

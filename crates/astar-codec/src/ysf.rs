@@ -56,6 +56,7 @@
 //! self-consistent one — see `the_two_modes_carry_the_same_three_fields`.
 
 use astar_ysf::DataType;
+use astar_ysf::dch::WHITENING;
 use astar_ysf::golay;
 
 /// Bytes of payload a YSF radio frame carries — [`astar_ysf::PAYLOAD_LEN`].
@@ -146,33 +147,11 @@ fn write_bit(buf: &mut [u8], i: usize, value: bool) {
 
 // ── The scrambler ───────────────────────────────────────────────────────
 
-/// Bytes of scrambling sequence the references publish.
-const WHITENING_LEN: usize = 20;
-
-/// The YSF scrambler: 160 bits of the PN9 sequence `x^9 + x^5 + 1`, run
-/// from state `0b1_0010_0111`, most significant stage out first.
-///
-/// The reference implementations print this as twenty magic bytes
-/// (`WHITENING_DATA` in `MMDVMHost`, `scramble_code` in `DroidStar`). It is
-/// not magic: a nine-stage Fibonacci LFSR with taps on stages 9 and 5
-/// reproduces all 160 of those bits, which
-/// `the_scrambler_is_the_published_sequence` asserts. Only 160 bits are
-/// published, so only 160 are generated — a DN payload never needs more.
-const fn whitening() -> [u8; WHITENING_LEN] {
-    let mut out = [0u8; WHITENING_LEN];
-    let mut state: u16 = 0b1_0010_0111;
-    let mut i = 0;
-    while i < WHITENING_LEN * 8 {
-        out[i / 8] |= ((state >> 8) as u8 & 1) << (7 - (i % 8));
-        let feedback = ((state >> 8) ^ (state >> 4)) & 1;
-        state = ((state << 1) | feedback) & 0x1FF;
-        i += 1;
-    }
-    out
-}
-
-/// The scrambling sequence, generated once at compile time.
-const WHITENING: [u8; WHITENING_LEN] = whitening();
+// [`WHITENING`] — the 160-bit PN9 sequence the references print as twenty
+// magic bytes — is derived once in `astar_ysf::dch` and imported at the top
+// of this file. The same bits whiten the voice channel here and the data
+// channel there, so one definition in the protocol crate is what keeps the
+// two halves of a payload from coming to disagree.
 
 // ── V/D mode 2: five [5-byte DCH][13-byte VCH] blocks ───────────────────
 
@@ -470,7 +449,11 @@ fn check(data_type: DataType, payload: &[u8]) -> Result<(), DnError> {
 /// Four bytes of documented header (AMBE-3000R users' manual §3), written
 /// out here because the vendored driver keeps its own builder private and
 /// `vendor/ambe-thumbdv` is a verbatim copy that must not grow functions.
-fn dvsi_packet(ptype: u8, fields: &[u8]) -> Vec<u8> {
+///
+/// `pub(crate)` so [`crate::dmr::ratep_dmr`] can build its own rate word
+/// from the same four bytes of header rather than spelling the framing out
+/// a third time.
+pub(crate) fn dvsi_packet(ptype: u8, fields: &[u8]) -> Vec<u8> {
     let mut packet = vec![0x61];
     let len = u16::try_from(fields.len()).expect("a DVSI packet's fields fit in 16 bits");
     packet.extend_from_slice(&len.to_be_bytes());
@@ -537,6 +520,11 @@ fn dvsi_bit_order() -> [usize; VOICE_BITS] {
 ///
 /// `ambe_thumbdv::channel_in` cannot be used for this — it hard-codes 72
 /// bits (`0x48`), which is what D-Star and DMR send. YSF DN sends `0x31`.
+///
+/// The width is all D-Star and DMR share, and it is the only reason `channel_in`
+/// is reusable between them: their RATEP words differ (2400 + 1200 against
+/// 2450 + 1150), so a dongle configured for one cannot decode the other's
+/// 72 bits. See [`crate::dmr::ratep_dmr`].
 #[must_use]
 pub fn channel_in_dn(frame: DnFrame) -> Vec<u8> {
     let mut bits = [0u8; VOICE_BYTES];

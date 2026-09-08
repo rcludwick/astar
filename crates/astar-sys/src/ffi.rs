@@ -93,7 +93,9 @@ pub struct IaxConfig {
     /// `AllStar` portal password (WT path), or NULL. Consumed into the station's
     /// `PortalCredentials`; never stored in any out-struct or logged.
     pub portal_pass: *const c_char,
-    /// `AllStar` node selector for token minting (WT path), or NULL.
+    /// `AllStar` node selector for token minting (WT path), or NULL. Optional:
+    /// the portal mints without one, so NULL (or empty) means "no node" and
+    /// the WT path is enabled by `portal_user` + `portal_pass` alone.
     pub portal_node: *const c_char,
     /// Guest secret, or NULL for the default `"allstar"`.
     pub secret: *const c_char,
@@ -329,6 +331,43 @@ pub struct IaxState {
     /// [`iax_station_connect_ysf`]). Transceive: key it with
     /// `iax_station_set_ptt`, exactly as D-Star.
     pub ysf_active: bool,
+    /// `true` when NXDN voice is available: the `nxdn` feature is compiled in
+    /// AND a `ThumbDV` is attached right now. NXDN voice is AMBE+2 — the same
+    /// 49-bit frame YSF DN carries, off the same dongle — so this is the same
+    /// cached probe [`Self::dstar_available`] and [`Self::ysf_available`]
+    /// read, and all three move together.
+    pub nxdn_available: bool,
+    /// `true` while an NXDN link is live — mutually exclusive with an IAX2
+    /// call, an M17 session, a D-Star session and a YSF link (see
+    /// [`iax_station_connect_nxdn`]).
+    ///
+    /// RECEIVE ONLY: there is no NXDN transmit path, so a key is refused
+    /// rather than queued and a UI must not offer PTT while this is set.
+    ///
+    /// Feature-INDEPENDENT, exactly as [`Self::dstar_active`] and
+    /// [`Self::ysf_active`] are: `astar-server` refuses remote keying while a
+    /// digital-voice link holds the dongle and must read that without
+    /// compiling the feature.
+    pub nxdn_active: bool,
+    /// `true` when DMR voice is available: the `dmr` feature is compiled in
+    /// AND a `ThumbDV` is attached right now. DMR voice is AMBE+2 — the same
+    /// 49-bit frame YSF DN and NXDN carry, off the same dongle — so this is
+    /// the same cached probe [`Self::dstar_available`],
+    /// [`Self::ysf_available`] and [`Self::nxdn_available`] read, and all
+    /// four move together.
+    pub dmr_available: bool,
+    /// `true` while a DMR link is live — mutually exclusive with an IAX2
+    /// call, an M17 session, a D-Star session, a YSF link and an NXDN link
+    /// (see [`iax_station_connect_dmr`]).
+    ///
+    /// RECEIVE ONLY: there is no DMR transmit path, so a key is refused
+    /// rather than queued and a UI must not offer PTT while this is set.
+    ///
+    /// Feature-INDEPENDENT, exactly as [`Self::dstar_active`],
+    /// [`Self::ysf_active`] and [`Self::nxdn_active`] are: `astar-server`
+    /// refuses remote keying while a digital-voice link holds the dongle and
+    /// must read that without compiling the feature.
+    pub dmr_active: bool,
 }
 
 /// The kind of a drained lifecycle event (see [`iax_station_next_event`]).
@@ -428,6 +467,20 @@ pub const IAX_ERR_DSTAR: c_int = -19;
 /// not being compiled in. Read `iax_station_last_error` for which.
 pub const IAX_ERR_YSF: c_int = -20;
 
+/// NXDN error (iax-b9c2): a link that could not be made, a callsign/radio
+/// id/talkgroup the wire cannot carry, a refused key (NXDN is receive-only —
+/// see `astar_console::nxdn`'s Transmit section), or the `nxdn` feature not
+/// being compiled in. Read `iax_station_last_error` for which.
+pub const IAX_ERR_NXDN: c_int = -21;
+
+/// DMR error (iax-d4f7): an unknown network slug, a network the operator has
+/// not opted in to, a radio id/callsign/talkgroup/timeslot the wire cannot
+/// carry, an empty master password, a login the master refused, a refused key
+/// (DMR is receive-only — see `astar_console::dmr`'s Transmit section), or the
+/// `dmr` feature not being compiled in. Read `iax_station_last_error` for
+/// which — it never carries the password.
+pub const IAX_ERR_DMR: c_int = -22;
+
 /// Number of log-spaced dBFS bins [`iax_station_mic_spectrum`] writes when
 /// monitoring (iax-e73e). Size the `out` array to (at least) this; a larger
 /// buffer is fine (the extra entries are left untouched). A literal here so
@@ -482,6 +535,8 @@ fn err_code(e: &StationError) -> c_int {
         StationError::M17(_) => IAX_ERR_M17,
         StationError::Dstar(_) => IAX_ERR_DSTAR,
         StationError::Ysf(_) => IAX_ERR_YSF,
+        StationError::Nxdn(_) => IAX_ERR_NXDN,
+        StationError::Dmr(_) => IAX_ERR_DMR,
     }
 }
 
@@ -522,6 +577,10 @@ fn fill_state(s: &astar_station::ConsoleState) -> IaxState {
         dstar_active: s.dstar_active,
         ysf_available: s.ysf_available,
         ysf_active: s.ysf_active,
+        nxdn_available: s.nxdn_available,
+        nxdn_active: s.nxdn_active,
+        dmr_available: s.dmr_available,
+        dmr_active: s.dmr_active,
     }
 }
 
@@ -579,15 +638,17 @@ pub unsafe extern "C" fn iax_station_new(cfg: *const IaxConfig) -> *mut IaxStati
             return std::ptr::null_mut();
         }
         let cfg = unsafe { &*cfg };
+        // User + password enable the WT path; the node is an optional
+        // selector (the portal mints without one), so NULL reads as empty.
         let portal = match (
             unsafe { opt_str(cfg.portal_user) },
             unsafe { opt_str(cfg.portal_pass) },
             unsafe { opt_str(cfg.portal_node) },
         ) {
-            (Some(user), Some(password), Some(node)) => Some(PortalCredentials {
+            (Some(user), Some(password), node) => Some(PortalCredentials {
                 user,
                 password,
-                node,
+                node: node.unwrap_or_default(),
             }),
             _ => None,
         };
@@ -1910,6 +1971,32 @@ pub unsafe extern "C" fn iax_station_set_devices(
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
+// ABI layout parity
+// ---------------------------------------------------------------------------
+
+/// Size in bytes of [`IaxState`] as this library lays it out.
+///
+/// Every foreign binding mirrors `IaxState` by hand (ctypes `Structure`, a
+/// Swift `struct`, …) and `iax_station_snapshot` writes `size_of::<IaxState>()`
+/// bytes into the caller's buffer. A mirror that has fallen behind is therefore
+/// not a cosmetic mismatch but a **heap overflow** in the caller, plus garbage
+/// reads from every field past the first divergence. Bindings should assert
+/// their mirror's size against this at load time so the drift fails loudly and
+/// immediately instead of corrupting memory. Carries no state and no secret.
+#[unsafe(no_mangle)]
+pub extern "C" fn iax_state_size() -> usize {
+    core::mem::size_of::<IaxState>()
+}
+
+/// Size in bytes of [`IaxEvent`] as this library lays it out. Same contract as
+/// [`iax_state_size`]: `iax_station_next_event` fills a caller-allocated
+/// `IaxEvent`, so a stale mirror overflows the caller's buffer.
+#[unsafe(no_mangle)]
+pub extern "C" fn iax_event_size() -> usize {
+    core::mem::size_of::<IaxEvent>()
+}
+
+// ---------------------------------------------------------------------------
 // Error text
 // ---------------------------------------------------------------------------
 
@@ -1929,6 +2016,8 @@ pub unsafe extern "C" fn iax_error_text(code: c_int) -> *const c_char {
         IAX_ERR_RESOLVE => b"node resolution failed\0",
         IAX_ERR_AUDIO => b"audio error\0",
         IAX_ERR_YSF => b"ysf error\0",
+        IAX_ERR_NXDN => b"nxdn error\0",
+        IAX_ERR_DMR => b"dmr error\0",
         IAX_ERR_IAX => b"iax error\0",
         IAX_ERR_SERIAL => b"serial error\0",
         IAX_ERR_UTF8 => b"argument was not valid utf-8\0",
@@ -2525,6 +2614,75 @@ pub unsafe extern "C" fn iax_station_m17_disconnect(st: *mut IaxStation) -> c_in
     .unwrap_or(IAX_ERR_PANIC)
 }
 
+/// Write the live M17 session's state as JSON into the caller buffer `buf` of
+/// `len` bytes (NUL-terminated, truncate-safe; same contract as
+/// [`iax_station_dstar_state`] — returns the byte length the full JSON needs,
+/// excluding the NUL, so a `len == 0` call is a sizing query).
+///
+/// ```json
+/// {"link":"linked","receiving":true,"ptt":false,"talker":"N0CALL"}
+/// ```
+///
+/// `link` is one of `idle`/`linking`/`linked`/`failed` — the same vocabulary
+/// D-Star and YSF use, minus the `unlinking` M17 has no state for.
+///
+/// `talker` is the source callsign from the LSF of the most recently heard
+/// stream, `null` until one arrives, and it PERSISTS past end-of-stream — it
+/// is "most recently heard", not "transmitting right now". `receiving` is the
+/// field that says whether a transmission is in progress.
+///
+/// Every field is credential-free: one callsign and two flags. The
+/// network-agnostic state (the level meters, the call status) is in
+/// [`IaxSnapshot`] — poll that on a metering tick and call this only for the
+/// talker.
+///
+/// Writes `{}` when no session is active or the `m17` feature isn't compiled
+/// in. Returns [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_m17_state(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let json = m17_state_json(station);
+        unsafe { fill_buf(&json, buf, len) }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Render the live M17 session's state as JSON, or `"{}"` when there is none.
+/// Split out of [`iax_station_m17_state`] so it is reachable from tests
+/// without an FFI buffer dance.
+fn m17_state_json(station: &IaxStation) -> String {
+    #[cfg(feature = "m17")]
+    {
+        let Some(s) = station.inner.m17_state() else {
+            return "{}".to_string();
+        };
+        // Built through serde_json rather than `format!`: `talker` is
+        // attacker-supplied — it is whatever callsign whoever keyed up put in
+        // their LSF — so a quote or backslash in it must not be able to break
+        // out of the string.
+        serde_json::json!({
+            "link": s.link.as_str(),
+            "receiving": s.receiving,
+            "ptt": s.ptt,
+            "talker": s.talker,
+        })
+        .to_string()
+    }
+    #[cfg(not(feature = "m17"))]
+    {
+        let _ = station;
+        "{}".to_string()
+    }
+}
+
 /// Set extra directories to search for a runtime `libcodec2`, ahead of the
 /// hard-coded system paths (iax-f2b8 Task 4/5). `dirs` is a single
 /// NUL-terminated string of `':'`-separated filesystem paths (e.g.
@@ -2894,6 +3052,651 @@ fn ysf_state_json(station: &IaxStation) -> String {
     {
         let _ = station;
         "{}".to_string()
+    }
+}
+
+/// Link to an `NXDNReflector` and decode the audio on it (iax-b9c2).
+///
+/// `host` is `host:port` — NXDN reflectors publish a port per reflector, so
+/// there is nothing conventional to assume. `callsign` is this station's own,
+/// sent in the registration poll; `radio_id` is its registered NXDN number
+/// and `talkgroup` the TG to join. Both are plain scalars here: NXDN
+/// addresses stations by NUMBER, and parsing an operator's typing into one is
+/// the caller's job, not the ABI's.
+///
+/// NXDN is HARDWARE-ONLY for the same reason D-Star and YSF are — the vocoder
+/// is AMBE+2 on a DVSI `ThumbDV`. Poll [`IaxState::nxdn_available`] and offer
+/// the affordance only when it is `true`, rather than calling this
+/// speculatively.
+///
+/// **RECEIVE ONLY today.** There is no NXDN transmit path: a key-down is
+/// REFUSED, not queued, so a UI must not offer PTT while this link is live.
+/// See `astar_console::nxdn`'s Transmit section for why a refusal beats a key
+/// that silently does nothing.
+///
+/// `host` and `callsign` are required (NULL/non-UTF-8 → [`IAX_ERR_NULL`] /
+/// [`IAX_ERR_UTF8`]). A zero `radio_id` or `talkgroup` is [`IAX_ERR_NXDN`]:
+/// zero is what an unset field looks like, not a registration. Returns
+/// [`IAX_OK`], [`IAX_ERR_ALREADY_CONNECTED`] (any other network is live),
+/// [`IAX_ERR_NXDN`], or [`IAX_ERR_PANIC`].
+///
+/// NOTE: this performs blocking work — a serial-port scan plus, per candidate
+/// port and baud rate, an open and a multi-transaction dongle init, then a
+/// socket bind and thread spawn. It can take on the order of a second. Call
+/// it off any UI thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_connect_nxdn(
+    st: *mut IaxStation,
+    host: *const c_char,
+    callsign: *const c_char,
+    radio_id: u16,
+    talkgroup: u16,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let host = match unsafe { req_str(host) } {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        let callsign = match unsafe { req_str(callsign) } {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        result_code(
+            station,
+            station
+                .inner
+                .nxdn_connect(host, callsign, radio_id, talkgroup),
+        )
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Disconnect the live NXDN link, if any. Idempotent — a no-op while idle.
+/// Returns [`IAX_OK`], [`IAX_ERR_NULL`], or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_nxdn_disconnect(st: *mut IaxStation) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        station.inner.nxdn_disconnect();
+        IAX_OK
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Write the live NXDN link's state as JSON into the caller buffer `buf` of
+/// `len` bytes (NUL-terminated, truncate-safe; same contract as
+/// [`iax_station_dstar_state`] — returns the byte length the full JSON needs,
+/// excluding the NUL, so a `len == 0` call is a sizing query).
+///
+/// ```json
+/// {"link":"linked","last_heard":"4242","last_heard_id":4242,"frames_rx":97,
+///  "receiving":true,"backend":"thumbdv","ptt":false,"rx_db":-31.2}
+/// ```
+///
+/// `link` is one of `idle`/`linking`/`linked`/`unlinking`/`failed`.
+///
+/// `last_heard` is a NUMBER rendered as a string, not a callsign: an `NXDND`
+/// datagram carries `srcId` and no callsign at all, so identifying the sender
+/// is a directory lookup astar does not hold. `last_heard_id` is that same id
+/// unformatted, for a caller that has a directory. Both are read from the
+/// header in clear, need no vocoder, and PERSIST past end-of-transmission —
+/// they are "most recently heard", not "currently transmitting". `receiving`
+/// is the one that says whether a transmission is in progress, and
+/// `frames_rx` is a liveness counter: a link that is up and silent and one
+/// that is receiving look identical from `link` alone.
+///
+/// `ptt` is always `false`: NXDN is receive-only today and a key is refused.
+///
+/// Every field is credential-free: numbers, counters and a level.
+///
+/// Writes `{}` when no link is active or the `nxdn` feature isn't compiled
+/// in. Returns [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_nxdn_state(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let json = nxdn_state_json(station);
+        unsafe { fill_buf(&json, buf, len) }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Render the live NXDN link's state as JSON, or `"{}"` when there is none.
+/// Split out of [`iax_station_nxdn_state`] so it is reachable from tests
+/// without an FFI buffer dance.
+fn nxdn_state_json(station: &IaxStation) -> String {
+    #[cfg(feature = "nxdn")]
+    {
+        let Some(s) = station.inner.nxdn_state() else {
+            return "{}".to_string();
+        };
+        // Built through serde_json rather than `format!` for the same reason
+        // the YSF renderer is: `last_heard` is attacker-supplied — it is
+        // derived from whatever the transmitting station put on the wire — so
+        // a quote or backslash in it must not be able to break out of the
+        // string.
+        serde_json::json!({
+            "link": s.link_state,
+            "last_heard": s.last_heard,
+            "last_heard_id": s.last_heard_id,
+            "frames_rx": s.frames_rx,
+            "receiving": s.receiving,
+            "backend": s.backend,
+            "ptt": s.ptt,
+            "rx_db": s.rx_dbfs,
+        })
+        .to_string()
+    }
+    #[cfg(not(feature = "nxdn"))]
+    {
+        let _ = station;
+        "{}".to_string()
+    }
+}
+
+#[cfg(test)]
+mod nxdn_tests {
+    //! Offline coverage of the NXDN entry points (iax-b9c2): the no-link
+    //! document, the error code's identity, and the NULL guards. No socket,
+    //! no dongle — a fresh station has no link, which is exactly the state
+    //! these pin.
+    use super::*;
+    use std::ptr;
+
+    /// A station built with every config string unset — the same shape
+    /// `tests/ffi.rs` uses, but reachable from inside the crate so the
+    /// private `nxdn_state_json` is too.
+    fn station() -> *mut IaxStation {
+        let cfg = IaxConfig {
+            input: ptr::null(),
+            output: ptr::null(),
+            portal_user: ptr::null(),
+            portal_pass: ptr::null(),
+            portal_node: ptr::null(),
+            secret: ptr::null(),
+            codec_policy: ptr::null(),
+        };
+        let st = unsafe { iax_station_new(std::ptr::from_ref(&cfg)) };
+        assert!(!st.is_null());
+        st
+    }
+
+    #[test]
+    fn nxdn_state_json_is_empty_without_a_link() {
+        let st = station();
+        assert_eq!(nxdn_state_json(unsafe { &*st }), "{}");
+        unsafe { iax_station_free(st) };
+    }
+
+    #[test]
+    fn nxdn_has_its_own_error_code_and_text() {
+        // iax_error_text returns a static string per code — the engine's
+        // classification does not cross the ABI, so the app writes its own
+        // message. See docs/design/adding-a-network.md.
+        assert_eq!(IAX_ERR_NXDN, -21);
+        assert_ne!(IAX_ERR_NXDN, IAX_ERR_YSF);
+        let text = unsafe { std::ffi::CStr::from_ptr(iax_error_text(IAX_ERR_NXDN)) };
+        assert_eq!(text.to_str().expect("utf8"), "nxdn error");
+    }
+
+    #[test]
+    fn a_null_station_is_refused_by_every_nxdn_entry_point() {
+        assert_eq!(
+            unsafe {
+                iax_station_connect_nxdn(ptr::null_mut(), c"x".as_ptr(), c"y".as_ptr(), 1, 1)
+            },
+            IAX_ERR_NULL
+        );
+        assert_eq!(
+            unsafe { iax_station_nxdn_disconnect(ptr::null_mut()) },
+            IAX_ERR_NULL
+        );
+        assert_eq!(
+            unsafe { iax_station_nxdn_state(ptr::null_mut(), ptr::null_mut(), 0) },
+            IAX_ERR_NULL
+        );
+    }
+
+    /// A zero radio id or talkgroup is refused BEFORE any hardware is
+    /// touched, so this holds with or without a dongle attached — and with
+    /// or without the feature compiled in.
+    #[test]
+    fn a_zero_radio_id_or_talkgroup_is_refused() {
+        let st = station();
+        assert_eq!(
+            unsafe {
+                iax_station_connect_nxdn(st, c"127.0.0.1:41400".as_ptr(), c"N0CALL".as_ptr(), 0, 1)
+            },
+            IAX_ERR_NXDN
+        );
+        assert_eq!(
+            unsafe {
+                iax_station_connect_nxdn(st, c"127.0.0.1:41400".as_ptr(), c"N0CALL".as_ptr(), 1, 0)
+            },
+            IAX_ERR_NXDN
+        );
+        unsafe { iax_station_free(st) };
+    }
+}
+
+/// Link to a DMR master's talkgroup and decode the audio on it (iax-d4f7).
+///
+/// `system` is a network SLUG — `tgif`, `brandmeister`, … — not a hostname:
+/// each network has its own rules, and a near-miss that resolved to the wrong
+/// one would put the operator on the wrong system under their own registered
+/// ID, so an unknown slug is refused rather than guessed. `host`/`port` are
+/// that network's master. `radio_id` is the station's radioid.net
+/// registration, `talkgroup` the room and `timeslot` 1 or 2. DMR addresses
+/// stations by NUMBER — a `DMRD` carries `srcId` and no callsign at all — so
+/// `callsign` rides only in the login's config packet.
+///
+/// # The password
+/// `password` is the master password. It is copied out of the caller's buffer
+/// into an owned `String` at the top of this function, moved onward into the
+/// link, spent on one login digest and dropped. Nothing on the station, in a
+/// snapshot, in an error, in the state JSON or in a log ever holds it — see
+/// [`iax_station_dmr_state`], whose document has no field it could occupy.
+/// The caller's own buffer is the caller's to scrub.
+///
+/// DMR is HARDWARE-ONLY for the same reason D-Star, YSF and NXDN are — the
+/// vocoder is AMBE+2 on a DVSI `ThumbDV`. Poll [`IaxState::dmr_available`] and
+/// offer the affordance only when it is `true`, rather than calling this
+/// speculatively.
+///
+/// **RECEIVE ONLY today.** There is no DMR transmit path: a key-down is
+/// REFUSED, not queued, so a UI must not offer PTT while this link is live.
+/// See `astar_console::dmr`'s Transmit section for why a refusal beats a key
+/// that silently does nothing.
+///
+/// `system`, `host`, `callsign` and `password` are required (NULL/non-UTF-8 →
+/// [`IAX_ERR_NULL`] / [`IAX_ERR_UTF8`]; a NULL password is a caller bug, not
+/// an empty password). Returns [`IAX_OK`], [`IAX_ERR_ALREADY_CONNECTED`] (any
+/// other network is live), [`IAX_ERR_DMR`] for an unknown or ungated network,
+/// a zero/over-wide `radio_id`, an empty `callsign` or `password`, a zero
+/// `talkgroup`, a `timeslot` that is not 1 or 2, or a login the master
+/// refused, or [`IAX_ERR_PANIC`].
+///
+/// NOTE: this performs blocking work — a serial-port scan plus, per candidate
+/// port and baud rate, an open and a multi-transaction dongle init, then a
+/// socket bind and a multi-round-trip login to the master. It can take
+/// several seconds. Call it off any UI thread.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_connect_dmr(
+    st: *mut IaxStation,
+    system: *const c_char,
+    host: *const c_char,
+    port: u16,
+    radio_id: u32,
+    callsign: *const c_char,
+    talkgroup: u32,
+    timeslot: u8,
+    password: *const c_char,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let system = match unsafe { req_str(system) } {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        let host = match unsafe { req_str(host) } {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        let callsign = match unsafe { req_str(callsign) } {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        // Copied here, once, and owned from here on: `Station::dmr_connect`
+        // takes it BY VALUE precisely so there is one place its life ends —
+        // its `Drop`, inside the facade. The borrow above is not held past
+        // this line.
+        let password = match unsafe { req_str(password) } {
+            Ok(s) => s.to_string(),
+            Err(c) => return c,
+        };
+        result_code(
+            station,
+            station.inner.dmr_connect(
+                system, host, port, radio_id, callsign, talkgroup, timeslot, password,
+            ),
+        )
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Disconnect the live DMR link, if any. Idempotent — a no-op while idle.
+/// Returns [`IAX_OK`], [`IAX_ERR_NULL`], or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_dmr_disconnect(st: *mut IaxStation) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        station.inner.dmr_disconnect();
+        IAX_OK
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Write the live DMR link's state as JSON into the caller buffer `buf` of
+/// `len` bytes (NUL-terminated, truncate-safe; same contract as
+/// [`iax_station_nxdn_state`] — returns the byte length the full JSON needs,
+/// excluding the NUL, so a `len == 0` call is a sizing query).
+///
+/// ```json
+/// {"link":"linked","failure":null,"last_heard":"4242","last_heard_id":4242,
+///  "talkgroup":31313,"timeslot":2,"frames_rx":97,"receiving":true,
+///  "backend":"thumbdv","ptt":false,"rx_db":-31.2}
+/// ```
+///
+/// `link` is one of `idle`/`logging_in`/`authenticating`/`configuring`/
+/// `linked`/`closing`/`failed` — a homebrew login is a conversation, and an
+/// operator watching it stall is owed which round trip stalled.
+///
+/// `failure` says where a failed link failed — `login`/`auth`/`config`/
+/// `session`/`closed`/`timeout` — and is `null` while it has not. "Your
+/// password is wrong" (`auth`) and "your ID is not allowed here" (`login`) are
+/// the two an operator can act on; show it.
+///
+/// `last_heard` is a NUMBER rendered as a string, not a callsign: a `DMRD`
+/// datagram carries `srcId` and no callsign at all, so identifying the sender
+/// is a directory lookup astar does not hold. `last_heard_id` is that same id
+/// unformatted, for a caller that has a directory. Both PERSIST past
+/// end-of-transmission — they are "most recently heard", not "currently
+/// transmitting". `receiving` is the one that says whether a transmission is
+/// in progress, and `frames_rx` is a liveness counter: a link that is up and
+/// silent and one that is receiving look identical from `link` alone.
+///
+/// `timeslot` is the slot NUMBER, 1 or 2 (the engine's own `ts1`/`ts2` label
+/// is not what an operator reads).
+///
+/// `ptt` is always `false`: DMR is receive-only today and a key is refused.
+///
+/// Every field is credential-free: numbers, counters and a level. There is no
+/// password field, and `iax_station_connect_dmr`'s never reaches here.
+///
+/// Writes `{}` when no link is active or the `dmr` feature isn't compiled in.
+/// Returns [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_dmr_state(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let json = dmr_state_json(station);
+        unsafe { fill_buf(&json, buf, len) }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Render the live DMR link's state as JSON, or `"{}"` when there is none.
+/// Split out of [`iax_station_dmr_state`] so it is reachable from tests
+/// without an FFI buffer dance.
+fn dmr_state_json(station: &IaxStation) -> String {
+    #[cfg(feature = "dmr")]
+    {
+        let Some(s) = station.inner.dmr_state() else {
+            return "{}".to_string();
+        };
+        dmr_snapshot_json(&s).to_string()
+    }
+    #[cfg(not(feature = "dmr"))]
+    {
+        let _ = station;
+        "{}".to_string()
+    }
+}
+
+/// The document one snapshot renders as.
+///
+/// Split from [`dmr_state_json`] so a test can render a snapshot it built
+/// itself: without a link the function above returns `{}`, and a promise about
+/// the fields of a document that has none is no promise at all.
+#[cfg(feature = "dmr")]
+fn dmr_snapshot_json(s: &astar_station::DmrSnapshot) -> serde_json::Value {
+    // The engine names the slot `ts1`/`ts2`; the number is what an operator
+    // reads and what the Swift binding types. An unrecognised label would be a
+    // new engine variant rather than a slot, and 0 says "not 1 or 2" instead
+    // of guessing one a caller might act on.
+    let timeslot: u8 = s
+        .timeslot
+        .strip_prefix("ts")
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    // Built through serde_json rather than `format!` for the same reason the
+    // YSF and NXDN renderers are: `last_heard` is attacker-supplied — it is
+    // derived from whatever the transmitting station put on the wire — so a
+    // quote or backslash in it must not be able to break out of the string.
+    serde_json::json!({
+        "link": s.link_state,
+        "failure": s.failure,
+        "last_heard": s.last_heard,
+        "last_heard_id": s.last_heard_id,
+        "talkgroup": s.talkgroup,
+        "timeslot": timeslot,
+        "frames_rx": s.frames_rx,
+        "receiving": s.receiving,
+        "backend": s.backend,
+        "ptt": s.ptt,
+        "rx_db": s.rx_dbfs,
+    })
+}
+
+#[cfg(test)]
+mod dmr_tests {
+    //! Offline coverage of the DMR entry points (iax-d4f7): the no-link
+    //! document, the error code's identity, the NULL guards — including a
+    //! NULL password — and the promise that no state field could ever carry
+    //! the master password. No socket, no dongle, no master.
+    use super::*;
+    use std::ptr;
+
+    /// A station built with every config string unset — the same helper the
+    /// NXDN tests above use, repeated rather than shared so each network's
+    /// block stays readable on its own.
+    fn station() -> *mut IaxStation {
+        let cfg = IaxConfig {
+            input: ptr::null(),
+            output: ptr::null(),
+            portal_user: ptr::null(),
+            portal_pass: ptr::null(),
+            portal_node: ptr::null(),
+            secret: ptr::null(),
+            codec_policy: ptr::null(),
+        };
+        let st = unsafe { iax_station_new(std::ptr::from_ref(&cfg)) };
+        assert!(!st.is_null());
+        st
+    }
+
+    #[test]
+    fn dmr_state_json_is_empty_without_a_link() {
+        let st = station();
+        assert_eq!(dmr_state_json(unsafe { &*st }), "{}");
+        unsafe { iax_station_free(st) };
+    }
+
+    #[test]
+    fn dmr_has_its_own_error_code_and_text() {
+        // iax_error_text returns a static string per code — the engine's
+        // classification does not cross the ABI, so the app writes its own
+        // message. See docs/design/adding-a-network.md.
+        assert_eq!(IAX_ERR_DMR, -22);
+        assert_ne!(IAX_ERR_DMR, IAX_ERR_NXDN);
+        let text = unsafe { std::ffi::CStr::from_ptr(iax_error_text(IAX_ERR_DMR)) };
+        assert_eq!(text.to_str().expect("utf8"), "dmr error");
+    }
+
+    #[test]
+    fn a_null_station_or_a_null_password_is_refused() {
+        // A null password is not an empty password: it is a caller bug, and
+        // reading it would be a segfault in somebody's menu bar.
+        assert_eq!(
+            unsafe {
+                iax_station_connect_dmr(
+                    ptr::null_mut(),
+                    c"tgif".as_ptr(),
+                    c"h".as_ptr(),
+                    1,
+                    1,
+                    c"K".as_ptr(),
+                    1,
+                    2,
+                    c"p".as_ptr(),
+                )
+            },
+            IAX_ERR_NULL
+        );
+        let st = station();
+        assert_eq!(
+            unsafe {
+                iax_station_connect_dmr(
+                    st,
+                    c"tgif".as_ptr(),
+                    c"h".as_ptr(),
+                    1,
+                    1,
+                    c"K".as_ptr(),
+                    1,
+                    2,
+                    ptr::null(),
+                )
+            },
+            IAX_ERR_NULL
+        );
+        assert_eq!(
+            unsafe { iax_station_dmr_disconnect(ptr::null_mut()) },
+            IAX_ERR_NULL
+        );
+        assert_eq!(
+            unsafe { iax_station_dmr_state(ptr::null_mut(), ptr::null_mut(), 0) },
+            IAX_ERR_NULL
+        );
+        unsafe { iax_station_free(st) };
+    }
+
+    /// A snapshot with every field populated, so the assertions below are
+    /// about a real document rather than the `{}` an idle station renders.
+    ///
+    /// `last_heard` carries the quote-and-backslash payload on purpose: it is
+    /// the one attacker-supplied field here — a talker's id as it came off the
+    /// wire — and the renderer's whole reason for going through `serde_json`
+    /// instead of `format!` is that it cannot break out of the string.
+    #[cfg(feature = "dmr")]
+    fn populated_snapshot() -> astar_station::DmrSnapshot {
+        astar_station::DmrSnapshot {
+            link_state: "linked",
+            failure: None,
+            last_heard: Some("4242\" , \"password\": \"hunter2".to_string()),
+            last_heard_id: Some(4242),
+            talkgroup: 31_313,
+            timeslot: "ts2",
+            frames_rx: 97,
+            receiving: true,
+            backend: Some("thumbdv"),
+            ptt: false,
+            tx_dbfs: -60.0,
+            rx_dbfs: -31.2,
+        }
+    }
+
+    #[test]
+    fn the_state_json_has_no_field_that_could_hold_a_secret() {
+        // The ABI is the widest surface a secret could escape through and the
+        // hardest to audit later. There is no password field, and this test
+        // is the thing that notices if one is ever added.
+        //
+        // Asserted against a POPULATED snapshot: the no-link document is
+        // `{}`, and "`{}` contains no password" is a promise about nothing.
+        // The idle case is covered separately, by
+        // `dmr_state_json_is_empty_without_a_link`.
+        #[cfg(feature = "dmr")]
+        {
+            let value = dmr_snapshot_json(&populated_snapshot());
+            let object = value.as_object().expect("a JSON object");
+            assert!(!object.is_empty(), "the fixture must render fields");
+            for name in object.keys() {
+                let lowered = name.to_ascii_lowercase();
+                for forbidden in ["password", "passphrase", "secret", "pass", "salt", "digest"] {
+                    assert!(
+                        !lowered.contains(forbidden),
+                        "the DMR state JSON has a field named {name:?}"
+                    );
+                }
+            }
+            // And the one field a talker controls cannot smuggle a key in by
+            // being quoted out of: it stays one JSON string, whatever is in
+            // it.
+            assert_eq!(
+                object.get("last_heard").and_then(serde_json::Value::as_str),
+                populated_snapshot().last_heard.as_deref()
+            );
+        }
+        // The rendered document itself, through the same path the ABI uses.
+        let st = station();
+        let json = dmr_state_json(unsafe { &*st });
+        for forbidden in ["password", "passphrase", "secret", "pass"] {
+            assert!(
+                !json.contains(forbidden),
+                "the DMR state JSON names {forbidden}"
+            );
+        }
+        unsafe { iax_station_free(st) };
+    }
+
+    /// An empty system is refused before a socket or a dongle is touched, so
+    /// this holds with or without hardware — and with or without the feature
+    /// compiled in.
+    ///
+    /// Empty rather than `not-a-network`, which is what this asked before:
+    /// an unrecognised system is now DIALED (a directory row's `system` names
+    /// a server, and 111 of the feed's do not match any family slug), so a
+    /// nonsense one here would reach the dongle probe — and on a machine with
+    /// a `ThumbDV` attached, seize it.
+    #[test]
+    fn an_empty_system_is_refused_with_the_dmr_code() {
+        let st = station();
+        assert_eq!(
+            unsafe {
+                iax_station_connect_dmr(
+                    st,
+                    c"".as_ptr(),
+                    c"127.0.0.1".as_ptr(),
+                    62031,
+                    1_234_567,
+                    c"N0CALL".as_ptr(),
+                    31313,
+                    2,
+                    c"secret".as_ptr(),
+                )
+            },
+            IAX_ERR_DMR
+        );
+        unsafe { iax_station_free(st) };
     }
 }
 

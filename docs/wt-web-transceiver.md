@@ -69,7 +69,8 @@ A three-step HTTPS sequence against the AllStar portal:
    `allstar_token` JWT) can be read directly. Both cookies are kept (any
    non-expired `Set-Cookie`) and forwarded — drop either and the next page
    renders unauthenticated.
-2. `GET /portal/webtransceiver.php?node=<owned-node>` with the cookie jar.
+2. `GET /portal/webtransceiver.php` with the cookie jar — `?node=<owned-node>`
+   only when a node is configured; the portal mints without one.
 3. Extract the token from the returned HTML — the `callingName` param
    (e.g. `value="84906e5c0000"`).
 
@@ -79,7 +80,9 @@ callsign.
 
 `PortalCredentials { user, password, node }` — note `user` is the **portal
 account callsign**, `password` is the **portal account password** (not any IAX2
-secret), and `node` is a node the account **owns** (needed as the query param).
+secret), and `node` is an **optional** selector for a node the account owns.
+The portal issues a token without one, so an empty `node` sends no query
+parameter; the macOS account panel no longer asks for it.
 
 ### Stage 2 — Resolve the node to an address (`astar-asl3::resolve_node`)
 
@@ -174,8 +177,9 @@ Set the portal credentials on the station config; the guest secret defaults to
 `"allstar"`:
 
 - Rust: `StationConfig { portal: Some(PortalCredentials { user, password, node }), secret, .. }`
-- C-ABI: `IaxConfig { portal_user, portal_pass, portal_node, secret }` — all
-  three portal fields must be non-NULL to enable the WT path.
+- C-ABI: `IaxConfig { portal_user, portal_pass, portal_node, secret }` —
+  `portal_user` and `portal_pass` must be non-NULL to enable the WT path;
+  `portal_node` may be NULL.
 - Swift: `StationConfig.portalUser / .portalPass / .portalNode / .secret`
 - Python: `Station(portal_user=…, portal_pass=…, portal_node=…, secret=…)`
 

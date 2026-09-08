@@ -43,11 +43,12 @@ daemon.
 > **M17 needs nothing installed.** The app has linked Codec 2 in since
 > `0.1.4beta`; a system `libcodec2` is still preferred when one is present.
 >
-> **D-Star and System Fusion need a dongle.** Both are in the macOS app, and
-> both are AMBE+2 with no software vocoder, so they run on an AMBE-3000 USB
-> stick: the **DVMEGA DVstick 30** or NW Digital Radio's **ThumbDV / DV3000**.
-> Plug one in and the networks appear; pull it and they go. AllStarLink and
-> M17 need neither.
+> **D-Star, System Fusion and NXDN need a dongle.** All three are AMBE+2 with
+> no software vocoder, so they run on an AMBE-3000 USB stick: the **DVMEGA
+> DVstick 30** or NW Digital Radio's **ThumbDV / DV3000**. Plug one in and the
+> networks appear; pull it and they go. D-Star and System Fusion are in the
+> macOS app fully; NXDN is receive only, everywhere it exists — astar has no
+> NXDN transmit path yet. AllStarLink and M17 need neither.
 >
 > This is a beta of a project that has only just started shipping. Expect rough
 > edges, expect things to move.
@@ -59,24 +60,26 @@ daemon.
 Be aware that "the engine supports it" and "you can click it in the app" are
 two different things right now. This is the honest state:
 
-| | AllStar (IAX2) | M17 | D-Star | System Fusion (YSF) |
-|---|---|---|---|---|
-| **Engine** (`crates/`) | yes | yes | yes — `dstar` feature | yes — `ysf` feature |
-| **macOS app** (`apps/macos`) | yes | yes¹ | yes² | yes² |
-| **Iced client** (`apps/gui`) | yes | yes¹ | **no** — not lit up yet | **no** — not lit up yet |
-| **CLI** (`astar-cli`) | yes | **no** — IAX2 only | `dstar-listen` (receive) | `ysf-listen` (receive) |
+| | AllStar (IAX2) | M17 | D-Star | System Fusion (YSF) | NXDN |
+|---|---|---|---|---|---|
+| **Engine** (`crates/`) | yes | yes | yes — `dstar` feature | yes — `ysf` feature | yes — `nxdn` feature |
+| **macOS app** (`apps/macos`) | yes | yes¹ | yes² | yes² | receive only² |
+| **Iced client** (`apps/gui`) | yes | yes¹ | **no** — not lit up yet | **no** — not lit up yet | **no** — not lit up yet |
+| **CLI** (`astar-cli`) | yes | **no** — IAX2 only | `dstar-listen` (receive) | `ysf-listen` (receive) | `nxdn-listen` (receive) |
 
 ¹ M17 is capability-gated: the client shows it only when the running build can
 actually place the call. Since `0.1.4beta` the macOS app links Codec 2 in, so
 that is satisfied out of the box — see [M17 and Codec 2](#m17-and-codec-2).
 
-² D-Star and System Fusion are capability-gated on **hardware** rather than on
-the build: the vocoder is an AMBE-3000 USB dongle — a DVMEGA DVstick 30 or a
-ThumbDV / DV3000 — so each network appears in the picker when one is plugged
-in and disappears when it is pulled. One dongle serves both, one network at a
-time. `astar-server` does not enable `dstar` or `ysf` in its own manifest,
-though a workspace build unifies features and compiles them in anyway; the
-daemon refuses to key while either session is active. See
+² D-Star, System Fusion and NXDN are capability-gated on **hardware** rather
+than on the build: the vocoder is an AMBE-3000 USB dongle — a DVMEGA DVstick
+30 or a ThumbDV / DV3000 — so each network appears in the picker when one is
+plugged in and disappears when it is pulled. One dongle serves all three, one
+network at a time. NXDN is receive only everywhere it exists — astar has no
+NXDN transmit path yet. `astar-server` does not enable `dstar`, `ysf` or
+`nxdn` in its own manifest, though a workspace build unifies features and
+compiles them in anyway; the daemon refuses to key while any of the three
+sessions is active. See
 [On-air safety](https://rcludwick.github.io/astar/about/safety/).
 
 M17 is **compiled in by default** everywhere it is implemented — the engine,

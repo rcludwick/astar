@@ -60,13 +60,15 @@
         private var availableNetworks: [Network] {
             Network.available(
                 m17: session.m17Available, dstar: session.dstarAvailable,
-                ysf: session.ysfAvailable)
+                ysf: session.ysfAvailable, nxdn: session.nxdnAvailable,
+                dmr: session.dmrAvailable)
         }
 
         private var selectedNetwork: Network {
             Network.resolve(
                 networkRaw, m17: session.m17Available, dstar: session.dstarAvailable,
-                ysf: session.ysfAvailable)
+                ysf: session.ysfAvailable, nxdn: session.nxdnAvailable,
+                dmr: session.dmrAvailable)
         }
 
         /// The network picker's binding, and the one place a network change
@@ -117,6 +119,16 @@
         @State private var dtmfHistory: [String] = []
         /// The most recently pressed dialpad key, for the tap-flash animation.
         @State private var flashedKey: String?
+        /// The DMR picker's groups, cached.
+        ///
+        /// Grouping walks all 3,415 directory rows and sorts what it keeps,
+        /// and this pane re-renders at the 20 Hz poll rate while the meters
+        /// are live — so it is recomputed when one of its two inputs changes
+        /// (the loaded feed itself, the consent flag) and not on every tick.
+        /// Keyed on the feed rather than its row COUNT: a sync that replaces
+        /// the directory with a same-sized one is exactly the case a count
+        /// would miss.
+        @State private var dmrGroupsCache: [DmrSystemCatalog.Group] = []
         /// Whether the in-call "Levels & Spectrum" disclosure is expanded (remembered
         /// across launches). Default collapsed so the call card stays compact and the
         /// FFT poll stays off until opened (astar-8b5b).
@@ -331,6 +343,10 @@
                     // one network's credential, and that network is not
                     // dialable yet (astar-a7c5).
                     DmrSettingsView()
+                    // Its own section, not a second field in DMR's: NXDN ids
+                    // are 16-bit and a registered DMR ID does not fit in one,
+                    // so they are two numbers, not one shown twice.
+                    NxdnSettingsView()
                     SetupsView()
                     FavoritesSettingsView(directoryRevision: $directoryRevision)
                     MicProfilesView()
@@ -350,26 +366,27 @@
         private var reflectorsPane: some View {
             ReflectorSearchPane(
                 preferredNetwork: selectedNetwork.reflectorNetwork,
-                onBack: { navigation.goBack() }
-            ) { text, network in
-                // Switch the picker to the chosen reflector's own network
-                // before filling the field — the pane can browse past the
-                // network the dial is set to, and text resolved against the
-                // wrong one silently finds nothing. Same move the favorites
-                // menu already makes. Unavailable networks cannot appear here:
-                // `Network.resolve` refuses them, so this cannot select a
-                // segment that is not offered.
-                if let appNetwork = Network.matching(network),
-                    availableNetworks.contains(appNetwork)
-                {
-                    networkRaw = appNetwork.rawValue
+                onBack: { navigation.goBack() },
+                onSelect: { text, network in
+                    // Switch the picker to the chosen reflector's own network
+                    // before filling the field — the pane can browse past the
+                    // network the dial is set to, and text resolved against the
+                    // wrong one silently finds nothing. Same move the favorites
+                    // menu already makes. Unavailable networks cannot appear here:
+                    // `Network.resolve` refuses them, so this cannot select a
+                    // segment that is not offered.
+                    if let appNetwork = Network.matching(network),
+                        availableNetworks.contains(appNetwork)
+                    {
+                        networkRaw = appNetwork.rawValue
+                    }
+                    // The pane hands back dial text, not a target: the dial field
+                    // stays the single source of truth for what Connect will dial.
+                    // Selecting never connects — that is still a deliberate second
+                    // action.
+                    node = text
                 }
-                // The pane hands back dial text, not a target: the dial field
-                // stays the single source of truth for what Connect will dial.
-                // Selecting never connects — that is still a deliberate second
-                // action.
-                node = text
-            }
+            )
         }
 
         /// Default window width per pane. The user's own window size wins over
@@ -534,13 +551,15 @@
                             talkTimerDot
                         }
                     }
-                    // Who is talking on the reflector, and anything they sent
-                    // as slow data (iax-4c8e). D-Star's own fields, so this
-                    // shows only on a D-Star call — and it is most of the
-                    // point of listening in: a reflector with no talker line
-                    // is an anonymous voice.
-                    if isInCall, session.activeCallNetwork == .dstar {
-                        dstarTalkerLine
+                    // Who last keyed up, on whichever digital network is
+                    // live — and, on D-Star, anything they sent as slow data.
+                    // It is most of the point of listening in: a reflector
+                    // with no talker line is an anonymous voice. AllStar is
+                    // excluded because IAX2 carries no talker identity at all
+                    // (`Network.isDigitalVoice`); a new network opts in there
+                    // and gets this line without touching the popover.
+                    if isInCall, session.activeCallNetwork?.isDigitalVoice == true {
+                        talkerLine
                     }
                 }
                 // astar-5e2c: the text column takes its ideal width BEFORE the
@@ -661,7 +680,17 @@
                     .accessibilityValue(session.isConnecting ? "connecting" : "")
                     .disabled(
                         needsCredentials || !isDialTargetValid || needsM17CallsignToConnect
-                            || session.isConnecting)
+                            || needsDMRRadioIDToConnect || session.isConnecting)
+                }
+                // DMR's target is four things and the field can only hold two
+                // of them comfortably, so the network and the slot get
+                // controls of their own — see `dmrTargetRow`.
+                if selectedNetwork == .dmr {
+                    dmrTargetRow
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                        .onAppear(perform: refreshDMRGroups)
+                        .onChange(of: session.brandmeisterConsent) { _ in refreshDMRGroups() }
+                        .onChange(of: reflectors.feed) { _ in refreshDMRGroups() }
                 }
                 // Connecting via AllStar requires an account (guest mode removed,
                 // au-1517) — `.m17` doesn't (astar-c2e5 Task 9 fix: this used to
@@ -674,6 +703,17 @@
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         // Same fade/slide as the M17 callsign field above.
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+                // DMR's other credential. Said here, with Connect already off,
+                // rather than thrown on press: the operator cannot supply a
+                // radioid.net registration from this field, so the useful thing
+                // to do is name where it goes.
+                if needsDMRRadioIDToConnect {
+                    Text("Enter your DMR radio ID in Settings to connect via DMR.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
                 // The one place the directory is visible so far
@@ -765,13 +805,184 @@
                 // the same callsign. Naming the network the operator is
                 // actually on keeps that concrete without implying there are
                 // two settings.
+                // DMR is the odd one: a `DMRD` frame carries a number and no
+                // callsign at all, so the callsign rides in the LOGIN. Saying
+                // "transmits" there would be wrong, and the difference is the
+                // whole reason the radio ID is a separate field.
                 Text(
-                    "\(selectedNetwork.displayName) transmits your callsign — "
-                        + "set it once here or in Settings."
+                    selectedNetwork == .dmr
+                        ? "DMR logs in with your callsign — set it once here or in Settings."
+                        : "\(selectedNetwork.displayName) transmits your callsign — "
+                            + "set it once here or in Settings."
                 )
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             }
+        }
+
+        /// DMR's target row: the network, the talkgroup and the timeslot.
+        ///
+        /// A DMR target is four things — the network, the master, the talkgroup
+        /// and the slot — because a talkgroup number names nothing on its own:
+        /// TG 91 exists on several of these networks and is a different room on
+        /// each. The dial field alone would mean typing all four; these three
+        /// controls fill it in instead.
+        ///
+        /// **They edit the dial field, they do not shadow it.** Every control
+        /// here reads its third of `node` and writes back the whole string
+        /// (`DmrDialText`), so the field stays the single source of truth for
+        /// what will be dialled — the same rule the D-Star module picker
+        /// follows, and for the same reason: two places each holding half a
+        /// target is how a UI comes to show one thing and dial another.
+        private var dmrTargetRow: some View {
+            HStack(spacing: 8) {
+                dmrSystemMenu
+                dmrTalkgroupField
+                Picker("", selection: dmrTimeslotBinding) {
+                    Text("TS1").tag(UInt8(1))
+                    Text("TS2").tag(UInt8(2))
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 96)
+                .accessibilityLabel("Timeslot")
+                .help("Which of the master's two timeslots to join. TS2 is the hotspot convention.")
+            }
+        }
+
+        /// The master picker, grouped by network family — nine families over
+        /// the directory's 111 system slugs, with everything they do not claim
+        /// under one heading and dialled exactly the same way.
+        ///
+        /// BrandMeister's group is absent until the consent box in Settings is
+        /// ticked (`DmrSystemCatalog.grouped(_:consented:)`). A submenu per
+        /// family rather than one flat list: 185 masters in a single menu is
+        /// not something anyone can scan.
+        private var dmrSystemMenu: some View {
+            Menu {
+                ForEach(dmrGroupsCache) { group in
+                    Menu(group.title) {
+                        ForEach(group.systems) { system in
+                            Button(system.name) { selectDMRSystem(system.entryID) }
+                        }
+                    }
+                }
+            } label: {
+                Text(dmrSystemLabel)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .menuStyle(.borderlessButton)
+            .frame(maxWidth: 140)
+            .disabled(dmrGroupsCache.isEmpty)
+            .accessibilityLabel("DMR network")
+            .accessibilityValue(dmrSystemLabel)
+            .help(
+                dmrGroupsCache.isEmpty
+                    ? "No DMR masters in the directory yet — type an address as "
+                        + "system:host:port/talkgroup/timeslot."
+                    : "Pick the network and master to log in to. Each issues its own password.")
+        }
+
+        /// The talkgroup: typed, and picked from a list where one exists.
+        ///
+        /// Typing the number is the normal case and a complete one — it is how
+        /// every DMR radio codeplug works. `session.dmrTalkgroups` is empty
+        /// today because the directory publishes no per-system list yet, so the
+        /// menu appears only if one ever arrives.
+        private var dmrTalkgroupField: some View {
+            HStack(spacing: 4) {
+                TextField("Talkgroup", text: dmrTalkgroupBinding)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 84)
+                    .accessibilityLabel("Talkgroup")
+                if !dmrTalkgroupOptions.isEmpty {
+                    Menu {
+                        ForEach(dmrTalkgroupOptions) { talkgroup in
+                            Button("\(talkgroup.tg) · \(talkgroup.name)") {
+                                dmrTalkgroupBinding.wrappedValue = String(talkgroup.tg)
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "list.bullet")
+                    }
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .frame(width: 22)
+                    .accessibilityLabel("Choose a talkgroup")
+                }
+            }
+        }
+
+        /// Refill `dmrGroupsCache`. Called when the feed loads or is replaced
+        /// by a sync, and when the consent flag flips — the only two things
+        /// that can change the answer.
+        private func refreshDMRGroups() {
+            dmrGroupsCache = DmrSystemCatalog.grouped(
+                reflectors.entries, consented: session.brandmeisterConsent)
+        }
+
+        /// What the master picker reads: the chosen row's name, or a prompt.
+        /// Looked up in the cached groups (185 masters at most) rather than in
+        /// the whole 3,415-row directory.
+        private var dmrSystemLabel: String {
+            let address = DmrDialText.parts(node).address
+            guard !address.isEmpty else { return "Network…" }
+            for group in dmrGroupsCache {
+                if let match = group.systems.first(where: { $0.entryID == address }) {
+                    return match.name
+                }
+            }
+            return address
+        }
+
+        /// The talkgroups published for the selected master's network, if any.
+        /// Nothing publishes them yet, so the empty check short-circuits before
+        /// any lookup runs.
+        private var dmrTalkgroupOptions: [DmrTalkgroup] {
+            guard !session.dmrTalkgroups.isEmpty else { return [] }
+            let address = DmrDialText.parts(node).address
+            guard let slug = DmrSystemCatalog.slug(forEntryID: address, in: reflectors.entries)
+            else { return [] }
+            return session.dmrTalkgroups[slug] ?? []
+        }
+
+        private var dmrTalkgroupBinding: Binding<String> {
+            Binding(
+                get: { DmrDialText.parts(node).talkgroup },
+                set: { talkgroup in
+                    let parts = DmrDialText.parts(node)
+                    node = DmrDialText.compose(
+                        address: parts.address, talkgroup: talkgroup, timeslot: parts.timeslot)
+                })
+        }
+
+        private var dmrTimeslotBinding: Binding<UInt8> {
+            Binding(
+                get: { DmrDialText.parts(node).timeslot },
+                set: { timeslot in
+                    let parts = DmrDialText.parts(node)
+                    node = DmrDialText.compose(
+                        address: parts.address, talkgroup: parts.talkgroup, timeslot: timeslot)
+                })
+        }
+
+        private func selectDMRSystem(_ entryID: String) {
+            let parts = DmrDialText.parts(node)
+            node = DmrDialText.compose(
+                address: entryID, talkgroup: parts.talkgroup, timeslot: parts.timeslot)
+        }
+
+        /// Whether DMR's radio-ID requirement is unmet right now — mirrors
+        /// `ConnectError.missingDMRRadioID` so Connect is off for the same
+        /// reason it would otherwise throw.
+        ///
+        /// The master PASSWORD is deliberately not gated the same way: reading
+        /// it means a Keychain round trip, and a view body runs at 20 Hz while
+        /// the meters are live. Its refusal is explained on press instead, by a
+        /// message that names where the network issues one.
+        private var needsDMRRadioIDToConnect: Bool {
+            selectedNetwork == .dmr && RadioID.sanitized(session.dmrRadioID).isEmpty
         }
 
         /// Commit the local callsign draft into `session.m17Callsign` (whose
@@ -893,18 +1104,29 @@
                 remembered.map { "Last used module \(String($0))" } ?? "No module chosen yet")
         }
 
-        /// The D-Star last-heard line: the talker's callsign, and the slow-data
-        /// message if one has arrived.
+        /// The last-heard line: whoever most recently keyed up on the live
+        /// digital network, and — on D-Star only, because only D-Star has one
+        /// — the slow-data message they sent with it.
         ///
-        /// **Last heard, not talking now.** The engine keeps both past
-        /// end-of-transmission on purpose, so this names whoever most recently
-        /// keyed up rather than whoever is keyed right now — the status dot
-        /// and the RX meter are what say that. Absent entirely until a header
-        /// arrives, because an empty "Hearing —" reads as a fault when the
-        /// truth is that the reflector has simply been quiet.
+        /// Network-agnostic by design. `session.lastHeard` is already the
+        /// active network's own talker (D-Star's header callsign, YSF's
+        /// frame-header callsign, M17's LSF source), so a network added later
+        /// lights this line up without a change here.
+        ///
+        /// **Last heard, not talking now.** The engine keeps every one of
+        /// those past end-of-transmission on purpose, so this names whoever
+        /// most recently keyed up rather than whoever is keyed right now —
+        /// the status dot and the RX meter are what say that. Absent entirely
+        /// until the first transmission, because an empty "Hearing —" reads
+        /// as a fault when the truth is that the reflector has simply been
+        /// quiet.
+        ///
+        /// **Attacker-controlled text.** Both lines are typed or keyed by
+        /// whoever is on the reflector. `Text` renders them verbatim and
+        /// interprets nothing, which is the whole requirement.
         @ViewBuilder
-        private var dstarTalkerLine: some View {
-            if let talker = session.dstarTalker {
+        private var talkerLine: some View {
+            if let talker = session.lastHeard {
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Last heard \(talker)")
                         .font(.caption2)
@@ -918,7 +1140,9 @@
                     // of view. `Text` renders it verbatim and interprets
                     // nothing, which is the whole requirement; the line limit
                     // stops a long one reflowing the status card.
-                    if let message = session.dstarSlowText, !message.isEmpty {
+                    if session.activeCallNetwork == .dstar,
+                        let message = session.dstarSlowText, !message.isEmpty
+                    {
                         Text(message)
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
@@ -1331,15 +1555,20 @@
         }
 
         /// Replaces the PTT/VOX control on a network astar can receive but not
-        /// transmit — System Fusion today.
+        /// transmit — NXDN today, System Fusion until 2026-09-06.
         ///
         /// A PTT button that did nothing would be worse than an absent one:
         /// the operator would key, hear nothing happen, and reasonably assume
         /// the radio or the link was broken. Naming the reason costs one line
         /// and answers the question before it is asked.
+        ///
+        /// The network is read live rather than written into the string, so
+        /// the sentence stays true as networks gain and lose transmit paths —
+        /// this text and `CallSession.canTransmit` cannot drift apart.
         private var receiveOnlyIndicator: some View {
-            Label(
-                "Receive only — astar can't transmit Fusion yet",
+            let name = (session.activeCallNetwork ?? .allstar).displayName
+            return Label(
+                "Receive only — astar can't transmit \(name) yet",
                 systemImage: "antenna.radiowaves.left.and.right"
             )
             .font(.callout.weight(.semibold))
@@ -1351,7 +1580,7 @@
             )
             .foregroundStyle(.secondary)
             .accessibilityElement()
-            .accessibilityLabel("Receive only, astar cannot transmit Fusion yet")
+            .accessibilityLabel("Receive only, astar cannot transmit \(name) yet")
         }
 
         /// Replaces the PTT/VOX control while listen-only (Disable TX) is on: makes it
@@ -1597,11 +1826,11 @@
                 case .address(let value):
                     dispatchConnect(node: value, network: network, address: value)
                 }
-            case .m17, .dstar, .ysf:
+            case .m17, .dstar, .ysf, .nxdn, .dmr:
                 // Every reflector network resolves its target engine-side
                 // (`CallSession.connect(node:network:)` → `m17Target` /
-                // `dstarTarget` / `ysfTarget`, directory first and address
-                // second) — this is
+                // `dstarTarget` / `ysfTarget` / `nxdnTarget` / `dmrTarget`,
+                // directory first and address second) — this is
                 // only the same "unreachable via the disabled button, but
                 // refuse it on Enter too" guard as above.
                 guard session.canDial(node, network: network) else { return }

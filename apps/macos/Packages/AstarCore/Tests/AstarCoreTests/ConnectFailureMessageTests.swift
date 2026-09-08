@@ -101,6 +101,63 @@ final class ConnectFailureMessageTests: XCTestCase {
             message, "Couldn’t connect to XLX836 A: ThumbDV at /dev/cu.usbserial-A1 is busy.")
     }
 
+    /// The NXDN refusals are `ConnectError`s, so they reach the popover
+    /// through `localizedDescription`. Each has to name the remedy: an id
+    /// that is missing, an id the wire cannot carry, and — the one worth
+    /// spelling out — that it is not the DMR number.
+    func testTheNXDNIdentityRefusalsNameTheRemedy() {
+        let missing = CallSession.ConnectError.missingRadioID.localizedDescription
+        XCTAssertTrue(missing.contains("NXDN ID"), missing)
+        XCTAssertTrue(missing.contains("Settings"), missing)
+
+        let range = CallSession.ConnectError.radioIDOutOfRange.localizedDescription
+        XCTAssertTrue(range.contains("65519"), range)
+        XCTAssertTrue(range.contains("DMR"), "the two numbers must not be confused: \(range)")
+
+        let target = CallSession.ConnectError.badNXDNTarget.localizedDescription
+        XCTAssertTrue(target.contains("talkgroup"), target)
+    }
+
+    /// A DMR failure gets the same treatment as D-Star's: `iax_error_text(-22)`
+    /// is the static "dmr error", so the engine's own detail is what tells an
+    /// operator whether the master refused the password or the ID.
+    func testADMRFailureWithDetailNamesTheRealReason() {
+        let error = StationError(
+            code: -22, text: "dmr error",
+            detail: "dmr error: master refused the login (auth)")
+        XCTAssertEqual(
+            connectFailureMessage(for: error, node: "tgif:tgif.network/31313/2"),
+            "Couldn’t connect to tgif:tgif.network/31313/2: master refused the login (auth).")
+
+        let bare = StationError(code: -22, text: "dmr error", detail: "")
+        let message = connectFailureMessage(for: bare, node: "tgif")
+        XCTAssertTrue(message.contains("DMR password"), message)
+        XCTAssertTrue(message.contains("ThumbDV"), message)
+    }
+
+    /// DMR's refusals are its own cases, not NXDN's: the two radio IDs are
+    /// different numbers with different registrations, and a message naming
+    /// the wrong one sends the operator to the wrong page.
+    func testTheDMRRefusalsNameTheirOwnRemedies() {
+        let missing = CallSession.ConnectError.missingDMRRadioID.localizedDescription
+        XCTAssertTrue(missing.contains("DMR radio ID"), missing)
+        XCTAssertFalse(missing.contains("NXDN"), missing)
+
+        let range = CallSession.ConnectError.dmrRadioIDOutOfRange.localizedDescription
+        XCTAssertTrue(range.contains("radioid.net"), range)
+
+        let password = CallSession.ConnectError.missingDMRPassword.localizedDescription
+        XCTAssertTrue(password.contains("Settings"), password)
+        XCTAssertTrue(password.contains("issues its own"), password)
+
+        let consent = CallSession.ConnectError.brandmeisterNotConsented.localizedDescription
+        XCTAssertTrue(consent.contains("BrandMeister enforces its own access rules"), consent)
+
+        let target = CallSession.ConnectError.badDMRTarget.localizedDescription
+        XCTAssertTrue(target.contains("talkgroup"), target)
+        XCTAssertTrue(target.contains("timeslot"), target)
+    }
+
     /// Non-StationError errors keep the existing `localizedDescription`
     /// behavior — `ConnectError.needsAccount` already has good wording.
     func testNonStationErrorKeepsLocalizedDescription() {

@@ -182,7 +182,7 @@ final class NodeDirectoryTests: XCTestCase {
         // `UserDefaultsNodeDirectoryStore.all()`'s `try?` into an empty
         // array, permanently wiping every favorite/recent on the next upsert.
         let json = #"""
-            {"id":"X","label":"AJ7HR","node":"77777","favorite":true,"network":"dmr"}
+            {"id":"X","label":"AJ7HR","node":"77777","favorite":true,"network":"tetra"}
             """#
         let entry = try JSONDecoder().decode(NodeEntry.self, from: Data(json.utf8))
         XCTAssertEqual(entry.network, .allstar)

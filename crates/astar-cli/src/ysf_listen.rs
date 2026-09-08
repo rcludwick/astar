@@ -211,7 +211,10 @@ fn listen(opts: &ListenOptions) -> Result<(), String> {
     station
         .ysf_connect(&target, &opts.callsign, opts.options.as_deref())
         .map_err(|e| format!("ysf connect failed: {e}"))?;
-    println!("receive only — this command has no PTT and astar has no YSF transmit path.");
+    println!(
+        "receive only — this command has no PTT. astar does transmit YSF; keying is the \
+         operator's, in the app."
+    );
 
     let mut tracker = PrintTracker::new(target.clone());
     let mut link_failed = false;

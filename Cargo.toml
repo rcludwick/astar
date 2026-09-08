@@ -21,6 +21,7 @@ members = [
     "crates/astar-dmr",
     "crates/astar-dstar",
     "crates/astar-ysf",
+    "crates/astar-nxdn",
     "apps/gui",
 ]
 exclude = [
@@ -30,7 +31,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.1.11-beta"
+version = "0.1.12-beta"
 edition = "2024"
 # Real floor, verified against the committed Cargo.lock: apps/gui's graph pulls
 # font-types 1.89 (and iced/wgpu/image 1.88, zbus 1.87). The engine crates alone
@@ -73,6 +74,7 @@ rubato = "5.0"
 nnnoiseless = { version = "0.5", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 smallvec = "1"
 thiserror = "2"
 tracing = "0.1"

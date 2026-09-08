@@ -100,6 +100,89 @@ public final class CallSession: ObservableObject {
     /// This is the sentence that explains it.
     @Published public private(set) var ysfUnsupportedMode: YSFState.UnsupportedMode?
 
+    /// Whether the engine can link NXDN: mirrors the snapshot's
+    /// `nxdnAvailable` flag. Gates the NXDN picker segment
+    /// (`Network.available(m17:dstar:ysf:nxdn:)`).
+    ///
+    /// Hardware, not a build — and the SAME hardware `dstarAvailable` and
+    /// `ysfAvailable` report, read through the same probe, so all three
+    /// always agree. NXDN voice is AMBE+2 from the same ThumbDV.
+    @Published public private(set) var nxdnAvailable = false
+
+    /// The id of the most recently heard NXDN transmission, or `nil`.
+    ///
+    /// A NUMBER, not a callsign: an `NXDND` frame carries `srcId` and no
+    /// callsign at all. **Last heard, not talking now** — it persists past
+    /// end-of-transmission (`nxdnReceiving` is what says whether a
+    /// transmission is in progress). Cleared when the link ends.
+    @Published public private(set) var nxdnLastHeard: String?
+
+    /// `true` while an NXDN transmission is in progress. Like YSF's and
+    /// unlike AllStar's `receiving`, this is not inferred from audio level —
+    /// the frame header says so directly.
+    @Published public private(set) var nxdnReceiving = false
+
+    /// The NXDN link's state, or `nil` when no link is live.
+    @Published public private(set) var nxdnLink: NXDNState.Link?
+
+    /// Whether the engine can link DMR: mirrors the snapshot's
+    /// `dmrAvailable` flag. Gates the DMR picker segment
+    /// (`Network.available(m17:dstar:ysf:nxdn:dmr:)`).
+    ///
+    /// Hardware, not a build — and the SAME hardware `dstarAvailable`,
+    /// `ysfAvailable` and `nxdnAvailable` report, read through the same
+    /// probe, so all four always agree. DMR voice is AMBE+2 from the same
+    /// ThumbDV.
+    @Published public private(set) var dmrAvailable = false
+
+    /// The id of the most recently heard DMR transmission, or `nil`.
+    ///
+    /// A NUMBER, not a callsign: a `DMRD` frame carries `srcId` and no
+    /// callsign at all, so naming the sender would be a radioid.net lookup
+    /// astar does not hold. **Last heard, not talking now** — it persists past
+    /// end-of-transmission (`dmrReceiving` is what says whether a transmission
+    /// is in progress). Cleared when the link ends.
+    ///
+    /// **Attacker-controlled**: it is whatever the transmitting station put on
+    /// the wire. Render it as text, never as markup.
+    @Published public private(set) var dmrLastHeard: String?
+
+    /// `true` while a DMR transmission is in progress. Like NXDN's and YSF's
+    /// and unlike AllStar's `receiving`, this is not inferred from audio level
+    /// — the frame header says so directly.
+    @Published public private(set) var dmrReceiving = false
+
+    /// The DMR link's state, or `nil` when no link is live.
+    ///
+    /// Longer-lived than the others' link enums: a homebrew login is a
+    /// conversation (login, authenticate, configure), and an operator watching
+    /// a connect hang is owed which round trip stalled.
+    @Published public private(set) var dmrLink: DMRState.Link?
+
+    /// Whether the operator has opted in to BrandMeister. **Persisted, and
+    /// `false` until they say otherwise.**
+    ///
+    /// BrandMeister is a private network: its operators set the terms, decide
+    /// what counts as a violation, and have permanently blocked accounts.
+    /// astar is a third-party client and cannot tell an operator whether
+    /// connecting this way is within those rules, so it does not put them
+    /// there without an explicit, informed tick — see
+    /// `docs/design/dmr-networks.md` §"What the gate looks like" for the
+    /// wording, and `dmr-brandmeister-position.md` for what BrandMeister's own
+    /// material did and did not say when it was checked on 2026-09-07.
+    ///
+    /// Never pre-ticked, never inferred from anything else (not from a saved
+    /// password, not from a dial), and never exported: `dmr.` is not one of
+    /// `ConfigArchive`'s settings prefixes, so a config handed to a friend
+    /// cannot consent on their behalf.
+    @Published public var brandmeisterConsent: Bool = false {
+        didSet {
+            guard brandmeisterConsent != oldValue else { return }
+            prefs.set(brandmeisterConsent, forKey: Self.brandmeisterConsentKey)
+        }
+    }
+    private static let brandmeisterConsentKey = "dmr.brandmeisterConsent"
+
     /// The MY callsign of the most recently heard D-Star transmission, or
     /// `nil` until one arrives. **Last heard, not talking now** — it persists
     /// past end-of-transmission by design (`receiving` is what says whether
@@ -113,6 +196,32 @@ public final class CallSession: ObservableObject {
     @Published public private(set) var dstarSlowText: String?
     /// The DExtra link's own state, or `nil` when no D-Star session is live.
     @Published public private(set) var dstarLink: DStarState.Link?
+
+    /// The callsign of the most recently heard M17 transmission — the LSF
+    /// source address of the last stream off the reflector — or `nil` until
+    /// one arrives. **Last heard, not talking now**, exactly like
+    /// `dstarTalker` and `ysfLastHeard`. Cleared when the session ends.
+    @Published public private(set) var m17Talker: String?
+
+    /// The M17 reflector link's own state, or `nil` when no session is live.
+    @Published public private(set) var m17Link: M17State.Link?
+
+    /// Who most recently keyed up on the network this call is on, or `nil`.
+    ///
+    /// ONE property for every digital-voice network: it is `dstarTalker` on
+    /// D-Star, `ysfLastHeard` on System Fusion, `m17Talker` on M17, and `nil`
+    /// on AllStar, which carries no talker identity in its audio path (a node
+    /// number is who you dialled, not who is speaking). A new network feeds
+    /// it by adding an arm to `refreshLastHeard()` and returning `true` from
+    /// `Network.isDigitalVoice` — nothing in the UI changes.
+    ///
+    /// **Last heard, not talking now**: every source persists past
+    /// end-of-transmission on purpose. `remotePTT`/`ysfReceiving` are what
+    /// say whether a transmission is in progress.
+    ///
+    /// **Attacker-controlled**: it is whatever callsign whoever keyed up put
+    /// on the wire. Render it as text, never as markup.
+    @Published public private(set) var lastHeard: String?
 
     /// The node most recently dialed (set at `connect`, cleared at `disconnect`).
     /// Surfaces who we're connected to — e.g. the menu-bar right-click menu.
@@ -379,8 +488,12 @@ public final class CallSession: ObservableObject {
 
     /// Whether `network` needs the operator's callsign before it can dial.
     /// Both reflector networks transmit it; AllStar dials as the user's node.
+    /// DMR is in the list even though a `DMRD` frame carries no callsign at
+    /// all: the homebrew LOGIN carries one, and a master that logs an empty
+    /// callsign has been told something false about who is connecting.
     public static func requiresCallsign(_ network: Network) -> Bool {
-        network == .m17 || network == .dstar || network == .ysf
+        network == .m17 || network == .dstar || network == .ysf || network == .nxdn
+            || network == .dmr
     }
 
     /// The operator's DMR radio ID — the numeric half of the identity model.
@@ -410,6 +523,34 @@ public final class CallSession: ObservableObject {
         }
     }
     private static let dmrRadioIDKey = "dmr.radioId"
+
+    /// The operator's NXDN id — a **third** identity field, and deliberately
+    /// not the DMR one.
+    ///
+    /// NXDN addresses stations by a 16-bit number (`NXDNGateway/
+    /// NXDNNetwork.cpp` packs `unsigned short srcId, dstId`). A registered
+    /// DMR ID is six or seven digits and does not fit, so reusing it would
+    /// mean truncating — putting somebody else's number on the air. astar
+    /// asks for this one separately instead, and refuses to dial without it.
+    ///
+    /// Stored as digits under `nxdn.radioId`; `NxdnID` holds the range.
+    /// Adding it does not move `ConfigVersion`: an older reader ignores a key
+    /// it does not know and a newer one treats it as unset, which is exactly
+    /// the tolerance a version bump would spend for nothing.
+    @Published public var nxdnRadioID: String = "" {
+        didSet {
+            let clean = NxdnID.sanitized(nxdnRadioID)
+            // Re-entrancy guard first, for the same reason `dmrRadioID` has
+            // one: the assignment below re-enters `didSet`.
+            guard clean == nxdnRadioID else {
+                nxdnRadioID = clean
+                return
+            }
+            guard nxdnRadioID != oldValue else { return }
+            prefs.set(nxdnRadioID, forKey: Self.nxdnRadioIDKey)
+        }
+    }
+    private static let nxdnRadioIDKey = "nxdn.radioId"
 
     /// Backing store for the preferences this session owns outright — the
     /// callsign, the radio ID, the M17 audio overrides. Injected (defaults to
@@ -532,10 +673,12 @@ public final class CallSession: ObservableObject {
         directoryStore: NodeDirectoryStore = UserDefaultsNodeDirectoryStore(),
         micProfileStore: MicProfileStore = UserDefaultsMicProfileStore(),
         credentials: Credentials? = nil,
+        dmrPasswords: DmrPasswordStore? = nil,
         userDefaults: UserDefaults = .standard
     ) {
         self.station = station
         self.hasCredentials = hasCredentials
+        self.dmrPasswords = dmrPasswords
         self.audioStore = audioStore
         self.directoryStore = directoryStore
         // Directory first; the online AllStarLink-DB source (astar-6c65) appends
@@ -557,7 +700,24 @@ public final class CallSession: ObservableObject {
         // written by hand (or by an older build) is not a trusted source.
         self.dmrRadioID = RadioID.sanitized(
             userDefaults.string(forKey: Self.dmrRadioIDKey) ?? "")
+        self.nxdnRadioID = NxdnID.sanitized(
+            userDefaults.string(forKey: Self.nxdnRadioIDKey) ?? "")
+        // Absent reads as false, which is the only safe direction for a
+        // consent: an unstamped domain has never been asked.
+        self.brandmeisterConsent = userDefaults.bool(forKey: Self.brandmeisterConsentKey)
     }
+
+    /// Where the DMR master passwords are read from at connect time, or `nil`
+    /// for a session that was never given one (previews, most tests).
+    ///
+    /// A STORE, not a value: the password must be read at the moment of the
+    /// dial and handed straight to the engine, so that nothing on this object
+    /// ever holds one. `credentials` above is the launch-time prefill for the
+    /// callsign and is deliberately not kept either.
+    ///
+    /// Its own store, separate from `CredentialStore`, and its own Keychain
+    /// item — see `DmrPasswordStore` for why the two must not share a record.
+    private let dmrPasswords: DmrPasswordStore?
 
     /// The reflector directory's name lookup, as of the last load or sync.
     ///
@@ -573,6 +733,19 @@ public final class CallSession: ObservableObject {
     /// `@Published` so the resolved-target line under the dial field refreshes
     /// when a sync replaces the feed, not only when the operator next types.
     @Published public var reflectorIndex: ReflectorIndex = .empty
+
+    /// Talkgroup lists per DMR system slug, when there are any.
+    ///
+    /// `[:]` is a first-class state and today's ONLY state:
+    /// `api/v1/reflectors/dmr/<system>/talkgroups.json` is a separate
+    /// hamcall-db task and does not exist yet, so nothing populates this and
+    /// the talkgroup field is a number the operator types. That is a complete
+    /// product — it is how every DMR radio codeplug works — and a list only
+    /// ever saves the typing.
+    ///
+    /// A value rather than a fetcher, exactly like `reflectorIndex`: whatever
+    /// loads the lists assigns them here, and dialling never waits on I/O.
+    @Published public var dmrTalkgroups: [String: [DmrTalkgroup]] = [:]
 
     /// Interpret dial-field text against the directory, ahead of any address
     /// grammar. The single seam through which "directory first, address
@@ -591,6 +764,12 @@ public final class CallSession: ObservableObject {
     /// that is the resolved-but-incomplete state doing its job: the reflector
     /// is known, the room is not, and nothing may be dialled until it is.
     public func canDial(_ raw: String, network: Network) -> Bool {
+        // DMR asks its own question first. Its directory rows are MASTERS,
+        // not rooms: a row resolves the moment its name is typed, and the
+        // talkgroup and slot after it are what make the target complete. The
+        // generic `.ready` test below would answer true for a master with no
+        // room named, which is a Connect button that dials nothing.
+        if network == .dmr { return (try? dmrTarget(raw)) != nil }
         if let reflectorNetwork = network.reflectorNetwork {
             switch resolveReflector(raw, network: reflectorNetwork) {
             case .ready: return true
@@ -603,6 +782,12 @@ public final class CallSession: ObservableObject {
         case .m17: return M17Dial.parse(raw) != nil
         case .dstar: return DStarDial.parse(raw) != nil
         case .ysf: return YSFDial.parse(raw) != nil
+        // The talkgroup is not optional in fact, only in the grammar: an
+        // address with none is a target with the room missing, and Connect
+        // stays off rather than dialling something that could never link.
+        case .nxdn: return NXDNDial.parse(raw)?.talkgroup != nil
+        // Unreachable — answered above, before the directory is consulted.
+        case .dmr: return false
         case .allstar, .hamlink: return DialTarget.parse(raw) != nil
         }
     }
@@ -694,6 +879,18 @@ public final class CallSession: ObservableObject {
             } else if dstarLink != nil || dstarTalker != nil || dstarSlowText != nil {
                 clearDStarState()
             }
+            // M17's own fields are behind the same second ABI call D-Star's
+            // and YSF's are, and cost the same buffer crossing plus JSON
+            // parse — so they are asked for only while a session is live.
+            // `talker` is the whole reason to ask: PTT, remote PTT and the
+            // meters are already in the snapshot above.
+            if snap.m17Active {
+                let state = try? station.m17State()
+                if m17Talker != state?.talker { m17Talker = state?.talker }
+                if m17Link != state?.link { m17Link = state?.link }
+            } else if m17Link != nil || m17Talker != nil {
+                clearM17State()
+            }
             if ysfAvailable != snap.ysfAvailable { ysfAvailable = snap.ysfAvailable }
             // Same arrangement as D-Star's above, for the same reason: YSF's
             // own fields cost an ABI crossing and a JSON parse, so they are
@@ -713,6 +910,40 @@ public final class CallSession: ObservableObject {
             {
                 clearYSFState()
             }
+            if nxdnAvailable != snap.nxdnAvailable { nxdnAvailable = snap.nxdnAvailable }
+            // Same arrangement as YSF's above, for the same reason: NXDN's own
+            // fields cost an ABI crossing and a JSON parse, so they are asked
+            // for only while a link is live.
+            if snap.nxdnActive {
+                let state = try? station.nxdnState()
+                if nxdnLastHeard != state?.lastHeard { nxdnLastHeard = state?.lastHeard }
+                if nxdnReceiving != (state?.receiving ?? false) {
+                    nxdnReceiving = state?.receiving ?? false
+                }
+                if nxdnLink != state?.link { nxdnLink = state?.link }
+            } else if nxdnLink != nil || nxdnLastHeard != nil || nxdnReceiving {
+                clearNXDNState()
+            }
+            if dmrAvailable != snap.dmrAvailable { dmrAvailable = snap.dmrAvailable }
+            // Same arrangement as NXDN's above, for the same reason: DMR's own
+            // fields cost an ABI crossing and a JSON parse, so they are asked
+            // for only while a link is live. Nothing read here is a secret —
+            // `DMRState` has no field the master password could occupy.
+            if snap.dmrActive {
+                let state = try? station.dmrState()
+                if dmrLastHeard != state?.lastHeard { dmrLastHeard = state?.lastHeard }
+                if dmrReceiving != (state?.receiving ?? false) {
+                    dmrReceiving = state?.receiving ?? false
+                }
+                if dmrLink != state?.link { dmrLink = state?.link }
+            } else if dmrLink != nil || dmrLastHeard != nil || dmrReceiving {
+                clearDMRState()
+            }
+            // Fold the three per-network talkers into the one property the UI
+            // reads. Done here, after every source has been advanced, so a
+            // single poll can never publish a `lastHeard` from the network
+            // that was live a tick ago.
+            refreshLastHeard()
             // Quarter-second peak-hold for the VU meters (astar-f78a) so they read
             // steadily instead of flickering at the poll rate.
             let meterNow = Date()
@@ -792,6 +1023,7 @@ public final class CallSession: ObservableObject {
             {
                 restoreStandardTxProcessing()
                 setActiveCallNetwork(nil)
+                clearM17State()
             }
             // The same edge for D-Star: a link the reflector dropped, or a
             // dongle pulled out of the USB port, never reaches `disconnect()`.
@@ -811,6 +1043,21 @@ public final class CallSession: ObservableObject {
             {
                 setActiveCallNetwork(nil)
                 clearYSFState()
+            }
+            // And the same for NXDN, for the same reasons.
+            if activeCallNetwork == .nxdn, snap.status == .hangup || snap.status == .idle,
+                lastPolledStatus != .hangup, lastPolledStatus != .idle
+            {
+                setActiveCallNetwork(nil)
+                clearNXDNState()
+            }
+            // And for DMR — a master that dropped the login, or a dongle
+            // pulled out mid-listen, never reaches `disconnect()`.
+            if activeCallNetwork == .dmr, snap.status == .hangup || snap.status == .idle,
+                lastPolledStatus != .hangup, lastPolledStatus != .idle
+            {
+                setActiveCallNetwork(nil)
+                clearDMRState()
             }
             lastPolledStatus = snap.status
             // "Receiving" = far end keyed (when the node reports it) OR live rx
@@ -915,6 +1162,53 @@ public final class CallSession: ObservableObject {
         /// dongle as ``dstarUnavailable``, and a separate case so the message
         /// can name the network the operator actually chose.
         case ysfUnavailable
+        /// The NXDN dial field's text names nothing in the directory and does
+        /// not parse as `host[:port]/talkgroup` either — including a bare
+        /// address with no talkgroup, which is a target with the room
+        /// missing rather than a target astar may guess at.
+        case badNXDNTarget
+        /// NXDN was dialled with no vocoder present. Same shape and the same
+        /// dongle as ``dstarUnavailable``, and a separate case so the message
+        /// can name the network the operator actually chose.
+        case nxdnUnavailable
+        /// NXDN was dialled with no NXDN id configured. Its own case rather
+        /// than `missingCallsign` because it is its own credential: NXDN
+        /// addresses stations by number and transmits no callsign at all.
+        case missingRadioID
+        /// The configured NXDN id is not one a station may transmit as —
+        /// `0`, or above the `65519` the standard reserves. Refused rather
+        /// than clamped: a number nobody registered is somebody else's.
+        case radioIDOutOfRange
+        /// The DMR dial field's text names no complete target: no talkgroup,
+        /// no network, an unparseable address, or a slot that is not 1 or 2.
+        /// A DMR target is four things and three of them are not defaultable.
+        case badDMRTarget
+        /// DMR was dialled with no vocoder present. Same shape and the same
+        /// dongle as ``dstarUnavailable``, and a separate case so the message
+        /// can name the network the operator actually chose.
+        case dmrUnavailable
+        /// DMR was dialled with no radio ID configured. Its own case rather
+        /// than ``missingRadioID`` — which is NXDN's — because the two are
+        /// different numbers with different registrations, and a message that
+        /// named the wrong one would send the operator to the wrong page.
+        case missingDMRRadioID
+        /// The configured DMR ID is not one the wire can carry: `0`, or wider
+        /// than the 24 bits a `DMRD` source address holds. Unlike NXDN's
+        /// 16-bit refusal a registered 7-digit ID FITS here, so this is
+        /// reachable only by a number nobody issued.
+        case dmrRadioIDOutOfRange
+        /// No master password is saved for this DMR network. Every dialable
+        /// row in the directory publishes `requires: ["dmr_id", "password"]`,
+        /// and refusing here — with a message that says where the network
+        /// issues one — beats an `MSTNAK` the operator cannot interpret.
+        case missingDMRPassword
+        /// BrandMeister was dialled without consent recorded. Not a failure:
+        /// the operator has not said they accept BrandMeister's own terms, and
+        /// astar does not put anyone on a private network that enforces its
+        /// own access rules without that. No control sets the flag today —
+        /// this build does not offer BrandMeister at all — so a typed address
+        /// is the only way here.
+        case brandmeisterNotConsented
 
         public var errorDescription: String? {
             switch self {
@@ -950,6 +1244,43 @@ public final class CallSession: ObservableObject {
                 return
                     "System Fusion needs a ThumbDV vocoder dongle attached — "
                     + "astar has no software AMBE decoder."
+            case .badNXDNTarget:
+                return
+                    "Enter an NXDN talkgroup, or an address as host:port/talkgroup "
+                    + "(for example nxdn.example:41400/100)."
+            case .nxdnUnavailable:
+                return
+                    "NXDN needs a ThumbDV vocoder dongle attached — "
+                    + "astar has no software AMBE decoder."
+            case .missingRadioID:
+                return "Enter your NXDN ID in Settings to connect via NXDN."
+            case .radioIDOutOfRange:
+                return
+                    "An NXDN ID is a number from \(NxdnID.minimum) to \(NxdnID.maximum) — "
+                    + "it isn’t your DMR radio ID."
+            case .badDMRTarget:
+                return
+                    "A DMR target is a network, a master, a talkgroup and a timeslot — "
+                    + "pick a network and enter a talkgroup, or type "
+                    + "system:host:port/talkgroup/timeslot."
+            case .dmrUnavailable:
+                return
+                    "DMR needs a ThumbDV vocoder dongle attached — "
+                    + "astar has no software AMBE decoder."
+            case .missingDMRRadioID:
+                return "Enter your DMR radio ID in Settings to connect via DMR."
+            case .dmrRadioIDOutOfRange:
+                return
+                    "A DMR radio ID is a number from 1 to \(RadioID.maximum) — "
+                    + "check your registration at radioid.net."
+            case .missingDMRPassword:
+                return
+                    "Add this network’s DMR password in Settings — each DMR network "
+                    + "issues its own."
+            case .brandmeisterNotConsented:
+                return
+                    "BrandMeister enforces its own access rules, and astar does not "
+                    + "connect to it yet."
             }
         }
     }
@@ -995,6 +1326,10 @@ public final class CallSession: ObservableObject {
             try connectDStar(target: node)
         case .ysf:
             try connectYSF(target: node)
+        case .nxdn:
+            try connectNXDN(target: node)
+        case .dmr:
+            try connectDMR(target: node)
         }
     }
 
@@ -1283,6 +1618,244 @@ public final class CallSession: ObservableObject {
             })
     }
 
+    /// Turn the NXDN dial field's text into a host, port and talkgroup —
+    /// **directory first, address second**, the same order and the same
+    /// reason as `m17Target`, `dstarTarget` and `ysfTarget`.
+    ///
+    /// The talkgroup is what makes this different from `ysfTarget`. An
+    /// NXDNReflector registers a client only when the poll names the
+    /// reflector's own id and drops every frame addressed elsewhere, so a
+    /// target without one could never link — silence with the link light on.
+    /// The directory carries it as the row's **id** (the feed's NXDN rows are
+    /// talkgroup numbers, "100", not callsigns); a typed address has to spell
+    /// it out, and one that does not is refused rather than guessed at.
+    private func nxdnTarget(_ target: String) throws -> (
+        host: String, port: UInt16, talkgroup: UInt16
+    ) {
+        switch resolveReflector(target, network: .nxdn) {
+        case .ready(let reflector):
+            // The id IS the talkgroup for this network. A row whose id is not
+            // a number astar can transmit to is a row it cannot dial —
+            // `notDialable` is the honest answer, not a guessed number.
+            guard let talkgroup = NxdnID.value(reflector.entry.id) else {
+                throw ConnectError.reflectorNotDialable(reflector.entry.id)
+            }
+            return (host: reflector.host, port: reflector.port, talkgroup: talkgroup)
+        case .needsModule(let entry):
+            // Unreachable for NXDN — `addressesModule` is false for this
+            // network, so the resolver never asks for one — but stated rather
+            // than silently treated as dialable.
+            throw ConnectError.needsModule(entry.id)
+        case .notDialable(let entry):
+            throw ConnectError.reflectorNotDialable(entry.id)
+        case .notInDirectory:
+            guard let parsed = NXDNDial.parse(target), let talkgroup = parsed.talkgroup else {
+                throw ConnectError.badNXDNTarget
+            }
+            return (host: parsed.host, port: parsed.port, talkgroup: talkgroup)
+        }
+    }
+
+    /// The operator's own NXDN id, or the reason astar will not dial without
+    /// one.
+    ///
+    /// NXDN source and destination ids are 16-bit on the wire
+    /// (`NXDNGateway/NXDNNetwork.cpp`: `writeData(..., unsigned short srcId,
+    /// unsigned short dstId, ...)`), which a registered DMR ID is not — six
+    /// or seven digits do not fit in sixteen bits. So this reads its own
+    /// field rather than truncating `dmrRadioID` into somebody else's number.
+    private func nxdnRadioIDValue() throws -> UInt16 {
+        let digits = NxdnID.sanitized(nxdnRadioID)
+        guard !digits.isEmpty else { throw ConnectError.missingRadioID }
+        guard let value = NxdnID.value(digits) else {
+            throw ConnectError.radioIDOutOfRange
+        }
+        return value
+    }
+
+    /// The `.nxdn` arm of `connect(node:network:)`.
+    ///
+    /// Structured exactly like `connectYSF` — validate before touching any
+    /// state, claim the single-flight dial slot, generation-gate every write
+    /// after the engine call — because the races are the same races and two
+    /// connect paths guarding them differently is how one ends up not
+    /// guarding them at all.
+    ///
+    /// Receive only: nothing here arms a transmit path, and none exists to
+    /// arm. The engine call BLOCKS for a serial scan plus a per-port dongle
+    /// init before it touches the network, so every caller runs this off the
+    /// main thread.
+    private func connectNXDN(target: String) throws {
+        let parsed = try nxdnTarget(target)
+        let callsign = operatorCallsign.trimmingCharacters(in: .whitespaces)
+        guard !callsign.isEmpty else {
+            throw ConnectError.missingCallsign
+        }
+        let radioID = try nxdnRadioIDValue()
+        guard nxdnAvailable else {
+            throw ConnectError.nxdnUnavailable
+        }
+        let generation = try claimDial()
+        try? station.disconnect()
+        setDialedNode(target)
+        recordedRecentForCall = false
+        dialAwaitingAnswer = false
+        setLastDialFailure(nil)
+        do {
+            try station.connectNXDN(
+                host: "\(parsed.host):\(parsed.port)", callsign: callsign,
+                radioID: radioID, talkgroup: parsed.talkgroup)
+        } catch {
+            testPostEngineCallHook?()
+            releaseDial(
+                generation: generation,
+                onCurrent: { setDialedNode(nil) },
+                onStale: {})
+            throw error
+        }
+        testPostEngineCallHook?()
+        releaseDial(
+            generation: generation,
+            onCurrent: { setActiveCallNetwork(.nxdn) },
+            // A disconnect superseded us while the dongle was initialising:
+            // the link we just made is nobody's. Tear it down.
+            onStale: {
+                try? station.nxdnDisconnect()
+                try? station.disconnect()
+            })
+    }
+
+    /// Turn the DMR dial field's text into a complete target —
+    /// **directory first, address second**, the same order and the same
+    /// reason as `m17Target`, `dstarTarget`, `ysfTarget` and `nxdnTarget`.
+    ///
+    /// DMR needs FOUR things and the directory supplies only two of them. A
+    /// row is a MASTER — `freedmr-network-server-freedmr-eu`, one per operator
+    /// instance — so it names the network (from its `dial`'s own `system`,
+    /// never from its id) and the host and port. The talkgroup and the
+    /// timeslot come from what the operator typed after the row's name, which
+    /// is why a bare row name is refused rather than dialled: a master with no
+    /// room named is not a target, and TG is not a thing to default.
+    ///
+    /// The address path is the only way to reach a network the directory does
+    /// not list — TGIF, astar's first and recommended target, is exactly that
+    /// case — and it has to spell the system out, because a login is per
+    /// network and there is nothing to infer one from.
+    private func dmrTarget(_ target: String) throws -> DmrDial {
+        switch resolveReflector(target, network: .dmr) {
+        case .ready(let reflector):
+            // The system rides on the dial, not the row id: the id is a
+            // display key that happens to start with the slug, and reading a
+            // network's name out of a string's prefix is how a client logs in
+            // to the wrong system under someone's own registration.
+            guard case .mmdvm(let system, _, _) = reflector.entry.dial else {
+                throw ConnectError.reflectorNotDialable(reflector.entry.id)
+            }
+            guard let room = ReflectorDialText.split(target)?.module,
+                let dial = DmrDial.parse(
+                    "\(reflector.host):\(reflector.port)/\(room)", system: system)
+            else { throw ConnectError.badDMRTarget }
+            return dial
+        case .needsModule(let entry):
+            // Unreachable for DMR — `addressesModule` is false for an mmdvm
+            // dial, so the resolver never asks for one — but stated rather
+            // than silently treated as dialable.
+            throw ConnectError.needsModule(entry.id)
+        case .notDialable(let entry):
+            throw ConnectError.reflectorNotDialable(entry.id)
+        case .notInDirectory:
+            guard let dial = DmrDial.parse(target, system: nil) else {
+                throw ConnectError.badDMRTarget
+            }
+            return dial
+        }
+    }
+
+    /// The 24-bit source id a DMR master addresses this station by.
+    ///
+    /// Unlike NXDN's 16-bit id, a registered radioid.net number FITS: 7
+    /// digits is at most 9,999,999 and the field holds 16,777,215, and even
+    /// the 9-digit multi-device convention (`id × 100 + nn`) fits for ids
+    /// below 167,772. So this converts rather than refusing -- and refuses
+    /// only the two cases that are not registrations: absent, and too wide.
+    private func dmrRadioIDValue() throws -> UInt32 {
+        let digits = RadioID.sanitized(dmrRadioID)
+        guard !digits.isEmpty else { throw ConnectError.missingDMRRadioID }
+        guard let value = UInt32(digits), value > 0, value <= RadioID.maximum else {
+            throw ConnectError.dmrRadioIDOutOfRange
+        }
+        return value
+    }
+
+    /// The `.dmr` arm of `connect(node:network:)`.
+    ///
+    /// Structured exactly like `connectNXDN` — validate before touching any
+    /// state, claim the single-flight dial slot, generation-gate every write
+    /// after the engine call — because the races are the same races and two
+    /// connect paths guarding them differently is how one ends up not
+    /// guarding them at all. Two things are added to the prologue: the
+    /// consent gate, and the password lookup.
+    ///
+    /// **The password is fetched here and passed straight through.** It is a
+    /// local `let` inside this function, handed to the engine by value and
+    /// gone when the function returns: it is never assigned to a property,
+    /// never published, and never logged. That is the whole reason
+    /// `dmrPasswords` is a store rather than a value held on the session.
+    ///
+    /// Receive only: nothing here arms a transmit path, and none exists to
+    /// arm. The engine call BLOCKS for a serial scan, a per-port dongle init
+    /// and then a multi-round-trip login, so every caller runs this off the
+    /// main thread.
+    private func connectDMR(target: String) throws {
+        let dial = try dmrTarget(target)
+        let callsign = operatorCallsign.trimmingCharacters(in: .whitespaces)
+        guard !callsign.isEmpty else {
+            throw ConnectError.missingCallsign
+        }
+        let radioID = try dmrRadioIDValue()
+        // The gate, before anything else about this network is looked up: an
+        // operator who has not consented should not even have their password
+        // read, let alone a socket opened.
+        if DmrDial.family(ofSystem: dial.system)?.requiresConsent == true, !brandmeisterConsent {
+            throw ConnectError.brandmeisterNotConsented
+        }
+        guard let password = dmrPasswords?.password(system: dial.system) else {
+            throw ConnectError.missingDMRPassword
+        }
+        guard dmrAvailable else {
+            throw ConnectError.dmrUnavailable
+        }
+        let generation = try claimDial()
+        try? station.disconnect()
+        setDialedNode(target)
+        recordedRecentForCall = false
+        dialAwaitingAnswer = false
+        setLastDialFailure(nil)
+        do {
+            try station.connectDMR(
+                system: dial.system, host: dial.host, port: dial.port, radioID: radioID,
+                callsign: callsign, talkgroup: dial.talkgroup, timeslot: dial.timeslot,
+                password: password)
+        } catch {
+            testPostEngineCallHook?()
+            releaseDial(
+                generation: generation,
+                onCurrent: { setDialedNode(nil) },
+                onStale: {})
+            throw error
+        }
+        testPostEngineCallHook?()
+        releaseDial(
+            generation: generation,
+            onCurrent: { setActiveCallNetwork(.dmr) },
+            // A disconnect superseded us while the dongle was initialising or
+            // the login was in flight: the link we just made is nobody's.
+            onStale: {
+                try? station.dmrDisconnect()
+                try? station.disconnect()
+            })
+    }
+
     /// Dial `node` over the WebTransceiver path, optionally overriding the dialed
     /// address. When `address` is a non-empty "host:port" (IP or hostname), the WT
     /// token is minted exactly as usual but the call dials `address` directly
@@ -1414,14 +1987,20 @@ public final class CallSession: ObservableObject {
     /// a key request while `txDisabled` is forced to unkeyed.
     /// Whether the live network can transmit at all.
     ///
-    /// Every network astar dials can, as of the YSF transmit path. Kept
-    /// rather than deleted because the answer was `false` for Fusion until
-    /// 2026-09-06 and will be `false` again for the next receive-only network
-    /// — and because the two places that consult it, the PTT control and the
-    /// key choke point, are the two that must never disagree.
+    /// `false` for NXDN and for DMR, both of which astar can hear but not yet
+    /// key into. Kept as a computed property over a LIST rather than a
+    /// constant because the list is what changes: it held Fusion until
+    /// 2026-09-06 and holds these two now. The two places that consult it —
+    /// the PTT control and the key choke point — must never disagree, which
+    /// is why they read one property instead of each knowing the list.
     public var canTransmit: Bool {
-        true
+        guard let network = activeCallNetwork else { return true }
+        return !Self.receiveOnlyNetworks.contains(network)
     }
+
+    /// The networks astar can hear and not yet key into. A transmit task for
+    /// one of them removes it from here and nothing else changes.
+    private static let receiveOnlyNetworks: Set<Network> = [.nxdn, .dmr]
 
     public func setPTT(_ on: Bool) throws {
         try station.setPTT(on && !txDisabled && canTransmit)
@@ -1507,6 +2086,7 @@ public final class CallSession: ObservableObject {
                 // The M17 call is ending — undo its TX override (astar-5d8e)
                 // before the network is cleared below.
                 restoreStandardTxProcessing()
+                clearM17State()
             }
             // Same belt-and-suspenders as M17's: `Station.disconnect()`
             // already tears a D-Star session down engine-side, but saying so
@@ -1519,6 +2099,14 @@ public final class CallSession: ObservableObject {
             if activeCallNetwork == .ysf {
                 try? station.ysfDisconnect()
                 clearYSFState()
+            }
+            if activeCallNetwork == .nxdn {
+                try? station.nxdnDisconnect()
+                clearNXDNState()
+            }
+            if activeCallNetwork == .dmr {
+                try? station.dmrDisconnect()
+                clearDMRState()
             }
             try station.disconnect()
             setDialedNode(nil)
@@ -1535,6 +2123,7 @@ public final class CallSession: ObservableObject {
         dstarTalker = nil
         dstarSlowText = nil
         dstarLink = nil
+        refreshLastHeard()
     }
 
     /// Drop the last-heard YSF fields, on every path a link can end by — for
@@ -1547,6 +2136,60 @@ public final class CallSession: ObservableObject {
         ysfReceiving = false
         ysfLink = nil
         ysfUnsupportedMode = nil
+        refreshLastHeard()
+    }
+
+    /// Drop the last-heard NXDN fields, on every path a link can end by — for
+    /// the same reason `clearYSFState` exists: an id left on screen after the
+    /// link is gone is a claim about the present that is no longer true.
+    private func clearNXDNState() {
+        nxdnLastHeard = nil
+        nxdnReceiving = false
+        nxdnLink = nil
+        refreshLastHeard()
+    }
+
+    /// Drop the last-heard DMR fields, on every path a link can end by — for
+    /// the same reason `clearNXDNState` exists: an id left on screen after the
+    /// link is gone is a claim about the present that is no longer true.
+    private func clearDMRState() {
+        dmrLastHeard = nil
+        dmrReceiving = false
+        dmrLink = nil
+        refreshLastHeard()
+    }
+
+    /// Drop the last-heard M17 fields, for the same reason `clearDStarState`
+    /// and `clearYSFState` exist: a callsign left on screen after the session
+    /// is gone is a claim about the present that is no longer true.
+    private func clearM17State() {
+        m17Talker = nil
+        m17Link = nil
+        refreshLastHeard()
+    }
+
+    /// Recompute `lastHeard` from the active network's own talker field.
+    ///
+    /// The one place that knows which per-network property answers "who keyed
+    /// up" — a new digital network adds an arm here and nothing else changes.
+    /// AllStar and Hamlink have no talker identity on the wire, so they
+    /// answer `nil` rather than leaving a stale callsign from the previous
+    /// call on screen.
+    ///
+    /// Publish-on-change, like everything else `poll()` touches, and
+    /// main-thread only: `poll()` runs on the main run loop's timer and the
+    /// clear helpers are called from it.
+    private func refreshLastHeard() {
+        let value: String?
+        switch activeCallNetwork {
+        case .dstar: value = dstarTalker
+        case .ysf: value = ysfLastHeard
+        case .m17: value = m17Talker
+        case .nxdn: value = nxdnLastHeard
+        case .dmr: value = dmrLastHeard
+        case .allstar, .hamlink, nil: value = nil
+        }
+        if lastHeard != value { lastHeard = value }
     }
 
     /// Record (or clear) the dialed node. `@Published`, so hop to the main thread —
@@ -1566,8 +2209,14 @@ public final class CallSession: ObservableObject {
     private func setActiveCallNetwork(_ network: Network?) {
         if Thread.isMainThread {
             activeCallNetwork = network
+            // `lastHeard` is derived from this, so it would otherwise show the
+            // PREVIOUS network's talker until the next poll tick.
+            refreshLastHeard()
         } else {
-            DispatchQueue.main.async { [weak self] in self?.activeCallNetwork = network }
+            DispatchQueue.main.async { [weak self] in
+                self?.activeCallNetwork = network
+                self?.refreshLastHeard()
+            }
         }
     }
 
@@ -2185,6 +2834,19 @@ public func connectFailureMessage(for error: Error, node: String) -> String {
         // can act on. The engine's detail is still carried on
         // `StationError.detail` for anyone debugging.
         return "Couldn’t open audio device, is it busy or unplugged?"
+    case -22:  // IAX_ERR_DMR — the login was refused, the network is not one
+        // the engine knows, or the dongle is not there. The engine
+        // distinguishes these ("your password is wrong" and "your ID is not
+        // permitted on this master" are different packets), but
+        // `iax_error_text(-22)` is the static string "dmr error", so prefer
+        // the engine's own detail when it gave one and name the two likely
+        // causes when it did not.
+        let why = engineDetail(stationError)
+        if !why.isEmpty {
+            return "Couldn’t connect to \(node): \(why)."
+        }
+        return "Couldn’t connect to \(node) — check this network’s DMR password "
+            + "and that the ThumbDV is plugged in."
     case -19:  // IAX_ERR_DSTAR — every D-Star connect failure, and the most
         // likely one by far is the dongle. The engine DOES classify these
         // precisely ("ThumbDV at /dev/cu.usbserial-… is busy — another

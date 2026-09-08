@@ -41,8 +41,7 @@
         /// nothing, and falls through to an address parser that fails. Handing
         /// the network back lets the caller switch to it, the same way the
         /// favorites menu already switches to a favorite's own network.
-        /// Leave the pane. Declared before `onSelect` so `onSelect` can stay
-        /// the trailing closure at the call site.
+        /// Leave the pane.
         let onBack: () -> Void
         let onSelect: (String, ReflectorNetwork) -> Void
 

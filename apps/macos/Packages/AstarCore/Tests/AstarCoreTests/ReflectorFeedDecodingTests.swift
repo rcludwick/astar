@@ -107,14 +107,18 @@ final class ReflectorFeedDecodingTests: XCTestCase {
     /// The headline forward-compatibility test. A network and a dial kind that
     /// do not exist in this build must decode, stay listed, and report
     /// themselves as un-dialable — never throw, never vanish. This is what
-    /// lets hamcall-db add DMR without astar shipping first.
+    /// let hamcall-db publish DMR before astar shipped a case for it, and it
+    /// is why adding `ReflectorNetwork.dmr` changed no stored file's meaning:
+    /// `other` round-trips the publisher's string, so a cache written by the
+    /// older build reads back identically on the newer one. The example moved
+    /// to P25's successor-shaped stand-in once DMR stopped being unknown.
     func testAFutureNetworkAndKindListWithoutBreakingTheBuild() throws {
         let feed = try feed(
             """
             {"schema_version": 1, "client_refresh_days": 7, "reflectors": [
-              {"network": "dmr", "id": "TG91", "name": "Worldwide",
-               "dial": {"kind": "dmr", "host": "dmr.example.org", "port": 62031,
-                        "requires": ["dmr_id", "password"]}},
+              {"network": "tetra", "id": "TG91", "name": "Worldwide",
+               "dial": {"kind": "tetra", "host": "tetra.example.org", "port": 62031,
+                        "requires": ["radio_id", "password"]}},
               {"network": "dstar", "id": "XLX999", "name": "XLX999",
                "dial": {"kind": "dextra", "host": "10.0.0.1", "port": 30001,
                         "callsign": "XRF999"}}
@@ -122,13 +126,14 @@ final class ReflectorFeedDecodingTests: XCTestCase {
             """)
 
         XCTAssertEqual(feed.entries.count, 2, "an unknown row must not cost the known one")
-        let dmr = try XCTUnwrap(feed.entries.first)
-        XCTAssertEqual(dmr.network, .other("dmr"))
-        XCTAssertEqual(dmr.network.rawValue, "dmr", "the publisher's string is kept verbatim")
-        XCTAssertEqual(dmr.network.displayName, "DMR")
-        XCTAssertEqual(dmr.dial, .unsupported(kind: "dmr"))
-        XCTAssertEqual(dmr.dial?.kind, "dmr", "the UI can still name what it cannot dial")
-        XCTAssertFalse(dmr.isDialable)
+        let unknown = try XCTUnwrap(feed.entries.first)
+        XCTAssertEqual(unknown.network, .other("tetra"))
+        XCTAssertEqual(
+            unknown.network.rawValue, "tetra", "the publisher's string is kept verbatim")
+        XCTAssertEqual(unknown.network.displayName, "TETRA")
+        XCTAssertEqual(unknown.dial, .unsupported(kind: "tetra"))
+        XCTAssertEqual(unknown.dial?.kind, "tetra", "the UI can still name what it cannot dial")
+        XCTAssertFalse(unknown.isDialable)
         XCTAssertTrue(feed.entries[1].isDialable)
     }
 
@@ -261,7 +266,7 @@ final class ReflectorFeedDecodingTests: XCTestCase {
     }
 
     func testEveryNetworkCaseRoundTripsItsRawValue() {
-        for network in ReflectorNetwork.known + [.other("dmr")] {
+        for network in ReflectorNetwork.known + [.other("tetra")] {
             XCTAssertEqual(ReflectorNetwork(rawValue: network.rawValue), network)
         }
     }
