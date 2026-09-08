@@ -117,8 +117,23 @@ The app shows one line for all three today; the station text (since
 
 #### Checking it by hand
 
-`live_mint` does exactly what the app does and prints the token or the
-category of failure, nothing else. The password goes in the environment,
+Two ways, both reading the password from the environment and never putting
+it on a command line.
+
+`scripts/asl-wt-check.sh` is the flow in plain `curl`, one request at a
+time, and it says what the portal answered at each step — the status, the
+cookies set and kept, whether a token came back. `--no-node` reproduces the
+unsaved-node case; `--show-token` prints the whole token instead of its
+first four characters. Exit status 2 is a refused login, 3 a page with no
+token, 4 transport. (`scripts/asl-wt-token.py` is the older Python
+original of the same flow, run with `uv`.)
+
+```text
+ASL_USER=<callsign> ASL_PASS='<portal password>' ASL_NODE=<owned node> scripts/asl-wt-check.sh
+```
+
+`live_mint` does the same thing through the engine's own code path and prints
+the token or the category of failure, nothing else. The password goes in the environment,
 never on a command line:
 
 ```text
