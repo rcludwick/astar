@@ -396,7 +396,9 @@ typedef struct {
    */
   const char *portal_pass;
   /**
-   * `AllStar` node selector for token minting (WT path), or NULL.
+   * `AllStar` node selector for token minting (WT path), or NULL. Optional:
+   * the portal mints without one, so NULL (or empty) means "no node" and
+   * the WT path is enabled by `portal_user` + `portal_pass` alone.
    */
   const char *portal_node;
   /**

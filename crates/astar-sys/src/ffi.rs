@@ -93,7 +93,9 @@ pub struct IaxConfig {
     /// `AllStar` portal password (WT path), or NULL. Consumed into the station's
     /// `PortalCredentials`; never stored in any out-struct or logged.
     pub portal_pass: *const c_char,
-    /// `AllStar` node selector for token minting (WT path), or NULL.
+    /// `AllStar` node selector for token minting (WT path), or NULL. Optional:
+    /// the portal mints without one, so NULL (or empty) means "no node" and
+    /// the WT path is enabled by `portal_user` + `portal_pass` alone.
     pub portal_node: *const c_char,
     /// Guest secret, or NULL for the default `"allstar"`.
     pub secret: *const c_char,
@@ -636,15 +638,17 @@ pub unsafe extern "C" fn iax_station_new(cfg: *const IaxConfig) -> *mut IaxStati
             return std::ptr::null_mut();
         }
         let cfg = unsafe { &*cfg };
+        // User + password enable the WT path; the node is an optional
+        // selector (the portal mints without one), so NULL reads as empty.
         let portal = match (
             unsafe { opt_str(cfg.portal_user) },
             unsafe { opt_str(cfg.portal_pass) },
             unsafe { opt_str(cfg.portal_node) },
         ) {
-            (Some(user), Some(password), Some(node)) => Some(PortalCredentials {
+            (Some(user), Some(password), node) => Some(PortalCredentials {
                 user,
                 password,
-                node,
+                node: node.unwrap_or_default(),
             }),
             _ => None,
         };

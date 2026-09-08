@@ -589,7 +589,8 @@ class Station:
     ) -> None:
         """Create a station.
 
-        ``portal_*`` enable the WT path only when all three are set.
+        ``portal_user`` + ``portal_pass`` enable the WT path; ``portal_node``
+        is an optional selector (the portal mints a token without one).
         ``portal_pass`` and ``secret`` are consumed into the station and never
         retained on this object.
 
