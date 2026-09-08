@@ -23,4 +23,12 @@ public enum HeardAge {
         if minutes < 60 { return "\(minutes) min" }
         return "\(seconds / 3_600) h"
     }
+
+    /// A station and its age as VoiceOver should read them: "W6VS, 12 s ago",
+    /// or "W6VS, just now" for the "now" bucket — "W6VS, now ago" is not
+    /// English. Every heard line speaks through this, the talker caption and
+    /// the history rows alike, so the two never drift apart.
+    public static func spoken(callsign: String, age: String) -> String {
+        "\(callsign), \(age == "now" ? "just now" : "\(age) ago")"
+    }
 }

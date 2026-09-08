@@ -1148,24 +1148,37 @@
         private var talkerLine: some View {
             if let talker = session.lastHeard {
                 let rows = session.heardHistory
-                let rest = (rows.first?.callsign == talker) ? Array(rows.dropFirst()) : rows
+                // The history's newest row is the station `lastHeard` already
+                // names — usually. When it is, it is dropped from the rows
+                // below and its age dates the header instead, so the caption
+                // says how stale the name is rather than implying it is live.
+                let current = rows.first?.callsign == talker ? rows.first : nil
+                let rest = current == nil ? rows : Array(rows.dropFirst())
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Last heard \(talker)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .accessibilityLabel("Last heard")
-                        .accessibilityValue(talker)
+                    let headerAge = current.map { HeardAge.label(ms: $0.ageMs) }
+                    Text(
+                        headerAge.map { "Last heard \(talker) · \($0)" }
+                            ?? "Last heard \(talker)"
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .accessibilityLabel("Last heard")
+                    .accessibilityValue(
+                        headerAge.map { HeardAge.spoken(callsign: talker, age: $0) } ?? talker)
                     // Slow data is typed by whoever is transmitting on the
                     // reflector — attacker-controlled text from astar's point
                     // of view. `Text` renders it verbatim and interprets
                     // nothing, which is the whole requirement; the line limit
-                    // stops a long one reflowing the status card.
+                    // stops a long one reflowing the status card. The bubble
+                    // symbol is what keeps it from reading as another
+                    // callsign row: it is a message, and it is the only line
+                    // here that is not a station.
                     if session.activeCallNetwork == .dstar,
                         let message = session.dstarSlowText, !message.isEmpty
                     {
-                        Text(message)
+                        Label(message, systemImage: "text.bubble")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
@@ -1174,16 +1187,20 @@
                             .accessibilityLabel("Message")
                             .accessibilityValue(message)
                     }
-                    ForEach(Array(rest.enumerated()), id: \.offset) { _, row in
+                    // The history is its own group: a couple of points of air
+                    // above the first row separate the stations heard earlier
+                    // from the talker (and the message) above them.
+                    ForEach(Array(rest.enumerated()), id: \.offset) { index, row in
                         let age = HeardAge.label(ms: row.ageMs)
                         Text("\(row.callsign) · \(age)")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
                             .truncationMode(.tail)
-                            .accessibilityLabel("Heard earlier")
-                            .accessibilityValue(
-                                "\(row.callsign), \(age == "now" ? "just now" : "\(age) ago")")
+                            .padding(.top, index == 0 ? 2 : 0)
+                            .help("\(row.callsign) · \(age)")
+                            .accessibilityLabel("Heard earlier, \(index + 1) of \(rest.count)")
+                            .accessibilityValue(HeardAge.spoken(callsign: row.callsign, age: age))
                     }
                 }
             }
