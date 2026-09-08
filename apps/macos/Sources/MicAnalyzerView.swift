@@ -72,6 +72,10 @@
         /// second line, then the buttons shorten (the instruction moves to their
         /// tooltip). There is no Close button — the pane header's Back chevron
         /// (⌘[) is the way out, the same as every other pane.
+        ///
+        /// The "Saved" confirmation sits on its own line rather than in the button
+        /// row: it appears only after a save, and folding it into the row would
+        /// make the row's width depend on state the fold was measured without.
         @ViewBuilder
         private var controls: some View {
             if vm.analyzing {
@@ -81,18 +85,24 @@
                     Spacer(minLength: 0)
                 }
             } else {
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 10) {
-                        actionButtons(shortTitles: false)
-                        harmonicCombToggle
+                VStack(alignment: .leading, spacing: 8) {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: 10) {
+                            actionButtons(shortTitles: false)
+                            harmonicCombToggle
+                        }
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 10) { actionButtons(shortTitles: false) }
+                            harmonicCombToggle
+                        }
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 8) { actionButtons(shortTitles: true) }
+                            harmonicCombToggle
+                        }
                     }
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 10) { actionButtons(shortTitles: false) }
-                        harmonicCombToggle
-                    }
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(spacing: 8) { actionButtons(shortTitles: true) }
-                        harmonicCombToggle
+                    if vm.saved {
+                        Label("Saved", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
                     }
                 }
             }
@@ -108,9 +118,6 @@
             Button("Clear") { vm.clear() }
                 .disabled(!vm.hasResult && vm.detectedPeaks.isEmpty && vm.profileName.isEmpty)
                 .help("Clear the detected frequencies to test another mic")
-            if vm.saved {
-                Label("Saved", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-            }
         }
 
         private var harmonicCombToggle: some View {

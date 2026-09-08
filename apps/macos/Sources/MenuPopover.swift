@@ -415,11 +415,21 @@
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
                 Divider()
-                // The view starts the monitor in `onAppear` and releases it in
-                // `onDisappear`; the switch above rebuilds it per visit, so the mic
-                // is open only while the pane is on screen.
-                MicAnalyzerView(vm: micAnalyzer.vm)
-                    .environmentObject(session)
+                // Scrolls like the other panes' lists do: at the window's 450 pt
+                // minimum height the canvas, a three-row control fold and an error
+                // line are at the budget. `minHeight: geo.size.height` keeps the
+                // spectrum filling the pane whenever there IS room — without it a
+                // ScrollView proposes nil and the canvas collapses to its 220 pt
+                // minimum with dead space below.
+                GeometryReader { geo in
+                    ScrollView {
+                        // The view starts the monitor in `onAppear` and releases it
+                        // in `onDisappear`; the switch above rebuilds it per visit,
+                        // so the mic is open only while the pane is on screen.
+                        MicAnalyzerView(vm: micAnalyzer.vm)
+                            .frame(minHeight: geo.size.height)
+                    }
+                }
             }
         }
 

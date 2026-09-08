@@ -49,18 +49,18 @@
             set { pane = newValue ? .settings : .call }
         }
 
-        /// One remembered "Back goes here instead of `.call`" — the pane it applies
-        /// to, and where it should land.
+        /// One remembered "Back goes here instead of `.call`": the pane it applies
+        /// to (`onPane`) and where Back should land from it (`returnsTo`).
         ///
         /// One slot, not a stack: astar's window is still one level deep. What
         /// changed is that a pane can be reached from *two* places (the mic
         /// analyzer opens from Settings and from Quick settings on the call card),
         /// and a Back that always went to `.call` threw the Settings context away.
         ///
-        /// `from` is what keeps a stale target from firing: if something else moved
-        /// the window on (⌘, while the analyzer is up, say), the recorded pane no
-        /// longer matches and Back falls back to `.call`.
-        private var returnTarget: (from: AppPane, to: AppPane)?
+        /// `onPane` is what keeps a stale target from firing: if something else
+        /// moved the window on (⌘, while the analyzer is up, say), the recorded
+        /// pane no longer matches and Back falls back to `.call`.
+        private var returnTarget: (onPane: AppPane, returnsTo: AppPane)?
 
         /// Show `pane`, remembering the pane on screen as where Back returns to.
         ///
@@ -70,15 +70,15 @@
         /// `.call`.
         func show(_ pane: AppPane) {
             guard self.pane != pane else { return }
-            returnTarget = (from: pane, to: self.pane)
+            returnTarget = (onPane: pane, returnsTo: self.pane)
             self.pane = pane
         }
 
         /// Back out of whatever pane is up — to whoever opened it, or the call
         /// card. One level either way, because there is only one.
         func goBack() {
-            if let target = returnTarget, target.from == pane {
-                pane = target.to
+            if let target = returnTarget, target.onPane == pane {
+                pane = target.returnsTo
             } else {
                 pane = .call
             }
