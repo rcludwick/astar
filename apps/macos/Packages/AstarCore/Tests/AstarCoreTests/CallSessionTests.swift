@@ -203,6 +203,11 @@ final class FakeStation: StationDriving {
     /// What `m17State()` reports; `nil` is "no session", the idle answer.
     var m17StateValue: M17State?
     func m17State() throws -> M17State? { m17StateValue }
+    /// What `heard()` reports — newest first, as the engine orders it. Named
+    /// like its neighbours because a stored `heard` would collide with the
+    /// method Swift needs for the protocol.
+    var heardValue: [HeardEntry] = []
+    func heard() throws -> [HeardEntry] { heardValue }
 
     // System Fusion. `host` is recorded whole — `host:port` is one string
     // across this ABI, and the port being folded into it is exactly the sort
@@ -323,6 +328,7 @@ private struct ThrowingStation: StationDriving {
     }
     func m17Disconnect() throws { throw Boom() }
     func m17State() throws -> M17State? { throw Boom() }
+    func heard() throws -> [HeardEntry] { throw Boom() }
     func setCodecDirs(_ dirs: [String]) throws { throw Boom() }
     func connectDStar(
         host: String, port: UInt16, module: Character, callsign: String,

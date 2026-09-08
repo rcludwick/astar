@@ -103,6 +103,8 @@ public protocol StationDriving {
     /// Costlier than `readSnapshot()`: it crosses the ABI with a buffer and
     /// parses JSON. Poll the snapshot for meters; call this at UI rate.
     func m17State() throws -> M17State?
+    /// Station.heard() 1:1.
+    func heard() throws -> [HeardEntry]
 
     // MARK: System Fusion
 

@@ -635,4 +635,17 @@ final class StationTests: XCTestCase {
         }
     }
 
+    /// The heard history's ABI shape: a top-level array, newest first, with
+    /// `age_ms` snake-cased on the wire. Callsigns are far-end text, stored
+    /// verbatim.
+    func testHeardEntryDecodesTheABIShape() throws {
+        let json = #"[{"age_ms":1234,"callsign":"W6VS","network":"m17"}]"#
+        let rows = try JSONDecoder().decode([HeardEntry].self, from: Data(json.utf8))
+        XCTAssertEqual(rows, [HeardEntry(callsign: "W6VS", network: "m17", ageMs: 1234)])
+    }
+
+    func testHeardIsEmptyOnAFreshStation() throws {
+        let station = try Station()
+        XCTAssertEqual(try station.heard(), [], "a never-connected station has heard nobody")
+    }
 }
