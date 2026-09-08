@@ -897,7 +897,8 @@ public struct StationConfig: Sendable {
     public var portalUser: String?
     /// AllStar portal password (WT path), or `nil`. Consumed; never retained.
     public var portalPass: String?
-    /// AllStar node selector for token minting (WT path), or `nil`.
+    /// AllStar node selector for token minting (WT path), or `nil`. Optional:
+    /// the portal mints without one, so user + password alone enable the path.
     public var portalNode: String?
     /// Guest secret, or `nil` for the default `"allstar"`. Consumed; never
     /// retained.

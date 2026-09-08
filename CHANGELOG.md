@@ -87,6 +87,11 @@ the same thing whichever network is live.
 
 ### Changed
 
+- **The AllStarLink account asks for a password, not a node number.** The
+  portal mints a WebTransceiver token without one, so the node field was a
+  hoop. The engine now sends the node only when a config carries one, and a
+  node saved by an earlier build is kept, unused, rather than deleted.
+
 - **astar-server prefers signed 16-bit linear by default** and rejects a peer
   with no usable codec instead of accepting one it cannot decode; µ-law-only
   nodes are still accepted, and the reject carries Asterisk's own CAUSE and
