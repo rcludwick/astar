@@ -58,7 +58,7 @@ public enum CredentialsValidation {
 
     /// Shown after a token-mint test comes back rejected.
     public static let portalRejected =
-        "The AllStarLink portal rejected these credentials. Check the callsign and password."
+        "The AllStarLink portal rejected these credentials. Check the callsign, password, and node."
 
     /// How to draw the password field.
     ///

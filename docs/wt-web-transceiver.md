@@ -80,9 +80,10 @@ callsign.
 
 `PortalCredentials { user, password, node }` — note `user` is the **portal
 account callsign**, `password` is the **portal account password** (not any IAX2
-secret), and `node` is an **optional** selector for a node the account owns.
-The portal issues a token without one, so an empty `node` sends no query
-parameter; the macOS account panel no longer asks for it.
+secret), and `node` is a node the account owns. The live portal answers a
+request with no `node` with a page that carries no token (checked 2026-09-08),
+so the macOS account panel asks for one; the engine still tolerates an empty
+`node` — it sends no query parameter — for configs that carry none.
 
 ### Stage 2 — Resolve the node to an address (`astar-asl3::resolve_node`)
 
