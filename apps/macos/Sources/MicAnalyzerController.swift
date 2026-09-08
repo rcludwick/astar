@@ -27,8 +27,10 @@
         init(session: CallSession, navigation: AppNavigation) {
             self.navigation = navigation
             vm.attach(session: session)
-            // The model's "close" is now "go back one pane"; `goBack()` returns to
-            // the call card, the same as Settings and the reflector directory.
+            // The model's "close" is now "go back one pane". No macOS view calls
+            // `requestClose()` — the pane header's Back chevron does that job —
+            // but this is the seam the iOS port will drive its navigation stack
+            // from, so it stays wired.
             vm.onClose = { [weak navigation] in navigation?.goBack() }
         }
 
@@ -37,9 +39,13 @@
         /// Seeding before the switch matters: the pane is built by
         /// `switch navigation.pane`, so the view's `onAppear` starts the monitor on
         /// whatever `selectedInput` already says.
+        ///
+        /// `show(_:)` rather than assigning `pane`: the analyzer is reachable from
+        /// Settings (Mic Profiles, a saved config) and from Quick settings on the
+        /// call card, so Back has to return to whichever one opened it.
         func open(input: String?) {
             vm.selectedInput = input
-            navigation?.pane = .micAnalyzer
+            navigation?.show(.micAnalyzer)
         }
     }
 #endif
