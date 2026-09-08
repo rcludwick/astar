@@ -47,6 +47,9 @@
         /// Live device lists, for the duplicate-name warning below the dial
         /// card (astar-9d41). Already in the environment for QuickConfigView.
         @EnvironmentObject private var deviceMonitor: AudioDeviceMonitor
+        /// Owns the mic analyzer's model, so the pane keeps its picker + profile
+        /// name across a trip back to the call card.
+        @EnvironmentObject private var micAnalyzer: MicAnalyzerController
         /// The devices this rig is actually using, so the warning below can be
         /// limited to a clash that affects them (astar-9d41). Same keys
         /// `AudioSettings` persists, read-only here.
@@ -154,6 +157,7 @@
                 case .call: mainPane
                 case .settings: devicesPane
                 case .reflectors: reflectorsPane
+                case .micAnalyzer: micAnalyzerPane
                 }
             }
             // Flexible sizing so the host window is resizable: a usable minimum, a
@@ -389,6 +393,36 @@
             )
         }
 
+        /// The mic analyzer, with the same header chrome as Settings — a Back
+        /// chevron (⌘[) and a title — so every pane is entered and left the same
+        /// way. The analyzer's own controls carry no close button for that reason.
+        private var micAnalyzerPane: some View {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 8) {
+                    Button {
+                        navigation.goBack()
+                    } label: {
+                        Label("Back", systemImage: "chevron.left")
+                            .labelStyle(.iconOnly)
+                            .frame(width: 22, height: 22)  // full hit area, no clip
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.borderless)
+                    .keyboardShortcut("[", modifiers: .command)  // ⌘[ to go back
+                    Text("Mic analyzer").font(.headline)
+                    Spacer()
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                Divider()
+                // The view starts the monitor in `onAppear` and releases it in
+                // `onDisappear`; the switch above rebuilds it per visit, so the mic
+                // is open only while the pane is on screen.
+                MicAnalyzerView(vm: micAnalyzer.vm)
+                    .environmentObject(session)
+            }
+        }
+
         /// Default window width per pane. The user's own window size wins over
         /// all of these; they only set what a fresh window opens at.
         private var idealPaneWidth: CGFloat {
@@ -396,6 +430,7 @@
             case .call: return 330
             case .settings: return 390
             case .reflectors: return 390
+            case .micAnalyzer: return 480
             }
         }
 
@@ -404,6 +439,7 @@
             case .call: return 550
             case .settings: return 670
             case .reflectors: return 620
+            case .micAnalyzer: return 560
             }
         }
 
@@ -2208,12 +2244,16 @@
 
     #Preview {
         let previewSession = CallSession(station: NullStation())
+        let previewNavigation = AppNavigation()
         MenuPopover()
             .environmentObject(previewSession)
             .environmentObject(SerialController())
             .environmentObject(SetupController())
-            .environmentObject(MicAnalyzerController(session: previewSession))
+            .environmentObject(
+                MicAnalyzerController(session: previewSession, navigation: previewNavigation)
+            )
             .environmentObject(AudioDeviceMonitor(session: previewSession))
+            .environmentObject(previewNavigation)
     }
 
     extension View {

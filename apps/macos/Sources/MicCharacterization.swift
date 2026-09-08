@@ -7,7 +7,7 @@
     import Combine
     import Foundation
 
-    /// Drives the Mic Analyzer window: opens the monitor mic lane, polls the live
+    /// Drives the Mic Analyzer pane: opens the monitor mic lane, polls the live
     /// spectrum ~20 Hz, runs `characterize()` (with a short stay-silent capture),
     /// and saves/recalls named per-device profiles. Holds a weak `CallSession` (the
     /// single station owner).
@@ -32,8 +32,8 @@
         /// Max ~0.7 s retries while the monitor warms up on a cold first open.
         private static let maxAnalyzeAttempts = 8
 
-        /// Set by the controller; closes the analyzer window. Closing tears down the
-        /// monitor via the view's `onDisappear`.
+        /// Set by the controller; leaves the analyzer pane (`AppNavigation.goBack`).
+        /// Leaving tears down the monitor via the view's `onDisappear`.
         var onClose: (() -> Void)?
 
         private weak var session: CallSession?
@@ -46,8 +46,9 @@
 
         func attach(session: CallSession) { self.session = session }
 
-        /// Close the analyzer window (Cancel). Teardown happens in `stop()` via the
-        /// view's `onDisappear`.
+        /// Leave the analyzer pane. Teardown happens in `stop()` via the view's
+        /// `onDisappear`. The pane's own way out is the header's Back chevron; this
+        /// is the model-level equivalent for anything that has only the model.
         func requestClose() { onClose?() }
 
         /// Whether there's a fresh characterization ready to save.

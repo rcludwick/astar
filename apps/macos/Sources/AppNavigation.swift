@@ -18,6 +18,9 @@
         case settings
         /// Browse and search the cached reflector directory.
         case reflectors
+        /// Live mic spectrum + the stay-silent characterization that saves a
+        /// mic profile.
+        case micAnalyzer
     }
 
     /// Which pane the main window is showing (astar-1f7d).

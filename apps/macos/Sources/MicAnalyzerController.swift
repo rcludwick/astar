@@ -3,47 +3,43 @@
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 
 #if os(macOS)
-    import AppKit
     import AstarCore
     import SwiftUI
 
-    /// Owns the single resizable Mic Analyzer `NSWindow`. The app is `LSUIElement`, so
-    /// `open` activates the app and brings the window to the front. Mirrors the
-    /// window pattern in `StatusItemController.makeWindow`.
+    /// Owns the Mic Analyzer's model and the way into (and out of) its pane.
+    ///
+    /// The analyzer is a **pane of the main window**, not a window of its own:
+    /// astar has one window and one navigation model, and a second window would be
+    /// a second place for "where am I" to live — reachable from Settings, from a
+    /// saved config and from Quick settings, each of which would have to find and
+    /// front it. It is also what makes the analyzer portable: an iOS navigation
+    /// stack can host a pane, and cannot host a second window.
+    ///
+    /// The model lives here rather than in the pane so the picker selection and any
+    /// unsaved profile name survive a trip back to the call card.
     @MainActor
     final class MicAnalyzerController: ObservableObject {
-        private let session: CallSession
-        private let vm = MicCharacterization()
-        private var window: NSWindow?
+        /// The analyzer's model; `MenuPopover.micAnalyzerPane` hands it to the view.
+        let vm = MicCharacterization()
+        /// Weak: the app delegate owns both this controller and the navigation.
+        private weak var navigation: AppNavigation?
 
-        init(session: CallSession) {
-            self.session = session
+        init(session: CallSession, navigation: AppNavigation) {
+            self.navigation = navigation
             vm.attach(session: session)
-            vm.onClose = { [weak self] in self?.window?.close() }
+            // The model's "close" is now "go back one pane"; `goBack()` returns to
+            // the call card, the same as Settings and the reflector directory.
+            vm.onClose = { [weak navigation] in navigation?.goBack() }
         }
 
-        /// Show the analyzer, defaulting the mic picker to `input`.
+        /// Show the analyzer pane, defaulting the mic picker to `input`.
+        ///
+        /// Seeding before the switch matters: the pane is built by
+        /// `switch navigation.pane`, so the view's `onAppear` starts the monitor on
+        /// whatever `selectedInput` already says.
         func open(input: String?) {
             vm.selectedInput = input
-            let w = window ?? makeWindow()
-            window = w
-            NSApp.activate(ignoringOtherApps: true)
-            w.makeKeyAndOrderFront(nil)
-        }
-
-        private func makeWindow() -> NSWindow {
-            let hosting = NSHostingController(
-                rootView: MicAnalyzerView(vm: vm).environmentObject(session))
-            let w = NSWindow(contentViewController: hosting)
-            w.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-            w.title = "Mic Analyzer"
-            w.isReleasedWhenClosed = false
-            w.contentMinSize = NSSize(width: 640, height: 400)
-            w.setContentSize(NSSize(width: 640, height: 400))
-            // Bumped autosave key so the new default size takes effect once, instead
-            // of restoring a stale smaller frame.
-            w.setFrameAutosaveName("astarMicAnalyzer.640x400")
-            return w
+            navigation?.pane = .micAnalyzer
         }
     }
 #endif
