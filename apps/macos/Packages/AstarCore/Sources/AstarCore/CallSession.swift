@@ -2270,10 +2270,16 @@ public final class CallSession: ObservableObject {
             // `lastHeard` is derived from this, so it would otherwise show the
             // PREVIOUS network's talker until the next poll tick.
             refreshLastHeard()
+            // Same for the list behind it — the next poll refills it from the
+            // new link.
+            if !heardHistory.isEmpty { heardHistory = [] }
         } else {
             DispatchQueue.main.async { [weak self] in
                 self?.activeCallNetwork = network
                 self?.refreshLastHeard()
+                // Same for the list behind it — the next poll refills it from
+                // the new link.
+                if self?.heardHistory.isEmpty == false { self?.heardHistory = [] }
             }
         }
     }

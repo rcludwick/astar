@@ -277,4 +277,24 @@ final class CallSessionLastHeardTests: XCTestCase {
         XCTAssertEqual(publishes, 2, "the displayed second changed, so the list publishes")
         XCTAssertEqual(session.heardHistory.first?.ageMs, 1_000, "rounded down to whole seconds")
     }
+
+    /// A dial straight from one live digital network to another must not leave
+    /// the previous link's roster on screen for a poll tick — the same reason
+    /// `setActiveCallNetwork` refreshes `lastHeard` there and then.
+    func testTheHeardHistoryClearsTheMomentTheNetworkSwitches() throws {
+        let (session, fake) = session()
+        try session.connect(node: "M17-002 A", network: .m17)
+        fake.snapshotToReturn = live(m17: true)
+        fake.m17StateValue = M17State(link: .linked, talker: "W6VS")
+        fake.heardValue = [HeardEntry(callsign: "W6VS", network: "m17", ageMs: 500)]
+        session.poll()
+        XCTAssertEqual(session.heardHistory.map(\.callsign), ["W6VS"])
+
+        try session.connect(node: "US-KCWIDE", network: .ysf)
+
+        XCTAssertEqual(session.activeCallNetwork, .ysf)
+        XCTAssertTrue(
+            session.heardHistory.isEmpty,
+            "no poll yet — the M17 roster must not survive the switch")
+    }
 }
