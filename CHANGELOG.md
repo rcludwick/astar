@@ -13,6 +13,50 @@ pre-release to the patch number, which sorts wrongly: `0.1.10beta` is newer
 than `0.1.9beta` and a string comparison says the opposite. Shipped versions
 are left as they were spelled.
 
+## 0.1.12-beta — 2026-09-07
+
+A System Fusion release, mostly. Your over now carries your callsign, so the
+reflector and the radios on it know who is talking; the transmitted audio is
+no longer scrambled on the way out; last heard names the talker on every
+digital network; and the AllStarLink account asks for one thing less.
+
+### Added
+
+- **Last heard: the popover names whoever keyed up on M17 and System Fusion,
+  as it already did on D-Star.** M17 carries the source callsign in every
+  stream and astar used to throw it away; System Fusion's was decoded all
+  along with nothing to display it. One line now answers for whichever
+  digital network is live. AllStarLink stays blank on purpose: a node number
+  is who you dialled, not who is speaking.
+
+- **A System Fusion over says who is transmitting.** An over opens with a
+  real header frame at key-down, weaves your callsign through the data
+  channel beside the voice, and ends with a terminator that carries the
+  callsigns rather than five frames of silence. Before this the data channel
+  went out zeroed, and a reflector dashboard showed the over with nobody's
+  name on it.
+
+### Changed
+
+- **The AllStarLink account asks for a password, not a node number.** The
+  portal mints a WebTransceiver token without one, so the node field was a
+  hoop. The engine now sends the node only when a config carries one, and a
+  node saved by an earlier build is kept, unused, rather than deleted.
+
+- **The Python binding can no longer drift from the C ABI.** Its struct
+  mirrors are checked against the generated header in CI, the way the
+  header itself is checked against the Rust.
+
+### Fixed
+
+- **System Fusion transmit was permuted twice.** The decode path has always
+  mapped a received frame from the codec's bit order to the chip's; the
+  encode path wrapped the chip's bytes as if they were already in codec
+  order, so every transmitted frame was permuted a second time and 1 bit in
+  49 landed where a receiver expected it. Receive was clean, and so was
+  D-Star, which has no permutation. Pinned bit for bit in a test and by a
+  tone loopback on the dongle.
+
 ## 0.1.11-beta — 2026-09-07
 
 System Fusion is the third digital network astar speaks: link a reflector,
@@ -23,9 +67,6 @@ audio lane, so the meters, the spectrum and your microphone settings mean
 the same thing whichever network is live.
 
 ### Added
-
-- **Last heard: the popover names whoever keyed up on M17 and System Fusion,
-  as it already did on D-Star.**
 
 - **System Fusion (YSF): link a reflector, hear it, and transmit**, with the
   ThumbDV in DN mode. YSF sits beside AllStarLink, M17 and D-Star in the
@@ -54,8 +95,8 @@ the same thing whichever network is live.
 
 - **DMR in the bundled reflector directory.** The 2026-09-07 snapshot
   carries 3,415 reflectors across seven networks, now including hamcall-db's
-  DMR masters — 185 servers, named and counted, grouped by the network family
-  that runs them, and every one of them dialable by the DMR client below.
+  DMR masters — 185 servers, named and counted. astar has no DMR client yet,
+  so they are listed rather than dialable.
 
 - **The node daemon has a voice.** `astar-server` depended on `tracing` and
   never installed a subscriber, so 35 log sites in the engine dispatched to
@@ -65,33 +106,7 @@ the same thing whichever network is live.
   inbound call naming the caller, what it can carry, what it asked for and
   what was accepted.
 
-- **DMR: log in to a talkgroup and hear it.** Point astar at a DMR master —
-  TGIF, FreeDMR, DMR+, SystemX and the rest — and it speaks the MMDVM/homebrew
-  repeater protocol, joins a talkgroup on a timeslot, and decodes the AMBE+2 on
-  it through the same ThumbDV D-Star, Fusion and NXDN use. The network switcher,
-  the directory's 185 DMR rows — pick one and connect, or type an address for a
-  network the directory does not list, TGIF included — and last-heard. Your radio ID and each
-  network's own password are separate credentials and stay that way; the
-  password is used to log in and never stored anywhere else. BrandMeister is
-  not offered: it is a private network whose operators set the terms, and
-  astar has not confirmed where they stand on third-party clients, so its
-  masters stay out of the picker and the engine refuses them.
-  Receive only for now: astar has no DMR transmit path yet and says so instead
-  of offering a PTT button that would do nothing.
-
-- **NXDN: link a talkgroup and hear it.** Point astar at an NXDNReflector
-  talkgroup and it decodes the AMBE+2 on it through the same ThumbDV D-Star
-  and Fusion use — the network switcher, the directory's 297 NXDN rows,
-  and last-heard. Receive only for now: astar has no
-  NXDN transmit path yet and says so instead of offering a PTT button that
-  would do nothing.
-
 ### Changed
-
-- **The AllStarLink account asks for a password, not a node number.** The
-  portal mints a WebTransceiver token without one, so the node field was a
-  hoop. The engine now sends the node only when a config carries one, and a
-  node saved by an earlier build is kept, unused, rather than deleted.
 
 - **astar-server prefers signed 16-bit linear by default** and rejects a peer
   with no usable codec instead of accepting one it cannot decode; µ-law-only
