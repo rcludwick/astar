@@ -27,6 +27,9 @@ fn test_station(cfg: StationConfig) -> Station {
 enum ApiStub {
     /// Issue this token — the mint stops there and the scrape never runs.
     Token(&'static str),
+    /// Answer 200 with an empty token: the engine treats that as the API
+    /// having issued nothing, not as a final refusal.
+    NoToken,
     /// Endpoint absent (404): the engine falls back to the scrape below.
     Gone,
 }
@@ -52,6 +55,9 @@ fn spawn_stub_portal(
                     ApiStub::Token(t) => tiny_http::Response::from_string(format!(
                         r#"{{"status":"OK","auth":1,"token":"{t}","msg":"ok"}}"#
                     )),
+                    ApiStub::NoToken => tiny_http::Response::from_string(
+                        r#"{"status":"OK","auth":1,"token":"","msg":"ok"}"#.to_string(),
+                    ),
                     ApiStub::Gone => tiny_http::Response::from_string("not found".to_string())
                         .with_status_code(404),
                 };
@@ -151,6 +157,23 @@ fn test_mint_token_unknown_node_maps_to_token_not_found() {
         matches!(err, StationError::Portal(Asl3Error::TokenNotFound)),
         "unknown node should map to TokenNotFound, got {err:?}"
     );
+    handle.join().unwrap();
+}
+
+/// The API answered but issued no token, and the account has no node to fall
+/// back with: a clean `Http` naming the API — and, as everywhere else here, no
+/// IAX call is opened.
+#[test]
+fn test_mint_token_api_without_token_or_node_is_http_and_opens_no_call() {
+    let (base, handle) = spawn_stub_portal(ApiStub::NoToken, "77777", 1);
+    let s = test_station(portal_cfg(base, "")); // no node → no scrape fallback
+    let err = s.test_mint_token().unwrap_err();
+    assert!(
+        matches!(err, StationError::Portal(Asl3Error::Http(_))),
+        "an API with no token and no node should map to Http, got {err:?}"
+    );
+    assert!(matches!(s.snapshot().status, CallStatus::Idle));
+    assert!(matches!(s.set_ptt(true), Err(StationError::NotConnected)));
     handle.join().unwrap();
 }
 

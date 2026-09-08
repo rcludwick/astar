@@ -108,11 +108,12 @@ enum ApiMint {
     /// The API answered in its own protocol and said no. Final: the scrape is
     /// NOT tried (a refused login is refused on both paths).
     Final(Asl3Error),
-    /// The API could not be reached, or did not answer in its own protocol —
-    /// transport failure, a non-JSON body, or an unexpected status (a 404
-    /// because the endpoint moved, a 5xx). The caller may fall back to the
-    /// scrape; the string is the message for the `Http` error it raises when
-    /// it cannot.
+    /// The API could not be reached, or did not answer with a token —
+    /// transport failure, a non-JSON body, an unexpected status (a 404 because
+    /// the endpoint moved, a 5xx), or a 2xx that carried no token. The caller
+    /// may fall back to the scrape; the string is the message for the `Http`
+    /// error it raises when it cannot, and always names the path and the
+    /// reason.
     Unavailable(String),
 }
 
@@ -151,6 +152,14 @@ fn mint_via_api(base_url: &str, creds: &PortalCredentials) -> ApiMint {
         Err(e) => return ApiMint::Unavailable(format!("POST {API_PATH}: {e}")),
     };
 
+    // A 401 is a refusal whatever the body looks like — the API's own JSON, an
+    // nginx error page, a WAF challenge. Decide it BEFORE parsing: an
+    // HTML-wrapped refusal must not become "unavailable" and send the password
+    // off to the scrape a second time.
+    if status == 401 {
+        return ApiMint::Final(Asl3Error::Login);
+    }
+
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
         return ApiMint::Unavailable(format!(
             "POST {API_PATH}: HTTP {status}, response was not JSON"
@@ -168,9 +177,10 @@ fn mint_via_api(base_url: &str, creds: &PortalCredentials) -> ApiMint {
         return ApiMint::Token(token.to_string());
     }
 
-    // No token. A 401, or an `auth: 0` body whose msg speaks of the login, is
-    // the endpoint refusing these credentials (live shape, probed 2026-09-08:
-    // HTTP 401 {"status":"ERR","auth":0,"token":"","msg":"login failed"}).
+    // No token. An `auth: 0` body whose msg speaks of the login is the endpoint
+    // refusing these credentials with a 200-shaped answer (the live refusal is
+    // the 401 handled above: {"status":"ERR","auth":0,"token":"","msg":"login
+    // failed"}, probed 2026-09-08).
     let auth_zero = json.get("auth").is_some_and(|v| {
         v.as_i64() == Some(0) || v.as_bool() == Some(false) || v.as_str() == Some("0")
     });
@@ -178,14 +188,18 @@ fn mint_via_api(base_url: &str, creds: &PortalCredentials) -> ApiMint {
         .get("msg")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
-    if status == 401 || (auth_zero && msg.to_ascii_lowercase().contains("login")) {
+    if auth_zero && msg.to_ascii_lowercase().contains("login") {
         return ApiMint::Final(Asl3Error::Login);
     }
-    if (200..300).contains(&status) {
-        // The endpoint answered OK and still issued nothing.
-        return ApiMint::Final(Asl3Error::TokenNotFound);
-    }
-    ApiMint::Unavailable(format!("POST {API_PATH}: HTTP {status}"))
+    // Anything else — including a 2xx that carried no token at all — is
+    // "unavailable", not final. Deliberately SOFT until the live success shape
+    // has been seen once: if the token turns out to live under another key, an
+    // account with a node still mints through the scrape instead of failing.
+    // Tighten this arm to `Final(TokenNotFound)` once a real success response
+    // has been observed.
+    ApiMint::Unavailable(format!(
+        "POST {API_PATH}: HTTP {status}, no token in the response"
+    ))
 }
 
 /// Mint against an explicit portal base URL — the testable core. Public so a
@@ -425,7 +439,10 @@ mod tests {
     }
 
     /// The endpoint gone (404) with a node configured: fall back to the
-    /// scrape, exactly as before the API existed.
+    /// scrape, exactly as before the API existed. Note the request count is a
+    /// ceiling, not an assertion: if a change made the engine send FEWER
+    /// requests than the stub is waiting for, this test hangs at
+    /// `handle.join()` rather than failing with a message.
     #[test]
     fn api_missing_falls_back_to_the_scrape_when_a_node_is_configured() {
         let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub");
@@ -501,10 +518,82 @@ mod tests {
         handle.join().unwrap();
     }
 
-    /// A 200 with an empty token is the API authenticating and issuing
-    /// nothing: `TokenNotFound`, and no scrape behind it.
+    /// A 401 is a refusal whatever wrapping it arrives in: an nginx/WAF page
+    /// in front of the API must not read as "unavailable" and send the
+    /// password off to the scrape. One request served — a fallback would be a
+    /// second.
     #[test]
-    fn api_ok_with_empty_token_is_token_not_found() {
+    fn api_401_with_an_html_body_is_still_login() {
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub");
+        let base = format!("http://{}", server.server_addr());
+        let handle = std::thread::spawn(move || {
+            let Ok(rq) = server.recv() else { return };
+            assert_eq!(rq.url(), "/api/v2/auth-wt-legacy");
+            let _ = rq.respond(
+                tiny_http::Response::from_string("<html><body>401 Unauthorized</body></html>")
+                    .with_status_code(401),
+            );
+        });
+        let creds = PortalCredentials {
+            user: "AJ7HR".into(),
+            password: "wrong".into(),
+            node: "77777".into(),
+        };
+        assert!(matches!(
+            mint_wt_token_at(&base, &creds),
+            Err(Asl3Error::Login)
+        ));
+        handle.join().unwrap();
+    }
+
+    /// A 2xx that carried no token is deliberately SOFT (see `mint_via_api`):
+    /// until the live success shape has been seen once, an account with a node
+    /// still mints through the scrape rather than failing outright.
+    #[test]
+    fn api_ok_with_empty_token_falls_back_to_the_scrape() {
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub");
+        let base = format!("http://{}", server.server_addr());
+        let handle = std::thread::spawn(move || {
+            for _ in 0..3 {
+                let Ok(rq) = server.recv() else { return };
+                let url = rq.url().to_string();
+                if url.starts_with(API_PATH) {
+                    let _ = rq.respond(tiny_http::Response::from_string(
+                        r#"{"status":"OK","auth":1,"token":"","msg":"ok"}"#,
+                    ));
+                } else if url.starts_with("/login.php") {
+                    let resp = tiny_http::Response::from_string("ok").with_header(
+                        tiny_http::Header::from_bytes(
+                            &b"Set-Cookie"[..],
+                            &b"PHPSESSID=stubsoft; path=/"[..],
+                        )
+                        .unwrap(),
+                    );
+                    let _ = rq.respond(resp);
+                } else {
+                    let body = if url.contains("node=77777") {
+                        r#"<param name="callingName" value="tok-soft"/>"#
+                    } else {
+                        "Node not found"
+                    };
+                    let _ = rq.respond(tiny_http::Response::from_string(body));
+                }
+            }
+        });
+        let creds = PortalCredentials {
+            user: "AJ7HR".into(),
+            password: "not-a-real-password".into(),
+            node: "77777".into(),
+        };
+        let token = mint_wt_token_at(&base, &creds).expect("falls back to the scrape");
+        assert_eq!(token, "tok-soft");
+        handle.join().unwrap();
+    }
+
+    /// The same empty-token answer with no node to fall back with: `Http`
+    /// naming the API path and why, not a silent `TokenNotFound`.
+    #[test]
+    fn api_ok_with_empty_token_without_a_node_is_an_http_error() {
         let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub");
         let base = format!("http://{}", server.server_addr());
         let handle = std::thread::spawn(move || {
@@ -517,12 +606,16 @@ mod tests {
         let creds = PortalCredentials {
             user: "AJ7HR".into(),
             password: "not-a-real-password".into(),
-            node: "77777".into(),
+            node: String::new(),
         };
-        assert!(matches!(
-            mint_wt_token_at(&base, &creds),
-            Err(Asl3Error::TokenNotFound)
-        ));
+        let err = mint_wt_token_at(&base, &creds).expect_err("no node, no fallback");
+        match err {
+            Asl3Error::Http(msg) => {
+                assert!(msg.contains(API_PATH), "names the API path: {msg}");
+                assert!(msg.contains("no token"), "names the reason: {msg}");
+            }
+            other => panic!("expected Http, got {other:?}"),
+        }
         handle.join().unwrap();
     }
 
