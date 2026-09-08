@@ -73,8 +73,9 @@ the same thing whichever network is live.
   network the directory does not list, TGIF included — and last-heard. Your radio ID and each
   network's own password are separate credentials and stay that way; the
   password is used to log in and never stored anywhere else. BrandMeister is
-  listed and not dialable: it is a private network whose operators set the
-  terms, and astar has not confirmed where they stand on third-party clients.
+  not offered: it is a private network whose operators set the terms, and
+  astar has not confirmed where they stand on third-party clients, so its
+  masters stay out of the picker and the engine refuses them.
   Receive only for now: astar has no DMR transmit path yet and says so instead
   of offering a PTT button that would do nothing.
 

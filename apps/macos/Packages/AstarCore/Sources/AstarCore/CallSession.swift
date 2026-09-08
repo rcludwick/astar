@@ -1202,10 +1202,12 @@ public final class CallSession: ObservableObject {
         /// and refusing here — with a message that says where the network
         /// issues one — beats an `MSTNAK` the operator cannot interpret.
         case missingDMRPassword
-        /// BrandMeister was dialled with the consent box unticked. Not a
-        /// failure: the operator has not said they accept BrandMeister's own
-        /// terms, and astar does not put anyone on a private network that
-        /// enforces its own access rules without that.
+        /// BrandMeister was dialled without consent recorded. Not a failure:
+        /// the operator has not said they accept BrandMeister's own terms, and
+        /// astar does not put anyone on a private network that enforces its
+        /// own access rules without that. No control sets the flag today —
+        /// this build does not offer BrandMeister at all — so a typed address
+        /// is the only way here.
         case brandmeisterNotConsented
 
         public var errorDescription: String? {
@@ -1277,8 +1279,8 @@ public final class CallSession: ObservableObject {
                     + "issues its own."
             case .brandmeisterNotConsented:
                 return
-                    "BrandMeister enforces its own access rules. Read them and tick the "
-                    + "box in Settings before connecting."
+                    "BrandMeister enforces its own access rules, and astar does not "
+                    + "connect to it yet."
             }
         }
     }
