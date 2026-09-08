@@ -570,9 +570,17 @@ fn run_loop(p: RunLoopParams) {
             // other place the history's clock is refreshed: without it that
             // station's age would count from the start of their over. A
             // move-to-front, never a duplicate row.
-            let last = shared.talker.lock().expect("talker mutex").clone();
-            if let Some(call) = last {
-                shared.heard.note("m17", &call);
+            //
+            // The gate is `rx_stream`: `note_talker` clears it on the `EOS`
+            // packet, so a stream that ended properly has already been
+            // refreshed there and has nothing left to refresh here — this
+            // arm would only push its age 400 ms newer than the end it
+            // actually had.
+            if rx_stream.is_some() {
+                let last = shared.talker.lock().expect("talker mutex").clone();
+                if let Some(call) = last {
+                    shared.heard.note("m17", &call);
+                }
             }
             rx_stream = None;
         }
