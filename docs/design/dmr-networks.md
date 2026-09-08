@@ -148,7 +148,7 @@ The gate above is the design. What shipped is **stricter**, and deliberately:
 | | |
 |---|---|
 | Engine | `Station::dmr_connect` refuses BrandMeister **unconditionally**. `BRANDMEISTER_CONSENTED` in `crates/astar-station/src/station.rs` is a `const false`, checked through `astar_dmr::dialable` before a socket or a dongle is touched, and there is no preference, config field or C ABI in-arg that can set it. |
-| App | The consent checkbox exists, defaults off, and its help text says in as many words that **this build cannot reach BrandMeister yet**. It records an intent; it opens nothing. |
+| App | No consent control is shown. The persisted flag (`dmr.brandmeisterConsent`) exists and defaults off, nothing in the UI sets it, and while it is off the directory hides BrandMeister's masters. A checkbox shipped briefly and was removed the same day: **this build cannot reach BrandMeister**, and a control that recorded an intent it could not honour was a promise the next connect broke. |
 
 That is the honest state of a finding that is outcome (b) rather than a clean
 answer: the gate is built and closed, and opening it is its own piece of work

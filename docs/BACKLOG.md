@@ -745,8 +745,11 @@ shipped binary.
 The gate is built and closed. `astar_dmr::dialable(consented)` decides, and
 every call site asks it — but the only caller passes `BRANDMEISTER_CONSENTED`
 (`crates/astar-station/src/station.rs`), a `const false` with no preference,
-no config field and no C ABI in-arg behind it. The macOS app's consent
-checkbox records an intent and opens nothing; its help text says so.
+no config field and no C ABI in-arg behind it. The macOS app shows no
+consent control at all: `dmr.brandmeisterConsent` persists, defaults off,
+nothing sets it, and the directory hides BrandMeister's masters while it is
+off. (A checkbox shipped briefly on 2026-09-07 and was pulled the same day —
+it recorded an intent the build could not honour.)
 
 That is the deliberate 2026-09-07 state, not an oversight: Task 2's check
 (`docs/design/dmr-brandmeister-position.md`) is outcome (b) — no published
@@ -756,9 +759,10 @@ fetch with an anti-bot interstitial, while third-party accounts point toward
 with a browser settles that in about a minute; nobody has.**
 
 If the read confirms (b): thread a `brandmeister_consented` in-arg through
-`Station::dmr_connect` → the C ABI → the Swift binding → `CallSession`, so the
-checkbox the operator ticked is the value the gate reads, and no default
-anywhere is `true`. If it confirms (a): leave BrandMeister listed and refused
+`Station::dmr_connect` → the C ABI → the Swift binding → `CallSession`, bring
+the consent control back in `DmrSettingsView` (the copy is in
+`docs/design/dmr-networks.md` §"What the gate looks like"), and make the box
+the operator ticked the value the gate reads, with no default anywhere `true`. If it confirms (a): leave BrandMeister listed and refused
 and write down why, which is the answer `p25-network.md` gives for IMBE. Do
 not open the gate on an inference either way.
 

@@ -305,9 +305,10 @@ network", since no directory server name equals a family slug.
 `astar_dmr::DmrNetwork::from_system_slug` is now the Rust twin of
 `family(ofSystem:)` — same table, same order — and a name added to one belongs
 in both. The master password is a per-system
-credential, and the BrandMeister consent checkbox is present, off by default,
-with help text saying in as many words that this build cannot reach
-BrandMeister at all. Receive only: no PTT button is offered, because the
+credential. There is no BrandMeister control: the persisted consent flag
+(`dmr.brandmeisterConsent`) exists, defaults off, and nothing in the UI sets
+it, so BrandMeister masters stay out of the picker — this build cannot reach
+BrandMeister at all, and a checkbox would have implied otherwise. Receive only: no PTT button is offered, because the
 engine has no DMR transmit path yet (`canTransmit` is false for DMR).
 
 **Verified: loopback, unit tests and the CLI. UNVERIFIED: the UI on screen.**

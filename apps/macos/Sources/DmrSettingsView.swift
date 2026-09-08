@@ -7,8 +7,8 @@
     import SwiftUI
 
     /// Everything DMR asks of the operator, in one section below the
-    /// AllStarLink account (astar-a7c5): the radio ID, one master password per
-    /// network, and the BrandMeister consent gate.
+    /// AllStarLink account (astar-a7c5): the radio ID and one master password
+    /// per network. No BrandMeister consent control — see the note in `body`.
     ///
     /// The radio ID started out beside the callsign, on the reasoning that both
     /// identify the operator. They do — but they are not equally load-bearing.
@@ -44,9 +44,11 @@
 
                 DmrPasswordView(systems: passwordSystems)
                     .listRowSeparator(.hidden)
-
-                BrandmeisterConsentView()
-                    .listRowSeparator(.hidden)
+                // No BrandMeister consent control. The engine refuses
+                // BrandMeister unconditionally and the directory hides its
+                // masters while `session.brandmeisterConsent` is false, which
+                // nothing in the UI can change: a checkbox for a network this
+                // build cannot reach would record an intent and open nothing.
             }
         }
 
@@ -208,9 +210,8 @@
         }
 
         private var caption: String {
-            "Each DMR network issues its own password — TGIF's is on its User Security page, "
-                + "BrandMeister's is the Hotspot Security password in SelfCare. Stored in your "
-                + "Keychain, never in an exported config."
+            "Each DMR network issues its own password — TGIF's is on its User Security page. "
+                + "Stored in your Keychain, never in an exported config."
         }
 
         /// Picker sections, in the catalog's own order.
@@ -277,83 +278,6 @@
                     "Couldn’t remove it from the Keychain.", priority: .medium)
             }
         }
-    }
-
-    /// The BrandMeister consent gate: one checkbox, off by default, never
-    /// pre-ticked.
-    ///
-    /// The wording is verbatim from `docs/design/dmr-networks.md` §"What the
-    /// gate looks like", plus the one thing this build has to add: astar
-    /// cannot reach BrandMeister yet even with the box ticked. The engine
-    /// refuses it unconditionally today, and a control that implied otherwise
-    /// would be a promise the next connect breaks.
-    ///
-    /// No dark patterns in either direction — it is not pre-ticked, and it is
-    /// not buried from someone who has read the terms and accepted them.
-    struct BrandmeisterConsentView: View {
-        @EnvironmentObject private var session: CallSession
-
-        /// BrandMeister's own material, so the operator reads the terms from
-        /// the people who enforce them rather than astar's summary of them.
-        private static let policyURL = URL(string: "https://wiki.brandmeister.network/")!
-
-        var body: some View {
-            VStack(alignment: .leading, spacing: 4) {
-                Toggle(isOn: $session.brandmeisterConsent) {
-                    Text("Show BrandMeister networks")
-                }
-                .toggleStyle(.checkbox)
-                .accessibilityLabel("Show BrandMeister networks")
-                .accessibilityHint(
-                    "BrandMeister enforces its own access rules. astar cannot tell you whether "
-                        + "connecting this way is within them.")
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("BrandMeister enforces its own access rules.")
-                        .font(.caption.weight(.semibold))
-                    // Three runs, one wrapped paragraph: the design doc bolds
-                    // the sentence that says who carries the risk, and losing
-                    // that emphasis is losing the point of the paragraph.
-                    (Text(Self.termsBeforeEmphasis)
-                        + Text(Self.termsEmphasis).bold()
-                        + Text(Self.termsAfterEmphasis))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityLabel(Self.terms)
-                    Link("Read BrandMeister’s own policy", destination: Self.policyURL)
-                        .font(.caption)
-                    Text(Self.notYet)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .settingsCaptionIndent()
-                .accessibilityElement(children: .combine)
-            }
-            .font(.callout)
-        }
-
-        // Verbatim from `docs/design/dmr-networks.md`, split at the one
-        // sentence that doc renders bold.
-        private static let termsBeforeEmphasis =
-            "It is a private network. Its operators set the terms, decide what counts as a "
-            + "violation, and have permanently blocked accounts — for conduct and for technical "
-            + "reasons. astar is a third-party client and cannot tell you whether connecting this "
-            + "way is within their rules. "
-        private static let termsEmphasis =
-            "If your access is revoked, that is between you and BrandMeister."
-        private static let termsAfterEmphasis = " Read their policy before you tick this."
-
-        /// The same paragraph as one string, for VoiceOver — which reads the
-        /// run structure as three fragments otherwise.
-        private static let terms = termsBeforeEmphasis + termsEmphasis + termsAfterEmphasis
-
-        /// What Task 2 recorded, said plainly rather than implied.
-        private static let notYet =
-            "astar can’t reach BrandMeister yet even with this ticked — the engine refuses it. "
-            + "astar looked for BrandMeister’s position on third-party clients on 2026-09-07 and "
-            + "could not read their wiki, so this box grants nothing but visibility."
     }
 
     #Preview {
