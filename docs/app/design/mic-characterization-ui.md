@@ -108,7 +108,7 @@ device's** `MicProfile` (no data duplication):
 
 - **Simple settings (`QuickConfigView`)** — under the Mic gain row:
   `Mic profile: ✓ characterized · [Analyze…] · Apply ⃝` (or
-  `⊘ not characterized · [Analyze…]`). "Analyze…" opens the Analyzer window
+  `⊘ not characterized · [Analyze…]`). "Analyze…" opens the Analyzer pane
   defaulted to the current input; the Apply toggle is the per-device `enabled`
   flag.
 - **Saved config card (`ConfigCard`, expanded)** — next to the Input picker, the
@@ -143,18 +143,18 @@ sets the expectation ("Mic profiles are saved per microphone").
   `enabled` + presence (FakeStation); the `MicCharacterization` view-model's
   characterize→save flow (scriptable FakeStation). The `Canvas` spectrum render is
   visual — verified on-device, not unit-tested.
-- **Phasing:** **M1** = engine seam (`StationDriving` + fakes) + Analyzer window
+- **Phasing:** **M1** = engine seam (`StationDriving` + fakes) + Analyzer pane
   with live spectrum (monitor + 20 Hz poll + draw). **M2** = characterize + Save +
   per-device persistence + recall wiring + the two exposure rows. Both are
   unblocked (FFI vendored); the split keeps PRs reviewable.
 - **Errors:** `monitorStart` failure (device busy / mic permission) → inline
-  message in the window; `micSpectrum` throwing → stop polling + show error;
+  message in the pane; `micSpectrum` throwing → stop polling + show error;
   `characterize()` returning `""` (not enough buffered silence) → "Couldn't
   analyze — try again in a quiet moment."
 
 ## Resolved questions
 
-- **Analyzer home:** separate resizable window (not popover tabs / list section) —
+- **Analyzer home:** a pane of the main window, since 2026-09-08 (§3). It shipped first as a separate resizable window; that decision is superseded —
   the spectrum needs width + height.
 - **Profile scope:** characterization per-device; gain/NR/comp stay per-config.
 - **Notch display:** shown read-only (transparency); applied opaquely (no in-app
