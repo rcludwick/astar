@@ -11,6 +11,7 @@ pub mod dmr;
 #[cfg(feature = "dstar")]
 pub mod dstar;
 pub mod dtmf;
+pub mod heard;
 #[cfg(feature = "m17")]
 pub mod m17;
 pub mod metering;
@@ -35,6 +36,7 @@ pub use dmr::{DmrConfig, DmrLink, DmrSnapshot};
 #[cfg(feature = "dstar")]
 pub use dstar::{DstarConfig, DstarSession, DstarSnapshotState};
 pub use dtmf::{DetectedDigit, DtmfShared, DtmfSource, DtmfTester};
+pub use heard::{HEARD_CAPACITY, HeardEntry, HeardLog};
 // `AmbeBackend` and `DstarLinkState` are the two enums reachable through
 // `DstarSnapshotState`'s own fields, re-exported so a consumer can match on
 // them without depending on `astar-dstar` or `astar-codec` directly

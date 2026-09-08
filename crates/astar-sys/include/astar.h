@@ -1298,6 +1298,16 @@ int iax_station_link_key(IaxStation *st, const char *node, bool on);
 int iax_station_link_roster_json(IaxStation *st, char *buf, uintptr_t len);
 
 /**
+ * Write who has keyed up on the live digital link as a JSON array, newest
+ * first (`[{"callsign":"..","network":"m17","age_ms":1234}]`, `[]` when
+ * nothing has been heard) into the caller buffer. Same contract as
+ * [`iax_station_link_roster_json`]: NUL-terminated + truncate-safe; returns
+ * the byte length the full JSON needs (a `len == 0` call is a sizing query),
+ * or a negative `IAX_ERR_*`.
+ */
+int iax_station_heard_json(IaxStation *st, char *buf, uintptr_t len);
+
+/**
  * Drain the next pending link lifecycle event. Returns 1 and fills `out`
  * when an event was pending (read the node label via
  * [`iax_station_link_event_node`] before the next drain), 0 when none, or a

@@ -811,6 +811,30 @@ public struct LinkRoster: Sendable, Equatable, Codable {
     public let links: [LinkSnapshot]
 }
 
+/// One row of ``Station/heard()``: whatever callsign the far end put on the
+/// wire, kept verbatim — it is remote text, not a validated identity.
+public struct HeardEntry: Sendable, Equatable, Codable {
+    /// The callsign as received, unmodified.
+    public let callsign: String
+    /// Which network heard it — the app's `Network.rawValue`: "m17", "dstar",
+    /// "ysf", "nxdn", "dmr".
+    public let network: String
+    /// How long ago it was heard, in milliseconds.
+    public let ageMs: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case callsign
+        case network
+        case ageMs = "age_ms"
+    }
+
+    public init(callsign: String, network: String, ageMs: UInt64) {
+        self.callsign = callsign
+        self.network = network
+        self.ageMs = ageMs
+    }
+}
+
 public enum Event: Sendable, Equatable {
     /// The peer answered; media is flowing.
     case answered
@@ -1671,6 +1695,37 @@ public final class Station {
             throw StationError(code: -1, text: "undecodable link roster json", detail: "")
         }
         return roster
+    }
+
+    /// Who has keyed up on the live digital link, newest first. Empty on
+    /// AllStar and while idle. Callsigns are whatever the far end sent.
+    public func heard() throws -> [HeardEntry] {
+        let needed = iax_station_heard_json(handle, nil, 0)
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
+        var buf = [CChar](repeating: 0, count: Int(needed) + 1)
+        var rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+            iax_station_heard_json(handle, ptr.baseAddress, UInt(ptr.count))
+        }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
+        // A station can key between the sizing call and the fill, which makes
+        // the JSON longer than the buffer we just sized: the C ABI reports the
+        // size it wanted instead of truncating silently, so grow once and fill
+        // again. Once only — the same race can always recur, and a retry loop
+        // on a busy reflector would spin.
+        if rc > Int32(buf.count - 1) {
+            buf = [CChar](repeating: 0, count: Int(rc) + 1)
+            rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+                iax_station_heard_json(handle, ptr.baseAddress, UInt(ptr.count))
+            }
+            if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
+        }
+        let json = String(cString: buf)
+        guard let data = json.data(using: .utf8),
+            let rows = try? JSONDecoder().decode([HeardEntry].self, from: data)
+        else {
+            throw StationError(code: -1, text: "undecodable heard json", detail: "")
+        }
+        return rows
     }
 
     /// Drain the next pending link lifecycle event, or `nil` when none.

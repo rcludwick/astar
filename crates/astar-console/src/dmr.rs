@@ -137,6 +137,7 @@ use astar_codec::dmr::unpack_voice;
 use astar_dmr::frame::DT_TERMINATOR_WITH_LC;
 use astar_dmr::{CallType, DmrFsm, DmrNetwork, FailureStage, FsmAction, LinkState, Timeslot, wire};
 
+use crate::heard::{HeardEntry, HeardLog};
 use crate::session::ConsoleError;
 
 /// How long the socket blocks before the loop runs `tick` anyway.
@@ -342,6 +343,10 @@ struct Shared {
     /// `FailureStage` as its index, or [`NO_FAILURE`]; see `failure_index`.
     failure: AtomicU32,
     last_heard: Mutex<Option<String>>,
+    /// Everyone heard on this link, newest first — `last_heard` keeps only
+    /// the most recent id, which a short courtesy tail overwrites a second
+    /// after the real talker unkeys.
+    heard: HeardLog,
     /// The same id as a number, plus one sentinel: [`NO_TALKER`] for "nobody
     /// has transmitted". A 24-bit id cannot collide with it.
     last_heard_id: AtomicU32,
@@ -378,6 +383,7 @@ impl Shared {
             link_state: AtomicU32::new(state_index(LinkState::Idle)),
             failure: AtomicU32::new(NO_FAILURE),
             last_heard: Mutex::new(None),
+            heard: HeardLog::new(),
             last_heard_id: AtomicU32::new(NO_TALKER),
             stream_id: Mutex::new(None),
             frames_rx: AtomicU64::new(0),
@@ -704,6 +710,14 @@ impl DmrLink {
         }
     }
 
+    /// Who has keyed up on this link, newest first — see
+    /// [`crate::heard::HeardLog`]. Far-end-supplied text, like
+    /// [`DmrSnapshot::last_heard`].
+    #[must_use]
+    pub fn heard(&self) -> Vec<HeardEntry> {
+        self.shared.heard.snapshot()
+    }
+
     /// Request transmit on or off.
     ///
     /// Stores a request; the run loop applies the edge on its next pass — and
@@ -942,8 +956,10 @@ fn on_data(packet: &wire::DataPacket, shared: &Arc<Shared>, audio: Option<&mut A
     // `srcId` is bytes 5..8 of the datagram, in clear — no vocoder involved,
     // so who is talking stays truthful even while this station transmits.
     shared.last_heard_id.store(packet.src_id, Ordering::Relaxed);
+    let src = packet.src_id.to_string();
+    shared.heard.note("dmr", &src);
     if let Ok(mut slot) = shared.last_heard.lock() {
-        *slot = Some(packet.src_id.to_string());
+        *slot = Some(src);
     }
 
     let end = matches!(
@@ -1573,6 +1589,12 @@ mod tests {
         );
         assert_eq!(shared.last_heard_id.load(Ordering::Relaxed), 4242);
         assert!(shared.receiving.load(Ordering::Relaxed));
+        let heard = shared.heard.snapshot();
+        assert_eq!(
+            (heard[0].network, heard[0].callsign.as_str()),
+            ("dmr", "4242"),
+            "the same id also lands in the history, tagged with its network"
+        );
     }
 
     #[test]

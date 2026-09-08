@@ -954,6 +954,31 @@ fn link_roster_json_is_empty_list_before_any_link() {
 }
 
 #[test]
+fn heard_json_is_an_empty_array_before_any_link() {
+    let scfg = null_config();
+    let st = unsafe { iax_station_new(std::ptr::from_ref(&scfg)) };
+    let mut buf = [0i8; 256];
+    let n = unsafe { iax_station_heard_json(st, buf.as_mut_ptr(), buf.len()) };
+    assert!(n >= 0, "heard json fills, got {n}");
+    let json = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().unwrap();
+    assert_eq!(json, "[]", "nothing has keyed up on a station with no link");
+    let sizing = unsafe { iax_station_heard_json(st, std::ptr::null_mut(), 0) };
+    assert_eq!(
+        sizing, 2,
+        "a sizing query answers the byte length of \"[]\""
+    );
+    unsafe { iax_station_free(st) };
+}
+
+#[test]
+fn heard_json_null_station_is_err_null() {
+    assert_eq!(
+        unsafe { iax_station_heard_json(std::ptr::null_mut(), std::ptr::null_mut(), 0) },
+        IAX_ERR_NULL
+    );
+}
+
+#[test]
 fn link_next_event_with_none_pending_returns_zero_and_kind_none() {
     let scfg = null_config();
     let st = unsafe { iax_station_new(std::ptr::from_ref(&scfg)) };

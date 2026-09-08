@@ -1121,29 +1121,64 @@
         /// as a fault when the truth is that the reflector has simply been
         /// quiet.
         ///
-        /// **Attacker-controlled text.** Both lines are typed or keyed by
-        /// whoever is on the reflector. `Text` renders them verbatim and
-        /// interprets nothing, which is the whole requirement.
+        /// **Why a history and not just one name.** One line is a lie on a
+        /// busy reflector: a station that keys a short tail after every over
+        /// — observed on M17-KCW — overwrites the name of whoever was
+        /// actually talking, so the operator reads the courtesy tone as the
+        /// conversation. The two rows under the first put the real talker
+        /// back on screen. They are the tail of `session.heardHistory`, which
+        /// `CallSession` already caps at three rows from the active network.
+        ///
+        /// The first history row is *usually* the station the `Last heard`
+        /// line already names, so it is dropped — but only when the callsigns
+        /// actually match. They do not always: a blank or whitespace callsign
+        /// is dropped from the history and not from `lastHeard`, the history
+        /// is empty for one poll after a network switch, and it is empty when
+        /// the engine read fails. Comparing rather than blindly dropping the
+        /// first row is what keeps a real station from vanishing in those
+        /// cases.
+        ///
+        /// **Attacker-controlled text.** Every line here — the talker, the
+        /// slow data, each history callsign — is typed or keyed by whoever is
+        /// on the reflector. `Text` renders them verbatim and interprets
+        /// nothing, which is the whole requirement; the rows are keyed by
+        /// offset because a callsign is neither unique nor trustworthy as
+        /// identity.
         @ViewBuilder
         private var talkerLine: some View {
             if let talker = session.lastHeard {
+                let rows = session.heardHistory
+                // The history's newest row is the station `lastHeard` already
+                // names — usually. When it is, it is dropped from the rows
+                // below and its age dates the header instead, so the caption
+                // says how stale the name is rather than implying it is live.
+                let current = rows.first?.callsign == talker ? rows.first : nil
+                let rest = current == nil ? rows : Array(rows.dropFirst())
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Last heard \(talker)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .accessibilityLabel("Last heard")
-                        .accessibilityValue(talker)
+                    let headerAge = current.map { HeardAge.label(ms: $0.ageMs) }
+                    Text(
+                        headerAge.map { "Last heard \(talker) · \($0)" }
+                            ?? "Last heard \(talker)"
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .accessibilityLabel("Last heard")
+                    .accessibilityValue(
+                        headerAge.map { HeardAge.spoken(callsign: talker, age: $0) } ?? talker)
                     // Slow data is typed by whoever is transmitting on the
                     // reflector — attacker-controlled text from astar's point
                     // of view. `Text` renders it verbatim and interprets
                     // nothing, which is the whole requirement; the line limit
-                    // stops a long one reflowing the status card.
+                    // stops a long one reflowing the status card. The bubble
+                    // symbol is what keeps it from reading as another
+                    // callsign row: it is a message, and it is the only line
+                    // here that is not a station.
                     if session.activeCallNetwork == .dstar,
                         let message = session.dstarSlowText, !message.isEmpty
                     {
-                        Text(message)
+                        Label(message, systemImage: "text.bubble")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
@@ -1151,6 +1186,21 @@
                             .help(message)
                             .accessibilityLabel("Message")
                             .accessibilityValue(message)
+                    }
+                    // The history is its own group: a couple of points of air
+                    // above the first row separate the stations heard earlier
+                    // from the talker (and the message) above them.
+                    ForEach(Array(rest.enumerated()), id: \.offset) { index, row in
+                        let age = HeardAge.label(ms: row.ageMs)
+                        Text("\(row.callsign) · \(age)")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .padding(.top, index == 0 ? 2 : 0)
+                            .help("\(row.callsign) · \(age)")
+                            .accessibilityLabel("Heard earlier, \(index + 1) of \(rest.count)")
+                            .accessibilityValue(HeardAge.spoken(callsign: row.callsign, age: age))
                     }
                 }
             }
