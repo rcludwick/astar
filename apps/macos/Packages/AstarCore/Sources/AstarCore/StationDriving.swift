@@ -245,6 +245,8 @@ public protocol StationDriving {
     /// poll-only (~20 Hz). Vendored Station exposes these; NullStation returns [].
     func txSpectrum() throws -> [Float]
     func rxSpectrum() throws -> [Float]
-    func characterize(harmonicComb: Bool) throws -> String
+    /// `peakMarginDb` is how far above the measured noise floor a bin must
+    /// stand to be notched; `nil` leaves the engine's own default in charge.
+    func characterize(harmonicComb: Bool, peakMarginDb: Float?) throws -> String
     func setMicProfile(_ json: String?) throws
 }

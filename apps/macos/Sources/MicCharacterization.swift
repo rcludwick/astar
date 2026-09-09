@@ -138,7 +138,10 @@
             // floor above the -120 dBFS empty value); retry until it's delivering or
             // we hit the attempt cap.
             let delivering = spectrum.contains { $0 > -119 }
-            let json = (try? session?.characterize(harmonicComb: harmonicComb) ?? "") ?? ""
+            // peakMarginDb: nil keeps the engine's default margin.
+            let json =
+                (try? session?.characterize(harmonicComb: harmonicComb, peakMarginDb: nil) ?? "")
+                ?? ""
             if !delivering || json.isEmpty, analyzeAttempt < Self.maxAnalyzeAttempts {
                 analyzeAttempt += 1
                 // Re-attempt the monitor each retry — recovers a cold/failed initial

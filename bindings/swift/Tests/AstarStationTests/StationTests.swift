@@ -648,4 +648,17 @@ final class StationTests: XCTestCase {
         let station = try Station()
         XCTAssertEqual(try station.heard(), [], "a never-connected station has heard nobody")
     }
+
+    /// `characterize` routes through the options ABI whether or not a peak margin
+    /// is supplied, and both spellings honour the empty-string contract: a station
+    /// that was never put into monitor mode has no silence to characterize, so it
+    /// returns "" rather than throwing or inventing a profile.
+    func testCharacterizeWithAPeakMarginIsEmptyWhileNotMonitoring() throws {
+        let station = try Station()
+        XCTAssertEqual(try station.characterize(harmonicComb: false, peakMarginDb: nil), "")
+        XCTAssertEqual(try station.characterize(harmonicComb: false, peakMarginDb: 18), "")
+        XCTAssertEqual(try station.characterize(harmonicComb: true, peakMarginDb: 18), "")
+        // The one-argument spelling still compiles and still means "engine default".
+        XCTAssertEqual(try station.characterize(harmonicComb: false), "")
+    }
 }

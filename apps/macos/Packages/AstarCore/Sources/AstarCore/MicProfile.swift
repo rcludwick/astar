@@ -50,6 +50,24 @@ extension MicProfile {
         else { return [] }
         return notches.compactMap { ($0["freq_hz"] as? NSNumber)?.doubleValue }
     }
+
+    /// True when the profile filters nothing: the characterizer found no bin
+    /// standing far enough above the noise floor, so the comb is empty and the
+    /// mic passes through untouched. A legitimate outcome for a clean mic — not
+    /// a failure — and worth saying so in the UI rather than showing an empty
+    /// notch list. Also true for an uncharacterized or unparseable profile,
+    /// which likewise filters nothing.
+    public var isPassThrough: Bool { notchFrequencies.isEmpty }
+
+    /// The peak margin (dB above the noise floor) the characterizer was run
+    /// with, parsed from the opaque engine JSON for display. `nil` when the
+    /// profile predates the field or is unparseable.
+    public var peakMarginDb: Double? {
+        guard let data = characterizationJSON.data(using: .utf8),
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return (obj["peak_margin_db"] as? NSNumber)?.doubleValue
+    }
 }
 
 /// Persistence for the mic-profile library, keyed by profile id.

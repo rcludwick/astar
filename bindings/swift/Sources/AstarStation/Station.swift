@@ -1395,24 +1395,48 @@ public final class Station {
         return Array(buf.prefix(Int(n)))
     }
 
+    /// The options `characterize(harmonicComb:peakMarginDb:)` sends across the
+    /// ABI. Both keys are optional on the wire: a `nil` `peakMarginDb` is left
+    /// out entirely so the engine's own default stays authoritative.
+    private struct CharacterizeOptions: Encodable {
+        var harmonicComb: Bool
+        var peakMarginDb: Float?
+
+        enum CodingKeys: String, CodingKey {
+            case harmonicComb = "harmonic_comb"
+            case peakMarginDb = "peak_margin_db"
+        }
+    }
+
     /// Characterize the monitored mic (iax-5fb6): run `characterize()` over the
     /// buffered monitor-mode silence and return the resulting `MicProfile` as a
     /// JSON string (secret-free — plain DSP numbers). Empty while not monitoring;
     /// call after a few seconds of monitored silence. `harmonicComb` enables
     /// harmonic-aware notch detection (**default off**: a learned-fundamental
-    /// comb that catches rolled-off upper harmonics). Persist the JSON opaquely
-    /// per device and feed it back via `setMicProfile(_:)`.
-    public func characterize(harmonicComb: Bool = false) throws -> String {
-        let needed = iax_station_characterize(handle, harmonicComb, nil, 0)
-        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
-        if needed == 0 { return "" }
-        // +1 for the NUL the C-ABI writes.
-        var buf = [CChar](repeating: 0, count: Int(needed) + 1)
-        let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
-            iax_station_characterize(handle, harmonicComb, ptr.baseAddress, UInt(ptr.count))
+    /// comb that catches rolled-off upper harmonics). `peakMarginDb` is how far
+    /// above the noise floor a bin must stand to be notched — bigger is fussier,
+    /// and a mic clean enough that nothing clears the bar characterizes as a
+    /// pass-through profile (an empty notch list). `nil` keeps the engine
+    /// default. Persist the JSON opaquely per device and feed it back via
+    /// `setMicProfile(_:)`.
+    public func characterize(harmonicComb: Bool = false, peakMarginDb: Float? = nil) throws
+        -> String
+    {
+        let options = CharacterizeOptions(harmonicComb: harmonicComb, peakMarginDb: peakMarginDb)
+        let optionsJSON = String(
+            decoding: try JSONEncoder().encode(options), as: UTF8.self)
+        return try optionsJSON.withCString { optsPtr -> String in
+            let needed = iax_station_characterize_opts(handle, optsPtr, nil, 0)
+            if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
+            if needed == 0 { return "" }
+            // +1 for the NUL the C-ABI writes.
+            var buf = [CChar](repeating: 0, count: Int(needed) + 1)
+            let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+                iax_station_characterize_opts(handle, optsPtr, ptr.baseAddress, UInt(ptr.count))
+            }
+            if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
+            return String(cString: buf)
         }
-        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
-        return String(cString: buf)
     }
 
     /// Apply (or clear) a calibrated per-mic profile (iax-2095). `json` is a

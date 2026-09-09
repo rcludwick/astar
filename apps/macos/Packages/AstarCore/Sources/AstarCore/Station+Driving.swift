@@ -128,7 +128,7 @@ public struct NullStation: StationDriving {
     public func micSpectrum() throws -> [Float] { [] }
     public func txSpectrum() throws -> [Float] { [] }
     public func rxSpectrum() throws -> [Float] { [] }
-    public func characterize(harmonicComb: Bool) throws -> String { "" }
+    public func characterize(harmonicComb: Bool, peakMarginDb: Float?) throws -> String { "" }
     public func setMicProfile(_ json: String?) throws {}
 }
 

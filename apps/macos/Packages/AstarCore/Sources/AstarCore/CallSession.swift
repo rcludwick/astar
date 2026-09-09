@@ -2605,8 +2605,11 @@ public final class CallSession: ObservableObject {
 
     /// Characterize the monitored mic from buffered silence; returns opaque
     /// `MicProfile` JSON (`""` when not enough silence has been captured).
-    public func characterize(harmonicComb: Bool) throws -> String {
-        try station.characterize(harmonicComb: harmonicComb)
+    /// `peakMarginDb` sets how far above the noise floor a bin must stand to be
+    /// notched — `nil` keeps the engine default, and a fussy enough margin can
+    /// yield a pass-through profile (no notches at all).
+    public func characterize(harmonicComb: Bool, peakMarginDb: Float?) throws -> String {
+        try station.characterize(harmonicComb: harmonicComb, peakMarginDb: peakMarginDb)
     }
 
     /// Apply (or clear) a raw profile JSON on the live/next call.
