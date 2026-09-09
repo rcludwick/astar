@@ -12,7 +12,7 @@ inline. All 129 issues (107 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (37)
+## Open items (38)
 
 ### astar-guidv — the Iced client has no digital voice at all
 *P2 medium · feature · labels: gui, cross-platform, dstar, ysf, cx:8*
@@ -517,3 +517,15 @@ The 'Save changes to <config>' button in Quick settings always shows even when n
 *P3 low · feature · labels: cx:3, gui-rs, phase2*
 
 **Design:** Phase 2 analysis tool, deliberately undesigned for now. Port of the Mac call spectrum; FFT axis math and trace state belong in shared Rust per the fat-core principle. Design when phase 1 operating set ships: docs/superpowers/specs/2026-07-01-gui-rs-parity-roadmap-design.md
+
+### astar-kcprompt — AstarCore tests read the real Keychain and hang on a locked screen
+*P2 · test hygiene · labels: app, tests*
+
+`CallSessionTests.testLiveSessionReflectsRealStationIdle` constructs a real
+`CallSession`, whose init calls `KeychainCredentialStore.load()` →
+`SecItemCopyMatching`. On a Mac whose screen is locked the Keychain prompt
+cannot be drawn and the whole `swift test` run parks there forever (seen
+twice on 2026-09-08 — the suite otherwise takes ~15 s). A unit-test target
+should never touch the login Keychain: inject a `MemoryCredentialStore` (the
+audio store already has `MemoryAudioStore`) and reserve the real store for the
+app target. Until then a locked screen means "kill xctest and rerun later".

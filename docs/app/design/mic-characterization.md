@@ -53,6 +53,13 @@ magnitudes; astar renders them.
 - **Characterize**: an "Analyze (stay silent)" button → `characterize()` → show
   the detected noise floor + notch frequencies; **"Save mic profile"** persists
   the JSON for this input device.
+- **Noise floor** (2026-09-08): a peak is a bin that clears the spectral-median
+  floor of the 100–3800 Hz scan band by a margin. The margin is an option
+  (`CharacterizeOpts.peak_margin_db`, default 12 dB — the old fixed value) and is
+  recorded in the profile JSON as `peak_margin_db`. A profile with no notches is
+  **pass-through**: `NoiseReducer::from_profile` builds the generic reducer for
+  it, so the mic lane behaves exactly as with no profile (generic gate, generic
+  60 Hz comb). "Profiled" therefore no longer implies "filtered".
 - **Recall**: a saved profile is applied (`setMicProfile`) when its device is
   selected or a call starts — rebuilding the live NoiseReducer comb in the engine.
 
