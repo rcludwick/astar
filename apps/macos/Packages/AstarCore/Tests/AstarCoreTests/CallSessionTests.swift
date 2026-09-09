@@ -447,13 +447,13 @@ final class CallSessionTests: XCTestCase {
         // The construction-time seam (astar-eb6c): makeStation builds its
         // StationConfig here. Wideband is always on (astar-e542), so the codec
         // policy is unconditionally prefer_slin16 alongside the credentials.
-        let creds = Credentials(portalUser: "AJ7HR", portalPass: "pw", portalNode: "77777")
+        let creds = Credentials(portalUser: "AJ7HR", portalPass: "pw")
         let audio = AudioSettings()
 
         let config = CallSession.stationConfig(credentials: creds, audio: audio)
         XCTAssertEqual(config.portalUser, "AJ7HR")
         XCTAssertEqual(config.portalPass, "pw")
-        XCTAssertEqual(config.portalNode, "77777")
+        XCTAssertNil(config.portalNode, "the app never sets a node; the API mint needs none")
         XCTAssertEqual(config.codecPolicy, "prefer_slin16")
 
         let noCreds = CallSession.stationConfig(credentials: nil, audio: audio)
@@ -2735,7 +2735,7 @@ final class CallSessionTests: XCTestCase {
 
     func testM17CallsignPrefillsFromPortalUserWhenNothingSaved() {
         let defaults = scratchM17Defaults()
-        let creds = Credentials(portalUser: "AJ7HR", portalPass: "pw", portalNode: "77777")
+        let creds = Credentials(portalUser: "AJ7HR", portalPass: "pw")
 
         let session = CallSession(
             station: FakeStation(), credentials: creds, userDefaults: defaults)
@@ -2748,7 +2748,7 @@ final class CallSessionTests: XCTestCase {
         // wins over the prefill.
         let defaults = scratchM17Defaults()
         defaults.set("N7XYZ", forKey: "m17.callsign")
-        let creds = Credentials(portalUser: "AJ7HR", portalPass: "pw", portalNode: "77777")
+        let creds = Credentials(portalUser: "AJ7HR", portalPass: "pw")
 
         let session = CallSession(
             station: FakeStation(), credentials: creds, userDefaults: defaults)
@@ -2758,7 +2758,7 @@ final class CallSessionTests: XCTestCase {
 
     func testM17CallsignPrefillSkipsWhenPortalUserDoesntLookLikeACallsign() {
         let defaults = scratchM17Defaults()
-        let creds = Credentials(portalUser: "myallstarlogin", portalPass: "pw", portalNode: "1")
+        let creds = Credentials(portalUser: "myallstarlogin", portalPass: "pw")
 
         let session = CallSession(
             station: FakeStation(), credentials: creds, userDefaults: defaults)

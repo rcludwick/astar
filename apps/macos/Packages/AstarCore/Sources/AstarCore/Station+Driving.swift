@@ -147,7 +147,8 @@ extension CallSession {
         if let c = credentials {
             config.portalUser = c.portalUser
             config.portalPass = c.portalPass
-            config.portalNode = c.portalNode
+            // No node: the API mint needs none, and the engine's legacy scrape
+            // (which does) is therefore unreachable from the app.
         }
         config.codecPolicy = audio.codecPolicyString
         return config

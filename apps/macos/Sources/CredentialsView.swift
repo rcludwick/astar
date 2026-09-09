@@ -8,34 +8,36 @@ import SwiftUI
 /// AllStar account credentials for the WebTransceiver (WT) path (au-dee9).
 ///
 /// The WT token mint logs into the **AllStarLink web portal** (`login.php`) with
-/// your callsign + **account password**, then fetches a transceiver token for a
-/// node your account owns. Per astar `PortalCredentials`, the password is
-/// the *portal ACCOUNT password — NOT the node's IAX secret*.
+/// your callsign + **account password**, then fetches a transceiver token. Per
+/// astar `PortalCredentials`, the password is the *portal ACCOUNT password —
+/// NOT the node's IAX secret*.
 ///
 /// **There is no callsign field here (astar-d3e6).** Your allstarlink.org login
 /// *is* your callsign, and astar already has one — the Operator section at the
 /// top of Settings. A second box for the same fact is a way to get them out of
-/// step, not a feature. So this panel owns two fields: Node number → portalNode
-/// and Account password → portalPass. `portalUser` is written from
-/// `session.operatorCallsign`, and kept in step when that changes.
+/// step, not a feature.
 ///
-/// The node number was removed on 2026-09-07 on the belief that the portal
-/// mints a token without one, and put back the next morning: with no node the
-/// live portal answers with no token and the Test button reads "rejected".
-/// Any node the account owns will do; the engine still tolerates an empty
-/// node for configs that carry none, which is why the field is back here
-/// rather than the engine refusing.
+/// **There is no node number field either.** The token comes from AllStarLink's
+/// documented API (`POST /api/v2/auth-wt-legacy`, username + password), which
+/// needs no node. The field went, came back for a day while the engine still
+/// scraped the portal's transceiver page (which does need an owned node), and
+/// went again on 2026-09-09 once the API path shipped, and this time the app
+/// stores no node at all (`Credentials` lost the property; an older Keychain
+/// blob's `portalNode` key is simply ignored on read). The engine keeps its
+/// legacy scrape as a fallback for configs that carry a node — none written
+/// by this app do, so from here the API is the only path. So this panel owns
+/// one field: Account password → portalPass. `portalUser` is written from
+/// `session.operatorCallsign`, and kept in step when that changes.
 ///
 /// The password lives only in the Keychain, is consumed into `StationConfig` at
 /// station build, and is never pre-filled or logged. It is read back out only to
-/// write it straight in again when the callsign or node changes — asking someone
-/// to retype a password because they fixed a typo in their callsign would be
+/// write it straight in again when the callsign changes — asking someone to
+/// retype a password because they fixed a typo in their callsign would be
 /// theatre, not security.
 struct CredentialsView: View {
     @EnvironmentObject private var session: CallSession
     private let store = KeychainCredentialStore()
 
-    @State private var node = ""
     @State private var accountPassword = ""
     @State private var saved = false
     @State private var message: String?
@@ -111,15 +113,6 @@ struct CredentialsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            SettingsField("Node number") {
-                TextField("", text: $node)
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityLabel("A node number your AllStarLink account owns")
-            }
-            Text("Any node your account owns — the portal needs one to issue a token.")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .settingsCaptionIndent()
             SettingsField("Password") {
                 // The placeholder is the one hint a label cannot carry: an
                 // empty box here means "unchanged", not "blank", because astar
@@ -187,7 +180,6 @@ struct CredentialsView: View {
         // keeps signing in under the old one for as long as nobody retypes a
         // password. `scheduleSave` debounces, so this is not per-keystroke.
         .onChange(of: session.operatorCallsign) { _ in scheduleSave() }
-        .onChange(of: node) { _ in scheduleSave() }
         .onChange(of: accountPassword) { _ in scheduleSave() }
         // Don't keep the secret in memory once you leave the panel; it's already
         // in the Keychain. Re-entry is required to change it again (we never
@@ -204,7 +196,7 @@ struct CredentialsView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(
-                "This deletes your saved node and password from the Keychain. Your callsign stays — it is not part of this account."
+                "This deletes your saved password from the Keychain. Your callsign stays — it is not part of this account."
             )
         }
     }
@@ -225,20 +217,15 @@ struct CredentialsView: View {
         session.operatorCallsign.trimmingCharacters(in: .whitespaces)
     }
 
-    /// A new account needs all three. An existing one needs only what changed:
-    /// the stored password stands in for itself, so correcting a callsign or a
-    /// node number does not send anyone hunting for their password.
+    /// A new account needs both. An existing one needs only what changed:
+    /// the stored password stands in for itself, so correcting a callsign does
+    /// not send anyone hunting for their password.
     private var canSave: Bool {
-        !loginCallsign.isEmpty
-            && !node.trimmingCharacters(in: .whitespaces).isEmpty
-            && (!accountPassword.isEmpty || saved)
+        !loginCallsign.isEmpty && (!accountPassword.isEmpty || saved)
     }
 
     private func loadExisting() {
-        if let c = store.load() {
-            node = c.portalNode
-            saved = true
-        }
+        saved = store.load() != nil
     }
 
     /// Autosave: persist ~0.7 s after the last edit, once all fields are present.
@@ -260,11 +247,7 @@ struct CredentialsView: View {
         // straight in again. It reaches no view state on the way through.
         let password = accountPassword.isEmpty ? (store.load()?.portalPass ?? "") : accountPassword
         guard !password.isEmpty else { return }
-        let creds = Credentials(
-            portalUser: loginCallsign,
-            portalPass: password,
-            portalNode: node.trimmingCharacters(in: .whitespaces)
-        )
+        let creds = Credentials(portalUser: loginCallsign, portalPass: password)
         do {
             try store.save(creds)
             // Rebuilding the station re-applies construction-time knobs — read
@@ -303,8 +286,8 @@ struct CredentialsView: View {
                 DispatchQueue.main.async {
                     testing = false
                     testResult = .failure
-                    message = "Token test failed — check callsign, password, and node."
-                    announce("Token test failed — check callsign, password, and node.")
+                    message = "Token test failed — check your callsign and password."
+                    announce("Token test failed — check your callsign and password.")
                 }
             }
         }
@@ -327,7 +310,6 @@ struct CredentialsView: View {
         // Not `operatorCallsign`: that is who you are, not an account detail,
         // and clearing an AllStarLink account must not take your M17 and
         // D-Star identity with it.
-        node = ""
         accountPassword = ""
         saved = false
         message = "Cleared."
