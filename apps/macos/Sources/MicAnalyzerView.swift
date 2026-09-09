@@ -20,6 +20,10 @@
         @EnvironmentObject private var deviceMonitor: AudioDeviceMonitor
         @ObservedObject var vm: MicCharacterization
         @State private var inputs: [String] = []
+        /// The noise-floor margin persists across visits to the pane — an operator
+        /// who found the right number for their shack shouldn't re-find it. The
+        /// view model holds the live value; this is only its durable seed.
+        @AppStorage("micAnalyzer.peakMarginDb") private var storedMargin: Double = 12
 
         var body: some View {
             VStack(alignment: .leading, spacing: 12) {
@@ -49,9 +53,13 @@
                     Spacer(minLength: 0)
                 }
 
-                SpectrumCanvas(bins: vm.spectrum, peaks: vm.detectedPeaks)
-                    .frame(minHeight: 220)
-                    .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+                SpectrumCanvas(
+                    bins: vm.spectrum, peaks: vm.detectedPeaks, floorMarginDb: vm.peakMarginDb
+                )
+                .frame(minHeight: 220)
+                .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
+
+                floorSlider
 
                 controls
 
@@ -63,6 +71,7 @@
             .padding(16)
             .onAppear {
                 inputs = deviceMonitor.inputs
+                vm.peakMarginDb = storedMargin
                 // A seeded device that is no longer plugged in has no row in the
                 // picker, which would render blank over a pane monitoring the
                 // system default anyway. Fall back to it explicitly instead.
@@ -72,6 +81,37 @@
                 vm.start(input: vm.selectedInput)
             }
             .onDisappear { vm.stop() }
+        }
+
+        /// How far above the measured noise floor a bin has to stand to be notched.
+        /// Sits directly under the canvas because it *is* the orange line drawn on
+        /// it: drag the slider, watch the line move over the peaks it would catch.
+        private var floorSlider: some View {
+            HStack(spacing: 10) {
+                // The two Texts are the slider's visible label and value, so they
+                // are hidden from VoiceOver: the Slider itself carries both, and
+                // stays the adjustable element rather than being merged into a
+                // static group.
+                Text("Noise floor")
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                Slider(value: $vm.peakMarginDb, in: 6...30, step: 1)
+                    .accessibilityLabel("Noise floor margin")
+                    .accessibilityValue(
+                        "\(Int(vm.peakMarginDb)) decibels above the measured floor"
+                    )
+                    .onChange(of: vm.peakMarginDb) { newValue in
+                        storedMargin = newValue
+                        // A result captured at the old margin no longer matches the
+                        // line now drawn (or the notches Save would write), so drop
+                        // it rather than let the two silently disagree.
+                        if vm.hasResult { vm.cancel() }
+                    }
+                Text("+\(Int(vm.peakMarginDb)) dB")
+                    .font(.body.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+            }
         }
 
         /// Analyze / Save / Clear and the harmonic-comb switch.
@@ -110,8 +150,14 @@
                         }
                     }
                     if vm.saved {
-                        Label("Saved", systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
+                        Label(
+                            vm.savedPassThrough
+                                ? "Saved as pass-through — no extra correction for this mic."
+                                : "Saved",
+                            systemImage: "checkmark.circle.fill"
+                        )
+                        .foregroundStyle(.green)
+                        .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
@@ -193,10 +239,18 @@
 
     /// Draws peak-held dBFS bins (-120…0) as a filled area on a log frequency axis
     /// (~100 Hz–3.9 kHz), with red markers at the notch frequencies a profile would
-    /// filter.
+    /// filter and a dashed orange line at the noise floor + margin the detector
+    /// uses to pick them.
     private struct SpectrumCanvas: View {
         let bins: [Float]
         var peaks: [Double] = []
+        /// dB above the measured floor at which the line is drawn — the same margin
+        /// Analyze hands the characterizer. `nil` draws no line.
+        var floorMarginDb: Double?
+
+        /// The characterizer scans 100–3800 Hz; the axis runs to 3900. The line uses
+        /// the detector's band, not the axis's, so the line and the notches agree.
+        private static let scanLoHz = 100.0, scanHiHz = 3800.0
 
         private static func binFraction(_ f: Double, binCount: Int) -> Double? {
             SpectrumAxis.binFraction(f, binCount: binCount)
@@ -220,6 +274,9 @@
                         Gradient(colors: [.green.opacity(0.7), .green.opacity(0.15)]),
                         startPoint: CGPoint(x: 0, y: 0), endPoint: CGPoint(x: 0, y: size.height)))
                 SpectrumAxis.drawGridlines(in: ctx, size: size)
+                // The noise floor + margin, under the notch markers so a caught peak
+                // is drawn over the line that caught it.
+                drawFloorLine(in: ctx, size: size)
                 // Notch markers the profile would filter, labelled with their
                 // frequency (Hz) in red at the top.
                 for f in peaks {
@@ -241,6 +298,34 @@
                 }
                 SpectrumAxis.drawFrequencyTicks(in: ctx, size: size, binCount: bins.count)
             }
+        }
+
+        /// The dashed floor line plus its "floor +N dB" tag at the right edge.
+        /// Orange reads over the green fill and in both appearances; nothing is
+        /// drawn before the mic delivers bins.
+        private func drawFloorLine(in ctx: GraphicsContext, size: CGSize) {
+            guard let margin = floorMarginDb,
+                let lo = Self.binFraction(Self.scanLoHz, binCount: bins.count),
+                let hi = Self.binFraction(Self.scanHiHz, binCount: bins.count),
+                let db = SpectrumFloor.line(
+                    bins: bins, lowFraction: lo, highFraction: hi, marginDb: margin)
+            else { return }
+            let yFloor = SpectrumAxis.y(db, height: size.height)
+            var line = Path()
+            line.move(to: CGPoint(x: 0, y: yFloor))
+            line.addLine(to: CGPoint(x: size.width, y: yFloor))
+            ctx.stroke(
+                line, with: .color(.orange.opacity(0.8)),
+                style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            // Above the line normally; below it when the floor rides so high there
+            // is no room, so the tag never clips off the top of the canvas.
+            let above = yFloor > 14
+            ctx.draw(
+                Text("floor +\(Int(margin)) dB")
+                    .font(.system(size: 9))
+                    .foregroundColor(.orange),
+                at: CGPoint(x: size.width - 2, y: yFloor + (above ? -2 : 2)),
+                anchor: above ? .bottomTrailing : .topTrailing)
         }
     }
 
