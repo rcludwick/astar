@@ -23,6 +23,14 @@
         /// linear-frequency FFT the detector medians, so a peak sitting just under
         /// the drawn line can still be notched. 12 dB is the engine's own default.
         @Published var peakMarginDb: Double = 12
+        /// The scan-band median of the live spectrum, averaged over the last
+        /// second of polls (20 at 50 ms), so the threshold line the canvas draws
+        /// from it holds still instead of jittering with the peak hold. `nil`
+        /// until the mic delivers bins; reset when the device changes.
+        @Published private(set) var floorMedianDb: Float?
+        private var floorMean = RollingMean(window: 20)
+        /// The characterizer scans 100–3800 Hz; the estimate looks at the same band.
+        private static let scanLoHz = 100.0, scanHiHz = 3800.0
         /// User-entered label for the profile being saved, e.g. "fake icom".
         @Published var profileName = ""
         /// True while a stay-silent capture is in progress (drives the spinner).
@@ -77,6 +85,12 @@
         /// Start monitoring `input` and polling the spectrum. Safe to call repeatedly;
         /// calling it with a different device switches the mic being monitored.
         func start(input: String?) {
+            // A different microphone has a different floor: start its average fresh
+            // rather than dragging the previous device's second along.
+            if input != selectedInput {
+                floorMean.reset()
+                floorMedianDb = nil
+            }
             selectedInput = input
             // Best-effort: a cold first open can fail/race the capture device here.
             // The poll timer runs regardless — so the spectrum reflects the mic the
@@ -113,11 +127,20 @@
                 holdsMonitor = false
             }
             spectrum = []
+            floorMean.reset()
+            floorMedianDb = nil
         }
 
         private func poll() {
             guard let s = try? session?.micSpectrum() else { return }
             spectrum = s
+            if let lo = SpectrumAxis.binFraction(Self.scanLoHz, binCount: s.count),
+                let hi = SpectrumAxis.binFraction(Self.scanHiHz, binCount: s.count),
+                let median = SpectrumFloor.scanBandMedian(s, lowFraction: lo, highFraction: hi)
+            {
+                floorMean.push(median)
+                if floorMedianDb != floorMean.value { floorMedianDb = floorMean.value }
+            }
         }
 
         // MARK: - Analyze / cancel
