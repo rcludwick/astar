@@ -149,6 +149,16 @@
                             harmonicCombToggle
                         }
                     }
+                    // What Analyze actually found, before the operator decides to
+                    // Save: the measured floor and either the notches or the
+                    // pass-through verdict.
+                    if vm.hasResult, let readout = vm.floorReadout {
+                        Text(readout)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if vm.saved {
                         Label(
                             vm.savedPassThrough
