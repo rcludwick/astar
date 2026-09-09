@@ -73,8 +73,9 @@ and there are **two** ways to do it:
   Transceiver page's HTML. This is what the portal's own page
   does in a browser, and what DroidStar's `obtain_asl_wt_creds()` and the old
   `scripts/asl-wt-token.py` did before the Rust port. The engine now uses it
-  **only as a fallback**, when the API is unreachable *and* a node is
-  configured — the scrape cannot mint without one.
+  **only as a fallback**, when the API gave nothing usable (unreachable, an
+  unexpected status, a body it could not read, or no token at all) *and* a node
+  is configured — the scrape cannot mint without one.
 
 A login the API *refuses* is never retried against the scrape: wrong
 credentials are wrong on both paths. The fallback exists for an endpoint that
@@ -89,10 +90,10 @@ moved or a portal that answered something the API grammar does not cover.
 | Body | JSON, exactly two keys: `username` = the allstarlink.org account callsign, `password` = its **account** password. Built with `serde_json`, never string formatting — a password is arbitrary text and must be escaped by something that knows the grammar. |
 | Node | **none.** The token is the account's, so nothing here needs a node the account owns. This is the whole reason the API path exists: an account saved without a node could not mint at all through the scrape. |
 | Success | JSON `{"status":"OK","auth":1,"token":"<TOKEN>","msg":…}`. astar accepts the response when **`token` is a non-empty string**; `status` and `auth` are read for the error message only, never required to hold particular values. |
-| Refused login | `HTTP 401` `{"status":"ERR","auth":0,"token":"","msg":"login failed"}` (probed live 2026-09-08) → `Asl3Error::Login`, and **no** fallback to the scrape |
-| Malformed request | `HTTP 400` with `"msg":"Invalid JSON payload"` for a body that is not JSON, `"msg":"Invalid JSON fields"` for other field names (both probed live 2026-09-08) |
-| Authenticated but empty | a 2xx whose `token` is missing or empty → `Asl3Error::TokenNotFound` |
-| Unreachable | transport failure, a non-JSON body, or another status (404 because the endpoint moved, a 5xx) → fall back to the scrape **if `creds.node` is non-empty**; otherwise `Asl3Error::Http("POST /api/v2/auth-wt-legacy: HTTP <status>")`, which names the path and status so the failure is not mistaken for a portal problem |
+| Refused login | `HTTP 401` `{"status":"ERR","auth":0,"token":"","msg":"login failed"}` (probed live 2026-09-08) → `Asl3Error::Login`, and **no** fallback to the scrape. The status decides this **before** the body is parsed, so a refusal wrapped in HTML (an nginx page, a WAF challenge) is still a refusal and the password is not sent a second time. A 200-shaped refusal — `auth: 0` with a `msg` naming the login — is read the same way. |
+| Malformed request | `HTTP 400` with `"msg":"Invalid JSON payload"` for a body that is not JSON, `"msg":"Invalid JSON fields"` for other field names (both probed live 2026-09-08). That is a bug in our own request, so the engine treats it like any other unusable answer: fall back to the scrape when a node is configured, `Asl3Error::Http` when there is none. |
+| Authenticated but empty | a 2xx whose `token` is missing or empty is treated as "the API issued nothing" — fall back / `Http`, **not** a final `TokenNotFound`. Deliberately soft: the live success shape has not been observed yet, so if the token turns out to live under another key an account with a node still mints through the scrape instead of failing outright. Tighten it to `TokenNotFound` once a real success response has been seen. |
+| Unreachable | transport failure, a non-JSON body, another status (404 because the endpoint moved, a 5xx), or a 2xx with no token → fall back to the scrape **if `creds.node` is non-empty**; otherwise `Asl3Error::Http`, whose message always names the path and the reason — `POST /api/v2/auth-wt-legacy: HTTP 404`, `…: HTTP 200, no token in the response`, or the transport error itself — so the failure is not mistaken for a portal problem |
 | Timeout | 15 s |
 
 #### Request 1 — log in *(fallback path)*
@@ -140,9 +141,10 @@ never leaves request 1.
 
 The app shows one line for all three today; the station text (since
 `71fa215`) carries the category, so a future build can say which. The API path
-raises the same three categories: a 401 is `Login`, a 2xx with no token is
-`TokenNotFound`, and an API that could not be reached with no node to fall back
-with is `Http` (its message names `/api/v2/auth-wt-legacy` and the status).
+raises `Login` for a refusal (final, never retried against the scrape) and
+`Http` for anything it could not use when there is no node to fall back with —
+that message names `/api/v2/auth-wt-legacy` and the reason. `TokenNotFound`
+comes only from the scrape today.
 
 #### Checking it by hand
 
@@ -155,10 +157,18 @@ call — the status and the JSON, token masked to its first four characters —
 and the script stops there, exit 0, when a token comes back. Steps 2 and 3
 are the fallback scrape, run for comparison when the API issued nothing:
 the login status, the cookies set and kept, whether a token came back.
+It mirrors the engine's own rules: a step-1 transport failure falls
+through to the scrape when a node is set and exits 4 when there is none,
+and after a 401 it says the engine stops there — the scrape steps still
+run, but only for comparison, and the exit stays 2 whatever they return.
 `--no-node` reproduces the unsaved-node case; `--show-token` prints whole
-tokens. Exit status 2 is a refused login, 3 a page with no token, 4
-transport. (`scripts/asl-wt-token.py` is the older Python original of the
-scrape half, run with `uv`.)
+tokens. Exit status 2 means the login was refused (by the API, or by the
+portal — after an API refusal the scrape's own result is informational),
+3 a page with no token, 4 a transport failure with no node to fall back
+with. Step 1 needs `python3` to build the JSON body; without it the
+script says so and runs the scrape.
+(`scripts/asl-wt-token.py` is the older Python original of the scrape
+half, run with `uv`.)
 
 ```text
 ASL_USER=<callsign> ASL_PASS='<portal password>' ASL_NODE=<owned node> scripts/asl-wt-check.sh

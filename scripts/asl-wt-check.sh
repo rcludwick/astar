@@ -15,14 +15,17 @@
 #
 #   --no-node      leave the node off the transceiver request (what the app
 #                  does for an account saved without one) — expect no token
-#                  from the fallback scrape; the API does not need one
+#                  from the fallback scrape; the API does not need one, and
+#                  without a node the engine has no fallback at all
 #   --show-token   print whole tokens instead of their first four characters
 #
 # The password comes from the environment and is handed to curl through 0600
 # temp files, so it appears on no command line and in no `ps` listing.
 # Nothing from the server is kept: the temp directory is removed on exit.
-# Exit status: 0 a token was minted · 2 login refused · 3 no token in the page
-# · 4 transport failure · 64 usage.
+# Exit status: 0 a token was minted · 2 the login was refused (by the API, or by
+# the portal — after an API refusal the scrape's own result is informational and
+# the exit stays 2) · 3 no token in the page · 4 transport failure with no node
+# to fall back with · 64 usage.
 
 set -eu
 
@@ -33,7 +36,7 @@ for arg in "$@"; do
   case "$arg" in
     --no-node) node="" ;;
     --show-token) show_token=yes ;;
-    -h|--help) sed -n '6,25p' "$0"; exit 0 ;;
+    -h|--help) sed -n '6,28p' "$0"; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 64 ;;
   esac
 done
@@ -63,29 +66,48 @@ mask() {
 origin=$(printf '%s' "$portal" | sed 's#^\(https*://[^/]*\).*#\1#')
 api="$origin/api/v2/auth-wt-legacy"
 say "1. POST $api  {\"username\":\"$ASL_USER\",\"password\":<from ASL_PASS>}  (no node needed)"
+# refused=yes means the API said "wrong credentials". The engine STOPS there —
+# it never retries a refusal against the portal — so the steps below become
+# comparison only and the script must not report success after one.
+refused=no
+if ! command -v python3 >/dev/null 2>&1; then
+  say "   SKIP: no python3 — cannot build the JSON body; the engine still tries this call"
+  say "   running the fallback path below for what it can tell you:"
 # Built by json.dumps so the password is escaped by something that knows the
 # grammar, and written to a 0600 file so it never reaches a command line.
-python3 -c 'import json,os,sys; print(json.dumps({"username":os.environ["ASL_USER"],"password":open(sys.argv[1]).read()}))' \
-  "$tmp/pass" > "$tmp/api.json"
-if ! code=$(curl -sS -m 15 -H 'Content-Type: application/json' --data @"$tmp/api.json" \
+elif ! python3 -c 'import json,os,sys; print(json.dumps({"username":os.environ["ASL_USER"],"password":open(sys.argv[1]).read()}))' \
+     "$tmp/pass" > "$tmp/api.json" 2>"$tmp/api.err"; then
+  say "   SKIP: could not build the JSON body ($(head -1 "$tmp/api.err" 2>/dev/null))"
+  say "   running the fallback path below for what it can tell you:"
+elif ! code=$(curl -sS -m 15 -H 'Content-Type: application/json' --data @"$tmp/api.json" \
      -o "$tmp/api.body" -w '%{http_code}' "$api"); then
-  say "   FAIL: transport error talking to the API"; exit 4
+  say "   FAIL: transport error talking to the API"
+  if [ -z "$node" ]; then
+    say "   with no node there is nothing to fall back to — this is the Http error astar reports"
+    exit 4
+  fi
+  say "   a node is configured, so the engine falls back to the scrape; doing the same:"
+else
+  say "   answered HTTP $code"
+  say "   $(mask < "$tmp/api.body" | head -c 400)"
+  token=$(grep -o '"token"[ ]*:[ ]*"[^"]*"' "$tmp/api.body" 2>/dev/null | sed 's/.*"\([^"]*\)"$/\1/' | head -1)
+  if [ -n "$token" ]; then
+    if [ "$show_token" = yes ]; then shown=$token; else shown="$(printf '%s' "$token" | cut -c1-4)… (${#token} chars)"; fi
+    say "   PASS: the API minted a token: $shown"
+    say "   This is what astar puts in the IAX2 CALLING_NAME. It is a session credential — do not paste it anywhere."
+    exit 0
+  fi
+  case "$code" in
+    401)
+      refused=yes
+      say "   the API refused the login (HTTP 401) — wrong account password?"
+      say "   the ENGINE STOPS HERE: a refusal is never retried against the portal scrape."
+      say "   the steps below run for comparison only — a token from them will not make astar work."
+      ;;
+    400) say "   the API rejected the request body (HTTP 400) — with a node the engine falls back, without one it reports Http" ;;
+    *) say "   the API issued no token (HTTP $code) — with a node the engine falls back, without one it reports Http" ;;
+  esac
 fi
-say "   answered HTTP $code"
-say "   $(mask < "$tmp/api.body" | head -c 400)"
-token=$(grep -o '"token"[ ]*:[ ]*"[^"]*"' "$tmp/api.body" 2>/dev/null | sed 's/.*"\([^"]*\)"$/\1/' | head -1)
-if [ -n "$token" ]; then
-  if [ "$show_token" = yes ]; then shown=$token; else shown="$(printf '%s' "$token" | cut -c1-4)… (${#token} chars)"; fi
-  say "   PASS: the API minted a token: $shown"
-  say "   This is what astar puts in the IAX2 CALLING_NAME. It is a session credential — do not paste it anywhere."
-  exit 0
-fi
-case "$code" in
-  401) say "   the API refused the login (HTTP 401) — wrong account password?" ;;
-  400) say "   the API rejected the request body (HTTP 400)" ;;
-  *) say "   the API issued no token (HTTP $code)" ;;
-esac
-say "   trying the fallback path the engine uses when the API is unreachable:"
 
 # ── Request 2: log in (the fallback path) ─────────────────────────────────────
 say "2. POST $portal/login.php  user=$ASL_USER pass=<from ASL_PASS>"
@@ -123,6 +145,11 @@ token=$(grep -o 'name="callingName"[^>]*value="[^"]*"' "$tmp/wt.html" | sed 's/.
 if [ -n "$token" ]; then
   if [ "$show_token" = yes ]; then shown=$token; else shown="$(printf '%s' "$token" | cut -c1-4)… (${#token} chars)"; fi
   say "   PASS: callingName token present: $shown"
+  if [ "$refused" = yes ]; then
+    say "   INFORMATIONAL ONLY: the API refused this login, and astar stops there — this token is not"
+    say "   one astar will ever mint. Fix the account password."
+    exit 2
+  fi
   say "   This is what astar puts in the IAX2 CALLING_NAME. It is a session credential — do not paste it anywhere."
   exit 0
 fi
@@ -132,4 +159,5 @@ if grep -qi 'node not found' "$tmp/wt.html"; then
 elif grep -qi 'login' "$tmp/wt.html" && grep -qi 'password' "$tmp/wt.html"; then
   say "   the page is the login form — the cookie jar did not authenticate the request"
 fi
+if [ "$refused" = yes ]; then exit 2; fi
 exit 3
