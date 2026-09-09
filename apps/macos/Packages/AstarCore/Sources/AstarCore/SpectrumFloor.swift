@@ -7,15 +7,22 @@ import Foundation
 /// The noise-floor estimate the mic-analyzer canvas draws, factored out of the
 /// view so it can be tested.
 ///
-/// The characterizer picks notches by taking the **median** of the bins inside
-/// its scan band and keeping every bin that stands `peakMarginDb` above it. The
-/// canvas draws that same rule as a line so the operator can see which peaks the
-/// current margin would catch — so this must be the median, over the same band,
-/// as the detector uses (100–3800 Hz), not the whole displayed axis (100–3900).
+/// The characterizer picks notches by taking the **median** of its scan band and
+/// keeping every bin that stands `peakMarginDb` above it. Applying that rule to
+/// the *display* bins gives the operator a line to aim the slider at — but it is
+/// an **estimate of the detector's threshold, not the threshold**. The display
+/// spectrum is a 2048-point FFT max-folded into log bins and peak-held; the
+/// detector runs a finer FFT and medians over linear frequency. Max-folding
+/// keeps the loudest linear bin in each log bin, so this median — and the line
+/// drawn from it — can sit several dB high, and a peak just under the line can
+/// still be notched. If a notch you expected to disappear stays, raise the
+/// margin further.
 ///
-/// The band is given as *bin index fractions* (0…1) rather than frequencies:
-/// the caller maps Hz to a fraction with the axis's own log mapping, which lives
-/// in the app target, and this stays pure arithmetic over the bins.
+/// The band matches the detector's scan band (100–3800 Hz), not the whole
+/// displayed axis (100–3900), so at least the two look at the same spectrum. It
+/// is given as *bin index fractions* (0…1) rather than frequencies: the caller
+/// maps Hz to a fraction with the axis's own log mapping, which lives in the app
+/// target, and this stays pure arithmetic over the bins.
 public enum SpectrumFloor {
     /// Median of the bins whose index fraction lies within `[lowFraction,
     /// highFraction]`. `nil` when fewer than three bins qualify (too few to call
@@ -40,8 +47,9 @@ public enum SpectrumFloor {
         return band.count % 2 == 1 ? band[mid] : (band[mid - 1] + band[mid]) / 2
     }
 
-    /// The dBFS value of the floor line: the scan-band median plus the operator's
-    /// margin. `nil` whenever the median is (no bins yet, or a bad band).
+    /// The dBFS value of the drawn line: the scan-band median plus the operator's
+    /// margin — an estimate of the detector's threshold, see the type doc. `nil`
+    /// whenever the median is (no bins yet, or a bad band).
     public static func line(
         bins: [Float], lowFraction: Double, highFraction: Double, marginDb: Double
     ) -> Float? {

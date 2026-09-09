@@ -71,7 +71,9 @@
             .padding(16)
             .onAppear {
                 inputs = deviceMonitor.inputs
-                vm.peakMarginDb = storedMargin
+                // Guarded: an unconditional assignment fires the slider's onChange,
+                // which would discard a result the pane already held.
+                if vm.peakMarginDb != storedMargin { vm.peakMarginDb = storedMargin }
                 // A seeded device that is no longer plugged in has no row in the
                 // picker, which would render blank over a pane monitoring the
                 // system default anyway. Fall back to it explicitly instead.
@@ -84,34 +86,66 @@
         }
 
         /// How far above the measured noise floor a bin has to stand to be notched.
-        /// Sits directly under the canvas because it *is* the orange line drawn on
-        /// it: drag the slider, watch the line move over the peaks it would catch.
+        /// Sits directly under the canvas because the canvas draws an *estimate* of
+        /// where this puts the detector's threshold: drag the slider, watch the
+        /// orange line move over the peaks it would roughly catch.
+        ///
+        /// Like `controls`, it folds rather than clips at the window's 310 pt
+        /// minimum: one line while the slider still has room, then label + value on
+        /// one line with the slider under them.
         private var floorSlider: some View {
-            HStack(spacing: 10) {
-                // The two Texts are the slider's visible label and value, so they
-                // are hidden from VoiceOver: the Slider itself carries both, and
-                // stays the adjustable element rather than being merged into a
-                // static group.
-                Text("Noise floor")
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-                Slider(value: $vm.peakMarginDb, in: 6...30, step: 1)
-                    .accessibilityLabel("Noise floor margin")
-                    .accessibilityValue(
-                        "\(Int(vm.peakMarginDb)) decibels above the measured floor"
-                    )
-                    .onChange(of: vm.peakMarginDb) { newValue in
-                        storedMargin = newValue
-                        // A result captured at the old margin no longer matches the
-                        // line now drawn (or the notches Save would write), so drop
-                        // it rather than let the two silently disagree.
-                        if vm.hasResult { vm.cancel() }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    floorSliderLabel
+                    // The minimum is what makes the fold real: a Slider is fully
+                    // flexible, so ViewThatFits would measure this row's ideal width
+                    // with the slider at nothing and always "fit" it.
+                    slider.frame(minWidth: 120)
+                    floorSliderValue
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 10) {
+                        floorSliderLabel
+                        Spacer(minLength: 0)
+                        floorSliderValue
                     }
-                Text("+\(Int(vm.peakMarginDb)) dB")
-                    .font(.body.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
+                    slider
+                }
             }
+        }
+
+        // The two Texts are the slider's visible label and value, so they are
+        // hidden from VoiceOver: the Slider itself carries both, and stays the
+        // adjustable element rather than being merged into a static group.
+        private var floorSliderLabel: some View {
+            Text("Noise floor")
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+        }
+
+        private var floorSliderValue: some View {
+            Text("+\(Int(vm.peakMarginDb)) dB")
+                .font(.body.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+        }
+
+        private var slider: some View {
+            Slider(value: $vm.peakMarginDb, in: 6...30, step: 1)
+                // Without this the label and value win the row's width and the
+                // slider collapses to nothing before the fold ever triggers.
+                .layoutPriority(1)
+                .accessibilityLabel("Noise floor margin")
+                .accessibilityValue(
+                    "\(Int(vm.peakMarginDb)) decibels above the estimated floor"
+                )
+                .onChange(of: vm.peakMarginDb) { newValue in
+                    storedMargin = newValue
+                    // A result captured at the old margin no longer matches the
+                    // line now drawn (or the notches Save would write), so drop
+                    // it rather than let the two silently disagree.
+                    if vm.hasResult { vm.cancel() }
+                }
         }
 
         /// Analyze / Save / Clear and the harmonic-comb switch.
@@ -249,17 +283,27 @@
 
     /// Draws peak-held dBFS bins (-120…0) as a filled area on a log frequency axis
     /// (~100 Hz–3.9 kHz), with red markers at the notch frequencies a profile would
-    /// filter and a dashed orange line at the noise floor + margin the detector
-    /// uses to pick them.
+    /// filter and a dashed orange line **estimating** where the current margin puts
+    /// the detector's threshold.
+    ///
+    /// It is an estimate, not the threshold itself. These bins are a 2048-point FFT
+    /// max-folded into log bins and peak-held for display; the detector runs a finer
+    /// FFT and takes its median over linear frequency. Folding many linear bins into
+    /// one log bin keeps the loudest of them, so the drawn line can sit several dB
+    /// above the detector's effective threshold — a peak just under the line can
+    /// still be notched. The line is for aiming the slider, not for predicting each
+    /// notch.
     private struct SpectrumCanvas: View {
         let bins: [Float]
         var peaks: [Double] = []
-        /// dB above the measured floor at which the line is drawn — the same margin
-        /// Analyze hands the characterizer. `nil` draws no line.
+        /// dB above the estimated floor at which the line is drawn — the same margin
+        /// Analyze hands the characterizer, applied to a coarser spectrum.
+        /// `nil` draws no line.
         var floorMarginDb: Double?
 
-        /// The characterizer scans 100–3800 Hz; the axis runs to 3900. The line uses
-        /// the detector's band, not the axis's, so the line and the notches agree.
+        /// The characterizer scans 100–3800 Hz; the axis runs to 3900. The estimate
+        /// uses the detector's band, not the axis's, so the two are at least looking
+        /// at the same part of the spectrum.
         private static let scanLoHz = 100.0, scanHiHz = 3800.0
 
         private static func binFraction(_ f: Double, binCount: Int) -> Double? {
@@ -284,8 +328,8 @@
                         Gradient(colors: [.green.opacity(0.7), .green.opacity(0.15)]),
                         startPoint: CGPoint(x: 0, y: 0), endPoint: CGPoint(x: 0, y: size.height)))
                 SpectrumAxis.drawGridlines(in: ctx, size: size)
-                // The noise floor + margin, under the notch markers so a caught peak
-                // is drawn over the line that caught it.
+                // The estimated detection threshold, under the notch markers so a
+                // caught peak is drawn over the line that approximates it.
                 drawFloorLine(in: ctx, size: size)
                 // Notch markers the profile would filter, labelled with their
                 // frequency (Hz) in red at the top.
@@ -310,9 +354,12 @@
             }
         }
 
-        /// The dashed floor line plus its "floor +N dB" tag at the right edge.
-        /// Orange reads over the green fill and in both appearances; nothing is
-        /// drawn before the mic delivers bins.
+        /// The dashed threshold line plus its "threshold +N dB (est.)" tag at the
+        /// right edge — "(est.)" because this is the display spectrum's estimate of
+        /// the detector's threshold, not the threshold itself, and because the
+        /// readout's "broadband floor" is a different measurement entirely. Orange
+        /// reads over the green fill and in both appearances; nothing is drawn
+        /// before the mic delivers bins.
         private func drawFloorLine(in ctx: GraphicsContext, size: CGSize) {
             guard let margin = floorMarginDb,
                 let lo = Self.binFraction(Self.scanLoHz, binCount: bins.count),
@@ -331,7 +378,7 @@
             // is no room, so the tag never clips off the top of the canvas.
             let above = yFloor > 14
             ctx.draw(
-                Text("floor +\(Int(margin)) dB")
+                Text("threshold +\(Int(margin)) dB (est.)")
                     .font(.system(size: 9))
                     .foregroundColor(.orange),
                 at: CGPoint(x: size.width - 2, y: yFloor + (above ? -2 : 2)),

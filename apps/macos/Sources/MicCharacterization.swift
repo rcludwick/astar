@@ -17,9 +17,11 @@
         @Published var selectedInput: String?
         @Published var harmonicComb = false
         /// How far (dB) above the measured noise floor a bin must stand to be
-        /// notched. The canvas draws this as the floor line, and Analyze passes it
-        /// to the characterizer, so what the operator sees is what gets detected.
-        /// 12 dB is the engine's own default.
+        /// notched. Analyze passes it to the characterizer, and the canvas draws an
+        /// estimate of where it puts the detector's threshold — an estimate only:
+        /// the display spectrum is coarser (log-folded, peak-held) than the finer,
+        /// linear-frequency FFT the detector medians, so a peak sitting just under
+        /// the drawn line can still be notched. 12 dB is the engine's own default.
         @Published var peakMarginDb: Double = 12
         /// User-entered label for the profile being saved, e.g. "fake icom".
         @Published var profileName = ""
@@ -235,13 +237,15 @@
                 let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { return nil }
             var parts: [String] = []
+            // "broadband" distinguishes this from the canvas's spectral threshold
+            // estimate: this is one wideband RMS number, that is a per-bin line.
             if let floor = (obj["noise_floor_dbfs"] as? NSNumber)?.doubleValue {
-                parts.append("floor \(Int(floor)) dBFS")
+                parts.append("broadband floor \(Int(floor)) dBFS")
             }
             let notches = peaks(from: json)
             parts.append(
                 notches.isEmpty
-                    ? "nothing clears the floor — pass-through"
+                    ? "nothing clears the threshold — pass-through"
                     : "notch " + notches.map { String(Int($0)) }.joined(separator: ", ") + " Hz")
             return parts.isEmpty ? nil : parts.joined(separator: " · ")
         }

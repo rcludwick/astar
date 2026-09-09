@@ -526,6 +526,8 @@ The 'Save changes to <config>' button in Quick settings always shows even when n
 `SecItemCopyMatching`. On a Mac whose screen is locked the Keychain prompt
 cannot be drawn and the whole `swift test` run parks there forever (seen
 twice on 2026-09-08 — the suite otherwise takes ~15 s). A unit-test target
-should never touch the login Keychain: inject a `MemoryCredentialStore` (the
-audio store already has `MemoryAudioStore`) and reserve the real store for the
-app target. Until then a locked screen means "kill xctest and rerun later".
+should never touch the login Keychain, and the type to avoid it already exists:
+`InMemoryCredentialStore` (`CredentialStore.swift` ~17). The fix is one argument
+at the `CallSession.live()` call in `CallSessionTests.swift` (~2497) —
+`CallSession.live(store: InMemoryCredentialStore())` — leaving the real store to
+the app target. Until then a locked screen means "kill xctest and rerun later".
