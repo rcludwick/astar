@@ -12,7 +12,7 @@ inline. All 129 issues (107 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (38)
+## Open items (39)
 
 ### astar-guidv — the Iced client has no digital voice at all
 *P2 medium · feature · labels: gui, cross-platform, dstar, ysf, cx:8*
@@ -531,3 +531,16 @@ should never touch the login Keychain, and the type to avoid it already exists:
 at the `CallSession.live()` call in `CallSessionTests.swift` (~2497) —
 `CallSession.live(store: InMemoryCredentialStore())` — leaving the real store to
 the app target. Until then a locked screen means "kill xctest and rerun later".
+
+### astar-thresh — The analyzer's threshold line is an estimate; let the engine report the real one
+*P3 · polish · labels: app, engine, audio*
+
+The dashed "threshold +N dB (est.)" line is drawn from the peak-held display
+spectrum (2048-point FFT, max-folded into log bins, median uniform in log
+frequency), while the detector medians a finer linear-frequency FFT — so the
+line sits several dB above the detector's effective threshold and notches
+land visibly below it (seen 2026-09-08: 228 Hz notched under an +18 dB line).
+Smoothing (a one-second rolling mean) fixed the jitter, not the bias. The
+honest fix: have `characterize`/a monitor call return the detector's own
+median floor and threshold, converted to the display's dBFS scale, and draw
+that; then the "(est.)" can go.
