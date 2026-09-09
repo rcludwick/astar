@@ -609,7 +609,14 @@ fn characterize_opts_rejects_bad_json() {
     let cfg = null_config();
     let st = unsafe { iax_station_new(std::ptr::from_ref(&cfg)) };
     let mut buf = [0_i8; 256];
-    for bad in ["not json", "[1,2]", r#"{"peak_margin_db":"loud"}"#] {
+    for bad in [
+        "not json",
+        "[1,2]",
+        r#"{"peak_margin_db":"loud"}"#,
+        // A dBFS level is a number or `null`; a string is not a level.
+        r#"{"threshold_dbfs":"x"}"#,
+        r#"{"threshold_dbfs":true}"#,
+    ] {
         let opts = CString::new(bad).unwrap();
         assert_eq!(
             unsafe {
@@ -647,6 +654,11 @@ fn characterize_opts_with_defaults_matches_the_bool_call_when_idle() {
         "",
         "{}",
         r#"{"harmonic_comb":true,"peak_margin_db":24.0}"#,
+        // An absolute detection threshold, as a number and as an explicit
+        // `null` (which means "no absolute threshold", like an absent key).
+        r#"{"threshold_dbfs":-60}"#,
+        r#"{"threshold_dbfs":-60.0,"harmonic_comb":true}"#,
+        r#"{"threshold_dbfs":null}"#,
         // Unknown keys are ignored, so a newer front-end can talk to an older
         // library.
         r#"{"future_key":1}"#,

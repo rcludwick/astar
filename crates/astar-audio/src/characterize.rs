@@ -46,6 +46,13 @@ pub struct MicProfile {
     /// [`CharacterizeOpts::DEFAULT_PEAK_MARGIN_DB`].
     #[cfg_attr(feature = "serde", serde(default = "MicProfile::default_peak_margin"))]
     pub peak_margin_db: f32,
+    /// The ABSOLUTE detection threshold (dBFS, the display's sinusoid-normalised
+    /// convention — see [`bin_dbfs`]) this profile was measured with, when the
+    /// caller asked for one. `None` means the relative rule decided instead:
+    /// `peak_margin_db` over the spectral-median floor. Profiles written before
+    /// the threshold existed load as `None`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub threshold_dbfs: Option<f32>,
 }
 
 impl MicProfile {
@@ -103,8 +110,18 @@ pub struct CharacterizeOpts {
     /// harmonic series. Raise it to leave quiet peaks alone (a mic with nothing
     /// above its floor then characterizes as a pass-through profile); lower it
     /// to chase faint whine. Clamped to `0.0..=60.0`; a margin that is not
-    /// finite falls back to [`Self::DEFAULT_PEAK_MARGIN_DB`].
+    /// finite falls back to [`Self::DEFAULT_PEAK_MARGIN_DB`]. Ignored entirely
+    /// when `threshold_dbfs` is `Some`.
     pub peak_margin_db: f32,
+    /// An ABSOLUTE detection threshold in dBFS. `Some(t)` switches the detector
+    /// off the relative rule: a peak is a local maximum whose level — in the
+    /// live analyzer's own sinusoid-normalised dBFS ([`bin_dbfs`]) — exceeds
+    /// `t`. That is the same number a spectrum display puts on screen, so a
+    /// tone drawn above the line is above it for the detector too, whatever the
+    /// noise underneath happens to be doing. `peak_margin_db` is not consulted
+    /// in this mode. Clamped to `-140.0..=0.0`; a threshold that is not finite
+    /// falls back to `None` (the relative rule). **Default `None`.**
+    pub threshold_dbfs: Option<f32>,
 }
 
 impl CharacterizeOpts {
@@ -113,6 +130,10 @@ impl CharacterizeOpts {
     pub const DEFAULT_PEAK_MARGIN_DB: f32 = PEAK_OVER_FLOOR_DB;
     /// The margin is clamped to this range before it is used or recorded.
     const MARGIN_RANGE: std::ops::RangeInclusive<f32> = 0.0..=60.0;
+    /// An absolute threshold is clamped to this range before it is used or
+    /// recorded: 0 dBFS is full scale (nothing stands above it) and −140 is
+    /// well under any real capture floor.
+    const THRESHOLD_RANGE: std::ops::RangeInclusive<f32> = -140.0..=0.0;
 }
 
 impl Default for CharacterizeOpts {
@@ -120,6 +141,7 @@ impl Default for CharacterizeOpts {
         Self {
             harmonic_comb: false,
             peak_margin_db: Self::DEFAULT_PEAK_MARGIN_DB,
+            threshold_dbfs: None,
         }
     }
 }
@@ -130,6 +152,80 @@ const HARMONIC_OVER_FLOOR_DB: f32 = 3.0;
 /// A harmonic peak is searched within ±this many bins of the ideal `k·f0` (the
 /// real tone drifts a little off an exact integer multiple).
 const HARMONIC_SEARCH_BINS: usize = 2;
+/// In ABSOLUTE mode the harmonics are relaxed this far below the caller's
+/// threshold — the same 12 → 3 dB relaxation the relative rule applies, so the
+/// comb behaves the same way whichever gate anchors it.
+const ABSOLUTE_HARMONIC_RELAXATION_DB: f32 = PEAK_OVER_FLOOR_DB - HARMONIC_OVER_FLOOR_DB;
+
+/// The level (dBFS) of one FFT bin, in the **display's** convention: the live
+/// analyzer ([`crate::MicSpectrum`]) normalises a bin magnitude as
+/// `|X[k]| · 4 / n`, so a full-scale sine through a Hann window reads 0 dBFS
+/// whatever the FFT length is. `power` is `|X[k]|²` over a window of `n`
+/// samples, hence `10·log10(power · 16 / n²)`.
+///
+/// Sharing this one conversion is what lets the analyzer draw an absolute
+/// threshold line the detector actually honours: a tone at amplitude `A` reads
+/// `20·log10(A)` on both sides. A non-positive power (an empty bin) reads
+/// −200 dBFS rather than `-inf`.
+#[must_use]
+pub fn bin_dbfs(power: f32, n: usize) -> f32 {
+    if power <= 0.0 || n == 0 {
+        return -200.0;
+    }
+    let n = n as f32;
+    10.0 * (power * 16.0 / (n * n)).log10()
+}
+
+/// What counts as a peak. Built once per detection run from the caller's
+/// options plus the measured spectrum, so the flat detector and the harmonic
+/// comb ask the same question in both modes.
+#[derive(Debug, Clone, Copy)]
+enum Gate {
+    /// The relative rule: a bin's power must stand `margin_db` (fundamental) or
+    /// [`HARMONIC_OVER_FLOOR_DB`] (harmonic) above the scan-band median.
+    OverFloor { fundamental: f32, harmonic: f32 },
+    /// The absolute rule: a bin's [`bin_dbfs`] level must exceed the caller's
+    /// threshold (harmonics [`ABSOLUTE_HARMONIC_RELAXATION_DB`] below it).
+    Absolute {
+        fundamental: f32,
+        harmonic: f32,
+        n: usize,
+    },
+}
+
+impl Gate {
+    /// The gate for one run: `threshold_dbfs` (already clamped) wins when set,
+    /// otherwise the median-relative margin.
+    fn new(threshold_dbfs: Option<f32>, median: f32, margin_db: f32, n: usize) -> Self {
+        match threshold_dbfs {
+            Some(t) => Self::Absolute {
+                fundamental: t,
+                harmonic: t - ABSOLUTE_HARMONIC_RELAXATION_DB,
+                n,
+            },
+            None => Self::OverFloor {
+                fundamental: median * 10f32.powf(margin_db / 10.0),
+                harmonic: median * 10f32.powf(HARMONIC_OVER_FLOOR_DB / 10.0),
+            },
+        }
+    }
+
+    /// Is this bin a tone worth notching (or worth anchoring a comb on)?
+    fn accepts(self, power: f32) -> bool {
+        match self {
+            Self::OverFloor { fundamental, .. } => power > fundamental,
+            Self::Absolute { fundamental, n, .. } => bin_dbfs(power, n) > fundamental,
+        }
+    }
+
+    /// The relaxed test the comb applies to harmonics above the fundamental.
+    fn accepts_harmonic(self, power: f32) -> bool {
+        match self {
+            Self::OverFloor { harmonic, .. } => power > harmonic,
+            Self::Absolute { harmonic, n, .. } => bin_dbfs(power, n) > harmonic,
+        }
+    }
+}
 
 /// Analyze `silence` (mic capture with no speech) at `sample_rate` and return a
 /// noise profile, using today's flat peak detection.
@@ -162,10 +258,19 @@ pub fn characterize_with(silence: &[f32], sample_rate: u32, opts: CharacterizeOp
     } else {
         CharacterizeOpts::DEFAULT_PEAK_MARGIN_DB
     };
+    // Same guard for the absolute threshold: a NaN would slip through `clamp`
+    // and make every comparison false. A non-finite threshold means "no
+    // absolute threshold", so the relative margin decides as it always did.
+    let threshold_dbfs = opts.threshold_dbfs.filter(|t| t.is_finite()).map(|t| {
+        t.clamp(
+            *CharacterizeOpts::THRESHOLD_RANGE.start(),
+            *CharacterizeOpts::THRESHOLD_RANGE.end(),
+        )
+    });
     let notches = if opts.harmonic_comb {
-        detect_harmonic_comb(silence, fs, margin_db)
+        detect_harmonic_comb(silence, fs, margin_db, threshold_dbfs)
     } else {
-        detect_notches(silence, fs, margin_db)
+        detect_notches(silence, fs, margin_db, threshold_dbfs)
     };
 
     MicProfile {
@@ -174,6 +279,7 @@ pub fn characterize_with(silence: &[f32], sample_rate: u32, opts: CharacterizeOp
         noise_floor_dbfs: floor_dbfs,
         gate_threshold_db: floor_dbfs + GATE_MARGIN_DB,
         peak_margin_db: margin_db,
+        threshold_dbfs,
     }
 }
 
@@ -208,32 +314,34 @@ fn power_spectrum(silence: &[f32], fs: f32) -> Option<(Vec<f32>, f32, usize, usi
 /// RELAXED threshold, emitting a notch comb. Mirrors the `HumFilter` 60/120 Hz
 /// comb, but with a learned fundamental, so rolled-off upper harmonics a flat
 /// threshold would miss are still notched.
-fn detect_harmonic_comb(silence: &[f32], fs: f32, margin_db: f32) -> Vec<NotchSpec> {
+fn detect_harmonic_comb(
+    silence: &[f32],
+    fs: f32,
+    margin_db: f32,
+    threshold_dbfs: Option<f32>,
+) -> Vec<NotchSpec> {
     let Some((power, bin_hz, k_lo, k_hi)) = power_spectrum(silence, fs) else {
         return Vec::new();
     };
 
     // Robust floor over the scan band (the same median basis the flat detector
-    // uses), then the fundamental and harmonic acceptance thresholds.
+    // uses), then the fundamental and harmonic acceptance thresholds. The
+    // fundamental is gated strictly (we only build a comb around a
+    // clearly-present tone); the harmonics are relaxed — by the constant in
+    // relative mode, by the same 9 dB below the caller's level in absolute.
     let mut band: Vec<f32> = power[k_lo..=k_hi].to_vec();
     band.sort_by(f32::total_cmp);
     let median = band[band.len() / 2].max(1e-20);
-    // The fundamental is gated at the caller's peak margin (a stricter gate
-    // than the per-harmonic scan: we only build a comb around a clearly-present
-    // tone); the harmonics stay on the relaxed constant.
-    let f0_threshold = median * 10f32.powf(margin_db / 10.0);
-    let harmonic_threshold = median * 10f32.powf(HARMONIC_OVER_FLOOR_DB / 10.0);
+    let gate = Gate::new(threshold_dbfs, median, margin_db, power.len() * 2);
 
     // Candidate fundamentals: every clear peak (local max above the strict gate).
     let candidates: Vec<usize> = (k_lo..=k_hi)
-        .filter(|&k| {
-            power[k] > f0_threshold && power[k] >= power[k - 1] && power[k] >= power[k + 1]
-        })
+        .filter(|&k| gate.accepts(power[k]) && power[k] >= power[k - 1] && power[k] >= power[k + 1])
         .collect();
     if candidates.is_empty() {
         // No clear fundamental → fall back to the flat detector so we never do
         // worse than today.
-        return detect_notches(silence, fs, margin_db);
+        return detect_notches(silence, fs, margin_db, threshold_dbfs);
     }
 
     // The fundamental is the candidate that explains the MOST peaks as its
@@ -276,7 +384,7 @@ fn detect_harmonic_comb(silence: &[f32], fs: f32, margin_db: f32) -> Vec<NotchSp
         {
             // k == 1 is the fundamental (always kept); higher harmonics must
             // clear the relaxed threshold.
-            if k == 1 || peak_pw > harmonic_threshold {
+            if k == 1 || gate.accepts_harmonic(peak_pw) {
                 let freq_hz = peak_k as f32 * bin_hz;
                 if !notches.iter().any(|ns| (ns.freq_hz - freq_hz).abs() < 15.0) {
                     notches.push(NotchSpec {
@@ -292,40 +400,29 @@ fn detect_harmonic_comb(silence: &[f32], fs: f32, margin_db: f32) -> Vec<NotchSp
 }
 
 /// Hann-windowed FFT of (up to) the first [`MAX_WINDOW`] samples, then pick the
-/// strongest narrowband peaks that stand `margin_db` above the spectral-median
-/// floor (default [`PEAK_OVER_FLOOR_DB`]).
-fn detect_notches(silence: &[f32], fs: f32, margin_db: f32) -> Vec<NotchSpec> {
-    let n = silence.len().min(MAX_WINDOW);
-    if n < 64 {
+/// strongest narrowband peaks the [`Gate`] accepts: either `margin_db` above
+/// the spectral-median floor (default [`PEAK_OVER_FLOOR_DB`]) or, when the
+/// caller gave one, an absolute [`bin_dbfs`] level.
+fn detect_notches(
+    silence: &[f32],
+    fs: f32,
+    margin_db: f32,
+    threshold_dbfs: Option<f32>,
+) -> Vec<NotchSpec> {
+    let Some((power, bin_hz, k_lo, k_hi)) = power_spectrum(silence, fs) else {
         return Vec::new();
-    }
+    };
 
-    let mut buf: Vec<Complex<f32>> = (0..n)
-        .map(|i| {
-            let w = 0.5 - 0.5 * (TAU * i as f32 / n as f32).cos(); // Hann
-            Complex::new(silence[i] * w, 0.0)
-        })
-        .collect();
-    FftPlanner::new().plan_fft_forward(n).process(&mut buf);
-
-    let half = n / 2;
-    let power: Vec<f32> = buf[..half].iter().map(Complex::norm_sqr).collect();
-    let bin_hz = fs / n as f32;
-    let k_lo = ((SCAN_LO_HZ / bin_hz).ceil() as usize).max(1);
-    let k_hi = ((SCAN_HI_HZ / bin_hz).floor() as usize).min(half - 2);
-    if k_hi <= k_lo {
-        return Vec::new();
-    }
-
-    // Spectral-median floor over the scan band (robust to the few peaks).
+    // Spectral-median floor over the scan band (robust to the few peaks) — the
+    // basis of the relative gate, and unused by the absolute one.
     let mut band: Vec<f32> = power[k_lo..=k_hi].to_vec();
     band.sort_by(f32::total_cmp);
     let median = band[band.len() / 2].max(1e-20);
-    let threshold = median * 10f32.powf(margin_db / 10.0);
+    let gate = Gate::new(threshold_dbfs, median, margin_db, power.len() * 2);
 
     // Local maxima above threshold, strongest first, deduped within 15 Hz.
     let mut peaks: Vec<(usize, f32)> = (k_lo..=k_hi)
-        .filter(|&k| power[k] > threshold && power[k] >= power[k - 1] && power[k] >= power[k + 1])
+        .filter(|&k| gate.accepts(power[k]) && power[k] >= power[k - 1] && power[k] >= power[k + 1])
         .map(|k| (k, power[k]))
         .collect();
     peaks.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -418,6 +515,7 @@ mod tests {
             CharacterizeOpts {
                 harmonic_comb: false,
                 peak_margin_db: 12.0,
+                threshold_dbfs: None,
             },
         );
         assert!(
@@ -437,6 +535,7 @@ mod tests {
             CharacterizeOpts {
                 harmonic_comb: false,
                 peak_margin_db: 24.0,
+                threshold_dbfs: None,
             },
         );
         assert!(
@@ -459,6 +558,7 @@ mod tests {
             CharacterizeOpts {
                 harmonic_comb: true,
                 peak_margin_db: 12.0,
+                threshold_dbfs: None,
             },
         );
         assert!(
@@ -472,6 +572,7 @@ mod tests {
             CharacterizeOpts {
                 harmonic_comb: true,
                 peak_margin_db: 20.0,
+                threshold_dbfs: None,
             },
         );
         assert!(
@@ -481,10 +582,201 @@ mod tests {
         );
     }
 
+    /// A 1 kHz sine of amplitude `amp` over noise quiet enough that nothing
+    /// else in the band comes near an absolute threshold. 1000 Hz is bin 2048
+    /// of the 16384-point FFT at 8 kHz — an exact bin centre, so there is no
+    /// scalloping loss between the amplitude asked for and the level measured.
+    fn quiet_tone(amp: f32) -> (Vec<f32>, u32) {
+        const N: usize = 16_384;
+        const FS: u32 = 8000;
+        let mut sig = noise(N, 0.002);
+        add_tone(&mut sig, 1000.0, FS, amp);
+        (sig, FS)
+    }
+
+    /// The [`bin_dbfs`] level of the bin nearest `freq`, measured the way the
+    /// detector measures it.
+    fn measured_dbfs(sig: &[f32], fs: u32, freq: f32) -> f32 {
+        let (power, bin_hz, _, _) = power_spectrum(sig, fs as f32).expect("spectrum");
+        let k = (freq / bin_hz).round() as usize;
+        bin_dbfs(power[k], power.len() * 2)
+    }
+
+    #[test]
+    fn an_absolute_threshold_is_in_the_displays_dbfs() {
+        // Amplitude 0.1 is -20 dBFS in the display's sinusoid normalisation.
+        let (silence, fs) = quiet_tone(0.1);
+        assert!(
+            (measured_dbfs(&silence, fs, 1000.0) - -20.0).abs() < 1.0,
+            "a 0.1-amplitude tone must read -20 dBFS, got {}",
+            measured_dbfs(&silence, fs, 1000.0)
+        );
+
+        let caught = characterize_with(
+            &silence,
+            fs,
+            CharacterizeOpts {
+                threshold_dbfs: Some(-26.0),
+                ..CharacterizeOpts::default()
+            },
+        );
+        assert!(
+            has_notch_near(&caught, 1000.0, 20.0),
+            "a -20 dBFS tone clears a -26 dBFS threshold: {:?}",
+            caught.notches
+        );
+        assert_eq!(caught.threshold_dbfs, Some(-26.0));
+        // And the notch the detector found reads, at the display's convention,
+        // the level the tone was built at — the two sides share one scale.
+        let found = caught.notches[0].freq_hz;
+        assert!(
+            (measured_dbfs(&silence, fs, found) - -20.0).abs() < 1.0,
+            "the notched bin must read -20 dBFS, got {}",
+            measured_dbfs(&silence, fs, found)
+        );
+
+        let missed = characterize_with(
+            &silence,
+            fs,
+            CharacterizeOpts {
+                threshold_dbfs: Some(-14.0),
+                ..CharacterizeOpts::default()
+            },
+        );
+        assert!(
+            missed.is_pass_through(),
+            "a -20 dBFS tone stays under a -14 dBFS threshold: {:?}",
+            missed.notches
+        );
+        assert_eq!(missed.threshold_dbfs, Some(-14.0));
+    }
+
+    #[test]
+    fn absolute_mode_ignores_the_margin() {
+        // A 60 dB relative margin would leave this tone alone; with an absolute
+        // threshold set, the margin is not consulted at all.
+        let (silence, fs) = quiet_tone(0.1);
+        let p = characterize_with(
+            &silence,
+            fs,
+            CharacterizeOpts {
+                harmonic_comb: false,
+                peak_margin_db: 60.0,
+                threshold_dbfs: Some(-26.0),
+            },
+        );
+        assert!(
+            has_notch_near(&p, 1000.0, 20.0),
+            "the absolute threshold decides, not the margin: {:?}",
+            p.notches
+        );
+    }
+
+    #[test]
+    fn the_comb_relaxes_harmonics_by_nine_db_in_absolute_mode() {
+        // The fake-Icom fixture: 588 Hz at 0.20 (~-14 dBFS) with its 2nd at
+        // 0.08 (~-22). A -18 dBFS threshold admits the fundamental only; the
+        // comb's 9 dB relaxation (-27) is what pulls the 2nd harmonic in.
+        let sig = synth_fake_icom(16_384, 8000);
+        let opts = CharacterizeOpts {
+            threshold_dbfs: Some(-18.0),
+            ..CharacterizeOpts::default()
+        };
+        let flat = characterize_with(&sig, 8000, opts);
+        assert!(
+            has_notch_near(&flat, 588.0, 12.0),
+            "the fundamental clears -18 dBFS: {:?}",
+            flat.notches
+        );
+        assert!(
+            !has_notch_near(&flat, 1176.0, 12.0),
+            "the 2nd harmonic does NOT clear -18 dBFS on its own: {:?}",
+            flat.notches
+        );
+
+        let comb = characterize_with(
+            &sig,
+            8000,
+            CharacterizeOpts {
+                harmonic_comb: true,
+                ..opts
+            },
+        );
+        for f in [588.0, 1176.0] {
+            assert!(
+                has_notch_near(&comb, f, 12.0),
+                "the comb's relaxed harmonic gate must catch {f} Hz: {:?}",
+                comb.notches
+            );
+        }
+        assert!(
+            (ABSOLUTE_HARMONIC_RELAXATION_DB - 9.0).abs() < f32::EPSILON,
+            "the relaxation mirrors the relative rule's 12 -> 3 dB"
+        );
+    }
+
+    #[test]
+    fn an_absurd_threshold_is_clamped_and_a_non_finite_one_falls_back() {
+        let (silence, fs) = quiet_tone(0.1);
+        let hot = characterize_with(
+            &silence,
+            fs,
+            CharacterizeOpts {
+                threshold_dbfs: Some(40.0),
+                ..CharacterizeOpts::default()
+            },
+        );
+        assert_eq!(hot.threshold_dbfs, Some(0.0));
+        let cold = characterize_with(
+            &silence,
+            fs,
+            CharacterizeOpts {
+                threshold_dbfs: Some(-500.0),
+                ..CharacterizeOpts::default()
+            },
+        );
+        assert_eq!(cold.threshold_dbfs, Some(-140.0));
+        // Not finite → no absolute threshold at all: the relative margin
+        // decides, exactly as it did before the option existed.
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let p = characterize_with(
+                &silence,
+                fs,
+                CharacterizeOpts {
+                    threshold_dbfs: Some(bad),
+                    ..CharacterizeOpts::default()
+                },
+            );
+            assert_eq!(p.threshold_dbfs, None, "threshold {bad} must fall back");
+            assert!(
+                has_notch_near(&p, 1000.0, 20.0),
+                "threshold {bad} must still detect at the default margin: {:?}",
+                p.notches
+            );
+        }
+    }
+
+    #[test]
+    fn bin_dbfs_matches_the_displays_full_scale_reference() {
+        // A full-scale sine through a Hann window peaks at |X| = n/4, whatever
+        // n is — that is the display's 0 dBFS. Guarded at the bottom, not -inf.
+        for n in [1024_usize, 4096, 16_384] {
+            let peak = (n as f32 / 4.0).powi(2);
+            assert!(
+                bin_dbfs(peak, n).abs() < 1e-4,
+                "full scale must read 0 dBFS at n = {n}, got {}",
+                bin_dbfs(peak, n)
+            );
+        }
+        assert!((bin_dbfs(0.0, 16_384) - -200.0).abs() < f32::EPSILON);
+        assert!((bin_dbfs(1.0, 0) - -200.0).abs() < f32::EPSILON);
+    }
+
     #[test]
     fn default_opts_are_the_old_behaviour() {
         let o = CharacterizeOpts::default();
         assert!(!o.harmonic_comb);
+        assert_eq!(o.threshold_dbfs, None);
         assert!((o.peak_margin_db - CharacterizeOpts::DEFAULT_PEAK_MARGIN_DB).abs() < f32::EPSILON);
         assert!((CharacterizeOpts::DEFAULT_PEAK_MARGIN_DB - 12.0).abs() < f32::EPSILON);
     }
@@ -498,6 +790,7 @@ mod tests {
             CharacterizeOpts {
                 harmonic_comb: false,
                 peak_margin_db: 500.0,
+                threshold_dbfs: None,
             },
         );
         assert!((p.peak_margin_db - 60.0).abs() < f32::EPSILON);
@@ -507,6 +800,7 @@ mod tests {
             CharacterizeOpts {
                 harmonic_comb: false,
                 peak_margin_db: -30.0,
+                threshold_dbfs: None,
             },
         );
         assert!((q.peak_margin_db - 0.0).abs() < f32::EPSILON);
@@ -525,6 +819,7 @@ mod tests {
                 CharacterizeOpts {
                     harmonic_comb: false,
                     peak_margin_db: bad,
+                    threshold_dbfs: None,
                 },
             );
             assert!(
@@ -547,6 +842,9 @@ mod tests {
         let json = r#"{"highpass_hz":90.0,"notches":[],"noise_floor_dbfs":-60.0,"gate_threshold_db":-54.0}"#;
         let p: MicProfile = serde_json::from_str(json).expect("old shape loads");
         assert!((p.peak_margin_db - 12.0).abs() < f32::EPSILON);
+        // No absolute threshold was recorded, so the relative rule was the one
+        // that decided — that is exactly what `None` says.
+        assert_eq!(p.threshold_dbfs, None);
         assert!(p.is_pass_through());
     }
 
@@ -796,6 +1094,7 @@ mod tests {
             noise_floor_dbfs: -52.0,
             gate_threshold_db: -46.0,
             peak_margin_db: 12.0,
+            threshold_dbfs: Some(-60.0),
         };
         let json = serde_json::to_string(&profile).expect("serialize");
         let back: MicProfile = serde_json::from_str(&json).expect("deserialize");
