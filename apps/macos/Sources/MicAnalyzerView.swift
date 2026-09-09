@@ -54,7 +54,8 @@
                 }
 
                 SpectrumCanvas(
-                    bins: vm.spectrum, peaks: vm.detectedPeaks, floorMarginDb: vm.peakMarginDb
+                    bins: vm.spectrum, peaks: vm.detectedPeaks, floorMarginDb: vm.peakMarginDb,
+                    floorMedianDb: vm.floorMedianDb
                 )
                 .frame(minHeight: 220)
                 .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
@@ -300,11 +301,10 @@
         /// Analyze hands the characterizer, applied to a coarser spectrum.
         /// `nil` draws no line.
         var floorMarginDb: Double?
-
-        /// The characterizer scans 100–3800 Hz; the axis runs to 3900. The estimate
-        /// uses the detector's band, not the axis's, so the two are at least looking
-        /// at the same part of the spectrum.
-        private static let scanLoHz = 100.0, scanHiHz = 3800.0
+        /// The one-second average of the scan-band median, from the view model —
+        /// smoothed there so the line holds still while the slider still moves it
+        /// instantly. `nil` draws no line.
+        var floorMedianDb: Float?
 
         private static func binFraction(_ f: Double, binCount: Int) -> Double? {
             SpectrumAxis.binFraction(f, binCount: binCount)
@@ -361,12 +361,8 @@
         /// reads over the green fill and in both appearances; nothing is drawn
         /// before the mic delivers bins.
         private func drawFloorLine(in ctx: GraphicsContext, size: CGSize) {
-            guard let margin = floorMarginDb,
-                let lo = Self.binFraction(Self.scanLoHz, binCount: bins.count),
-                let hi = Self.binFraction(Self.scanHiHz, binCount: bins.count),
-                let db = SpectrumFloor.line(
-                    bins: bins, lowFraction: lo, highFraction: hi, marginDb: margin)
-            else { return }
+            guard let margin = floorMarginDb, let median = floorMedianDb else { return }
+            let db = median + Float(margin)
             let yFloor = SpectrumAxis.y(db, height: size.height)
             var line = Path()
             line.move(to: CGPoint(x: 0, y: yFloor))
