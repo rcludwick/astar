@@ -75,8 +75,13 @@ final class NullStationTests: XCTestCase {
         XCTAssertNoThrow(try station.monitorStart(input: "Mic"))
         XCTAssertNoThrow(try station.monitorStop())
         XCTAssertEqual(try station.micSpectrum(), [])
-        XCTAssertEqual(try station.characterize(harmonicComb: true, peakMarginDb: nil), "")
-        XCTAssertEqual(try station.characterize(harmonicComb: false, peakMarginDb: 20), "")
+        XCTAssertEqual(
+            try station.characterize(harmonicComb: true, peakMarginDb: nil, thresholdDbfs: nil), "")
+        XCTAssertEqual(
+            try station.characterize(harmonicComb: false, peakMarginDb: 20, thresholdDbfs: nil), "")
+        XCTAssertEqual(
+            try station.characterize(harmonicComb: false, peakMarginDb: nil, thresholdDbfs: -60),
+            "")
         XCTAssertNoThrow(try station.setMicProfile(#"{"notches":[]}"#))
         XCTAssertNoThrow(try station.setMicProfile(nil))
     }

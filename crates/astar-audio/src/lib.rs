@@ -61,7 +61,9 @@ pub mod spectrum;
 pub mod stream;
 
 pub use announce::{AnnounceHandle, AnnouncePolicy};
-pub use characterize::{CharacterizeOpts, MicProfile, NotchSpec, characterize, characterize_with};
+pub use characterize::{
+    CharacterizeOpts, MicProfile, NotchSpec, bin_dbfs, characterize, characterize_with,
+};
 pub use conference::{Conference, ConferenceConfig, MemberId, ParrotTuning};
 pub use denoise::NoiseReducer;
 pub use device::{DeviceId, DeviceInfo, Direction};

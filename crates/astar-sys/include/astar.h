@@ -1183,14 +1183,27 @@ int iax_station_characterize(IaxStation *st, bool harmonic_comb, char *buf, uint
  * and the same output JSON as [`iax_station_characterize`], but the caller
  * chooses the peak margin as well as the harmonic comb.
  *
- * `opts_json` is `{"harmonic_comb":false,"peak_margin_db":12.0}`. Both keys are
- * optional and NULL or an empty string means "all defaults" (comb off, 12 dB —
- * exactly `iax_station_characterize(st, false, …)`). `peak_margin_db` is how
- * far above the spectral-median noise floor a tone must stand to be worth
- * notching: raise it to leave quiet peaks alone, and a mic with nothing above
- * its floor characterizes as a PASS-THROUGH profile (an empty notch list) that
- * changes nothing in the mic lane. The engine clamps the margin to 0–60 dB and
- * records the clamped value in the profile it returns.
+ * `opts_json` is
+ * `{"harmonic_comb":false,"peak_margin_db":12.0,"threshold_dbfs":-60.0}`. Every
+ * key is optional and NULL or an empty string means "all defaults" (comb off,
+ * 12 dB, no absolute threshold — exactly
+ * `iax_station_characterize(st, false, …)`).
+ *
+ * The two detection knobs are alternatives, and `threshold_dbfs` wins:
+ *
+ * * `peak_margin_db` is RELATIVE — how far above the spectral-median noise
+ *   floor a tone must stand to be worth notching. Raise it to leave quiet
+ *   peaks alone. Clamped to 0–60 dB.
+ * * `threshold_dbfs` is ABSOLUTE — a level, in the same sinusoid-normalised
+ *   dBFS the live spectrum ([`iax_station_mic_spectrum`]) reports, that a peak
+ *   must exceed. A tone drawn above that line on a spectrum display is above
+ *   it for the detector too. Clamped to −140–0 dBFS. `null` (or an absent key)
+ *   means "no absolute threshold": the relative margin decides.
+ *
+ * Either way, a mic with nothing above the bar characterizes as a PASS-THROUGH
+ * profile (an empty notch list) that changes nothing in the mic lane. The
+ * engine records the clamped values it actually used in the profile it
+ * returns.
  *
  * Returns the byte length the full JSON needs (excluding the NUL), or a
  * negative `IAX_ERR_*`: [`IAX_ERR_NULL`] (NULL `st`), [`IAX_ERR_UTF8`]

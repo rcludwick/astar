@@ -245,8 +245,13 @@ public protocol StationDriving {
     /// poll-only (~20 Hz). Vendored Station exposes these; NullStation returns [].
     func txSpectrum() throws -> [Float]
     func rxSpectrum() throws -> [Float]
-    /// `peakMarginDb` is how far above the measured noise floor a bin must
-    /// stand to be notched; `nil` leaves the engine's own default in charge.
-    func characterize(harmonicComb: Bool, peakMarginDb: Float?) throws -> String
+    /// Two ways to say what counts as a tone, and `thresholdDbfs` wins:
+    /// `peakMarginDb` is RELATIVE (how far above the measured noise floor a bin
+    /// must stand), `thresholdDbfs` ABSOLUTE (a level in the same dBFS
+    /// `micSpectrum()` reports, so what is drawn above the line is what the
+    /// detector catches). `nil` for either leaves the engine's own default in
+    /// charge.
+    func characterize(harmonicComb: Bool, peakMarginDb: Float?, thresholdDbfs: Float?) throws
+        -> String
     func setMicProfile(_ json: String?) throws
 }

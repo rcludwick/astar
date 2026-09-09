@@ -204,6 +204,7 @@ mod tests {
             noise_floor_dbfs: -52.0,
             gate_threshold_db: -46.0,
             peak_margin_db: 12.0,
+            threshold_dbfs: None,
         };
         let json = serde_json::to_string(&profile).unwrap();
         let recalled: MicProfile = serde_json::from_str(&json).unwrap();
@@ -241,6 +242,7 @@ mod tests {
             noise_floor_dbfs: -50.0,
             gate_threshold_db: -44.0,
             peak_margin_db: 12.0,
+            threshold_dbfs: None,
         };
         let mut nr = NoiseReducer::from_profile(8000, &profile);
         let mut whine = tone(450.0, 8000, 4000);
@@ -275,6 +277,7 @@ mod tests {
             noise_floor_dbfs: -30.0,
             gate_threshold_db: -24.0,
             peak_margin_db: 30.0,
+            threshold_dbfs: None,
         };
         let mut from_profile = NoiseReducer::from_profile(8000, &p);
         let mut generic = NoiseReducer::new(8000);
@@ -298,6 +301,7 @@ mod tests {
             noise_floor_dbfs: -30.0,
             gate_threshold_db: -24.0,
             peak_margin_db: 30.0,
+            threshold_dbfs: None,
         };
         let mut from_profile = NoiseReducer::hum_only_from_profile(8000, &p);
         let mut generic = NoiseReducer::hum_only(8000);

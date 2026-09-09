@@ -499,6 +499,7 @@ mod tests {
             noise_floor_dbfs: -50.0,
             gate_threshold_db: -44.0,
             peak_margin_db: 12.0,
+            threshold_dbfs: None,
         };
         let mut sink = MeteringSink {
             inner: Box::new(RecSink {

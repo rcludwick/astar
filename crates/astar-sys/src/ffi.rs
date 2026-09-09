@@ -1767,7 +1767,7 @@ pub unsafe extern "C" fn iax_station_characterize(
 
 /// Parse the `opts_json` of [`iax_station_characterize_opts`]: an empty or
 /// whitespace-only string is the defaults, anything that is not a JSON object
-/// of the two known keys (each of the right type) is [`IAX_ERR_IAX`]. Keys the
+/// of the three known keys (each of the right type) is [`IAX_ERR_IAX`]. Keys the
 /// engine does not know are ignored, so a newer front-end can talk to an older
 /// library.
 fn parse_characterize_opts(text: &str) -> Result<astar_station::CharacterizeOpts, c_int> {
@@ -1781,11 +1781,26 @@ fn parse_characterize_opts(text: &str) -> Result<astar_station::CharacterizeOpts
         opts.harmonic_comb = v.as_bool().ok_or(IAX_ERR_IAX)?;
     }
     if let Some(v) = obj.get("peak_margin_db") {
+        // A plain f32 on the engine side, so `null` is a type error here — only
+        // `threshold_dbfs` below is optional and accepts `null`.
         let margin = v.as_f64().ok_or(IAX_ERR_IAX)?;
         // A dB margin is a small number; the engine clamps it to 0..=60 anyway.
         #[allow(clippy::cast_possible_truncation)]
         let margin = margin as f32;
         opts.peak_margin_db = margin;
+    }
+    if let Some(v) = obj.get("threshold_dbfs") {
+        // Explicit `null` is "no absolute threshold" — the same as leaving the
+        // key out — so a front-end can send one shape of options either way.
+        opts.threshold_dbfs = if v.is_null() {
+            None
+        } else {
+            let threshold = v.as_f64().ok_or(IAX_ERR_IAX)?;
+            // A dBFS level is a small number; the engine clamps it to
+            // -140..=0 anyway.
+            #[allow(clippy::cast_possible_truncation)]
+            Some(threshold as f32)
+        };
     }
     Ok(opts)
 }
@@ -1794,14 +1809,27 @@ fn parse_characterize_opts(text: &str) -> Result<astar_station::CharacterizeOpts
 /// and the same output JSON as [`iax_station_characterize`], but the caller
 /// chooses the peak margin as well as the harmonic comb.
 ///
-/// `opts_json` is `{"harmonic_comb":false,"peak_margin_db":12.0}`. Both keys are
-/// optional and NULL or an empty string means "all defaults" (comb off, 12 dB —
-/// exactly `iax_station_characterize(st, false, …)`). `peak_margin_db` is how
-/// far above the spectral-median noise floor a tone must stand to be worth
-/// notching: raise it to leave quiet peaks alone, and a mic with nothing above
-/// its floor characterizes as a PASS-THROUGH profile (an empty notch list) that
-/// changes nothing in the mic lane. The engine clamps the margin to 0–60 dB and
-/// records the clamped value in the profile it returns.
+/// `opts_json` is
+/// `{"harmonic_comb":false,"peak_margin_db":12.0,"threshold_dbfs":-60.0}`. Every
+/// key is optional and NULL or an empty string means "all defaults" (comb off,
+/// 12 dB, no absolute threshold — exactly
+/// `iax_station_characterize(st, false, …)`).
+///
+/// The two detection knobs are alternatives, and `threshold_dbfs` wins:
+///
+/// * `peak_margin_db` is RELATIVE — how far above the spectral-median noise
+///   floor a tone must stand to be worth notching. Raise it to leave quiet
+///   peaks alone. Clamped to 0–60 dB.
+/// * `threshold_dbfs` is ABSOLUTE — a level, in the same sinusoid-normalised
+///   dBFS the live spectrum ([`iax_station_mic_spectrum`]) reports, that a peak
+///   must exceed. A tone drawn above that line on a spectrum display is above
+///   it for the detector too. Clamped to −140–0 dBFS. `null` (or an absent key)
+///   means "no absolute threshold": the relative margin decides.
+///
+/// Either way, a mic with nothing above the bar characterizes as a PASS-THROUGH
+/// profile (an empty notch list) that changes nothing in the mic lane. The
+/// engine records the clamped values it actually used in the profile it
+/// returns.
 ///
 /// Returns the byte length the full JSON needs (excluding the NUL), or a
 /// negative `IAX_ERR_*`: [`IAX_ERR_NULL`] (NULL `st`), [`IAX_ERR_UTF8`]
@@ -3950,5 +3978,43 @@ mod resolver_bridge_tests {
             data: std::ptr::null_mut(),
         };
         assert_eq!(ctx.resolve("77777"), "");
+    }
+}
+
+#[cfg(test)]
+mod characterize_opts_tests {
+    use super::{IAX_ERR_IAX, parse_characterize_opts};
+
+    #[test]
+    fn an_absolute_threshold_reaches_the_engine() {
+        // rc == 0 from the boundary only proves the JSON parsed; this proves
+        // the number actually lands on the options the engine is handed.
+        let opts = parse_characterize_opts(r#"{"threshold_dbfs":-60}"#).expect("parses");
+        assert_eq!(opts.threshold_dbfs, Some(-60.0));
+        let opts = parse_characterize_opts(r#"{"threshold_dbfs":-60.5}"#).expect("parses");
+        assert_eq!(opts.threshold_dbfs, Some(-60.5));
+    }
+
+    #[test]
+    fn null_and_absent_both_mean_no_absolute_threshold() {
+        for text in [
+            "{}",
+            r#"{"threshold_dbfs":null}"#,
+            r#"{"peak_margin_db":18}"#,
+        ] {
+            let opts = parse_characterize_opts(text).expect("parses");
+            assert_eq!(opts.threshold_dbfs, None, "{text} must leave it unset");
+        }
+    }
+
+    #[test]
+    fn a_threshold_of_the_wrong_type_is_rejected() {
+        for bad in [
+            r#"{"threshold_dbfs":"x"}"#,
+            r#"{"threshold_dbfs":true}"#,
+            r#"{"threshold_dbfs":[]}"#,
+        ] {
+            assert_eq!(parse_characterize_opts(bad), Err(IAX_ERR_IAX), "{bad}");
+        }
     }
 }

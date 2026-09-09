@@ -53,10 +53,29 @@ magnitudes; astar renders them.
 - **Characterize**: an "Analyze (stay silent)" button → `characterize()` → show
   the detected noise floor + notch frequencies; **"Save mic profile"** persists
   the JSON for this input device.
-- **Noise floor** (2026-09-08): a peak is a bin that clears the spectral-median
-  floor of the 100–3800 Hz scan band by a margin. The margin is an option
-  (`CharacterizeOpts.peak_margin_db`, default 12 dB — the old fixed value) and is
-  recorded in the profile JSON as `peak_margin_db`. A profile with no notches is
+- **Detection threshold** (2026-09-08): what counts as a tone can be said two
+  ways, and the absolute one wins when both are given.
+  - **Relative** (`CharacterizeOpts.peak_margin_db`, default 12 dB — the old
+    fixed value): a peak is a bin that clears the spectral-median floor of the
+    100–3800 Hz scan band by that margin.
+  - **Absolute** (`CharacterizeOpts.threshold_dbfs`, default unset): a peak is a
+    local maximum whose LEVEL exceeds a dBFS the caller names. The level is
+    measured in the live analyzer's own normalisation — `astar_audio::bin_dbfs`
+    (re-exported from `characterize`),
+    `10·log10(power · 16 / n²)`, so a full-scale sine through a Hann window reads
+    0 dBFS whatever the FFT length. **That shared normalisation is why the
+    analyzer's line stopped being an estimate** (it closed `astar-thresh`): the
+    display and the detector now put a tone at the same level, so a peak drawn
+    above the line is a peak the detector counts. That holds for tones; the
+    grey *background* line is still a reading of the display spectrum's
+    coarser, peak-held, log-folded bins and sits several dB above the
+    detector's own noise floor — it is a guide, not the detector's number
+    (`astar-bgline`).
+  With the harmonic comb on, harmonics are relaxed 9 dB below the bar in either
+  mode (the same 12 → 3 dB relaxation the relative rule always applied).
+  Both numbers are recorded in the profile JSON (`peak_margin_db`,
+  `threshold_dbfs` — `null` when the relative rule decided). A profile with no
+  notches is
   **pass-through**: `NoiseReducer::from_profile` builds the generic reducer for
   it, so the mic lane behaves exactly as with no profile (generic gate, generic
   60 Hz comb). "Profiled" therefore no longer implies "filtered".

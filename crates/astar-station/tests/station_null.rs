@@ -391,6 +391,7 @@ fn characterize_requires_monitoring_then_returns_a_profile() {
         .characterize_with(astar_audio::CharacterizeOpts {
             harmonic_comb: false,
             peak_margin_db: 40.0,
+            threshold_dbfs: None,
         })
         .expect("characterize_with while monitoring");
     assert!((lenient.peak_margin_db - 40.0).abs() < f32::EPSILON);
@@ -412,6 +413,7 @@ fn set_mic_profile_apply_and_clear_do_not_panic_when_idle() {
         noise_floor_dbfs: -52.0,
         gate_threshold_db: -46.0,
         peak_margin_db: 12.0,
+        threshold_dbfs: None,
     };
     // Applying a recalled profile while idle is a standing preference (no active
     // call yet) — it must not panic and seeds the next call.

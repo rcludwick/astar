@@ -20,10 +20,12 @@
         @EnvironmentObject private var deviceMonitor: AudioDeviceMonitor
         @ObservedObject var vm: MicCharacterization
         @State private var inputs: [String] = []
-        /// The noise-floor margin persists across visits to the pane — an operator
-        /// who found the right number for their shack shouldn't re-find it. The
-        /// view model holds the live value; this is only its durable seed.
-        @AppStorage("micAnalyzer.peakMarginDb") private var storedMargin: Double = 12
+        /// The detection threshold persists across visits to the pane — an
+        /// operator who found the right level for their shack shouldn't re-find
+        /// it. The view model holds the live value; this is only its durable seed.
+        /// (The earlier relative slider's key, `micAnalyzer.peakMarginDb`, is
+        /// deliberately abandoned — not migrated, it meant a different thing.)
+        @AppStorage("micAnalyzer.thresholdDbfs") private var storedThreshold: Double = -60
 
         var body: some View {
             VStack(alignment: .leading, spacing: 12) {
@@ -54,13 +56,13 @@
                 }
 
                 SpectrumCanvas(
-                    bins: vm.spectrum, peaks: vm.detectedPeaks, floorMarginDb: vm.peakMarginDb,
-                    floorMedianDb: vm.floorMedianDb
+                    bins: vm.spectrum, peaks: vm.detectedPeaks,
+                    thresholdDbfs: vm.thresholdDbfs, backgroundDbfs: vm.floorMedianDb
                 )
                 .frame(minHeight: 220)
                 .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 8))
 
-                floorSlider
+                thresholdSlider
 
                 controls
 
@@ -74,7 +76,7 @@
                 inputs = deviceMonitor.inputs
                 // Guarded: an unconditional assignment fires the slider's onChange,
                 // which would discard a result the pane already held.
-                if vm.peakMarginDb != storedMargin { vm.peakMarginDb = storedMargin }
+                if vm.thresholdDbfs != storedThreshold { vm.thresholdDbfs = storedThreshold }
                 // A seeded device that is no longer plugged in has no row in the
                 // picker, which would render blank over a pane monitoring the
                 // system default anyway. Fall back to it explicitly instead.
@@ -86,29 +88,30 @@
             .onDisappear { vm.stop() }
         }
 
-        /// How far above the measured noise floor a bin has to stand to be notched.
-        /// Sits directly under the canvas because the canvas draws an *estimate* of
-        /// where this puts the detector's threshold: drag the slider, watch the
-        /// orange line move over the peaks it would roughly catch.
+        /// The absolute level a bin has to exceed to be notched. Sits directly
+        /// under the canvas because the canvas draws it on the same axis: drag the
+        /// slider, watch the orange line move, and every peak still standing above
+        /// it is a peak Analyze will notch. The grey line under it is the ambient
+        /// noise, there to aim by — not part of the decision.
         ///
         /// Like `controls`, it folds rather than clips at the window's 310 pt
         /// minimum: one line while the slider still has room, then label + value on
         /// one line with the slider under them.
-        private var floorSlider: some View {
+        private var thresholdSlider: some View {
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 10) {
-                    floorSliderLabel
+                    thresholdSliderLabel
                     // The minimum is what makes the fold real: a Slider is fully
                     // flexible, so ViewThatFits would measure this row's ideal width
                     // with the slider at nothing and always "fit" it.
                     slider.frame(minWidth: 120)
-                    floorSliderValue
+                    thresholdSliderValue
                 }
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 10) {
-                        floorSliderLabel
+                        thresholdSliderLabel
                         Spacer(minLength: 0)
-                        floorSliderValue
+                        thresholdSliderValue
                     }
                     slider
                 }
@@ -118,31 +121,31 @@
         // The two Texts are the slider's visible label and value, so they are
         // hidden from VoiceOver: the Slider itself carries both, and stays the
         // adjustable element rather than being merged into a static group.
-        private var floorSliderLabel: some View {
-            Text("Noise floor")
+        private var thresholdSliderLabel: some View {
+            Text("Threshold")
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
         }
 
-        private var floorSliderValue: some View {
-            Text("+\(Int(vm.peakMarginDb)) dB")
+        private var thresholdSliderValue: some View {
+            Text(SpectrumAxis.dbfsLabel(vm.thresholdDbfs))
                 .font(.body.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
         }
 
         private var slider: some View {
-            Slider(value: $vm.peakMarginDb, in: 6...30, step: 1)
+            Slider(value: $vm.thresholdDbfs, in: -100...(-20), step: 1)
                 // Without this the label and value win the row's width and the
                 // slider collapses to nothing before the fold ever triggers.
                 .layoutPriority(1)
-                .accessibilityLabel("Noise floor margin")
-                .accessibilityValue(
-                    "\(Int(vm.peakMarginDb)) decibels above the estimated floor"
-                )
-                .onChange(of: vm.peakMarginDb) { newValue in
-                    storedMargin = newValue
-                    // A result captured at the old margin no longer matches the
+                .accessibilityLabel("Detection threshold")
+                // A plain hyphen, not the typographic minus the visible label
+                // draws: VoiceOver reads this one as "minus".
+                .accessibilityValue("\(Int(vm.thresholdDbfs)) dBFS")
+                .onChange(of: vm.thresholdDbfs) { newValue in
+                    storedThreshold = newValue
+                    // A result captured at the old threshold no longer matches the
                     // line now drawn (or the notches Save would write), so drop
                     // it rather than let the two silently disagree.
                     if vm.hasResult { vm.cancel() }
@@ -233,6 +236,15 @@
     enum SpectrumAxis {
         static let fLo = 100.0, fHi = 3900.0
 
+        /// A dBFS level as the UI spells it: a typographic minus (U+2212), which
+        /// aligns with digits in a monospaced-digit font where a hyphen does not.
+        /// The slider's value and the canvas's line tags share it so the number
+        /// under the graph and the number on the graph read identically.
+        static func dbfsLabel(_ db: Double) -> String {
+            let n = Int(db.rounded())
+            return n < 0 ? "−\(-n) dBFS" : "\(n) dBFS"
+        }
+
         /// y for a dBFS value over a fixed −120…0 range (0 dB at the top).
         static func y(_ db: Float, height: CGFloat) -> CGFloat {
             let clamped = min(0, max(-120, db))
@@ -284,27 +296,25 @@
 
     /// Draws peak-held dBFS bins (-120…0) as a filled area on a log frequency axis
     /// (~100 Hz–3.9 kHz), with red markers at the notch frequencies a profile would
-    /// filter and a dashed orange line **estimating** where the current margin puts
-    /// the detector's threshold.
+    /// filter and two horizontal reference lines: the **background** noise (grey,
+    /// where the mic's ambient sits) and the **detection threshold** (orange, the
+    /// level Analyze will notch above).
     ///
-    /// It is an estimate, not the threshold itself. These bins are a 2048-point FFT
-    /// max-folded into log bins and peak-held for display; the detector runs a finer
-    /// FFT and takes its median over linear frequency. Folding many linear bins into
-    /// one log bin keeps the loudest of them, so the drawn line can sit several dB
-    /// above the detector's effective threshold — a peak just under the line can
-    /// still be notched. The line is for aiming the slider, not for predicting each
-    /// notch.
+    /// The threshold is not an estimate. It is an absolute dBFS level, and the
+    /// engine measures each bin in this display's own normalisation (a full-scale
+    /// sine reads 0 dBFS whatever the FFT length), so a peak drawn above the orange
+    /// line is a peak the detector counts. The grey line is informational — the
+    /// noise the tone has to be picked out of, not part of the decision.
     private struct SpectrumCanvas: View {
         let bins: [Float]
         var peaks: [Double] = []
-        /// dB above the estimated floor at which the line is drawn — the same margin
-        /// Analyze hands the characterizer, applied to a coarser spectrum.
-        /// `nil` draws no line.
-        var floorMarginDb: Double?
+        /// The absolute level the detector will notch above — the slider's value,
+        /// drawn on the canvas's own dBFS axis. `nil` draws no line.
+        var thresholdDbfs: Double?
         /// The one-second average of the scan-band median, from the view model —
-        /// smoothed there so the line holds still while the slider still moves it
-        /// instantly. `nil` draws no line.
-        var floorMedianDb: Float?
+        /// smoothed there so the line holds still instead of jittering with the
+        /// peak hold. `nil` draws no line.
+        var backgroundDbfs: Float?
 
         private static func binFraction(_ f: Double, binCount: Int) -> Double? {
             SpectrumAxis.binFraction(f, binCount: binCount)
@@ -328,20 +338,30 @@
                         Gradient(colors: [.green.opacity(0.7), .green.opacity(0.15)]),
                         startPoint: CGPoint(x: 0, y: 0), endPoint: CGPoint(x: 0, y: size.height)))
                 SpectrumAxis.drawGridlines(in: ctx, size: size)
-                // The estimated detection threshold, under the notch markers so a
-                // caught peak is drawn over the line that approximates it.
-                drawFloorLine(in: ctx, size: size)
+                // Background then threshold, both under the notch markers so a
+                // caught peak is drawn over the line that caught it.
+                drawLevelLines(in: ctx, size: size)
                 // Notch markers the profile would filter, labelled with their
                 // frequency (Hz) in red at the top.
-                for f in peaks {
-                    guard let frac = Self.binFraction(f, binCount: bins.count) else { continue }
-                    let x = CGFloat(frac) * size.width
+                // Every notch gets its marker line; a label only when there is
+                // room for it. Notches cluster (a hum comb puts several within
+                // a few tens of Hz), and stacked labels overprint into a smear —
+                // so labels go left to right and one is skipped when it would
+                // land within `labelGap` points of the last one drawn.
+                let labelGap: CGFloat = 22
+                var lastLabelX: CGFloat = -.infinity
+                let placed = peaks.compactMap { f -> (Double, CGFloat)? in
+                    Self.binFraction(f, binCount: bins.count).map { (f, CGFloat($0) * size.width) }
+                }
+                for (f, x) in placed.sorted(by: { $0.1 < $1.1 }) {
                     var marker = Path()
                     marker.move(to: CGPoint(x: x, y: 11))  // leave room for the label
                     marker.addLine(to: CGPoint(x: x, y: size.height))
                     ctx.stroke(
                         marker, with: .color(.red.opacity(0.7)),
                         style: StrokeStyle(lineWidth: 1.5, dash: [3, 2]))
+                    guard x - lastLabelX >= labelGap else { continue }
+                    lastLabelX = x
                     let anchor: UnitPoint =
                         x < 16
                         ? .topLeading
@@ -354,31 +374,72 @@
             }
         }
 
-        /// The dashed threshold line plus its "threshold +N dB (est.)" tag at the
-        /// right edge — "(est.)" because this is the display spectrum's estimate of
-        /// the detector's threshold, not the threshold itself, and because the
-        /// readout's "broadband floor" is a different measurement entirely. Orange
-        /// reads over the green fill and in both appearances; nothing is drawn
-        /// before the mic delivers bins.
-        private func drawFloorLine(in ctx: GraphicsContext, size: CGSize) {
-            guard let margin = floorMarginDb, let median = floorMedianDb else { return }
-            let db = median + Float(margin)
-            let yFloor = SpectrumAxis.y(db, height: size.height)
+        /// The two reference lines and their tags. The background is drawn first
+        /// (under the threshold, and quieter: grey, finely dashed, tagged at the
+        /// LEFT edge) so the orange threshold stays the line the eye goes to; its
+        /// tag sits at the RIGHT edge. Neither says "(est.)" any more — in this
+        /// canvas's units a tone reads the same level on both sides.
+        ///
+        /// Nothing is drawn before the mic delivers bins.
+        private func drawLevelLines(in ctx: GraphicsContext, size: CGSize) {
+            let yBackground = backgroundDbfs.map { SpectrumAxis.y($0, height: size.height) }
+            let yThreshold = thresholdDbfs.map { SpectrumAxis.y(Float($0), height: size.height) }
+            // Close enough that two tags on the same side of their lines would
+            // collide: push them apart — background below its line, threshold above
+            // its own — so both stay readable when the noise reaches the threshold.
+            let crowded: Bool = {
+                guard let a = yBackground, let b = yThreshold else { return false }
+                return abs(a - b) < 10
+            }()
+
+            if let y = yBackground, let db = backgroundDbfs {
+                stroke(y, .secondary.opacity(0.7), dash: [2, 3], in: ctx, size: size)
+                // Above its line normally; below when crowded, or when the line
+                // rides so high there is no room for a tag over it.
+                tag(
+                    "background \(SpectrumAxis.dbfsLabel(Double(db)))",
+                    color: .secondary, y: y, trailing: false, below: crowded || y <= 14,
+                    in: ctx, size: size)
+            }
+            if let y = yThreshold, let db = thresholdDbfs {
+                stroke(y, .orange.opacity(0.8), dash: [4, 3], in: ctx, size: size)
+                // Above the line unless it rides too high to fit a tag there; when
+                // that happens and the two are crowded, drop further so the
+                // background's own below-tag still has its row.
+                let below = y <= 14
+                tag(
+                    "threshold \(SpectrumAxis.dbfsLabel(db))",
+                    color: .orange, y: y, trailing: true, below: below,
+                    gap: below && crowded ? 13 : 2, in: ctx, size: size)
+            }
+        }
+
+        /// One full-width horizontal reference line.
+        private func stroke(
+            _ y: CGFloat, _ color: Color, dash: [CGFloat], in ctx: GraphicsContext, size: CGSize
+        ) {
             var line = Path()
-            line.move(to: CGPoint(x: 0, y: yFloor))
-            line.addLine(to: CGPoint(x: size.width, y: yFloor))
-            ctx.stroke(
-                line, with: .color(.orange.opacity(0.8)),
-                style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
-            // Above the line normally; below it when the floor rides so high there
-            // is no room, so the tag never clips off the top of the canvas.
-            let above = yFloor > 14
+            line.move(to: CGPoint(x: 0, y: y))
+            line.addLine(to: CGPoint(x: size.width, y: y))
+            ctx.stroke(line, with: .color(color), style: StrokeStyle(lineWidth: 1, dash: dash))
+        }
+
+        /// A reference line's caption, hugging one edge and clearing its line.
+        private func tag(
+            _ text: String, color: Color, y: CGFloat, trailing: Bool, below: Bool,
+            gap: CGFloat = 2, in ctx: GraphicsContext, size: CGSize
+        ) {
+            let anchor: UnitPoint =
+                below
+                ? (trailing ? .topTrailing : .topLeading)
+                : (trailing ? .bottomTrailing : .bottomLeading)
+            // Clear of the frequency ticks along the bottom: a line down at the
+            // canvas floor would otherwise print its tag straight through them.
+            let baseline = min(y + (below ? gap : -gap), size.height - 12)
             ctx.draw(
-                Text("threshold +\(Int(margin)) dB (est.)")
-                    .font(.system(size: 9))
-                    .foregroundColor(.orange),
-                at: CGPoint(x: size.width - 2, y: yFloor + (above ? -2 : 2)),
-                anchor: above ? .bottomTrailing : .topTrailing)
+                Text(text).font(.system(size: 9)).foregroundColor(color),
+                at: CGPoint(x: trailing ? size.width - 2 : 2, y: baseline),
+                anchor: anchor)
         }
     }
 

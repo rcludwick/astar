@@ -532,15 +532,19 @@ at the `CallSession.live()` call in `CallSessionTests.swift` (~2497) —
 `CallSession.live(store: InMemoryCredentialStore())` — leaving the real store to
 the app target. Until then a locked screen means "kill xctest and rerun later".
 
-### astar-thresh — The analyzer's threshold line is an estimate; let the engine report the real one
+### astar-bgline — The analyzer's background line reads high, and the threshold line is peak-held
 *P3 · polish · labels: app, engine, audio*
 
-The dashed "threshold +N dB (est.)" line is drawn from the peak-held display
-spectrum (2048-point FFT, max-folded into log bins, median uniform in log
-frequency), while the detector medians a finer linear-frequency FFT — so the
-line sits several dB above the detector's effective threshold and notches
-land visibly below it (seen 2026-09-08: 228 Hz notched under an +18 dB line).
-Smoothing (a one-second rolling mean) fixed the jitter, not the bias. The
-honest fix: have `characterize`/a monitor call return the detector's own
-median floor and threshold, converted to the display's dBFS scale, and draw
-that; then the "(est.)" can go.
+The threshold line is exact for tones since the display and the detector
+share one sinusoid normalisation (`bin_dbfs`). Two things are still not the
+detector's own numbers: (1) the grey background line is the one-second mean
+of the DISPLAY spectrum's scan-band median — a 2048-point FFT max-folded into
+log bins and peak-held — so for broadband noise it sits several dB (roughly
+9 dB from resolution alone, before the fold and the hold) above the floor
+the detector's up-to-16384-point FFT measures; (2) the display peak-holds
+(800 dB/s decay) while `characterize` averages a 1.5 s capture, so a held
+transient can sit visibly on the threshold line and still not be notched.
+The honest fix for both: have the monitor/characterize path return the
+detector's own per-bin floor and, for a capture, its per-bin levels in
+`bin_dbfs` units, and draw those; then the background line is the detector's
+and the markers can be drawn from the same numbers the decision used.

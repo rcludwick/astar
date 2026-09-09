@@ -300,6 +300,8 @@ def test_characterize_idle_is_empty() -> None:
         assert st.characterize() == "", "idle characterize must be empty"
         assert st.characterize(peak_margin_db=24.0) == ""
         assert st.characterize(harmonic_comb=True, peak_margin_db=0.0) == ""
+        assert st.characterize(threshold_dbfs=-60.0) == ""
+        assert st.characterize(harmonic_comb=True, threshold_dbfs=-90.0) == ""
 
 
 def main() -> int:

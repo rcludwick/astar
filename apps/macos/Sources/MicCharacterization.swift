@@ -16,20 +16,27 @@
         @Published private(set) var spectrum: [Float] = []
         @Published var selectedInput: String?
         @Published var harmonicComb = false
-        /// How far (dB) above the measured noise floor a bin must stand to be
-        /// notched. Analyze passes it to the characterizer, and the canvas draws an
-        /// estimate of where it puts the detector's threshold — an estimate only:
-        /// the display spectrum is coarser (log-folded, peak-held) than the finer,
-        /// linear-frequency FFT the detector medians, so a peak sitting just under
-        /// the drawn line can still be notched. 12 dB is the engine's own default.
-        @Published var peakMarginDb: Double = 12
+        /// The ABSOLUTE level (dBFS) a bin must exceed to be notched. Analyze
+        /// passes it to the characterizer, and the canvas draws it as a flat line
+        /// on the same axis the spectrum is drawn on — the engine measures a bin
+        /// in the display's own sinusoid normalisation, so a tone that shows above
+        /// the line is above it for the detector too. Nothing to estimate: the two
+        /// sides read one scale.
+        @Published var thresholdDbfs: Double = -60
         /// The scan-band median of the live spectrum, averaged over the last
-        /// second of polls (20 at 50 ms), so the threshold line the canvas draws
-        /// from it holds still instead of jittering with the peak hold. `nil`
-        /// until the mic delivers bins; reset when the device changes.
+        /// second of polls (20 at 50 ms), so the background line the canvas draws
+        /// from it holds still instead of jittering with the peak hold. This is
+        /// the ambient noise the mic is sitting in — informational, and no longer
+        /// part of the threshold, which is now absolute. `nil` until the mic
+        /// delivers bins; reset when the device changes.
         @Published private(set) var floorMedianDb: Float?
         private var floorMean = RollingMean(window: 20)
-        /// The characterizer scans 100–3800 Hz; the estimate looks at the same band.
+        /// The characterizer scans 100–3800 Hz; the background line reads the same
+        /// band of the DISPLAY spectrum. It is a display-side reading: the live
+        /// analyzer's bins are coarser (2048-point FFT, max-folded into log bins,
+        /// peak-held) than the detector's own FFT, so for broadband noise this
+        /// line reads several dB above the detector's floor. The threshold line
+        /// is exact for tones; this one is a guide.
         private static let scanLoHz = 100.0, scanHiHz = 3800.0
         /// User-entered label for the profile being saved, e.g. "fake icom".
         @Published var profileName = ""
@@ -42,8 +49,8 @@
         @Published private(set) var detectedPeaks: [Double] = []
         @Published private(set) var saved = false
         /// Whether the profile the last `save` wrote filters nothing — a clean mic
-        /// at this margin. Drives the confirmation copy; a legitimate result, not a
-        /// failure.
+        /// at this threshold. Drives the confirmation copy; a legitimate result,
+        /// not a failure.
         @Published private(set) var savedPassThrough = false
 
         /// Seconds of silence to buffer before characterizing.
@@ -134,6 +141,13 @@
         private func poll() {
             guard let s = try? session?.micSpectrum() else { return }
             spectrum = s
+            // Only average bins the mic is actually delivering. Before the
+            // capture device starts (or on a cold open) every bin reads the
+            // display's -120 dBFS empty value; folding those into the mean would
+            // drag the background line down to the floor for a second after the
+            // audio arrives, and park it on the frequency ticks until then. The
+            // same test `finishAnalyze` uses to decide the mic is live.
+            guard s.contains(where: { $0 > -119 }) else { return }
             if let lo = SpectrumAxis.binFraction(Self.scanLoHz, binCount: s.count),
                 let hi = SpectrumAxis.binFraction(Self.scanHiHz, binCount: s.count),
                 let median = SpectrumFloor.scanBandMedian(s, lowFraction: lo, highFraction: hi)
@@ -173,11 +187,14 @@
             // floor above the -120 dBFS empty value); retry until it's delivering or
             // we hit the attempt cap.
             let delivering = spectrum.contains { $0 > -119 }
-            // The operator's slider margin — the same number the canvas draws its
-            // floor line at, so the detected notches match what they can see.
+            // The operator's slider level — the same number the canvas draws its
+            // threshold line at, on the same scale, so the detected notches are
+            // exactly the peaks standing above the line they can see. The relative
+            // margin is left unset: the absolute threshold is the one that decides.
             let json =
                 (try? session?.characterize(
-                    harmonicComb: harmonicComb, peakMarginDb: Float(peakMarginDb)) ?? "")
+                    harmonicComb: harmonicComb, peakMarginDb: nil,
+                    thresholdDbfs: Float(thresholdDbfs)) ?? "")
                 ?? ""
             if !delivering || json.isEmpty, analyzeAttempt < Self.maxAnalyzeAttempts {
                 analyzeAttempt += 1
@@ -260,8 +277,8 @@
                 let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { return nil }
             var parts: [String] = []
-            // "broadband" distinguishes this from the canvas's spectral threshold
-            // estimate: this is one wideband RMS number, that is a per-bin line.
+            // "broadband" distinguishes this from the canvas's per-bin lines: this
+            // is one wideband RMS number over the whole capture.
             if let floor = (obj["noise_floor_dbfs"] as? NSNumber)?.doubleValue {
                 parts.append("broadband floor \(Int(floor)) dBFS")
             }

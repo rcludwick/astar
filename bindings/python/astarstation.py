@@ -1015,25 +1015,40 @@ class Station:
     # -- mic characterization --------------------------------------------- #
 
     def characterize(
-        self, harmonic_comb: bool = False, peak_margin_db: float | None = None
+        self,
+        harmonic_comb: bool = False,
+        peak_margin_db: float | None = None,
+        threshold_dbfs: float | None = None,
     ) -> str:
         """Characterize the monitored mic and return its profile as JSON.
 
         Requires monitor mode; call after a few seconds of monitored silence.
         Returns ``""`` when not monitoring.
 
-        ``peak_margin_db`` is how far (dB) above the spectral-median noise floor
-        a tone must stand to be worth notching. Raise it to leave quiet peaks
-        alone: a mic with nothing above its floor characterizes as a
+        The two detection knobs are alternatives, and ``threshold_dbfs`` wins:
+
+        ``peak_margin_db`` is RELATIVE -- how far (dB) above the spectral-median
+        noise floor a tone must stand to be worth notching. Raise it to leave
+        quiet peaks alone. The engine clamps it to 0-60 dB.
+
+        ``threshold_dbfs`` is ABSOLUTE -- a level, in the same
+        sinusoid-normalised dBFS the live ``mic_spectrum()`` reports, that a
+        peak must exceed. A tone drawn above that line on a spectrum display is
+        above it for the detector too, whatever the noise underneath is doing.
+        The engine clamps it to -140-0 dBFS.
+
+        Either way, a mic with nothing above the bar characterizes as a
         pass-through profile (an empty ``notches`` list) that changes nothing in
-        the mic lane. The engine clamps it to 0-60 dB. ``None`` (the default)
-        omits the key entirely, so the engine's own default is the one number
-        that decides -- this binding does not carry a copy of it.
-        ``harmonic_comb`` enables harmonic-aware notch detection (default off).
+        the mic lane. ``None`` (the default) for either omits the key entirely,
+        so the engine's own default is the one number that decides -- this
+        binding does not carry a copy of it. ``harmonic_comb`` enables
+        harmonic-aware notch detection (default off).
         """
         options: dict[str, object] = {"harmonic_comb": bool(harmonic_comb)}
         if peak_margin_db is not None:
             options["peak_margin_db"] = float(peak_margin_db)
+        if threshold_dbfs is not None:
+            options["threshold_dbfs"] = float(threshold_dbfs)
         opts = json.dumps(options).encode("utf-8")
 
         def _call(handle, buf, size):
