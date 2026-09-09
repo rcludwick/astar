@@ -13,8 +13,11 @@ already exposes the five methods this feature consumes:
 - `monitorStart(input:)` / `monitorStop()` — open the mic lane with no call (`iax-2377`).
 - `micSpectrum() -> [Float]` — peak-held dBFS bins (`-120…0`), log-spaced
   ~100 Hz–3.9 kHz, length `IAX_SPECTRUM_BINS`, polled ~20 Hz (`iax-e73e`).
-- `characterize(harmonicComb:) -> String` — opaque, secret-free `MicProfile` JSON
-  (noise floor + harmonic notch comb), `harmonicComb` default off (`iax-5fb6`).
+- `characterize(harmonicComb:peakMarginDb:thresholdDbfs:) -> String` — opaque,
+  secret-free `MicProfile` JSON (noise floor + harmonic notch comb),
+  `harmonicComb` default off (`iax-5fb6`). The two detection knobs are
+  alternatives — a relative margin over the measured floor, or an absolute dBFS
+  level, which wins — and `nil` for either leaves the engine's default in charge.
 - `setMicProfile(_ json: String?)` — apply (or clear with `nil`) a profile,
   rebuilding the live noise-reduction comb (`iax-2095`).
 
@@ -65,7 +68,8 @@ not. Add to `StationDriving`:
 func monitorStart(input: String?) throws
 func monitorStop() throws
 func micSpectrum() throws -> [Float]
-func characterize(harmonicComb: Bool) throws -> String
+func characterize(harmonicComb: Bool, peakMarginDb: Float?, thresholdDbfs: Float?)
+    throws -> String
 func setMicProfile(_ json: String?) throws
 ```
 
@@ -93,21 +97,27 @@ to live. It hosts `MicAnalyzerView`, driven by a `MicCharacterization`
   **log frequency x-axis** (engine already log-bins; label 100 Hz / 500 / 1k / 2k /
   3.9k), dBFS y-axis (−120…0). The engine provides peak-hold, so silence peaks
   persist.
-- **Controls:** a mic picker (defaults to the current input); a **Noise floor**
-  slider (+6…+30 dB above the measured floor, default +12, persisted under
-  `micAnalyzer.peakMarginDb`) drawn as a dashed orange line on the spectrum at
-  *median of the scan band + margin*, tagged "threshold +N dB (est.)".
-  **The line is an estimate of where the detector's threshold falls, not the
-  threshold itself**: it is computed from the live display spectrum — a
-  2048-point FFT max-folded into log bins and peak-held — while the detector
-  runs a finer FFT and medians over linear frequency, so the line can sit
-  several dB high and a peak sitting just under it can still be notched. If a
-  notch you expected to vanish stays, raise the margin further. Moving the
-  slider after an Analyze discards that result;
-  **"Analyze (stay silent)"** → `characterize(harmonicComb:peakMarginDb:)` → a
-  readout line under the buttons — "broadband floor −58 dBFS" (one wideband RMS
-  number, deliberately named apart from the canvas's spectral threshold
-  estimate) plus notch frequencies, or "nothing clears the threshold —
+- **Controls:** a mic picker (defaults to the current input); a **Threshold**
+  slider (−100…−20 dBFS, default −60, persisted under
+  `micAnalyzer.thresholdDbfs`) drawn as a dashed orange line straight onto the
+  spectrum's own dBFS axis, tagged "threshold −60 dBFS" at the RIGHT edge.
+  **The line is the threshold, not an estimate of it** (2026-09-08): the engine
+  measures a bin in this canvas's own sinusoid normalisation, so a peak drawn
+  above the line is a peak the detector notches. It does not move with the
+  audio — only with the slider.
+  Under it, a second **background** line: grey, finely dashed, tagged
+  "background −78 dBFS" at the LEFT edge, drawn at the one-second rolling mean
+  of the scan band's median. It is the ambient noise the mic is sitting in —
+  informational, an aiming aid, no longer part of the threshold. (When the two
+  lines come within 10 pt, the background's tag drops below its line and the
+  threshold's stays above, so they never overlap.) Moving the slider after an
+  Analyze discards that result;
+  **"Analyze (stay silent)"** →
+  `characterize(harmonicComb:peakMarginDb:thresholdDbfs:)` (the app sends the
+  absolute threshold and leaves the relative margin unset) → a readout line
+  under the buttons — "broadband floor −58 dBFS" (one wideband RMS number over
+  the whole capture, distinct from the canvas's per-bin lines) plus notch
+  frequencies, or "nothing clears the threshold —
   pass-through"; **"Save mic profile"** persists
   `characterizationJSON` (+ `characterizedAt`) to that device's `MicProfile` and
   applies it immediately — a pass-through profile says "Saved as pass-through —
