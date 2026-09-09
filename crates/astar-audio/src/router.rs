@@ -2764,6 +2764,7 @@ mod tests {
             }],
             noise_floor_dbfs: -50.0,
             gate_threshold_db: -44.0,
+            peak_margin_db: 12.0,
         };
         let dest = Arc::new(Mutex::new(None));
         let gate = Arc::new(std::sync::atomic::AtomicBool::new(true));
