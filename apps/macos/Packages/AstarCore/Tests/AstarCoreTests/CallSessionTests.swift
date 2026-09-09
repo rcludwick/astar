@@ -71,6 +71,9 @@ final class FakeStation: StationDriving {
     var txSpectrumToReturn: [Float] = []
     var rxSpectrumToReturn: [Float] = []
     var characterizeJSON = ""
+    /// Every `characterize` argument pair, in order — so a test can prove WHICH
+    /// peak margin the session handed the engine, not just that it asked.
+    private(set) var characterizeCalls: [(harmonicComb: Bool, peakMarginDb: Float?)] = []
     private(set) var setMicProfileCalls: [String?] = []
     private(set) var monitorStartCount = 0
     private(set) var monitorStopCount = 0
@@ -159,7 +162,10 @@ final class FakeStation: StationDriving {
     func micSpectrum() throws -> [Float] { spectrumToReturn }
     func txSpectrum() throws -> [Float] { txSpectrumToReturn }
     func rxSpectrum() throws -> [Float] { rxSpectrumToReturn }
-    func characterize(harmonicComb: Bool) throws -> String { characterizeJSON }
+    func characterize(harmonicComb: Bool, peakMarginDb: Float?) throws -> String {
+        characterizeCalls.append((harmonicComb: harmonicComb, peakMarginDb: peakMarginDb))
+        return characterizeJSON
+    }
     func setMicProfile(_ json: String?) throws { setMicProfileCalls.append(json) }
 
     // M17 (iax-f2b8 Task 8) scripting/recording.
@@ -332,7 +338,7 @@ private struct ThrowingStation: StationDriving {
     func micSpectrum() throws -> [Float] { throw Boom() }
     func txSpectrum() throws -> [Float] { throw Boom() }
     func rxSpectrum() throws -> [Float] { throw Boom() }
-    func characterize(harmonicComb: Bool) throws -> String { throw Boom() }
+    func characterize(harmonicComb: Bool, peakMarginDb: Float?) throws -> String { throw Boom() }
     func setMicProfile(_ json: String?) throws { throw Boom() }
     func connectM17(host: String, port: UInt16, module: Character, callsign: String) throws {
         throw Boom()

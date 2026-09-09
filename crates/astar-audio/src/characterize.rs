@@ -40,11 +40,37 @@ pub struct MicProfile {
     pub noise_floor_dbfs: f32,
     /// Suggested gate threshold (dBFS), the floor plus a margin.
     pub gate_threshold_db: f32,
+    /// The peak margin (dB over the spectral-median floor) this profile was
+    /// measured with — what counted as a tone worth notching. Profiles written
+    /// before the margin was adjustable load as
+    /// [`CharacterizeOpts::DEFAULT_PEAK_MARGIN_DB`].
+    #[cfg_attr(feature = "serde", serde(default = "MicProfile::default_peak_margin"))]
+    pub peak_margin_db: f32,
+}
+
+impl MicProfile {
+    /// The margin a profile that predates the setting is read at.
+    #[must_use]
+    pub const fn default_peak_margin() -> f32 {
+        PEAK_OVER_FLOOR_DB
+    }
+
+    /// Nothing to correct: the characterizer found no tone above the floor at
+    /// this profile's margin. [`crate::NoiseReducer::from_profile`] treats such
+    /// a profile as no profile at all — the mic lane is left exactly as the
+    /// generic reducer would leave it.
+    #[must_use]
+    pub fn is_pass_through(&self) -> bool {
+        self.notches.is_empty()
+    }
 }
 
 /// Largest analysis window (samples). Longer silence is truncated to this.
 const MAX_WINDOW: usize = 16_384;
-/// A peak must exceed the spectral-median floor by this many dB (power).
+/// A peak must exceed the spectral-median floor by this many dB (power) unless
+/// the caller asks for a different margin. Single source of truth for
+/// [`CharacterizeOpts::DEFAULT_PEAK_MARGIN_DB`] and for the margin an
+/// old (pre-setting) [`MicProfile`] deserializes at.
 const PEAK_OVER_FLOOR_DB: f32 = 12.0;
 /// Most notches to emit. Whines are harmonic-rich (the test mic runs to its
 /// 5th/6th harmonic, ~2940/3528 Hz); notch enough of them that no audible tone
@@ -62,7 +88,9 @@ const GATE_MARGIN_DB: f32 = 6.0;
 
 /// Runtime options for [`characterize_with`] (iax-5fb6). `Default` reproduces
 /// today's flat peak detection exactly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// Not `Eq`: `peak_margin_db` is a float.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CharacterizeOpts {
     /// Enable harmonic-aware notch detection: find the strongest fundamental
     /// `f0`, then scan its integer multiples `k·f0` at a RELAXED threshold and
@@ -70,12 +98,31 @@ pub struct CharacterizeOpts {
     /// misses). **Default off** to limit blast radius until validated against
     /// the real fake-Icom recording; when off, falls back to the flat detector.
     pub harmonic_comb: bool,
+    /// How far (dB, power) a bin must stand above the spectral-median floor to
+    /// count as a tone worth notching — and, with the comb on, to anchor a
+    /// harmonic series. Raise it to leave quiet peaks alone (a mic with nothing
+    /// above its floor then characterizes as a pass-through profile); lower it
+    /// to chase faint whine. Clamped to `0.0..=60.0`; a margin that is not
+    /// finite falls back to [`Self::DEFAULT_PEAK_MARGIN_DB`].
+    pub peak_margin_db: f32,
 }
 
-/// The strongest detected fundamental must beat the spectral-median floor by
-/// this many dB (power) to anchor a harmonic comb (a stricter gate than the
-/// per-harmonic scan: we only build a comb around a clearly-present tone).
-const FUNDAMENTAL_OVER_FLOOR_DB: f32 = 12.0;
+impl CharacterizeOpts {
+    /// The margin the characterizer has always used, and the one `Default`
+    /// still gives: 12 dB over the spectral-median floor.
+    pub const DEFAULT_PEAK_MARGIN_DB: f32 = PEAK_OVER_FLOOR_DB;
+    /// The margin is clamped to this range before it is used or recorded.
+    const MARGIN_RANGE: std::ops::RangeInclusive<f32> = 0.0..=60.0;
+}
+
+impl Default for CharacterizeOpts {
+    fn default() -> Self {
+        Self {
+            harmonic_comb: false,
+            peak_margin_db: Self::DEFAULT_PEAK_MARGIN_DB,
+        }
+    }
+}
 /// Once a fundamental is found, its harmonics are accepted at this RELAXED
 /// threshold over the floor — low enough to catch upper harmonics that have
 /// rolled off well below the fundamental.
@@ -104,10 +151,21 @@ pub fn characterize_with(silence: &[f32], sample_rate: u32, opts: CharacterizeOp
         -120.0
     };
 
-    let notches = if opts.harmonic_comb {
-        detect_harmonic_comb(silence, fs)
+    // A NaN margin would slip straight through `clamp` and poison the
+    // threshold (and the profile, which then will not serialize), so a margin
+    // that is not finite falls back to the default rather than the clamp.
+    let margin_db = if opts.peak_margin_db.is_finite() {
+        opts.peak_margin_db.clamp(
+            *CharacterizeOpts::MARGIN_RANGE.start(),
+            *CharacterizeOpts::MARGIN_RANGE.end(),
+        )
     } else {
-        detect_notches(silence, fs)
+        CharacterizeOpts::DEFAULT_PEAK_MARGIN_DB
+    };
+    let notches = if opts.harmonic_comb {
+        detect_harmonic_comb(silence, fs, margin_db)
+    } else {
+        detect_notches(silence, fs, margin_db)
     };
 
     MicProfile {
@@ -115,6 +173,7 @@ pub fn characterize_with(silence: &[f32], sample_rate: u32, opts: CharacterizeOp
         notches,
         noise_floor_dbfs: floor_dbfs,
         gate_threshold_db: floor_dbfs + GATE_MARGIN_DB,
+        peak_margin_db: margin_db,
     }
 }
 
@@ -149,7 +208,7 @@ fn power_spectrum(silence: &[f32], fs: f32) -> Option<(Vec<f32>, f32, usize, usi
 /// RELAXED threshold, emitting a notch comb. Mirrors the `HumFilter` 60/120 Hz
 /// comb, but with a learned fundamental, so rolled-off upper harmonics a flat
 /// threshold would miss are still notched.
-fn detect_harmonic_comb(silence: &[f32], fs: f32) -> Vec<NotchSpec> {
+fn detect_harmonic_comb(silence: &[f32], fs: f32, margin_db: f32) -> Vec<NotchSpec> {
     let Some((power, bin_hz, k_lo, k_hi)) = power_spectrum(silence, fs) else {
         return Vec::new();
     };
@@ -159,7 +218,10 @@ fn detect_harmonic_comb(silence: &[f32], fs: f32) -> Vec<NotchSpec> {
     let mut band: Vec<f32> = power[k_lo..=k_hi].to_vec();
     band.sort_by(f32::total_cmp);
     let median = band[band.len() / 2].max(1e-20);
-    let f0_threshold = median * 10f32.powf(FUNDAMENTAL_OVER_FLOOR_DB / 10.0);
+    // The fundamental is gated at the caller's peak margin (a stricter gate
+    // than the per-harmonic scan: we only build a comb around a clearly-present
+    // tone); the harmonics stay on the relaxed constant.
+    let f0_threshold = median * 10f32.powf(margin_db / 10.0);
     let harmonic_threshold = median * 10f32.powf(HARMONIC_OVER_FLOOR_DB / 10.0);
 
     // Candidate fundamentals: every clear peak (local max above the strict gate).
@@ -171,7 +233,7 @@ fn detect_harmonic_comb(silence: &[f32], fs: f32) -> Vec<NotchSpec> {
     if candidates.is_empty() {
         // No clear fundamental → fall back to the flat detector so we never do
         // worse than today.
-        return detect_notches(silence, fs);
+        return detect_notches(silence, fs, margin_db);
     }
 
     // The fundamental is the candidate that explains the MOST peaks as its
@@ -230,9 +292,9 @@ fn detect_harmonic_comb(silence: &[f32], fs: f32) -> Vec<NotchSpec> {
 }
 
 /// Hann-windowed FFT of (up to) the first [`MAX_WINDOW`] samples, then pick the
-/// strongest narrowband peaks that stand [`PEAK_OVER_FLOOR_DB`] above the
-/// spectral-median floor.
-fn detect_notches(silence: &[f32], fs: f32) -> Vec<NotchSpec> {
+/// strongest narrowband peaks that stand `margin_db` above the spectral-median
+/// floor (default [`PEAK_OVER_FLOOR_DB`]).
+fn detect_notches(silence: &[f32], fs: f32, margin_db: f32) -> Vec<NotchSpec> {
     let n = silence.len().min(MAX_WINDOW);
     if n < 64 {
         return Vec::new();
@@ -259,7 +321,7 @@ fn detect_notches(silence: &[f32], fs: f32) -> Vec<NotchSpec> {
     let mut band: Vec<f32> = power[k_lo..=k_hi].to_vec();
     band.sort_by(f32::total_cmp);
     let median = band[band.len() / 2].max(1e-20);
-    let threshold = median * 10f32.powf(PEAK_OVER_FLOOR_DB / 10.0);
+    let threshold = median * 10f32.powf(margin_db / 10.0);
 
     // Local maxima above threshold, strongest first, deduped within 15 Hz.
     let mut peaks: Vec<(usize, f32)> = (k_lo..=k_hi)
@@ -309,6 +371,183 @@ mod tests {
 
     fn has_notch_near(p: &MicProfile, freq: f32, tol: f32) -> bool {
         p.notches.iter().any(|n| (n.freq_hz - freq).abs() <= tol)
+    }
+
+    /// A tone standing exactly `over_floor_db` (power) above the
+    /// spectral-median floor the detector measures, over white noise at the
+    /// 8 kHz pipeline rate. The tone is placed on an exact bin centre (1000 Hz
+    /// is bin 2048 of a 16384-point FFT at 8 kHz), so there is no scalloping
+    /// loss and the margin the caller asks for is the margin the detector
+    /// sees.
+    fn tone_over_noise(freq: f32, over_floor_db: f32) -> (Vec<f32>, u32) {
+        const N: usize = 16_384;
+        const FS: u32 = 8000;
+        let base = noise(N, 0.02);
+        let (power, _, k_lo, k_hi) = power_spectrum(&base, FS as f32).expect("spectrum");
+        let mut band: Vec<f32> = power[k_lo..=k_hi].to_vec();
+        band.sort_by(f32::total_cmp);
+        let median = band[band.len() / 2].max(1e-20);
+        let target = median * 10f32.powf(over_floor_db / 10.0);
+        // A Hann-windowed FFT of `amp * sin` at a bin centre peaks at
+        // |X| = amp * N / 4, so start at amp = 4 * sqrt(target power) / N —
+        // then correct, because the noise already in that bin adds to (or
+        // subtracts from) the tone. A few passes land the MEASURED peak on the
+        // margin the caller asked for, which is what the detector compares.
+        let mut amp = 4.0 * target.sqrt() / N as f32;
+        let mut sig = base.clone();
+        for _ in 0..16 {
+            sig = base.clone();
+            add_tone(&mut sig, freq, FS, amp);
+            let (power, bin_hz, _, _) = power_spectrum(&sig, FS as f32).expect("spectrum");
+            let k = (freq / bin_hz).round() as usize;
+            let achieved = 10.0 * (power[k] / median).log10();
+            if (achieved - over_floor_db).abs() < 0.01 {
+                break;
+            }
+            amp *= 10f32.powf((over_floor_db - achieved) / 20.0);
+        }
+        (sig, FS)
+    }
+
+    #[test]
+    fn the_margin_decides_what_counts_as_a_peak() {
+        let (silence, fs) = tone_over_noise(1000.0, 18.0);
+        let strict = characterize_with(
+            &silence,
+            fs,
+            CharacterizeOpts {
+                harmonic_comb: false,
+                peak_margin_db: 12.0,
+            },
+        );
+        assert!(
+            strict
+                .notches
+                .iter()
+                .any(|n| (n.freq_hz - 1000.0).abs() < 20.0),
+            "12 dB margin notches an 18 dB tone: {:?}",
+            strict.notches
+        );
+        assert!(!strict.is_pass_through());
+        assert!((strict.peak_margin_db - 12.0).abs() < f32::EPSILON);
+
+        let lenient = characterize_with(
+            &silence,
+            fs,
+            CharacterizeOpts {
+                harmonic_comb: false,
+                peak_margin_db: 24.0,
+            },
+        );
+        assert!(
+            lenient.is_pass_through(),
+            "24 dB margin lets an 18 dB tone through: {:?}",
+            lenient.notches
+        );
+        assert!((lenient.peak_margin_db - 24.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn the_margin_also_gates_the_harmonic_combs_fundamental() {
+        // A fundamental 14 dB over the floor anchors a comb at a 12 dB margin
+        // and anchors nothing at 20 (the comb then falls back to the flat
+        // detector, which at 20 dB finds nothing either).
+        let (silence, fs) = tone_over_noise(1000.0, 14.0);
+        let found = characterize_with(
+            &silence,
+            fs,
+            CharacterizeOpts {
+                harmonic_comb: true,
+                peak_margin_db: 12.0,
+            },
+        );
+        assert!(
+            has_notch_near(&found, 1000.0, 20.0),
+            "12 dB margin anchors the comb on a 14 dB fundamental: {:?}",
+            found.notches
+        );
+        let missed = characterize_with(
+            &silence,
+            fs,
+            CharacterizeOpts {
+                harmonic_comb: true,
+                peak_margin_db: 20.0,
+            },
+        );
+        assert!(
+            missed.is_pass_through(),
+            "20 dB margin leaves a 14 dB fundamental alone: {:?}",
+            missed.notches
+        );
+    }
+
+    #[test]
+    fn default_opts_are_the_old_behaviour() {
+        let o = CharacterizeOpts::default();
+        assert!(!o.harmonic_comb);
+        assert!((o.peak_margin_db - CharacterizeOpts::DEFAULT_PEAK_MARGIN_DB).abs() < f32::EPSILON);
+        assert!((CharacterizeOpts::DEFAULT_PEAK_MARGIN_DB - 12.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn an_absurd_margin_is_clamped() {
+        let (silence, fs) = tone_over_noise(1000.0, 18.0);
+        let p = characterize_with(
+            &silence,
+            fs,
+            CharacterizeOpts {
+                harmonic_comb: false,
+                peak_margin_db: 500.0,
+            },
+        );
+        assert!((p.peak_margin_db - 60.0).abs() < f32::EPSILON);
+        let q = characterize_with(
+            &silence,
+            fs,
+            CharacterizeOpts {
+                harmonic_comb: false,
+                peak_margin_db: -30.0,
+            },
+        );
+        assert!((q.peak_margin_db - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_non_finite_margin_falls_back_to_the_default() {
+        // NaN slips through `clamp` unchanged; left alone it would make every
+        // comparison false (no notches, ever) and produce a profile serde
+        // cannot serialize.
+        let (silence, fs) = tone_over_noise(1000.0, 18.0);
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let p = characterize_with(
+                &silence,
+                fs,
+                CharacterizeOpts {
+                    harmonic_comb: false,
+                    peak_margin_db: bad,
+                },
+            );
+            assert!(
+                (p.peak_margin_db - CharacterizeOpts::DEFAULT_PEAK_MARGIN_DB).abs() < f32::EPSILON,
+                "margin {bad} must record the default, got {}",
+                p.peak_margin_db
+            );
+            // And detection carries on as normal at the default margin.
+            assert!(
+                has_notch_near(&p, 1000.0, 20.0),
+                "margin {bad} must still detect at 12 dB: {:?}",
+                p.notches
+            );
+        }
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn an_old_profile_without_a_margin_still_loads() {
+        let json = r#"{"highpass_hz":90.0,"notches":[],"noise_floor_dbfs":-60.0,"gate_threshold_db":-54.0}"#;
+        let p: MicProfile = serde_json::from_str(json).expect("old shape loads");
+        assert!((p.peak_margin_db - 12.0).abs() < f32::EPSILON);
+        assert!(p.is_pass_through());
     }
 
     #[test]
@@ -456,6 +695,7 @@ mod tests {
             8000,
             CharacterizeOpts {
                 harmonic_comb: true,
+                ..CharacterizeOpts::default()
             },
         );
         for f in [588.0, 1176.0, 1764.0] {
@@ -478,6 +718,7 @@ mod tests {
             8000,
             CharacterizeOpts {
                 harmonic_comb: true,
+                ..CharacterizeOpts::default()
             },
         );
         for f in [588.0, 1176.0, 1764.0, 2352.0] {
@@ -505,6 +746,7 @@ mod tests {
             8000,
             CharacterizeOpts {
                 harmonic_comb: true,
+                ..CharacterizeOpts::default()
             },
         );
         for f in [588.0, 1176.0, 1764.0, 2352.0] {
@@ -526,6 +768,7 @@ mod tests {
             8000,
             CharacterizeOpts {
                 harmonic_comb: true,
+                ..CharacterizeOpts::default()
             },
         );
         assert!(
@@ -552,6 +795,7 @@ mod tests {
             ],
             noise_floor_dbfs: -52.0,
             gate_threshold_db: -46.0,
+            peak_margin_db: 12.0,
         };
         let json = serde_json::to_string(&profile).expect("serialize");
         let back: MicProfile = serde_json::from_str(&json).expect("deserialize");
@@ -580,6 +824,7 @@ mod tests {
             8000,
             CharacterizeOpts {
                 harmonic_comb: true,
+                ..CharacterizeOpts::default()
             },
         );
         for f in [588.0, 1176.0, 1764.0, 2352.0] {

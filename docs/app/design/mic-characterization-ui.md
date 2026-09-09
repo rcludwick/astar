@@ -93,11 +93,26 @@ to live. It hosts `MicAnalyzerView`, driven by a `MicCharacterization`
   **log frequency x-axis** (engine already log-bins; label 100 Hz / 500 / 1k / 2k /
   3.9k), dBFS y-axis (−120…0). The engine provides peak-hold, so silence peaks
   persist.
-- **Controls:** a mic picker (defaults to the current input);
-  **"Analyze (stay silent)"** → `characterize(harmonicComb:)` → read-only readout
-  (noise floor dBFS + detected notch frequencies); **"Save mic profile"** persists
+- **Controls:** a mic picker (defaults to the current input); a **Noise floor**
+  slider (+6…+30 dB above the measured floor, default +12, persisted under
+  `micAnalyzer.peakMarginDb`) drawn as a dashed orange line on the spectrum at
+  *median of the scan band + margin*, tagged "threshold +N dB (est.)".
+  **The line is an estimate of where the detector's threshold falls, not the
+  threshold itself**: it is computed from the live display spectrum — a
+  2048-point FFT max-folded into log bins and peak-held — while the detector
+  runs a finer FFT and medians over linear frequency, so the line can sit
+  several dB high and a peak sitting just under it can still be notched. If a
+  notch you expected to vanish stays, raise the margin further. Moving the
+  slider after an Analyze discards that result;
+  **"Analyze (stay silent)"** → `characterize(harmonicComb:peakMarginDb:)` → a
+  readout line under the buttons — "broadband floor −58 dBFS" (one wideband RMS
+  number, deliberately named apart from the canvas's spectral threshold
+  estimate) plus notch frequencies, or "nothing clears the threshold —
+  pass-through"; **"Save mic profile"** persists
   `characterizationJSON` (+ `characterizedAt`) to that device's `MicProfile` and
-  applies it immediately; an **"Harmonic comb (experimental)"** advanced toggle,
+  applies it immediately — a pass-through profile says "Saved as pass-through —
+  no extra correction for this mic." and Mic Profiles lists it as
+  "pass-through"; an **"Harmonic comb (experimental)"** advanced toggle,
   **default off** (matches the engine's gating until validated against a real
   fake-Icom recording).
 

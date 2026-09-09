@@ -1179,6 +1179,29 @@ int iax_station_rx_spectrum(IaxStation *st, float *out, uintptr_t cap);
 int iax_station_characterize(IaxStation *st, bool harmonic_comb, char *buf, uintptr_t len);
 
 /**
+ * Characterize the monitored mic with JSON options — the same buffer contract
+ * and the same output JSON as [`iax_station_characterize`], but the caller
+ * chooses the peak margin as well as the harmonic comb.
+ *
+ * `opts_json` is `{"harmonic_comb":false,"peak_margin_db":12.0}`. Both keys are
+ * optional and NULL or an empty string means "all defaults" (comb off, 12 dB —
+ * exactly `iax_station_characterize(st, false, …)`). `peak_margin_db` is how
+ * far above the spectral-median noise floor a tone must stand to be worth
+ * notching: raise it to leave quiet peaks alone, and a mic with nothing above
+ * its floor characterizes as a PASS-THROUGH profile (an empty notch list) that
+ * changes nothing in the mic lane. The engine clamps the margin to 0–60 dB and
+ * records the clamped value in the profile it returns.
+ *
+ * Returns the byte length the full JSON needs (excluding the NUL), or a
+ * negative `IAX_ERR_*`: [`IAX_ERR_NULL`] (NULL `st`), [`IAX_ERR_UTF8`]
+ * (non-UTF-8 `opts_json`), [`IAX_ERR_IAX`] (unparsable options), or
+ * [`IAX_ERR_PANIC`]. When not monitoring, writes an empty string and returns 0.
+ *
+ * The JSON carries plain DSP numbers only — no credential fields.
+ */
+int iax_station_characterize_opts(IaxStation *st, const char *opts_json, char *buf, uintptr_t len);
+
+/**
  * Apply (or clear) a calibrated per-mic profile (iax-2095). `json` is a
  * `MicProfile` JSON string as produced by [`iax_station_characterize`] (or
  * persisted by the front-end), or NULL to CLEAR the profile back to the generic

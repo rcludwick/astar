@@ -61,6 +61,11 @@ impl NoiseReducer {
     /// A per-mic reducer from `profile`'s notches, with no gate.
     #[must_use]
     pub fn hum_only_from_profile(sample_rate: u32, profile: &MicProfile) -> Self {
+        // A pass-through profile is no profile: same reasoning as
+        // [`Self::from_profile`], on the neural-stage branch of the mic lane.
+        if profile.is_pass_through() {
+            return Self::hum_only(sample_rate);
+        }
         Self {
             hum: Self::hum_from_profile(sample_rate, profile),
             gate: None,
@@ -82,6 +87,13 @@ impl NoiseReducer {
     /// notches + high-pass, and a gate at the profile's derived threshold.
     #[must_use]
     pub fn from_profile(sample_rate: u32, profile: &MicProfile) -> Self {
+        // A pass-through profile — the characterizer found nothing above the
+        // mic's floor at its margin — must change NOTHING in the mic lane, so
+        // it is the generic reducer, not a notch-free filter with the
+        // profile's own (much higher) gate threshold clamped over the top.
+        if profile.is_pass_through() {
+            return Self::new(sample_rate);
+        }
         let hum = Self::hum_from_profile(sample_rate, profile);
         let gate = NoiseGate::with_params(
             sample_rate,
@@ -191,6 +203,7 @@ mod tests {
             ],
             noise_floor_dbfs: -52.0,
             gate_threshold_db: -46.0,
+            peak_margin_db: 12.0,
         };
         let json = serde_json::to_string(&profile).unwrap();
         let recalled: MicProfile = serde_json::from_str(&json).unwrap();
@@ -227,6 +240,7 @@ mod tests {
             }],
             noise_floor_dbfs: -50.0,
             gate_threshold_db: -44.0,
+            peak_margin_db: 12.0,
         };
         let mut nr = NoiseReducer::from_profile(8000, &profile);
         let mut whine = tone(450.0, 8000, 4000);
@@ -235,6 +249,63 @@ mod tests {
             tail_peak(&whine) < 0.2,
             "the profile's 450 Hz notch should crush 450 Hz: {}",
             tail_peak(&whine)
+        );
+    }
+
+    /// A ~-34 dBFS tone: quiet enough that a profile gate at -24 dBFS would
+    /// close on it and the generic gate would not.
+    #[allow(clippy::cast_precision_loss)]
+    fn quiet_input() -> Vec<f32> {
+        (0..1600).map(|i| 0.02 * ((i as f32) * 0.3).sin()).collect()
+    }
+
+    /// Run a buffer through a reducer and hand back what came out.
+    fn process_all(nr: &mut NoiseReducer, input: &[f32]) -> Vec<f32> {
+        let mut out = input.to_vec();
+        nr.process(&mut out);
+        out
+    }
+
+    #[test]
+    fn a_pass_through_profile_is_the_generic_reducer() {
+        use crate::characterize::MicProfile;
+        let p = MicProfile {
+            highpass_hz: 90.0,
+            notches: vec![],
+            noise_floor_dbfs: -30.0,
+            gate_threshold_db: -24.0,
+            peak_margin_db: 30.0,
+        };
+        let mut from_profile = NoiseReducer::from_profile(8000, &p);
+        let mut generic = NoiseReducer::new(8000);
+        // Same output on the same input, sample for sample — including a quiet
+        // stretch the profile's gate (−24 dBFS) would have closed and the
+        // generic one leaves open.
+        let input = quiet_input();
+        let a = process_all(&mut from_profile, &input);
+        let b = process_all(&mut generic, &input);
+        assert_eq!(a, b, "a pass-through profile must change nothing");
+    }
+
+    #[test]
+    fn a_pass_through_profile_is_the_generic_hum_only_reducer() {
+        use crate::characterize::MicProfile;
+        // The same claim on the neural-stage branch of the mic lane, where the
+        // gate is dropped and only the hum filter is built.
+        let p = MicProfile {
+            highpass_hz: 90.0,
+            notches: vec![],
+            noise_floor_dbfs: -30.0,
+            gate_threshold_db: -24.0,
+            peak_margin_db: 30.0,
+        };
+        let mut from_profile = NoiseReducer::hum_only_from_profile(8000, &p);
+        let mut generic = NoiseReducer::hum_only(8000);
+        let input = quiet_input();
+        assert_eq!(
+            process_all(&mut from_profile, &input),
+            process_all(&mut generic, &input),
+            "a pass-through profile must change nothing without the gate either"
         );
     }
 }

@@ -16,6 +16,13 @@
         @Published private(set) var spectrum: [Float] = []
         @Published var selectedInput: String?
         @Published var harmonicComb = false
+        /// How far (dB) above the measured noise floor a bin must stand to be
+        /// notched. Analyze passes it to the characterizer, and the canvas draws an
+        /// estimate of where it puts the detector's threshold — an estimate only:
+        /// the display spectrum is coarser (log-folded, peak-held) than the finer,
+        /// linear-frequency FFT the detector medians, so a peak sitting just under
+        /// the drawn line can still be notched. 12 dB is the engine's own default.
+        @Published var peakMarginDb: Double = 12
         /// User-entered label for the profile being saved, e.g. "fake icom".
         @Published var profileName = ""
         /// True while a stay-silent capture is in progress (drives the spinner).
@@ -26,6 +33,10 @@
         /// Notch frequencies (Hz) the saved profile would filter — shown as markers.
         @Published private(set) var detectedPeaks: [Double] = []
         @Published private(set) var saved = false
+        /// Whether the profile the last `save` wrote filters nothing — a clean mic
+        /// at this margin. Drives the confirmation copy; a legitimate result, not a
+        /// failure.
+        @Published private(set) var savedPassThrough = false
 
         /// Seconds of silence to buffer before characterizing.
         private static let captureSeconds: TimeInterval = 1.5
@@ -120,6 +131,7 @@
             start(input: selectedInput)
             captureWork?.cancel()
             saved = false
+            savedPassThrough = false
             lastError = nil
             lastJSON = nil
             floorReadout = nil
@@ -138,7 +150,12 @@
             // floor above the -120 dBFS empty value); retry until it's delivering or
             // we hit the attempt cap.
             let delivering = spectrum.contains { $0 > -119 }
-            let json = (try? session?.characterize(harmonicComb: harmonicComb) ?? "") ?? ""
+            // The operator's slider margin — the same number the canvas draws its
+            // floor line at, so the detected notches match what they can see.
+            let json =
+                (try? session?.characterize(
+                    harmonicComb: harmonicComb, peakMarginDb: Float(peakMarginDb)) ?? "")
+                ?? ""
             if !delivering || json.isEmpty, analyzeAttempt < Self.maxAnalyzeAttempts {
                 analyzeAttempt += 1
                 // Re-attempt the monitor each retry — recovers a cold/failed initial
@@ -178,6 +195,7 @@
             floorReadout = nil
             detectedPeaks = []
             saved = false
+            savedPassThrough = false
             lastError = nil
         }
 
@@ -197,6 +215,7 @@
             session?.saveMicProfile(p)
             session?.setMicProfileSelection(id: p.id)
             saved = true
+            savedPassThrough = p.isPassThrough
         }
 
         // MARK: - JSON readouts (display only — application stays opaque)
@@ -218,13 +237,15 @@
                 let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { return nil }
             var parts: [String] = []
+            // "broadband" distinguishes this from the canvas's spectral threshold
+            // estimate: this is one wideband RMS number, that is a per-bin line.
             if let floor = (obj["noise_floor_dbfs"] as? NSNumber)?.doubleValue {
-                parts.append("floor \(Int(floor)) dBFS")
+                parts.append("broadband floor \(Int(floor)) dBFS")
             }
             let notches = peaks(from: json)
             parts.append(
                 notches.isEmpty
-                    ? "no tones to notch"
+                    ? "nothing clears the threshold — pass-through"
                     : "notch " + notches.map { String(Int($0)) }.joined(separator: ", ") + " Hz")
             return parts.isEmpty ? nil : parts.joined(separator: " · ")
         }

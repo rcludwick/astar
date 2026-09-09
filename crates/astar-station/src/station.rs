@@ -2572,11 +2572,28 @@ impl Station {
     /// rolled-off upper harmonics). Returns `None` if not currently monitoring.
     #[must_use]
     pub fn characterize(&self, harmonic_comb: bool) -> Option<astar_audio::MicProfile> {
+        self.characterize_with(astar_audio::CharacterizeOpts {
+            harmonic_comb,
+            ..astar_audio::CharacterizeOpts::default()
+        })
+    }
+
+    /// Characterize the monitored mic with explicit
+    /// [`astar_audio::CharacterizeOpts`] — the harmonic-comb toggle plus the
+    /// peak margin (how far above the spectral-median floor a tone must stand
+    /// to be worth notching). A mic with nothing above its floor at that margin
+    /// characterizes as a pass-through profile, which changes nothing in the
+    /// mic lane. Returns `None` if not currently monitoring.
+    #[must_use]
+    pub fn characterize_with(
+        &self,
+        opts: astar_audio::CharacterizeOpts,
+    ) -> Option<astar_audio::MicProfile> {
         self.monitor
             .lock()
             .unwrap()
             .as_ref()
-            .map(|(_, mon)| mon.characterize(astar_audio::CharacterizeOpts { harmonic_comb }))
+            .map(|(_, mon)| mon.characterize(opts))
     }
 
     /// Apply (or clear) a calibrated per-mic profile (iax-2095). A recalled

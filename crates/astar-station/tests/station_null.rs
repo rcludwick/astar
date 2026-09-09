@@ -377,9 +377,24 @@ fn characterize_requires_monitoring_then_returns_a_profile() {
         profile.gate_threshold_db >= profile.noise_floor_dbfs,
         "gate threshold sits at/above the floor: {profile:?}"
     );
+    // The bool call is the default options, recorded in the profile.
+    assert!(
+        (profile.peak_margin_db - astar_audio::CharacterizeOpts::DEFAULT_PEAK_MARGIN_DB).abs()
+            < f32::EPSILON
+    );
     // The harmonic-comb toggle is a valid argument either way (default off at
     // the FFI, but the engine accepts true too).
     assert!(s.characterize(true).is_some());
+    // characterize_with carries the peak margin through; silence at a 40 dB
+    // margin has nothing above the floor, so the profile is pass-through.
+    let lenient = s
+        .characterize_with(astar_audio::CharacterizeOpts {
+            harmonic_comb: false,
+            peak_margin_db: 40.0,
+        })
+        .expect("characterize_with while monitoring");
+    assert!((lenient.peak_margin_db - 40.0).abs() < f32::EPSILON);
+    assert!(lenient.is_pass_through(), "{lenient:?}");
     s.monitor_stop();
 }
 
@@ -396,6 +411,7 @@ fn set_mic_profile_apply_and_clear_do_not_panic_when_idle() {
         }],
         noise_floor_dbfs: -52.0,
         gate_threshold_db: -46.0,
+        peak_margin_db: 12.0,
     };
     // Applying a recalled profile while idle is a standing preference (no active
     // call yet) — it must not panic and seeds the next call.
