@@ -1765,6 +1765,84 @@ pub unsafe extern "C" fn iax_station_characterize(
     .unwrap_or(IAX_ERR_PANIC)
 }
 
+/// Parse the `opts_json` of [`iax_station_characterize_opts`]: an empty or
+/// whitespace-only string is the defaults, anything that is not a JSON object
+/// of the two known keys (each of the right type) is [`IAX_ERR_IAX`]. Keys the
+/// engine does not know are ignored, so a newer front-end can talk to an older
+/// library.
+fn parse_characterize_opts(text: &str) -> Result<astar_station::CharacterizeOpts, c_int> {
+    let mut opts = astar_station::CharacterizeOpts::default();
+    if text.trim().is_empty() {
+        return Ok(opts);
+    }
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|_| IAX_ERR_IAX)?;
+    let obj = value.as_object().ok_or(IAX_ERR_IAX)?;
+    if let Some(v) = obj.get("harmonic_comb") {
+        opts.harmonic_comb = v.as_bool().ok_or(IAX_ERR_IAX)?;
+    }
+    if let Some(v) = obj.get("peak_margin_db") {
+        let margin = v.as_f64().ok_or(IAX_ERR_IAX)?;
+        // A dB margin is a small number; the engine clamps it to 0..=60 anyway.
+        #[allow(clippy::cast_possible_truncation)]
+        let margin = margin as f32;
+        opts.peak_margin_db = margin;
+    }
+    Ok(opts)
+}
+
+/// Characterize the monitored mic with JSON options — the same buffer contract
+/// and the same output JSON as [`iax_station_characterize`], but the caller
+/// chooses the peak margin as well as the harmonic comb.
+///
+/// `opts_json` is `{"harmonic_comb":false,"peak_margin_db":12.0}`. Both keys are
+/// optional and NULL or an empty string means "all defaults" (comb off, 12 dB —
+/// exactly `iax_station_characterize(st, false, …)`). `peak_margin_db` is how
+/// far above the spectral-median noise floor a tone must stand to be worth
+/// notching: raise it to leave quiet peaks alone, and a mic with nothing above
+/// its floor characterizes as a PASS-THROUGH profile (an empty notch list) that
+/// changes nothing in the mic lane. The engine clamps the margin to 0–60 dB and
+/// records the clamped value in the profile it returns.
+///
+/// Returns the byte length the full JSON needs (excluding the NUL), or a
+/// negative `IAX_ERR_*`: [`IAX_ERR_NULL`] (NULL `st`), [`IAX_ERR_UTF8`]
+/// (non-UTF-8 `opts_json`), [`IAX_ERR_IAX`] (unparsable options), or
+/// [`IAX_ERR_PANIC`]. When not monitoring, writes an empty string and returns 0.
+///
+/// The JSON carries plain DSP numbers only — no credential fields.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_characterize_opts(
+    st: *mut IaxStation,
+    opts_json: *const c_char,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        // NULL options == all defaults.
+        let text = if opts_json.is_null() {
+            ""
+        } else {
+            match unsafe { req_str(opts_json) } {
+                Ok(s) => s,
+                Err(c) => return c,
+            }
+        };
+        let opts = match parse_characterize_opts(text) {
+            Ok(o) => o,
+            Err(c) => return c,
+        };
+        let json = match station.inner.characterize_with(opts) {
+            Some(profile) => serde_json::to_string(&profile).unwrap_or_default(),
+            None => String::new(),
+        };
+        unsafe { fill_buf(&json, buf, len) }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
 /// Apply (or clear) a calibrated per-mic profile (iax-2095). `json` is a
 /// `MicProfile` JSON string as produced by [`iax_station_characterize`] (or
 /// persisted by the front-end), or NULL to CLEAR the profile back to the generic

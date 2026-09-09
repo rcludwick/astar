@@ -290,6 +290,18 @@ def test_m17_snapshot_fields() -> None:
         assert isinstance(snap.m17_available, bool), f"got {type(snap.m17_available)}"
 
 
+def test_characterize_idle_is_empty() -> None:
+    """characterize() on a station that is not monitoring returns "".
+
+    Hardware-free: no monitor is started, so no device is opened. Covers the
+    default margin and an explicit one — both take the same idle path.
+    """
+    with Station() as st:
+        assert st.characterize() == "", "idle characterize must be empty"
+        assert st.characterize(peak_margin_db=24.0) == ""
+        assert st.characterize(harmonic_comb=True, peak_margin_db=0.0) == ""
+
+
 def main() -> int:
     tests = [
         test_struct_layout_matches_library,
@@ -308,6 +320,7 @@ def main() -> int:
         test_register_deregister_no_registrar_raises_null,
         test_deregister_idempotent,
         test_m17_snapshot_fields,
+        test_characterize_idle_is_empty,
     ]
     for t in tests:
         t()
