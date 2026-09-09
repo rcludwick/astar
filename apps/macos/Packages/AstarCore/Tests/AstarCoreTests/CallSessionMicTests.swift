@@ -22,7 +22,8 @@ final class CallSessionMicTests: XCTestCase {
     func testNullStationMicDefaults() throws {
         let s = NullStation()
         XCTAssertEqual(try s.micSpectrum(), [])
-        XCTAssertEqual(try s.characterize(harmonicComb: false, peakMarginDb: nil), "")
+        XCTAssertEqual(
+            try s.characterize(harmonicComb: false, peakMarginDb: nil, thresholdDbfs: nil), "")
         XCTAssertNoThrow(try s.monitorStart(input: nil))
         XCTAssertNoThrow(try s.monitorStop())
         XCTAssertNoThrow(try s.setMicProfile(nil))
@@ -58,11 +59,19 @@ final class CallSessionMicTests: XCTestCase {
         XCTAssertEqual(fake.monitorStartCount, 1)
         XCTAssertEqual(try session.micSpectrum(), [-90, -70, -50])
         XCTAssertEqual(
-            try session.characterize(harmonicComb: false, peakMarginDb: 20), "{\"floorDb\":-52}")
+            try session.characterize(harmonicComb: false, peakMarginDb: 20, thresholdDbfs: nil),
+            "{\"floorDb\":-52}")
         XCTAssertEqual(fake.characterizeCalls.last?.harmonicComb, false)
         XCTAssertEqual(
             fake.characterizeCalls.last?.peakMarginDb, 20,
             "the session hands the engine the margin it was given, not a default")
+        // The absolute threshold rides the same path, and the session passes it
+        // through untouched rather than substituting a default of its own.
+        XCTAssertEqual(
+            try session.characterize(harmonicComb: true, peakMarginDb: nil, thresholdDbfs: -72),
+            "{\"floorDb\":-52}")
+        XCTAssertEqual(fake.characterizeCalls.last?.thresholdDbfs, -72)
+        XCTAssertNil(fake.characterizeCalls.last?.peakMarginDb)
         try session.monitorStop()
         XCTAssertEqual(fake.monitorStopCount, 1)
     }

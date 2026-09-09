@@ -49,4 +49,21 @@ final class MicProfileTests: XCTestCase {
         XCTAssertNil(profile("not json").peakMarginDb)
         XCTAssertNil(profile("").peakMarginDb)
     }
+
+    func testAbsoluteThresholdParsesFromTheEngineJSON() {
+        XCTAssertEqual(
+            profile("{\"notches\":[],\"threshold_dbfs\":-60.5}").thresholdDbfs, -60.5)
+        XCTAssertEqual(
+            profile("{\"notches\":[],\"threshold_dbfs\":-60}").thresholdDbfs, -60)
+    }
+
+    /// A profile the relative margin decided (the engine writes `null` there),
+    /// one characterized before the threshold existed, or one that will not
+    /// parse — all have no absolute threshold to show.
+    func testAbsoluteThresholdIsNilWhenAbsentNullOrUnparseable() {
+        XCTAssertNil(profile("{\"notches\":[],\"threshold_dbfs\":null}").thresholdDbfs)
+        XCTAssertNil(profile("{\"notches\":[]}").thresholdDbfs)
+        XCTAssertNil(profile("not json").thresholdDbfs)
+        XCTAssertNil(profile("").thresholdDbfs)
+    }
 }

@@ -73,7 +73,8 @@ final class FakeStation: StationDriving {
     var characterizeJSON = ""
     /// Every `characterize` argument pair, in order — so a test can prove WHICH
     /// peak margin the session handed the engine, not just that it asked.
-    private(set) var characterizeCalls: [(harmonicComb: Bool, peakMarginDb: Float?)] = []
+    private(set) var characterizeCalls:
+        [(harmonicComb: Bool, peakMarginDb: Float?, thresholdDbfs: Float?)] = []
     private(set) var setMicProfileCalls: [String?] = []
     private(set) var monitorStartCount = 0
     private(set) var monitorStopCount = 0
@@ -162,8 +163,11 @@ final class FakeStation: StationDriving {
     func micSpectrum() throws -> [Float] { spectrumToReturn }
     func txSpectrum() throws -> [Float] { txSpectrumToReturn }
     func rxSpectrum() throws -> [Float] { rxSpectrumToReturn }
-    func characterize(harmonicComb: Bool, peakMarginDb: Float?) throws -> String {
-        characterizeCalls.append((harmonicComb: harmonicComb, peakMarginDb: peakMarginDb))
+    func characterize(harmonicComb: Bool, peakMarginDb: Float?, thresholdDbfs: Float?) throws
+        -> String
+    {
+        characterizeCalls.append(
+            (harmonicComb: harmonicComb, peakMarginDb: peakMarginDb, thresholdDbfs: thresholdDbfs))
         return characterizeJSON
     }
     func setMicProfile(_ json: String?) throws { setMicProfileCalls.append(json) }
@@ -338,7 +342,9 @@ private struct ThrowingStation: StationDriving {
     func micSpectrum() throws -> [Float] { throw Boom() }
     func txSpectrum() throws -> [Float] { throw Boom() }
     func rxSpectrum() throws -> [Float] { throw Boom() }
-    func characterize(harmonicComb: Bool, peakMarginDb: Float?) throws -> String { throw Boom() }
+    func characterize(harmonicComb: Bool, peakMarginDb: Float?, thresholdDbfs: Float?) throws
+        -> String
+    { throw Boom() }
     func setMicProfile(_ json: String?) throws { throw Boom() }
     func connectM17(host: String, port: UInt16, module: Character, callsign: String) throws {
         throw Boom()

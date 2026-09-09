@@ -68,6 +68,18 @@ extension MicProfile {
         else { return nil }
         return (obj["peak_margin_db"] as? NSNumber)?.doubleValue
     }
+
+    /// The absolute detection threshold (dBFS) the characterizer was run with,
+    /// parsed from the opaque engine JSON for display. It is a level on the same
+    /// scale the live spectrum draws, so it can be shown as-is. `nil` when the
+    /// relative `peakMarginDb` decided instead, when the profile predates the
+    /// field, or when the JSON is unparseable.
+    public var thresholdDbfs: Double? {
+        guard let data = characterizationJSON.data(using: .utf8),
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return (obj["threshold_dbfs"] as? NSNumber)?.doubleValue
+    }
 }
 
 /// Persistence for the mic-profile library, keyed by profile id.

@@ -1395,16 +1395,19 @@ public final class Station {
         return Array(buf.prefix(Int(n)))
     }
 
-    /// The options `characterize(harmonicComb:peakMarginDb:)` sends across the
-    /// ABI. Both keys are optional on the wire: a `nil` `peakMarginDb` is left
-    /// out entirely so the engine's own default stays authoritative.
+    /// The options `characterize(harmonicComb:peakMarginDb:thresholdDbfs:)`
+    /// sends across the ABI. Every level key is optional on the wire: a `nil`
+    /// is left out entirely (Swift's `Encodable` omits a nil `Optional` by
+    /// default) so the engine's own default stays authoritative.
     private struct CharacterizeOptions: Encodable {
         var harmonicComb: Bool
         var peakMarginDb: Float?
+        var thresholdDbfs: Float?
 
         enum CodingKeys: String, CodingKey {
             case harmonicComb = "harmonic_comb"
             case peakMarginDb = "peak_margin_db"
+            case thresholdDbfs = "threshold_dbfs"
         }
     }
 
@@ -1413,29 +1416,56 @@ public final class Station {
     /// JSON string (secret-free — plain DSP numbers). Empty while not monitoring;
     /// call after a few seconds of monitored silence. `harmonicComb` enables
     /// harmonic-aware notch detection (**default off**: a learned-fundamental
-    /// comb that catches rolled-off upper harmonics). `peakMarginDb` is how far
-    /// above the noise floor a bin must stand to be notched — bigger is fussier,
-    /// and a mic clean enough that nothing clears the bar characterizes as a
-    /// pass-through profile (an empty notch list). `nil` keeps the engine
-    /// default. Persist the JSON opaquely per device and feed it back via
-    /// `setMicProfile(_:)`.
-    public func characterize(harmonicComb: Bool = false, peakMarginDb: Float? = nil) throws
-        -> String
-    {
-        let options = CharacterizeOptions(harmonicComb: harmonicComb, peakMarginDb: peakMarginDb)
+    /// comb that catches rolled-off upper harmonics).
+    ///
+    /// Two ways to say what counts as a tone, and `thresholdDbfs` wins:
+    ///
+    /// - `peakMarginDb` is **relative** — how far above the measured noise floor
+    ///   a bin must stand. Bigger is fussier.
+    /// - `thresholdDbfs` is **absolute** — a level, in the same
+    ///   sinusoid-normalised dBFS `micSpectrum()` reports, that a bin must
+    ///   exceed. A tone drawn above that line on a spectrum view is above it for
+    ///   the detector too, whatever the noise underneath is doing.
+    ///
+    /// Either way, a mic clean enough that nothing clears the bar characterizes
+    /// as a pass-through profile (an empty notch list). `nil` for either keeps
+    /// the engine's own default. Persist the JSON opaquely per device and feed
+    /// it back via `setMicProfile(_:)`.
+    public func characterize(
+        harmonicComb: Bool = false,
+        peakMarginDb: Float? = nil,
+        thresholdDbfs: Float? = nil
+    ) throws -> String {
+        let options = CharacterizeOptions(
+            harmonicComb: harmonicComb, peakMarginDb: peakMarginDb, thresholdDbfs: thresholdDbfs)
         let optionsJSON = String(
             decoding: try JSONEncoder().encode(options), as: UTF8.self)
         return try optionsJSON.withCString { optsPtr -> String in
-            let needed = iax_station_characterize_opts(handle, optsPtr, nil, 0)
-            if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
-            if needed == 0 { return "" }
-            // +1 for the NUL the C-ABI writes.
-            var buf = [CChar](repeating: 0, count: Int(needed) + 1)
-            let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
-                iax_station_characterize_opts(handle, optsPtr, ptr.baseAddress, UInt(ptr.count))
+            // Size, then fill — but each call is a fresh MEASUREMENT of a moving
+            // mic ring, not a read of a stored string, so the second run can be
+            // longer than the first reported. It does not take a new notch to do
+            // it: the floats are printed at full precision, and a floor that
+            // lands on "-44.78613" instead of "-44.7861" is one byte more. The C
+            // ABI truncates silently, and one byte off the end of an object is a
+            // missing "}" — JSON that parses nowhere. So retry once at the size
+            // the fill actually reported, the same once-only retry the Python
+            // binding does for its lists.
+            var needed = iax_station_characterize_opts(handle, optsPtr, nil, 0)
+            for _ in 0..<2 {
+                if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
+                if needed == 0 { return "" }
+                // +1 for the NUL the C-ABI writes.
+                var buf = [CChar](repeating: 0, count: Int(needed) + 1)
+                let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+                    iax_station_characterize_opts(handle, optsPtr, ptr.baseAddress, UInt(ptr.count))
+                }
+                if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
+                if rc <= needed { return String(cString: buf) }
+                needed = rc
             }
-            if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
-            return String(cString: buf)
+            // Grew twice running. Report "nothing to characterize" rather than
+            // hand back a truncated profile; the caller's next attempt re-measures.
+            return ""
         }
     }
 
