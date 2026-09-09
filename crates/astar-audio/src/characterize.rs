@@ -102,7 +102,8 @@ pub struct CharacterizeOpts {
     /// count as a tone worth notching — and, with the comb on, to anchor a
     /// harmonic series. Raise it to leave quiet peaks alone (a mic with nothing
     /// above its floor then characterizes as a pass-through profile); lower it
-    /// to chase faint whine. Clamped to `0.0..=60.0`.
+    /// to chase faint whine. Clamped to `0.0..=60.0`; a margin that is not
+    /// finite falls back to [`Self::DEFAULT_PEAK_MARGIN_DB`].
     pub peak_margin_db: f32,
 }
 
@@ -150,10 +151,17 @@ pub fn characterize_with(silence: &[f32], sample_rate: u32, opts: CharacterizeOp
         -120.0
     };
 
-    let margin_db = opts.peak_margin_db.clamp(
-        *CharacterizeOpts::MARGIN_RANGE.start(),
-        *CharacterizeOpts::MARGIN_RANGE.end(),
-    );
+    // A NaN margin would slip straight through `clamp` and poison the
+    // threshold (and the profile, which then will not serialize), so a margin
+    // that is not finite falls back to the default rather than the clamp.
+    let margin_db = if opts.peak_margin_db.is_finite() {
+        opts.peak_margin_db.clamp(
+            *CharacterizeOpts::MARGIN_RANGE.start(),
+            *CharacterizeOpts::MARGIN_RANGE.end(),
+        )
+    } else {
+        CharacterizeOpts::DEFAULT_PEAK_MARGIN_DB
+    };
     let notches = if opts.harmonic_comb {
         detect_harmonic_comb(silence, fs, margin_db)
     } else {
@@ -502,6 +510,35 @@ mod tests {
             },
         );
         assert!((q.peak_margin_db - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_non_finite_margin_falls_back_to_the_default() {
+        // NaN slips through `clamp` unchanged; left alone it would make every
+        // comparison false (no notches, ever) and produce a profile serde
+        // cannot serialize.
+        let (silence, fs) = tone_over_noise(1000.0, 18.0);
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let p = characterize_with(
+                &silence,
+                fs,
+                CharacterizeOpts {
+                    harmonic_comb: false,
+                    peak_margin_db: bad,
+                },
+            );
+            assert!(
+                (p.peak_margin_db - CharacterizeOpts::DEFAULT_PEAK_MARGIN_DB).abs() < f32::EPSILON,
+                "margin {bad} must record the default, got {}",
+                p.peak_margin_db
+            );
+            // And detection carries on as normal at the default margin.
+            assert!(
+                has_notch_near(&p, 1000.0, 20.0),
+                "margin {bad} must still detect at 12 dB: {:?}",
+                p.notches
+            );
+        }
     }
 
     #[cfg(feature = "serde")]

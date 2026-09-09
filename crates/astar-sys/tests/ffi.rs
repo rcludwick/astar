@@ -627,18 +627,32 @@ fn characterize_opts_with_defaults_matches_the_bool_call_when_idle() {
     let cfg = null_config();
     let st = unsafe { iax_station_new(std::ptr::from_ref(&cfg)) };
     let mut buf = [0_i8; 256];
+    // Dirty the buffer before every call: returning 0 is only half the claim,
+    // the other half is that an empty string was actually written.
     // Not monitoring → empty string, length 0 — same as the bool call.
+    buf[0] = b'x'.cast_signed();
     assert_eq!(
         unsafe { iax_station_characterize(st, false, buf.as_mut_ptr(), buf.len()) },
         0
     );
+    assert_eq!(buf[0], 0, "the bool call writes an empty string");
     // NULL, empty and explicit options all take the default path.
+    buf[0] = b'x'.cast_signed();
     assert_eq!(
         unsafe { iax_station_characterize_opts(st, ptr::null(), buf.as_mut_ptr(), buf.len()) },
         0
     );
-    for good in ["", "{}", r#"{"harmonic_comb":true,"peak_margin_db":24.0}"#] {
+    assert_eq!(buf[0], 0, "NULL options write an empty string");
+    for good in [
+        "",
+        "{}",
+        r#"{"harmonic_comb":true,"peak_margin_db":24.0}"#,
+        // Unknown keys are ignored, so a newer front-end can talk to an older
+        // library.
+        r#"{"future_key":1}"#,
+    ] {
         let opts = CString::new(good).unwrap();
+        buf[0] = b'x'.cast_signed();
         assert_eq!(
             unsafe {
                 iax_station_characterize_opts(st, opts.as_ptr(), buf.as_mut_ptr(), buf.len())
@@ -646,6 +660,7 @@ fn characterize_opts_with_defaults_matches_the_bool_call_when_idle() {
             0,
             "idle characterize with {good:?} writes an empty profile"
         );
+        assert_eq!(buf[0], 0, "options {good:?} write an empty string");
     }
     unsafe { iax_station_free(st) };
 }

@@ -78,7 +78,7 @@ portal_node=None, secret=None, lib=None)`
 | `snapshot() -> Snapshot` | `iax_station_snapshot` |
 | `next_event() -> Event \| None` | `iax_station_next_event` |
 | `heard() -> list[dict]` (newest first; `callsign`/`network`/`age_ms`) | `iax_station_heard_json` |
-| `characterize(harmonic_comb=False, peak_margin_db=12.0) -> str` (MicProfile JSON; `""` when not monitoring) | `iax_station_characterize_opts` |
+| `characterize(harmonic_comb=False, peak_margin_db=None) -> str` (MicProfile JSON; `""` when not monitoring; `None` margin = the engine's default) | `iax_station_characterize_opts` |
 | `list_inputs()` / `list_outputs()` | `iax_station_list_*` |
 | `set_devices(input, output)` | `iax_station_set_devices` |
 | `close()` / `__enter__`/`__exit__` | `iax_station_free` |

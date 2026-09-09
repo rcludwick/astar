@@ -1015,7 +1015,7 @@ class Station:
     # -- mic characterization --------------------------------------------- #
 
     def characterize(
-        self, harmonic_comb: bool = False, peak_margin_db: float = 12.0
+        self, harmonic_comb: bool = False, peak_margin_db: float | None = None
     ) -> str:
         """Characterize the monitored mic and return its profile as JSON.
 
@@ -1026,12 +1026,15 @@ class Station:
         a tone must stand to be worth notching. Raise it to leave quiet peaks
         alone: a mic with nothing above its floor characterizes as a
         pass-through profile (an empty ``notches`` list) that changes nothing in
-        the mic lane. The engine clamps it to 0-60 dB. ``harmonic_comb`` enables
-        harmonic-aware notch detection (default off).
+        the mic lane. The engine clamps it to 0-60 dB. ``None`` (the default)
+        omits the key entirely, so the engine's own default is the one number
+        that decides -- this binding does not carry a copy of it.
+        ``harmonic_comb`` enables harmonic-aware notch detection (default off).
         """
-        opts = json.dumps(
-            {"harmonic_comb": bool(harmonic_comb), "peak_margin_db": float(peak_margin_db)}
-        ).encode("utf-8")
+        options: dict[str, object] = {"harmonic_comb": bool(harmonic_comb)}
+        if peak_margin_db is not None:
+            options["peak_margin_db"] = float(peak_margin_db)
+        opts = json.dumps(options).encode("utf-8")
 
         def _call(handle, buf, size):
             return self._lib.iax_station_characterize_opts(handle, opts, buf, size)
