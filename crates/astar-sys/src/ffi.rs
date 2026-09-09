@@ -1781,6 +1781,8 @@ fn parse_characterize_opts(text: &str) -> Result<astar_station::CharacterizeOpts
         opts.harmonic_comb = v.as_bool().ok_or(IAX_ERR_IAX)?;
     }
     if let Some(v) = obj.get("peak_margin_db") {
+        // A plain f32 on the engine side, so `null` is a type error here — only
+        // `threshold_dbfs` below is optional and accepts `null`.
         let margin = v.as_f64().ok_or(IAX_ERR_IAX)?;
         // A dB margin is a small number; the engine clamps it to 0..=60 anyway.
         #[allow(clippy::cast_possible_truncation)]

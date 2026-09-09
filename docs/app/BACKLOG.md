@@ -12,7 +12,7 @@ inline. All 129 issues (107 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (38)
+## Open items (39)
 
 ### astar-guidv — the Iced client has no digital voice at all
 *P2 medium · feature · labels: gui, cross-platform, dstar, ysf, cx:8*
@@ -531,3 +531,20 @@ should never touch the login Keychain, and the type to avoid it already exists:
 at the `CallSession.live()` call in `CallSessionTests.swift` (~2497) —
 `CallSession.live(store: InMemoryCredentialStore())` — leaving the real store to
 the app target. Until then a locked screen means "kill xctest and rerun later".
+
+### astar-bgline — The analyzer's background line reads high, and the threshold line is peak-held
+*P3 · polish · labels: app, engine, audio*
+
+The threshold line is exact for tones since the display and the detector
+share one sinusoid normalisation (`bin_dbfs`). Two things are still not the
+detector's own numbers: (1) the grey background line is the one-second mean
+of the DISPLAY spectrum's scan-band median — a 2048-point FFT max-folded into
+log bins and peak-held — so for broadband noise it sits several dB (roughly
+9 dB from resolution alone, before the fold and the hold) above the floor
+the detector's up-to-16384-point FFT measures; (2) the display peak-holds
+(800 dB/s decay) while `characterize` averages a 1.5 s capture, so a held
+transient can sit visibly on the threshold line and still not be notched.
+The honest fix for both: have the monitor/characterize path return the
+detector's own per-bin floor and, for a capture, its per-bin levels in
+`bin_dbfs` units, and draw those; then the background line is the detector's
+and the markers can be drawn from the same numbers the decision used.

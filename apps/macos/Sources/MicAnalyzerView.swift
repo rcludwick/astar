@@ -23,6 +23,8 @@
         /// The detection threshold persists across visits to the pane — an
         /// operator who found the right level for their shack shouldn't re-find
         /// it. The view model holds the live value; this is only its durable seed.
+        /// (The earlier relative slider's key, `micAnalyzer.peakMarginDb`, is
+        /// deliberately abandoned — not migrated, it meant a different thing.)
         @AppStorage("micAnalyzer.thresholdDbfs") private var storedThreshold: Double = -60
 
         var body: some View {
@@ -341,15 +343,25 @@
                 drawLevelLines(in: ctx, size: size)
                 // Notch markers the profile would filter, labelled with their
                 // frequency (Hz) in red at the top.
-                for f in peaks {
-                    guard let frac = Self.binFraction(f, binCount: bins.count) else { continue }
-                    let x = CGFloat(frac) * size.width
+                // Every notch gets its marker line; a label only when there is
+                // room for it. Notches cluster (a hum comb puts several within
+                // a few tens of Hz), and stacked labels overprint into a smear —
+                // so labels go left to right and one is skipped when it would
+                // land within `labelGap` points of the last one drawn.
+                let labelGap: CGFloat = 22
+                var lastLabelX: CGFloat = -.infinity
+                let placed = peaks.compactMap { f -> (Double, CGFloat)? in
+                    Self.binFraction(f, binCount: bins.count).map { (f, CGFloat($0) * size.width) }
+                }
+                for (f, x) in placed.sorted(by: { $0.1 < $1.1 }) {
                     var marker = Path()
                     marker.move(to: CGPoint(x: x, y: 11))  // leave room for the label
                     marker.addLine(to: CGPoint(x: x, y: size.height))
                     ctx.stroke(
                         marker, with: .color(.red.opacity(0.7)),
                         style: StrokeStyle(lineWidth: 1.5, dash: [3, 2]))
+                    guard x - lastLabelX >= labelGap else { continue }
+                    lastLabelX = x
                     let anchor: UnitPoint =
                         x < 16
                         ? .topLeading

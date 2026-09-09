@@ -32,7 +32,11 @@
         @Published private(set) var floorMedianDb: Float?
         private var floorMean = RollingMean(window: 20)
         /// The characterizer scans 100–3800 Hz; the background line reads the same
-        /// band, so it describes the noise the detector is actually looking through.
+        /// band of the DISPLAY spectrum. It is a display-side reading: the live
+        /// analyzer's bins are coarser (2048-point FFT, max-folded into log bins,
+        /// peak-held) than the detector's own FFT, so for broadband noise this
+        /// line reads several dB above the detector's floor. The threshold line
+        /// is exact for tones; this one is a guide.
         private static let scanLoHz = 100.0, scanHiHz = 3800.0
         /// User-entered label for the profile being saved, e.g. "fake icom".
         @Published var profileName = ""

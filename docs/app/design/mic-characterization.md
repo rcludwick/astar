@@ -60,13 +60,17 @@ magnitudes; astar renders them.
     100–3800 Hz scan band by that margin.
   - **Absolute** (`CharacterizeOpts.threshold_dbfs`, default unset): a peak is a
     local maximum whose LEVEL exceeds a dBFS the caller names. The level is
-    measured in the live analyzer's own normalisation — `astar_audio::bin_dbfs`,
+    measured in the live analyzer's own normalisation — `astar_audio::bin_dbfs`
+    (re-exported from `characterize`),
     `10·log10(power · 16 / n²)`, so a full-scale sine through a Hann window reads
     0 dBFS whatever the FFT length. **That shared normalisation is why the
     analyzer's line stopped being an estimate** (it closed `astar-thresh`): the
     display and the detector now put a tone at the same level, so a peak drawn
-    above the line is a peak the detector counts. Nothing needs to be inferred
-    from the display spectrum's coarser, peak-held, log-folded bins any more.
+    above the line is a peak the detector counts. That holds for tones; the
+    grey *background* line is still a reading of the display spectrum's
+    coarser, peak-held, log-folded bins and sits several dB above the
+    detector's own noise floor — it is a guide, not the detector's number
+    (`astar-bgline`).
   With the harmonic comb on, harmonics are relaxed 9 dB below the bar in either
   mode (the same 12 → 3 dB relaxation the relative rule always applied).
   Both numbers are recorded in the profile JSON (`peak_margin_db`,
