@@ -11,7 +11,7 @@ final class CredentialStoreTests: XCTestCase {
         let store = InMemoryCredentialStore()
         XCTAssertNil(store.load())
 
-        let creds = Credentials(portalUser: "rob", portalPass: "s3cret", portalNode: "77777")
+        let creds = Credentials(portalUser: "rob", portalPass: "s3cret")
         try store.save(creds)
         XCTAssertEqual(store.load(), creds)
 
@@ -20,7 +20,7 @@ final class CredentialStoreTests: XCTestCase {
     }
 
     func testCredentialsDebugRedactsPassword() {
-        let creds = Credentials(portalUser: "rob", portalPass: "topsecret", portalNode: "77777")
+        let creds = Credentials(portalUser: "rob", portalPass: "topsecret")
         // The secret-free contract: the password must never leak via logging.
         XCTAssertFalse(
             String(reflecting: creds).contains("topsecret"),
@@ -29,7 +29,7 @@ final class CredentialStoreTests: XCTestCase {
     }
 
     func testCredentialsCodableRoundTrips() throws {
-        let creds = Credentials(portalUser: "rob", portalPass: "s3cret", portalNode: "77777")
+        let creds = Credentials(portalUser: "rob", portalPass: "s3cret")
         let data = try JSONEncoder().encode(creds)
         let decoded = try JSONDecoder().decode(Credentials.self, from: data)
         XCTAssertEqual(decoded, creds)
@@ -37,15 +37,15 @@ final class CredentialStoreTests: XCTestCase {
 
     func testInMemoryStoreSeedsWithInitialCredentials() {
         // The preview/test convenience: a store can be pre-seeded.
-        let seed = Credentials(portalUser: "rob", portalPass: "p", portalNode: "1")
+        let seed = Credentials(portalUser: "rob", portalPass: "p")
         let store = InMemoryCredentialStore(seed)
         XCTAssertEqual(store.load(), seed)
     }
 
     func testInMemoryStoreSaveReplacesExisting() throws {
         let store = InMemoryCredentialStore(
-            Credentials(portalUser: "old", portalPass: "x", portalNode: "1"))
-        let fresh = Credentials(portalUser: "new", portalPass: "y", portalNode: "2")
+            Credentials(portalUser: "old", portalPass: "x"))
+        let fresh = Credentials(portalUser: "new", portalPass: "y")
         try store.save(fresh)
         XCTAssertEqual(store.load(), fresh, "save replaces rather than appends")
     }
@@ -86,5 +86,13 @@ final class CredentialStoreTests: XCTestCase {
         let store = InMemoryDmrPasswordStore(["tgif": "   "])
         XCTAssertNil(store.password(system: "tgif"))
         XCTAssertTrue(store.systems().isEmpty)
+    }
+
+    /// A Keychain blob written before 2026-09-09 carries `portalNode`; the
+    /// decoder must ignore it rather than refuse the account.
+    func testAnOldBlobWithANodeStillDecodes() throws {
+        let json = #"{"portalUser":"rob","portalPass":"s3cret","portalNode":"77777"}"#
+        let creds = try JSONDecoder().decode(Credentials.self, from: Data(json.utf8))
+        XCTAssertEqual(creds, Credentials(portalUser: "rob", portalPass: "s3cret"))
     }
 }
