@@ -55,7 +55,7 @@ so anything cargo understands works:
 just build -p astar-audio          # one crate
 just test  -p astar-server         # one crate's tests
 just clippy                        # whole workspace, warnings as errors
-cargo build --workspace --release  # or: just release
+cargo build --workspace --release  # or: just build-release
 ```
 
 The release profile uses thin LTO and a single codegen unit, so it is
