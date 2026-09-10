@@ -16,6 +16,12 @@ them.
 | `guard-distribution-claims.sh` | astar has never been released — fails on any invented install channel. |
 | `guard-spdx-headers.sh` | Every first-party `.rs` / `.swift` / `.sh` / `.py` file carries the `AGPL-3.0-only` SPDX header the README and the docs site promise. `vendor/` and the vendored C libiax2 are exempt — different licences. |
 | `build-docs.sh` | Builds the Zensical site (`docs/site` → `docs/.site`) with `--strict`. Shared by GitLab and the dormant Pages workflow. |
+| `release.sh` | Cuts a release as far as `origin`: preconditions, the version bump in all five homes, the reflector snapshot, the four gates, commit + tag + push. `just release <version>`; `--dry-run` modifies nothing. |
+| `publish.sh` | The deliberate second step — push to `public` and create the GitHub release with the notarized DMG. `just publish <version>`, and only when Rob says so. |
+| `test_release_sh.sh` | Tests `release.sh` against a throwaway repo. Hermetic, ~1 s, part of `just ci`. |
+
+The release flow, including how to recover from a failed gate, is
+[`../docs/RELEASING.md`](../docs/RELEASING.md).
 
 Each script is runnable by hand from the repo root and prints a one-line
 success message, so you can reproduce a red pipeline locally in seconds.

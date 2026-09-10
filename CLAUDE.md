@@ -178,6 +178,9 @@ never complains — which is how the workspace drifted six releases behind befor
 
 `vendor/ambe-thumbdv` is outside all of this and stays at its own `0.1.0`.
 
+Bumping all five is `just release <version>` (`--dry-run` first); publishing is
+the separate `just publish <version>` — see `docs/RELEASING.md`.
+
 ## Config version — bump it for translation, not for change
 
 `ConfigVersion.current` (AstarCore) is **1**. One number, two homes: stamped

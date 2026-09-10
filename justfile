@@ -39,8 +39,9 @@ fmt:
 fmt-check:
     cargo fmt --all -- --check
 
-# Release build of the whole workspace.
-release:
+# Optimised build of the whole workspace. (`just release` cuts a RELEASE — see
+# the Release section at the bottom of this file.)
+build-release:
     cargo build --workspace --release
 
 # ── D-Star / ThumbDV ────────────────────────────────────────────────────────
@@ -376,9 +377,42 @@ audit:
     cargo audit --deny warnings
 
 # The everyday Rust gate: format, lint, test, header-drift.
-ci: fmt-check clippy test cbindgen version-check
-    @echo "✓ ci: fmt + clippy + test + cbindgen + version-check passed"
+ci: fmt-check clippy test cbindgen version-check release-test
+    @echo "✓ ci: fmt + clippy + test + cbindgen + version-check + release-test passed"
 
 # Everything, including the Swift side (needs a full Xcode).
 ci-full: fmt-check clippy test cbindgen version-check ffi-example python swift-fmt-check app-test
     @echo "✓ ci-full: rust + swift gates passed locally"
+
+# ── Release ─────────────────────────────────────────────────────────────────
+#
+# Two commands, and the split between them is deliberate: `release` goes as far
+# as the PRIVATE repo and stops. Pushing to the public repo and creating the
+# GitHub release is `publish`, which nobody runs on Rob's behalf — CLAUDE.md:
+# publishing is his call, never a step in a task.
+#
+# Before either, by hand: write the `## <version> — <date>` section at the top
+# of CHANGELOG.md (moving in whatever is waiting in
+# docs/superpowers/notes/2026-09-07-pending-changelog.md) and commit it. The
+# release refuses to run until that heading names the version being cut.
+# The whole flow, with the recovery steps: docs/RELEASING.md.
+
+# Cut a release: preconditions, version bump in all five homes, the reflector
+# snapshot, ci + xcframework + app-test + dmg, then commit, tag and push to
+# ORIGIN (the private repo). `just release 0.1.13-beta --dry-run` first — it
+# prints every command and modifies nothing. `--skip-reflectors` skips the
+# snapshot refresh (it needs the network).
+release version *args:
+    ci/release.sh {{version}} {{args}}
+
+# THE DELIBERATE SECOND STEP, after `just release` and only when Rob says so:
+# push main + the tag to PUBLIC and create the GitHub release with the signed,
+# notarized astar.dmg attached, notes lifted from CHANGELOG.md, marked --latest.
+# `just publish 0.1.13-beta --dry-run` shows the notes and pushes nothing.
+publish version *args:
+    ci/publish.sh {{version}} {{args}}
+
+# Tests for ci/release.sh: a throwaway repo in a temp dir, no cargo/just/gh.
+# Part of `just ci` — it is hermetic and takes about a second.
+release-test:
+    ./ci/test_release_sh.sh
