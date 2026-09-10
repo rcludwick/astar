@@ -30,7 +30,9 @@ RELEASE_SH="$HERE/release.sh"
 OLD="0.1.12-beta"
 NEW="0.1.13-beta"
 
-TMP="$(mktemp -d -t astar-release-test)"
+# `mktemp -d -t NAME` is a BSD spelling GNU coreutils rejects (it wants the
+# X's). An explicit template works on both.
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/astar-release-test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
 REPO="$TMP/repo"

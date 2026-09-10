@@ -16,10 +16,15 @@
 # fast-forward and never a merge.
 #
 # What it does:
-#   1. Preconditions — the tag exists locally AND on origin, the DMG is on
-#      disk and Gatekeeper-clean with a stapled ticket, `gh` is authenticated.
+#   1. Preconditions — HEAD is `main` (it is main that gets pushed), the tag
+#      exists locally, is reachable from main AND is on origin, the DMG is on
+#      disk and BOTH Gatekeeper-clean and stapled, `gh` is authenticated.
 #   2. Extracts this version's section out of CHANGELOG.md as the release
 #      notes, with the "Full changelog" link every earlier release carried.
+#      CHANGELOG.md's NEWEST heading must be this version: publishing an older
+#      section as --latest would put stale notes on the release the docs link
+#      to, and the changelog is in descending order, so anything below the top
+#      is already out.
 #   3. `git push public main v<version>`
 #   4. `gh release create` with astar.dmg attached, marked --latest (NOT a
 #      prerelease: the docs link to /releases/latest and it must resolve).
@@ -73,7 +78,7 @@ done
 TAG="v$VERSION"
 
 if [ "$DRY_RUN" = 1 ]; then
-  echo "== astar publish $VERSION — DRY RUN (nothing will be pushed or created)"
+  echo "== astar publish $VERSION — DRY RUN (reads only; touches nothing but remote-tracking refs)"
 else
   echo "== astar publish $VERSION -> $PUBLIC_REPO"
 fi
@@ -84,8 +89,18 @@ fi
 
 git rev-parse --git-dir >/dev/null 2>&1 || die "$ROOT is not a git checkout"
 
+# What gets pushed is the branch `main`, not HEAD — so `main` is what every
+# check below has to be about. Publishing from a detached HEAD or a work branch
+# would check one commit and push a different one.
+branch="$(git rev-parse --abbrev-ref HEAD)"
+[ "$branch" = "main" ] ||
+  die "publishing pushes main, and you are on '$branch'. Check out main first."
+
 git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null ||
   die "no local tag $TAG. Cut the release first: just release $VERSION"
+
+git merge-base --is-ancestor "$TAG^{commit}" main ||
+  die "$TAG is not reachable from main — the tag names a commit main does not contain."
 
 git remote get-url public >/dev/null 2>&1 ||
   die "no 'public' remote. It should be git@github.com:$PUBLIC_REPO.git"
@@ -101,8 +116,8 @@ fi
 echo ">> git fetch public"
 git fetch public --quiet || die "could not fetch the public remote"
 if git rev-parse --verify --quiet public/main >/dev/null; then
-  if ! git merge-base --is-ancestor public/main HEAD; then
-    die "public/main is not an ancestor of HEAD — the public repo has diverged."
+  if ! git merge-base --is-ancestor public/main main; then
+    die "public/main is not an ancestor of main — the public repo has diverged."
   fi
 fi
 
@@ -110,25 +125,40 @@ fi
   die "no $DMG_PATH. \`just release $VERSION\` builds it via \`just dmg\`."
 
 # The DMG must be the distributable article, not an ad-hoc local build. These
-# are the same two assertions make-dmg.sh prints at the end of a good run: the
-# container passes the assessment a downloader's Mac makes, and the stapled
-# ticket is present so a first launch works OFFLINE.
+# are the same two assertions make-dmg.sh ends a good run with, and BOTH must
+# hold — they answer different questions and neither implies the other:
+#
+#   spctl    the container passes the assessment a downloader's Mac makes when
+#            they open the download. A signed-but-unnotarized DMG fails here.
+#   stapler  the ticket is attached to the image, so a first launch works with
+#            the network unplugged. Apple can notarize an image whose ticket
+#            never got stapled, and that image passes spctl on a machine that
+#            can reach Apple — and fails on one that cannot.
+#
+# make-dmg.sh exits 3 rather than ship a DMG that misses either, so publishing
+# one would be shipping an artifact that script already refused.
 echo ">> verifying $DMG_PATH the way a downloader's Mac will"
-gate_ok=0
-if spctl --assess --type open --context context:primary-signature -v "$DMG_PATH" 2>&1 |
-  sed 's/^/   spctl:   /'; then
-  gate_ok=1
-else
-  echo "   spctl:   REJECTED" >&2
+gate_ok=1
+
+# Captured, not piped: `spctl … | sed` reports SED's exit status, so a piped
+# assessment silently "passes" no matter what Gatekeeper said.
+spctl_out="$(spctl --assess --type open --context context:primary-signature -v "$DMG_PATH" 2>&1)" &&
+  spctl_rc=0 || spctl_rc=$?
+printf '%s\n' "$spctl_out" | sed 's/^/   spctl:   /'
+if [ "$spctl_rc" -ne 0 ]; then
+  echo "   spctl:   REJECTED (exit $spctl_rc)" >&2
+  gate_ok=0
 fi
+
 if xcrun stapler validate "$DMG_PATH" >/dev/null 2>&1; then
   echo "   stapler: stapled ticket present (works offline)"
-  gate_ok=1
 else
   echo "   stapler: NO stapled ticket" >&2
+  gate_ok=0
 fi
+
 [ "$gate_ok" = 1 ] ||
-  die "$DMG_PATH is neither Gatekeeper-clean nor stapled — it is an ad-hoc build. Do not ship it."
+  die "$DMG_PATH is not both Gatekeeper-clean AND stapled. Do not ship it — rebuild with \`just dmg\` on a machine with the Developer ID identity and the notary profile."
 
 echo ">> gh auth status"
 gh auth status >/dev/null 2>&1 ||
@@ -140,7 +170,27 @@ gh auth status >/dev/null 2>&1 ||
 
 [ -f CHANGELOG.md ] || die "no CHANGELOG.md in $ROOT"
 
-NOTES="$(mktemp -t astar-release-notes)"
+# The NEWEST heading must be this release — the same rule release.sh applies,
+# and for a sharper reason here. Publishing an older section as `--latest`
+# would put stale notes on the release everything links to, and the changelog
+# is in descending order, so anything but the top entry is a version that has
+# already been published.
+heading="$(grep -m1 '^## ' CHANGELOG.md || true)"
+[ -n "$heading" ] || die "CHANGELOG.md has no '## <version> — <date>' heading"
+heading_version="$(printf '%s\n' "$heading" | awk '{print $2}')"
+if [ "$heading_version" != "$VERSION" ]; then
+  echo "FAIL: CHANGELOG.md's newest heading is not the release you asked to publish." >&2
+  echo "    newest heading:  $heading" >&2
+  echo "    asked to publish: $VERSION" >&2
+  echo >&2
+  echo "      Publishing $VERSION now would attach the notes of a release that" >&2
+  echo "      is already out, and mark it --latest. Publish the newest release," >&2
+  echo "      or check out the commit whose changelog tops out at $VERSION." >&2
+  exit 1
+fi
+
+# An explicit template: `mktemp -t NAME` is a BSD spelling GNU rejects.
+NOTES="$(mktemp "${TMPDIR:-/tmp}/astar-release-notes.XXXXXX")"
 trap 'rm -f "$NOTES"' EXIT
 
 # From the `## <version> — <date>` heading to the next `## `, heading dropped:

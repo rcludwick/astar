@@ -32,11 +32,15 @@
 #
 # Flags:
 #   --dry-run          Run only the read-only checks and print every command
-#                      that would run. Nothing is modified, ever.
+#                      that would run. It touches nothing but remote-tracking
+#                      refs: the `git fetch origin` precondition is real, on
+#                      purpose, because "is main behind origin?" is the check a
+#                      rehearsal most needs to be true. No file in the tree, no
+#                      commit, no tag and no push.
+#   --bump-only        Rewrite the version strings and stop — no cargo, no
+#                      manifest check, NO GATES AT ALL, no git. This is a test
+#                      seam (ci/test_release_sh.sh), not a way to release.
 #   --skip-reflectors  Skip step 4 (the snapshot needs the network).
-#   --bump-only        Do step 3's file edits and stop, without cargo, the
-#                      manifest check, the gates or git. This is what
-#                      ci/test_release_sh.sh drives; it is not a release mode.
 #
 # Bash 3.2 (what macOS ships) — no associative arrays, no `mapfile`, and no
 # `timeout` command anywhere.
@@ -59,8 +63,13 @@ die() {
 }
 
 usage() {
-  echo "usage: ci/release.sh <version> [--dry-run] [--skip-reflectors]"
+  echo "usage: ci/release.sh <version> [--dry-run] [--skip-reflectors] [--bump-only]"
   echo "       e.g. ci/release.sh 0.1.13-beta --dry-run"
+  echo
+  echo "  --dry-run          read-only rehearsal; prints every command it would run"
+  echo "  --skip-reflectors  skip the bundled reflector snapshot refresh"
+  echo "  --bump-only        rewrite the version strings and stop — NO GATES AT ALL,"
+  echo "                     no cargo, no manifest check, no git. A test seam."
 }
 
 # Escape a version string for the left-hand side of a sed s/// — only `.` can
@@ -113,7 +122,7 @@ printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' ||
   die "not SemVer: '$VERSION'. Releases are MAJOR.MINOR.PATCH[-pre], e.g. 0.1.13-beta"
 
 if [ "$DRY_RUN" = 1 ]; then
-  echo "== astar release $VERSION — DRY RUN (nothing will be modified)"
+  echo "== astar release $VERSION — DRY RUN (reads only; touches nothing but remote-tracking refs)"
 else
   echo "== astar release $VERSION"
 fi
@@ -254,9 +263,9 @@ if [ "$DRY_RUN" = 1 ]; then
   echo "   would run: just dmg          -> $DMG_PATH"
   echo "   would run: git commit -m 'chore: $VERSION' <the files above>"
   echo "   would run: git tag -a v$VERSION -m 'astar $VERSION'"
-  echo "   would run: git push origin main v$VERSION"
+  echo "   would run: git push --atomic origin main v$VERSION"
   echo
-  echo "== dry run OK — nothing was modified. Publishing stays a separate step:"
+  echo "== dry run OK — no file, commit, tag or push. Publishing stays a separate step:"
   echo "   just publish $VERSION"
   exit 0
 fi
@@ -321,6 +330,8 @@ if [ "$SKIP_REFLECTORS" = 1 ]; then
 else
   echo ">> just reflectors"
   just reflectors || fail_after_edits "just reflectors failed (network?)"
+  # The snapshot is tracked, so a later failure has to name it in the undo.
+  CHANGED_LIST="$CHANGED_LIST apps/macos/Resources/reflectors.json"
 fi
 
 # ---------------------------------------------------------------------------
@@ -338,21 +349,75 @@ done
 # 6. Commit, tag, push to origin (the PRIVATE repo)
 # ---------------------------------------------------------------------------
 
+# Once anything is staged, `git checkout -- <files>` is no longer the undo:
+# it restores from the INDEX, which now holds the bumped content. Unstaging
+# has to come first, so from here failures say that instead.
+fail_after_stage() {
+  echo "FAIL: $1" >&2
+  echo >&2
+  echo "      The version edits are made AND STAGED. Nothing was committed," >&2
+  echo "      tagged or pushed. \`git checkout --\` alone will NOT undo them" >&2
+  echo "      now — it restores from the index, which holds the new version." >&2
+  echo "      Unstage first:" >&2
+  echo >&2
+  echo "        git reset HEAD -- $CHANGED_LIST && git checkout -- $CHANGED_LIST" >&2
+  exit 1
+}
+
 echo ">> committing chore: $VERSION"
 # Named paths, never `git add -A`: the tree also holds gitignored build output
 # and a DMG nobody wants in history.
-git add Cargo.toml Cargo.lock apps/macos/project.yml zensical.toml
+git add Cargo.toml Cargo.lock apps/macos/project.yml zensical.toml ||
+  fail_after_stage "git add failed"
 printf '%s' "$EDITED" | while IFS= read -r manifest; do
   [ -n "$manifest" ] || continue
   git add "$manifest"
-done
+done || fail_after_stage "git add of a crate manifest failed"
 if [ "$SKIP_REFLECTORS" = 0 ] && [ -f apps/macos/Resources/reflectors.json ]; then
-  git add apps/macos/Resources/reflectors.json
+  git add apps/macos/Resources/reflectors.json ||
+    fail_after_stage "git add of the reflector snapshot failed"
 fi
 
-git commit -m "chore: $VERSION"
-git tag -a "v$VERSION" -m "astar $VERSION"
-git push origin main "v$VERSION"
+# Each of the three can fail on its own, and each leaves the tree in a
+# different state. The gates take twenty minutes, which is long enough for
+# origin/main to move under a release, so the push is the one that really does
+# fail in practice — and it must not leave anything the message does not name.
+git commit -m "chore: $VERSION" || fail_after_stage "git commit failed"
+
+git tag -a "v$VERSION" -m "astar $VERSION" || {
+  echo "FAIL: git tag -a v$VERSION failed." >&2
+  echo >&2
+  echo "      The 'chore: $VERSION' commit EXISTS locally. Nothing is tagged," >&2
+  echo "      and nothing was pushed. To undo the commit and keep the edits:" >&2
+  echo >&2
+  echo "        git reset --soft HEAD~1" >&2
+  echo >&2
+  echo "      Or to throw them away entirely: git reset --hard HEAD~1" >&2
+  exit 1
+}
+
+# --atomic so the branch and the tag land together or not at all: a push that
+# gets main onto origin and then loses the tag is the one state that would make
+# the message below a lie.
+git push --atomic origin main "v$VERSION" || {
+  echo "FAIL: git push origin main v$VERSION failed." >&2
+  echo >&2
+  echo "      NOTHING reached origin — the push was --atomic, so main and the" >&2
+  echo "      tag either both landed or neither did, and neither did." >&2
+  echo "      Locally you now have:" >&2
+  echo "        * the commit  chore: $VERSION" >&2
+  echo "        * the tag     v$VERSION" >&2
+  echo >&2
+  echo "      Most likely origin/main moved while the gates ran. Either:" >&2
+  echo >&2
+  echo "        git pull --rebase origin main && git push --atomic origin main v$VERSION" >&2
+  echo >&2
+  echo "      ...re-running the gates first if the rebase pulled in real work," >&2
+  echo "      or unwind and start over:" >&2
+  echo >&2
+  echo "        git tag -d v$VERSION && git reset --hard HEAD~1" >&2
+  exit 1
+}
 
 echo
 echo "== released $VERSION to origin (rcludwick/astar-private)."

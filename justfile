@@ -412,7 +412,9 @@ release version *args:
 publish version *args:
     ci/publish.sh {{version}} {{args}}
 
-# Tests for ci/release.sh: a throwaway repo in a temp dir, no cargo/just/gh.
-# Part of `just ci` — it is hermetic and takes about a second.
+# Tests for both release scripts: a throwaway repo in a temp dir, with gh /
+# spctl / stapler stubbed on PATH for the publish half. No cargo, no network,
+# nothing real is ever pushed. Part of `just ci` — hermetic, about two seconds.
 release-test:
     ./ci/test_release_sh.sh
+    ./ci/test_publish_sh.sh

@@ -63,15 +63,35 @@ from and what `ci/version_manifest.py` publishes as the release list.
    machine — `make-dmg.sh` prints which of ad-hoc / signed / signed+notarized
    you actually got, and only the last is fit to publish.
 
-5. **Commit, tag, push**: `chore: <version>`, `v<version>`, both to `origin`.
+5. **Commit, tag, push**: `chore: <version>`, `v<version>`, both to `origin`,
+   with `git push --atomic` so the branch and the tag land together or not at
+   all.
+
+There is one more flag, `--bump-only`: it rewrites the version strings and
+stops — no cargo, no manifest check, **no gates at all**, no git. It exists so
+`ci/test_release_sh.sh` can drive the bump in isolation. It is not a way to
+release, and a tree bumped with it has been proven by nothing.
 
 ## `just publish <version>`
 
-Preconditions: the tag exists locally *and* on `origin`, `public/main` is an
-ancestor of `HEAD` (both repos share one history, so publishing is a
-fast-forward), `apps/macos/build/astar.dmg` exists and passes the same two
-assertions `make-dmg.sh` ends with — `spctl --assess --type open` and a stapled
-ticket from `xcrun stapler validate` — and `gh auth status` is happy.
+Preconditions:
+
+* you are on `main` — `main` is the branch that gets pushed, so `main` is what
+  every other check is about;
+* the tag exists locally, is reachable from `main`, and is on `origin`;
+* `public/main` is an ancestor of `main` (both repos share one history, so
+  publishing is a fast-forward and never a merge);
+* `CHANGELOG.md`'s **newest** heading is the version being published. Anything
+  below the top is a release that is already out, and publishing its notes as
+  `--latest` would put stale notes on the release the docs link to;
+* `apps/macos/build/astar.dmg` exists and passes **both** assertions
+  `make-dmg.sh` ends with — `spctl --assess --type open` *and* a stapled ticket
+  from `xcrun stapler validate`. Neither implies the other: Apple can notarize
+  an image whose ticket never got stapled, and that image passes `spctl` on a
+  machine that can reach Apple and fails on one that cannot. `make-dmg.sh`
+  exits 3 rather than produce a DMG missing either, so publishing one would be
+  shipping an artifact that script already refused;
+* `gh auth status` is happy.
 
 Then it pushes `main` and the tag to `public`, and creates the release with
 `gh release create`, with:
@@ -102,14 +122,35 @@ failure never leaves a half-released repo — only a modified working tree. Fix
 what broke, undo the edits (the script refuses a dirty tree, so you must), and
 run `just release <version>` again from the top.
 
-If a failure happens *after* the commit and tag but before the push, the tag is
-local only: `git tag -d v<version>` and `git reset --hard HEAD~1` put you back.
+The commit, the tag and the push each have their own failure message naming
+exactly what exists locally at that point. The push is the one that really
+fails in practice — the gates take twenty minutes, which is long enough for
+`origin/main` to move — and it is `--atomic`, so main and the tag either both
+landed or neither did. Either rebase and re-push:
+
+```console
+$ git pull --rebase origin main && git push --atomic origin main v<version>
+```
+
+...re-running the gates first if the rebase pulled in real work, or unwind and
+start over: `git tag -d v<version> && git reset --hard HEAD~1`.
 
 ## Testing the release script
 
-`just release-test` builds a throwaway repo in a temp directory and drives
-`ci/release.sh` against it — the changelog refusal, the dry run, and the bump
-proving it rewrites the five homes and nothing else (there is a decoy
-third-party dependency at the same version to catch a careless
-search-and-replace). It calls no cargo, no just, no gh and no network, takes
-about a second, and runs as part of `just ci`.
+`just release-test` runs both suites against throwaway repos in a temp
+directory, and runs as part of `just ci`.
+
+`ci/test_release_sh.sh` drives `ci/release.sh`: the changelog refusal, the dry
+run, and the bump proving it rewrites the five homes and nothing else (there is
+a decoy third-party dependency at the same version to catch a careless
+search-and-replace).
+
+`ci/test_publish_sh.sh` drives `ci/publish.sh` with `gh`, `spctl` and `stapler`
+stubbed on `PATH` and bare repos standing in for `origin` and `public`, so the
+refusals that protect a published release are provable offline: the
+newest-heading rule, the spctl-AND-stapler gate in both directions, publishing
+from the wrong branch, a diverged public repo, and a dry run that prints the
+three commands and runs none of them.
+
+Neither calls cargo, just, gh or the network, neither pushes anything, and
+together they take about two seconds.
