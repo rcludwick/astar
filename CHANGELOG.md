@@ -13,6 +13,84 @@ pre-release to the patch number, which sorts wrongly: `0.1.10beta` is newer
 than `0.1.9beta` and a string comparison says the opposite. Shipped versions
 are left as they were spelled.
 
+## 0.1.13-beta — 2026-09-09
+
+A microphone-setup release, mostly. The analyzer is a pane of the main window
+rather than a window of its own, it opens on the microphone your profile
+actually uses, and its threshold is now a level you can read straight off the
+canvas instead of an estimate drawn a few dB too high. Last heard grew from one
+name into a short history, the mic gains reach as far as the speaker's, and the
+AllStarLink account asks for nothing but a password.
+
+### Added
+
+- **Last heard is a history: the three most recent stations, each with its
+  age.** M17, D-Star and System Fusion all keep one, and both clients show it —
+  the macOS popover and the Iced client's status card. A single name answers
+  "who is talking"; three with ages answer "who is on this net", which is the
+  question you actually have when you join one. AllStarLink stays blank on
+  purpose: a node number is who you dialled, not who is speaking.
+
+- **The mic analyzer is a pane of the main window, not a second window.** It
+  opens in place, scrolls when the window is short, and Back returns to the
+  pane that sent you there — from Quick Config or from a Setup — rather than
+  leaving you to find your way home.
+
+- **Analyze says what it found before you save it.** One line under the button
+  gives the broadband noise floor it measured and the frequencies it would
+  notch — or that nothing cleared the threshold at all — so the profile you
+  write is one you have already read.
+
+### Changed
+
+- **The analyzer's threshold is an absolute level in dBFS, and the background
+  noise has a line of its own.** The slider used to read "Noise floor +N dB"
+  and the dashed line was tagged "(est.)" because it genuinely was one: it came
+  from the coarse display spectrum while the detector medianed a finer FFT, so
+  it sat several dB high and notches landed visibly beneath it. The slider is
+  now a threshold in dBFS (-100 to -20, default -60) drawn on the canvas's own
+  axis, and the background line is drawn and labelled separately. Nothing is
+  estimated any more: a peak above the orange line is a peak Analyze notches.
+
+- **A microphone with nothing above the threshold saves as a pass-through
+  profile.** A clean mic used to come back with notches invented out of its
+  noise floor. Now the profile records that there was nothing to remove, and
+  says so.
+
+- **Mic Level and TX Gain reach 400%, matching the speaker.** Both were
+  clamped at 200% on the mic lane — the capture gain and the final TX trim
+  after the compressor — while the speaker side already had 400% of headroom
+  for lifting a quiet station on a mixed net. A quiet mic, or a hot one that
+  still wants more reach after compression, is the same case. The per-Setup
+  "Vol" slider was left behind by that earlier change and now matches the main
+  one at 100-400%.
+
+- **For maintainers: a release is `just release <version>`.** One command bumps
+  the version in all five of its homes, refreshes the bundled reflector
+  snapshot, runs every gate and builds the signed, notarized DMG. Publishing is
+  a separate, deliberate second step — `just publish`. See `docs/RELEASING.md`.
+
+### Fixed
+
+- **The mic analyzer opens on the microphone the profile is using, and
+  switching devices actually switches.** This is what "the UCI150 shows
+  silence" was: the analyzer always monitored the system default, so a profile
+  built for a USB radio interface was measured from the built-in mic — and
+  picking the right device in the analyzer changed the label without changing
+  the audio, because the engine treated a monitor that was already running as
+  nothing to do. It now switches when the device differs, stays idempotent when
+  it does not, and a switch that fails keeps the old device rather than
+  half-forgetting it.
+
+- **The AllStarLink account asks for a password only, and the token comes
+  from AllStarLink's API.** astar now mints the WebTransceiver token through
+  the documented `auth-wt-legacy` endpoint with your callsign and account
+  password; no node number is involved, and the field is gone from Settings
+  for good. (0.1.12-beta had dropped it while still scraping the portal page,
+  which does need a node, so the Test button read "rejected"; the field came
+  back for a day and left again once the API path shipped.) The engine keeps
+  the page scrape as a fallback for configs that still carry a node.
+
 ## 0.1.12-beta — 2026-09-07
 
 A System Fusion release, mostly. Your over now carries your callsign, so the
