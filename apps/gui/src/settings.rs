@@ -113,7 +113,7 @@ pub struct AudioSettings {
     pub compression: bool,
     /// Compression strength (0…1), used when `compression` is on.
     pub compression_level: f32,
-    /// TX trim (0…2, linear, 1.0 = unity): the always-on final TX gain stage
+    /// TX trim (0…4, linear, 1.0 = unity): the always-on final TX gain stage
     /// after compression. Attenuates a hot mic that compression makeup gain
     /// would otherwise keep loud; above 1.0 boosts (engine clamps).
     pub tx_trim: f32,

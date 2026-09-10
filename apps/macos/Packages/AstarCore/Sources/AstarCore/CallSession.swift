@@ -278,7 +278,7 @@ public final class CallSession: ObservableObject {
     /// while the classical filter+gate chain is running, which
     /// `denoiseSummary` names.
     @Published public private(set) var denoiseStrength: Float = 1.0
-    /// TX trim (0…2, 1.0 = unity): the always-on final TX gain stage after
+    /// TX trim (0…4, 1.0 = unity): the always-on final TX gain stage after
     /// compression.
     @Published public private(set) var txTrim: Float = 1.0
     /// Mic noise reduction (denoise) is engaged. Persisted via the audio store.
@@ -2318,7 +2318,7 @@ public final class CallSession: ObservableObject {
         persistAudio { $0.denoiseStrength = level }
     }
 
-    /// Set the TX trim gain (0…2, 1.0 = unity; the engine clamps): publish, push
+    /// Set the TX trim gain (0…4, 1.0 = unity; the engine clamps): publish, push
     /// to the station, and persist (preserving the other audio prefs).
     public func setTxTrim(_ gain: Float) {
         txTrim = gain
@@ -2386,7 +2386,7 @@ public final class CallSession: ObservableObject {
         }
     }
 
-    /// Set the M17 override's TX trim (0…2, 1.0 = unity): publish, persist,
+    /// Set the M17 override's TX trim (0…4, 1.0 = unity): publish, persist,
     /// push live while an M17 call is active (see `setM17NoiseReduction`).
     public func setM17TxTrim(_ gain: Float) {
         m17Overrides.txTrim = gain
@@ -2396,7 +2396,7 @@ public final class CallSession: ObservableObject {
         }
     }
 
-    /// Set the M17 override's mic (input) gain (0…2, unity 1.0): publish,
+    /// Set the M17 override's mic (input) gain (0…4, unity 1.0): publish,
     /// persist, push live while an M17 call is active (see
     /// `setM17NoiseReduction`). Output gain has no M17 counterpart — it
     /// stays whatever the shared `AudioSettings` says for both networks.

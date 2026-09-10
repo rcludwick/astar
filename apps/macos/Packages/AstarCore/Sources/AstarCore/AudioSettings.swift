@@ -26,7 +26,7 @@ public struct AudioSettings: Equatable {
     /// Adding a field does NOT bump `ConfigVersion`: an older reader ignores
     /// it, a newer one treats it as unset and gets the default.
     public var denoiseStrength: Float
-    /// TX trim (0…2, linear): the always-on final TX gain stage after
+    /// TX trim (0…4, linear): the always-on final TX gain stage after
     /// compression. Attenuates a hot mic that compression makeup gain would
     /// otherwise keep loud; above 1.0 boosts (engine clamps at full scale).
     /// Default 1.0 (unity).

@@ -2348,7 +2348,7 @@ impl Station {
             })
     }
 
-    /// Set the input (TX/mic) gain multiplier (clamped `[0.0, 2.0]`).
+    /// Set the input (TX/mic) gain multiplier (clamped `[0.0, 4.0]`).
     pub fn set_input_gain(&self, gain: f32) {
         self.session.lock().unwrap().set_input_gain(gain);
     }
@@ -2382,7 +2382,7 @@ impl Station {
         self.session.lock().unwrap().set_denoise_strength(level);
     }
 
-    /// Set the TX trim gain (`0.0..=2.0`, clamped; default `1.0` = unity) on
+    /// Set the TX trim gain (`0.0..=4.0`, clamped; default `1.0` = unity) on
     /// the live/next call: the always-on FINAL TX gain stage, applied after the
     /// compressor so it attenuates a hot mic that compression makeup gain would
     /// otherwise keep loud (iax-750a). Values above `1.0` boost (clamped at
