@@ -17,17 +17,39 @@ use crate::device::{DeviceId, DeviceInfo, Direction};
 use crate::error::AudioError;
 use crate::stream::{AudioBackend, InputSink, OutputSource, StreamConfig, StreamHandle};
 
-/// A backend that touches no hardware: it advertises a single synthetic input
-/// (`in:null`) and output (`out:null`) device and opens streams that drop
-/// silently. Construct with [`NullBackend::new`].
-#[derive(Debug, Default, Clone, Copy)]
-pub struct NullBackend;
+/// A backend that touches no hardware: it advertises synthetic input devices
+/// (just `in:null` unless [`NullBackend::with_inputs`] names others) and one
+/// synthetic output (`out:null`), and opens streams that drop silently.
+/// Construct with [`NullBackend::new`].
+#[derive(Debug, Clone)]
+pub struct NullBackend {
+    /// The input device names this backend advertises, in order. The first is
+    /// the default input.
+    inputs: Vec<String>,
+}
 
 impl NullBackend {
-    /// Create a `NullBackend`.
+    /// Create a `NullBackend` advertising the single input `in:null`.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self::with_inputs(&["in:null"])
+    }
+
+    /// Create a `NullBackend` advertising each of `names` as an input device
+    /// (plus the usual `out:null` output). Lets a test exercise picking BETWEEN
+    /// capture devices — switching the mic monitor, say — with no hardware.
+    /// The first name is the default input.
+    #[must_use]
+    pub fn with_inputs(names: &[&str]) -> Self {
+        Self {
+            inputs: names.iter().map(|n| (*n).to_string()).collect(),
+        }
+    }
+}
+
+impl Default for NullBackend {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -57,14 +79,17 @@ fn dev(direction: Direction, tag: &str) -> DeviceInfo {
 
 impl AudioBackend for NullBackend {
     fn devices(&self) -> Result<Vec<DeviceInfo>, AudioError> {
-        Ok(vec![
-            dev(Direction::Input, "in:null"),
-            dev(Direction::Output, "out:null"),
-        ])
+        let mut devs: Vec<DeviceInfo> = self
+            .inputs
+            .iter()
+            .map(|name| dev(Direction::Input, name))
+            .collect();
+        devs.push(dev(Direction::Output, "out:null"));
+        Ok(devs)
     }
 
     fn default_input(&self) -> Option<DeviceInfo> {
-        Some(dev(Direction::Input, "in:null"))
+        self.inputs.first().map(|name| dev(Direction::Input, name))
     }
 
     fn default_output(&self) -> Option<DeviceInfo> {
@@ -98,6 +123,38 @@ impl AudioBackend for NullBackend {
 mod tests {
     use super::*;
     use crate::AudioBackend;
+
+    #[test]
+    fn with_inputs_advertises_each_named_input() {
+        let b = NullBackend::with_inputs(&["in:a", "in:b"]);
+        let devs = b.devices().expect("devices");
+        let ins: Vec<_> = devs
+            .iter()
+            .filter(|d| d.direction == crate::Direction::Input)
+            .map(|d| d.name.as_str())
+            .collect();
+        assert_eq!(ins, ["in:a", "in:b"]);
+        assert_eq!(
+            b.default_input().map(|d| d.name),
+            Some("in:a".to_string()),
+            "the first named input is the default"
+        );
+        assert!(
+            devs.iter().any(|d| d.direction == crate::Direction::Output),
+            "the output is still advertised"
+        );
+    }
+
+    #[test]
+    fn new_advertises_exactly_the_one_null_input() {
+        let devs = NullBackend::new().devices().expect("devices");
+        let ins: Vec<_> = devs
+            .iter()
+            .filter(|d| d.direction == crate::Direction::Input)
+            .map(|d| d.name.as_str())
+            .collect();
+        assert_eq!(ins, ["in:null"]);
+    }
 
     #[test]
     fn null_backend_lists_two_devices() {

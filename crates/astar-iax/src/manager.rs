@@ -2065,7 +2065,7 @@ impl Manager {
         self.router.output_compress_level(&c.output)
     }
 
-    /// Set the TX trim (0.0..=2.0, clamped; 1.0 = unity) on `call`'s routed
+    /// Set the TX trim (0.0..=4.0, clamped; 1.0 = unity) on `call`'s routed
     /// mic: the always-on final gain stage after the compressor (iax-750a).
     /// No-op if unrouted/unknown.
     pub fn set_tx_trim(&self, call: CallId, g: f32) {

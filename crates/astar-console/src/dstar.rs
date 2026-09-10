@@ -180,6 +180,7 @@ use astar_dstar::{
     TxStream, generate_stream_id, repeater_fields,
 };
 
+use crate::heard::{HeardEntry, HeardLog};
 use crate::session::ConsoleError;
 
 /// The run-loop thread's socket read timeout: also the cadence at which the
@@ -418,6 +419,10 @@ struct SharedState {
     talker: Mutex<Option<String>>,
     slow_text: Mutex<Option<String>>,
     ptt: AtomicBool,
+    /// Everyone heard on this link, newest first — `talker` keeps only the
+    /// most recent name, which a short courtesy tail overwrites a second
+    /// after the real talker unkeys.
+    heard: HeardLog,
 }
 
 impl SharedState {
@@ -427,6 +432,7 @@ impl SharedState {
             talker: Mutex::new(None),
             ptt: AtomicBool::new(false),
             slow_text: Mutex::new(None),
+            heard: HeardLog::new(),
         }
     }
 
@@ -646,6 +652,14 @@ impl DstarSession {
     #[must_use]
     pub fn state(&self) -> DstarSnapshotState {
         self.shared.snapshot(self.backend)
+    }
+
+    /// Who has keyed up on this link, newest first — see
+    /// [`crate::heard::HeardLog`]. Attacker-supplied text, like
+    /// [`DstarSnapshotState::talker`].
+    #[must_use]
+    pub fn heard(&self) -> Vec<HeardEntry> {
+        self.shared.heard.snapshot()
     }
 
     /// Disconnect: requests the run-loop send an unlink and exit, then joins
@@ -1949,7 +1963,9 @@ fn handle_dsvt(pkt: DsvtPacket, rx: &mut RxState<'_>) {
             flush_pipeline(rx, false);
             rx.tracker.start(stream_id, Instant::now());
             *rx.slow_rx = SlowDataRx::new();
-            *rx.shared.talker.lock().expect("talker mutex") = Some(header.my_callsign());
+            let call = header.my_callsign();
+            rx.shared.heard.note("dstar", &call);
+            *rx.shared.talker.lock().expect("talker mutex") = Some(call);
         }
         DsvtPacket::Voice {
             stream_id,
@@ -1986,6 +2002,16 @@ fn handle_dsvt(pkt: DsvtPacket, rx: &mut RxState<'_>) {
                 // so the tail isn't clipped (spec §2) BEFORE resetting
                 // tracking — `talker`/`slow_text` deliberately persist past
                 // this point (last-heard semantics — see the module docs).
+                //
+                // The history's clock is refreshed here too, so
+                // `HeardEntry::age_ms` counts from the end of the over
+                // rather than its start — the same meaning the AMBE links'
+                // per-frame notes give it. `note` moves an entry already at
+                // the front, so this is never a duplicate row.
+                let last = rx.shared.talker.lock().expect("talker mutex").clone();
+                if let Some(call) = last {
+                    rx.shared.heard.note("dstar", &call);
+                }
                 flush_pipeline(rx, true);
                 rx.tracker.end();
             }

@@ -29,6 +29,7 @@ use astar_iax_core::session::auth::Secret;
 use crate::dmr::{DmrConfig, DmrLink, DmrSnapshot};
 #[cfg(feature = "dstar")]
 use crate::dstar::{DstarConfig, DstarSession, DstarSnapshotState};
+use crate::heard::HeardEntry;
 #[cfg(feature = "m17")]
 use crate::m17::{M17Config, M17Session, M17SnapshotState};
 use crate::metering::Gain;
@@ -306,7 +307,7 @@ pub struct ConsoleSession {
     /// Neural denoise strength (f32 bits, `0.0..=1.0`; `1.0` = full). Held
     /// here so it survives across calls, like `compress_level`.
     denoise_strength: Arc<AtomicU32>,
-    /// TX trim 0.0..=2.0 (f32 bits, default 1.0 = unity): the always-on final
+    /// TX trim 0.0..=4.0 (f32 bits, default 1.0 = unity): the always-on final
     /// TX gain stage after the compressor (iax-750a). Persisted across
     /// reconnects and pushed to the router on connect / on change.
     tx_trim: Arc<AtomicU32>,
@@ -719,11 +720,11 @@ impl ConsoleSession {
         }
     }
 
-    /// Set the TX trim (0.0..=2.0, clamped; 1.0 = unity) on the next/current
+    /// Set the TX trim (0.0..=4.0, clamped; 1.0 = unity) on the next/current
     /// network call: the always-on final TX gain stage after the compressor
     /// (iax-750a). Persisted across reconnects; takes effect immediately.
     pub fn set_tx_trim(&self, g: f32) {
-        let g = g.clamp(0.0, 2.0);
+        let g = g.clamp(0.0, 4.0);
         self.tx_trim.store(g.to_bits(), Ordering::Relaxed);
         if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
             mgr.set_tx_trim(id, g);
@@ -2737,15 +2738,16 @@ impl ConsoleSession {
         call.map(|c| (c, manager))
     }
 
-    /// Set the input (TX/mic) gain multiplier. `value` is clamped to `[0.0, 2.0]`;
-    /// `NaN` is treated as unity (1.0). Takes `&self` (atomic write) so it can be
-    /// called from a shared reference — no `NotConnected` error, gain is a
-    /// standing preference that persists across calls.
+    /// Set the input (TX/mic) gain multiplier. `value` is clamped to `[0.0, 4.0]`
+    /// (100%-400% headroom, matching the output side's ceiling); `NaN` is
+    /// treated as unity (1.0). Takes `&self` (atomic write) so it can be called
+    /// from a shared reference — no `NotConnected` error, gain is a standing
+    /// preference that persists across calls.
     pub fn set_input_gain(&self, value: f32) {
         let clamped = if value.is_nan() {
             1.0
         } else {
-            value.clamp(0.0, 2.0)
+            value.clamp(0.0, 4.0)
         };
         self.input_gain.set(clamped);
         if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
@@ -2761,7 +2763,7 @@ impl ConsoleSession {
 
     /// Set the output (RX/speaker) gain multiplier. `value` is clamped to
     /// `[0.0, 4.0]` (iax-a4e7: 100%-400% headroom so a quiet station on a
-    /// mixed net can be boosted, not just the input side's `[0.0, 2.0]`);
+    /// mixed net can be boosted — the input side shares this same ceiling);
     /// `NaN` is treated as unity (1.0), same as
     /// [`set_input_gain`](Self::set_input_gain). `0.0` is a valid floor, not
     /// just a clamp boundary — the half-duplex RX-mute path calls
@@ -2985,6 +2987,38 @@ impl ConsoleSession {
     #[must_use]
     pub fn link_roster(&self) -> Option<LinkRoster> {
         self.manager.as_ref().map(Manager::link_roster)
+    }
+
+    /// Who has keyed up on the live digital link, newest first — see
+    /// [`crate::heard::HeardLog`]. Empty when no digital session is live:
+    /// `AllStar` carries no talker identity, so an IAX2 call has nothing to
+    /// report here.
+    ///
+    /// At most one digital session is ever live (every connect path guards on
+    /// the others), so the first `Some` found is the answer.
+    #[must_use]
+    pub fn heard(&self) -> Vec<HeardEntry> {
+        #[cfg(feature = "m17")]
+        if let Some(s) = &self.m17 {
+            return s.heard();
+        }
+        #[cfg(feature = "dstar")]
+        if let Some(s) = &self.dstar {
+            return s.heard();
+        }
+        #[cfg(feature = "ysf")]
+        if let Some(s) = &self.ysf {
+            return s.heard();
+        }
+        #[cfg(feature = "nxdn")]
+        if let Some(s) = &self.nxdn {
+            return s.heard();
+        }
+        #[cfg(feature = "dmr")]
+        if let Some(s) = &self.dmr {
+            return s.heard();
+        }
+        Vec::new()
     }
 
     /// Drain all pending aggregated link lifecycle events (iax-62cf stream).
@@ -3952,6 +3986,14 @@ mod tests {
         );
     }
 
+    /// No digital link, nothing heard. `AllStar` carries no talker identity,
+    /// so an IAX2-only console has nothing to report either.
+    #[test]
+    fn heard_is_empty_with_no_digital_session() {
+        let s = ConsoleSession::new();
+        assert!(s.heard().is_empty());
+    }
+
     #[test]
     fn gain_defaults_to_unity() {
         let s = ConsoleSession::new();
@@ -3966,7 +4008,7 @@ mod tests {
     }
 
     #[test]
-    fn set_input_gain_clamps_to_0_to_2() {
+    fn set_input_gain_clamps_to_0_to_4() {
         let s = ConsoleSession::new();
         s.set_input_gain(1.5);
         assert!(
@@ -3980,15 +4022,21 @@ mod tests {
         );
         s.set_input_gain(3.0);
         assert!(
-            (s.input_gain() - 2.0).abs() < 1e-6,
-            "above 2 clamped to 2.0"
+            (s.input_gain() - 3.0).abs() < 1e-6,
+            "3.0 is within the 4.0 ceiling, stored as-is"
+        );
+        s.set_input_gain(5.0);
+        assert!(
+            (s.input_gain() - 4.0).abs() < 1e-6,
+            "above 4 clamped to 4.0"
         );
     }
 
     #[test]
     fn set_output_gain_clamps_to_0_to_4() {
-        // iax-a4e7: output gain's ceiling is 4.0 (400%), double the input
-        // side's 2.0 — RX amplification headroom for a quiet station.
+        // iax-a4e7: output gain's ceiling is 4.0 (400%), same headroom as
+        // the input side — RX amplification for a quiet station on a mixed
+        // net.
         let s = ConsoleSession::new();
         s.set_output_gain(0.75);
         assert!(

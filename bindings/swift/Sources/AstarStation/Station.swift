@@ -811,6 +811,30 @@ public struct LinkRoster: Sendable, Equatable, Codable {
     public let links: [LinkSnapshot]
 }
 
+/// One row of ``Station/heard()``: whatever callsign the far end put on the
+/// wire, kept verbatim — it is remote text, not a validated identity.
+public struct HeardEntry: Sendable, Equatable, Codable {
+    /// The callsign as received, unmodified.
+    public let callsign: String
+    /// Which network heard it — the app's `Network.rawValue`: "m17", "dstar",
+    /// "ysf", "nxdn", "dmr".
+    public let network: String
+    /// How long ago it was heard, in milliseconds.
+    public let ageMs: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case callsign
+        case network
+        case ageMs = "age_ms"
+    }
+
+    public init(callsign: String, network: String, ageMs: UInt64) {
+        self.callsign = callsign
+        self.network = network
+        self.ageMs = ageMs
+    }
+}
+
 public enum Event: Sendable, Equatable {
     /// The peer answered; media is flowing.
     case answered
@@ -1222,7 +1246,7 @@ public final class Station {
         try check(iax_station_set_dtmf_mode(handle, IaxDtmfMode(rawValue: UInt32(mode.rawValue))))
     }
 
-    /// Set the input (TX/mic) gain multiplier (clamped `0.0...2.0`).
+    /// Set the input (TX/mic) gain multiplier (clamped `0.0...4.0`).
     public func setInputGain(_ gain: Float) throws {
         try check(iax_station_set_input_gain(handle, gain))
     }
@@ -1276,7 +1300,7 @@ public final class Station {
         try check(iax_station_set_denoise_strength(handle, level))
     }
 
-    /// Set the TX trim gain (`0.0...2.0`, clamped; default `1.0` = unity): the
+    /// Set the TX trim gain (`0.0...4.0`, clamped; default `1.0` = unity): the
     /// always-on final TX gain stage after compression. Attenuates a hot mic
     /// that compression makeup gain would otherwise keep loud; values above
     /// 1.0 boost (clamped at full scale). Takes effect immediately on the
@@ -1313,12 +1337,20 @@ public final class Station {
 
     // MARK: Monitor mode
 
-    /// Start monitor mode (iax-2377): open the capture device and run the mic
+    /// Monitor THIS device (iax-2377): open the capture device and run the mic
     /// lane WITHOUT a call so a front-end can preview / characterize the mic
     /// before dialing. `input` is a capture-device name substring, or `nil` for
-    /// the system default. Idempotent and call-safe: a no-op if a call is
-    /// already active (the device is already open) or if a monitor is already
-    /// running. Stop it with `monitorStop()`.
+    /// the system default.
+    ///
+    /// Call it again to change mics: asking for a **different** resolved device
+    /// stops the running monitor and opens the new one — a device picker moves
+    /// the stream, not just its label — while asking for the device already
+    /// monitored is a no-op. The device is resolved before the running monitor
+    /// is touched, so a name that resolves to nothing throws and leaves the
+    /// current monitor running. Still call-safe: a no-op if a call is already
+    /// active (the device is already open on the call's mic lane).
+    ///
+    /// Stop it with `monitorStop()`.
     ///
     /// NOTE: opens an audio device (blocking); call it off any UI thread.
     public func monitorStart(input: String? = nil) throws {
@@ -1363,24 +1395,78 @@ public final class Station {
         return Array(buf.prefix(Int(n)))
     }
 
+    /// The options `characterize(harmonicComb:peakMarginDb:thresholdDbfs:)`
+    /// sends across the ABI. Every level key is optional on the wire: a `nil`
+    /// is left out entirely (Swift's `Encodable` omits a nil `Optional` by
+    /// default) so the engine's own default stays authoritative.
+    private struct CharacterizeOptions: Encodable {
+        var harmonicComb: Bool
+        var peakMarginDb: Float?
+        var thresholdDbfs: Float?
+
+        enum CodingKeys: String, CodingKey {
+            case harmonicComb = "harmonic_comb"
+            case peakMarginDb = "peak_margin_db"
+            case thresholdDbfs = "threshold_dbfs"
+        }
+    }
+
     /// Characterize the monitored mic (iax-5fb6): run `characterize()` over the
     /// buffered monitor-mode silence and return the resulting `MicProfile` as a
     /// JSON string (secret-free — plain DSP numbers). Empty while not monitoring;
     /// call after a few seconds of monitored silence. `harmonicComb` enables
     /// harmonic-aware notch detection (**default off**: a learned-fundamental
-    /// comb that catches rolled-off upper harmonics). Persist the JSON opaquely
-    /// per device and feed it back via `setMicProfile(_:)`.
-    public func characterize(harmonicComb: Bool = false) throws -> String {
-        let needed = iax_station_characterize(handle, harmonicComb, nil, 0)
-        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
-        if needed == 0 { return "" }
-        // +1 for the NUL the C-ABI writes.
-        var buf = [CChar](repeating: 0, count: Int(needed) + 1)
-        let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
-            iax_station_characterize(handle, harmonicComb, ptr.baseAddress, UInt(ptr.count))
+    /// comb that catches rolled-off upper harmonics).
+    ///
+    /// Two ways to say what counts as a tone, and `thresholdDbfs` wins:
+    ///
+    /// - `peakMarginDb` is **relative** — how far above the measured noise floor
+    ///   a bin must stand. Bigger is fussier.
+    /// - `thresholdDbfs` is **absolute** — a level, in the same
+    ///   sinusoid-normalised dBFS `micSpectrum()` reports, that a bin must
+    ///   exceed. A tone drawn above that line on a spectrum view is above it for
+    ///   the detector too, whatever the noise underneath is doing.
+    ///
+    /// Either way, a mic clean enough that nothing clears the bar characterizes
+    /// as a pass-through profile (an empty notch list). `nil` for either keeps
+    /// the engine's own default. Persist the JSON opaquely per device and feed
+    /// it back via `setMicProfile(_:)`.
+    public func characterize(
+        harmonicComb: Bool = false,
+        peakMarginDb: Float? = nil,
+        thresholdDbfs: Float? = nil
+    ) throws -> String {
+        let options = CharacterizeOptions(
+            harmonicComb: harmonicComb, peakMarginDb: peakMarginDb, thresholdDbfs: thresholdDbfs)
+        let optionsJSON = String(
+            decoding: try JSONEncoder().encode(options), as: UTF8.self)
+        return try optionsJSON.withCString { optsPtr -> String in
+            // Size, then fill — but each call is a fresh MEASUREMENT of a moving
+            // mic ring, not a read of a stored string, so the second run can be
+            // longer than the first reported. It does not take a new notch to do
+            // it: the floats are printed at full precision, and a floor that
+            // lands on "-44.78613" instead of "-44.7861" is one byte more. The C
+            // ABI truncates silently, and one byte off the end of an object is a
+            // missing "}" — JSON that parses nowhere. So retry once at the size
+            // the fill actually reported, the same once-only retry the Python
+            // binding does for its lists.
+            var needed = iax_station_characterize_opts(handle, optsPtr, nil, 0)
+            for _ in 0..<2 {
+                if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
+                if needed == 0 { return "" }
+                // +1 for the NUL the C-ABI writes.
+                var buf = [CChar](repeating: 0, count: Int(needed) + 1)
+                let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+                    iax_station_characterize_opts(handle, optsPtr, ptr.baseAddress, UInt(ptr.count))
+                }
+                if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
+                if rc <= needed { return String(cString: buf) }
+                needed = rc
+            }
+            // Grew twice running. Report "nothing to characterize" rather than
+            // hand back a truncated profile; the caller's next attempt re-measures.
+            return ""
         }
-        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
-        return String(cString: buf)
     }
 
     /// Apply (or clear) a calibrated per-mic profile (iax-2095). `json` is a
@@ -1671,6 +1757,37 @@ public final class Station {
             throw StationError(code: -1, text: "undecodable link roster json", detail: "")
         }
         return roster
+    }
+
+    /// Who has keyed up on the live digital link, newest first. Empty on
+    /// AllStar and while idle. Callsigns are whatever the far end sent.
+    public func heard() throws -> [HeardEntry] {
+        let needed = iax_station_heard_json(handle, nil, 0)
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
+        var buf = [CChar](repeating: 0, count: Int(needed) + 1)
+        var rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+            iax_station_heard_json(handle, ptr.baseAddress, UInt(ptr.count))
+        }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
+        // A station can key between the sizing call and the fill, which makes
+        // the JSON longer than the buffer we just sized: the C ABI reports the
+        // size it wanted instead of truncating silently, so grow once and fill
+        // again. Once only — the same race can always recur, and a retry loop
+        // on a busy reflector would spin.
+        if rc > Int32(buf.count - 1) {
+            buf = [CChar](repeating: 0, count: Int(rc) + 1)
+            rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+                iax_station_heard_json(handle, ptr.baseAddress, UInt(ptr.count))
+            }
+            if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
+        }
+        let json = String(cString: buf)
+        guard let data = json.data(using: .utf8),
+            let rows = try? JSONDecoder().decode([HeardEntry].self, from: data)
+        else {
+            throw StationError(code: -1, text: "undecodable heard json", detail: "")
+        }
+        return rows
     }
 
     /// Drain the next pending link lifecycle event, or `nil` when none.

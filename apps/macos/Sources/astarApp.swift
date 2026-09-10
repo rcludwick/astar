@@ -108,7 +108,7 @@ struct AstarApp: App {
         // pickers never enumerate on view-appear (which froze the Quick-settings
         // reveal) and stay live when a mic/interface is plugged in or removed.
         lazy var deviceMonitor = AudioDeviceMonitor(session: session)
-        lazy var micAnalyzer = MicAnalyzerController(session: session)
+        lazy var micAnalyzer = MicAnalyzerController(session: session, navigation: navigation)
         // Which pane the main window shows. Owned here because BOTH the popover's
         // footer button and the main menu's Settings… item drive it (astar-1f7d).
         let navigation = AppNavigation()

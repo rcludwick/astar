@@ -28,7 +28,7 @@ extension CallSession {
         try station.setDevices(input: input, output: output)
     }
 
-    /// Set the input (TX/mic) gain multiplier (the station clamps to `0...2`).
+    /// Set the input (TX/mic) gain multiplier (the station clamps to `0...4`).
     public func setInputGain(_ gain: Float) throws {
         try station.setInputGain(gain)
     }

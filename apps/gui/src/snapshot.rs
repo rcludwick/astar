@@ -68,6 +68,24 @@ pub struct Snapshot {
     /// Total digits of the active sequence; `0` when none — the falling edge
     /// back to 0 is the dialpad's "sequence finished" signal.
     pub dtmf_total: u32,
+    /// Who has keyed up recently on the live digital link, newest first, at
+    /// most three (astar-heard). Empty on AllStar and while idle — the
+    /// engine's log lives in the digital session, so every row belongs to the
+    /// network that is up.
+    pub heard: Vec<Heard>,
+}
+
+/// One row of the "last heard" list: a callsign and how long ago it was heard.
+///
+/// The network is implicit — only one digital link is live at a time, so
+/// every row belongs to it (mirrors `astar_station::HeardEntry` minus the
+/// network tag the UI doesn't need).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Heard {
+    /// The callsign as heard on the wire. Off-air text, rendered verbatim.
+    pub callsign: String,
+    /// Milliseconds since this station was last heard, at snapshot time.
+    pub age_ms: u64,
 }
 
 impl Snapshot {
@@ -140,6 +158,7 @@ impl Default for Snapshot {
             negotiated_format: None,
             dtmf_played: 0,
             dtmf_total: 0,
+            heard: Vec::new(),
         }
     }
 }
@@ -262,6 +281,13 @@ mod tests {
             Some("256 kbit/s")
         );
         assert_eq!(with(None).codec_bitrate(), None);
+    }
+
+    #[test]
+    fn idle_has_no_heard_history() {
+        // AllStar and idle carry none: the engine's log is the digital
+        // session's, and the live seam only reads it while one is up.
+        assert!(Snapshot::default().heard.is_empty());
     }
 
     #[test]

@@ -297,7 +297,7 @@ pub enum Message {
     RemoveFavorite(String),
     /// "Full duplex" toggled (Station card).
     FullDuplex(bool),
-    /// "Mic Level" (input gain, 0…2) dragged.
+    /// "Mic Level" (input gain, 0…4) dragged.
     InputGain(f32),
     /// "Noise reduction" toggled (Mic card).
     NoiseReduction(bool),
@@ -305,7 +305,7 @@ pub enum Message {
     Compression(bool),
     /// "Strength" (compression level, 0…1) dragged.
     CompressionLevel(f32),
-    /// "TX Gain" (TX trim, 0…2) dragged.
+    /// "TX Gain" (TX trim, 0…4) dragged.
     TxTrim(f32),
     /// "Vol" (output gain, 100%-400%) dragged.
     OutputGain(f32),

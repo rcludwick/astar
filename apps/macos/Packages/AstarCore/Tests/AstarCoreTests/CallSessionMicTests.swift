@@ -22,7 +22,8 @@ final class CallSessionMicTests: XCTestCase {
     func testNullStationMicDefaults() throws {
         let s = NullStation()
         XCTAssertEqual(try s.micSpectrum(), [])
-        XCTAssertEqual(try s.characterize(harmonicComb: false), "")
+        XCTAssertEqual(
+            try s.characterize(harmonicComb: false, peakMarginDb: nil, thresholdDbfs: nil), "")
         XCTAssertNoThrow(try s.monitorStart(input: nil))
         XCTAssertNoThrow(try s.monitorStop())
         XCTAssertNoThrow(try s.setMicProfile(nil))
@@ -57,7 +58,20 @@ final class CallSessionMicTests: XCTestCase {
         try session.monitorStart(input: "Jabra Link 390")
         XCTAssertEqual(fake.monitorStartCount, 1)
         XCTAssertEqual(try session.micSpectrum(), [-90, -70, -50])
-        XCTAssertEqual(try session.characterize(harmonicComb: false), "{\"floorDb\":-52}")
+        XCTAssertEqual(
+            try session.characterize(harmonicComb: false, peakMarginDb: 20, thresholdDbfs: nil),
+            "{\"floorDb\":-52}")
+        XCTAssertEqual(fake.characterizeCalls.last?.harmonicComb, false)
+        XCTAssertEqual(
+            fake.characterizeCalls.last?.peakMarginDb, 20,
+            "the session hands the engine the margin it was given, not a default")
+        // The absolute threshold rides the same path, and the session passes it
+        // through untouched rather than substituting a default of its own.
+        XCTAssertEqual(
+            try session.characterize(harmonicComb: true, peakMarginDb: nil, thresholdDbfs: -72),
+            "{\"floorDb\":-52}")
+        XCTAssertEqual(fake.characterizeCalls.last?.thresholdDbfs, -72)
+        XCTAssertNil(fake.characterizeCalls.last?.peakMarginDb)
         try session.monitorStop()
         XCTAssertEqual(fake.monitorStopCount, 1)
     }
@@ -78,6 +92,71 @@ final class CallSessionMicTests: XCTestCase {
         XCTAssertEqual(fake.monitorStopCount, 0)
         try session.monitorRelease()  // 1 → 0: close
         XCTAssertEqual(fake.monitorStopCount, 1)
+    }
+
+    func testRetainingADifferentInputSwitchesTheMonitor() throws {
+        // The mic analyzer's picker changes device while the lane is already held;
+        // a retain on another device has to re-assert it, or the label moves and
+        // the stream doesn't.
+        let fake = FakeStation()
+        let session = CallSession(station: fake)
+
+        try session.monitorRetain(input: "in:a")
+        try session.monitorRetain(input: "in:b")
+        XCTAssertEqual(
+            fake.monitorStartInputs, ["in:a", "in:b"],
+            "a second retain on another device re-asserts it")
+        try session.monitorRetain(input: "in:b")
+        XCTAssertEqual(
+            fake.monitorStartInputs, ["in:a", "in:b"],
+            "the same device is not re-asserted")
+    }
+
+    func testMonitorInputIsForgottenOnLastRelease() throws {
+        // The remembered device is per-open: after the last holder releases, the
+        // next retain on the same device must really open it again.
+        let fake = FakeStation()
+        let session = CallSession(station: fake)
+
+        try session.monitorRetain(input: "in:a")
+        try session.monitorRelease()
+        try session.monitorRetain(input: "in:a")
+
+        XCTAssertEqual(fake.monitorStartInputs, ["in:a", "in:a"])
+    }
+
+    func testAFailedSwitchStillCountsTheHold() throws {
+        // The analyzer marks itself as holding the lane whether or not the switch
+        // succeeded (`try?` + `holdsMonitor`), so a failed switch that didn't count
+        // would have its later release close the lane under the VOX meter.
+        let fake = FakeStation()
+        fake.monitorStartFailsFor = "in:b"
+        let session = CallSession(station: fake)
+
+        try session.monitorRetain(input: "in:a")
+        XCTAssertThrowsError(try session.monitorRetain(input: "in:b"))
+
+        try session.monitorRelease()  // 2 → 1: the other holder still has it
+        XCTAssertEqual(fake.monitorStopCount, 0, "a failed switch still counted its hold")
+        try session.monitorRelease()  // 1 → 0: now it closes
+        XCTAssertEqual(fake.monitorStopCount, 1)
+    }
+
+    func testAFailedSwitchForgetsTheDeviceSoTheNextRetainReopens() throws {
+        // The engine drops the old monitor before opening the new one, so after a
+        // failed switch nothing is open — retaining the ORIGINAL device again has
+        // to really reopen it, not compare equal and skip.
+        let fake = FakeStation()
+        fake.monitorStartFailsFor = "in:b"
+        let session = CallSession(station: fake)
+
+        try session.monitorRetain(input: "in:a")
+        XCTAssertThrowsError(try session.monitorRetain(input: "in:b"))
+        try session.monitorRetain(input: "in:a")
+
+        XCTAssertEqual(
+            fake.monitorStartInputs, ["in:a", "in:b", "in:a"],
+            "the lane is reopened after a failed switch")
     }
 
     func testMonitorReleaseIsClampedAtZero() throws {

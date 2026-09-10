@@ -17,9 +17,10 @@ use zeroize::Zeroize;
 
 use astar_station::LinkMode;
 use astar_station::{
-    AnswerPolicy, CallMode, CallStatus, CodecPolicy, DtmfMode, InboundConfig, IncomingAuthPolicy,
-    IncomingCallPolicy, NodeConfig, OperatingMode, PortalCredentials, RegisterConfig, Station,
-    StationConfig, StationError, StationEvent, VoiceFormat, WgConfigError, WgLinkConfig,
+    AnswerPolicy, CallMode, CallStatus, CodecPolicy, DtmfMode, HeardEntry, InboundConfig,
+    IncomingAuthPolicy, IncomingCallPolicy, NodeConfig, OperatingMode, PortalCredentials,
+    RegisterConfig, Station, StationConfig, StationError, StationEvent, VoiceFormat, WgConfigError,
+    WgLinkConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -1357,7 +1358,7 @@ pub unsafe extern "C" fn iax_station_set_dtmf_mode(
     .unwrap_or(IAX_ERR_PANIC)
 }
 
-/// Set the input (TX/mic) gain multiplier (clamped `[0.0, 2.0]`).
+/// Set the input (TX/mic) gain multiplier (clamped `[0.0, 4.0]`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iax_station_set_input_gain(st: *mut IaxStation, gain: c_float) -> c_int {
     if st.is_null() {
@@ -1487,7 +1488,7 @@ pub unsafe extern "C" fn iax_station_set_compression_level(
     .unwrap_or(IAX_ERR_PANIC)
 }
 
-/// Set the TX trim gain (0.0..=2.0 clamped, default 1.0): the final output
+/// Set the TX trim gain (0.0..=4.0 clamped, default 1.0): the final output
 /// stage after compression. Attenuates a hot mic that compression makeup gain
 /// would otherwise keep loud; values above 1.0 boost (clamped at full scale).
 /// Takes effect immediately on the live/next call. Returns [`IAX_OK`],
@@ -1567,13 +1568,22 @@ pub unsafe extern "C" fn iax_station_set_noise_reduction(st: *mut IaxStation, on
 // Monitor mode (mic capture without a call)
 // ---------------------------------------------------------------------------
 
-/// Start monitor mode (iax-2377): open the capture device and run the mic lane
+/// Monitor THIS device (iax-2377): open the capture device and run the mic lane
 /// WITHOUT a call so a front-end can preview / characterize the mic before
 /// dialing. `input` is a capture-device name substring, or NULL for the system
-/// default. Idempotent and call-safe: a no-op if a call is already active (the
-/// device is already open) or if a monitor is already running. Stop it with
-/// [`iax_station_monitor_stop`]. Returns [`IAX_OK`], [`IAX_ERR_AUDIO`] (device
-/// resolve/open failed), [`IAX_ERR_NULL`] (NULL `st`), or [`IAX_ERR_PANIC`].
+/// default.
+///
+/// Call it again to change mics: asking for a DIFFERENT resolved device stops
+/// the running monitor and opens the new one, so a front-end's device picker
+/// moves the stream and not just its label; asking for the device already
+/// monitored is a no-op. The device is resolved before the running monitor is
+/// touched, so a name that resolves to nothing returns an error and leaves the
+/// current monitor running. Still call-safe: a no-op if a call is already
+/// active (the device is already open on the call's mic lane).
+///
+/// Stop it with [`iax_station_monitor_stop`]. Returns [`IAX_OK`],
+/// [`IAX_ERR_AUDIO`] (device resolve/open failed), [`IAX_ERR_NULL`] (NULL `st`),
+/// or [`IAX_ERR_PANIC`].
 ///
 /// NOTE: opens an audio device (blocking); call it off any UI thread.
 #[unsafe(no_mangle)]
@@ -1747,6 +1757,112 @@ pub unsafe extern "C" fn iax_station_characterize(
     let station = unsafe { &*st };
     catch_unwind(AssertUnwindSafe(|| {
         let json = match station.inner.characterize(harmonic_comb) {
+            Some(profile) => serde_json::to_string(&profile).unwrap_or_default(),
+            None => String::new(),
+        };
+        unsafe { fill_buf(&json, buf, len) }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Parse the `opts_json` of [`iax_station_characterize_opts`]: an empty or
+/// whitespace-only string is the defaults, anything that is not a JSON object
+/// of the three known keys (each of the right type) is [`IAX_ERR_IAX`]. Keys the
+/// engine does not know are ignored, so a newer front-end can talk to an older
+/// library.
+fn parse_characterize_opts(text: &str) -> Result<astar_station::CharacterizeOpts, c_int> {
+    let mut opts = astar_station::CharacterizeOpts::default();
+    if text.trim().is_empty() {
+        return Ok(opts);
+    }
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|_| IAX_ERR_IAX)?;
+    let obj = value.as_object().ok_or(IAX_ERR_IAX)?;
+    if let Some(v) = obj.get("harmonic_comb") {
+        opts.harmonic_comb = v.as_bool().ok_or(IAX_ERR_IAX)?;
+    }
+    if let Some(v) = obj.get("peak_margin_db") {
+        // A plain f32 on the engine side, so `null` is a type error here — only
+        // `threshold_dbfs` below is optional and accepts `null`.
+        let margin = v.as_f64().ok_or(IAX_ERR_IAX)?;
+        // A dB margin is a small number; the engine clamps it to 0..=60 anyway.
+        #[allow(clippy::cast_possible_truncation)]
+        let margin = margin as f32;
+        opts.peak_margin_db = margin;
+    }
+    if let Some(v) = obj.get("threshold_dbfs") {
+        // Explicit `null` is "no absolute threshold" — the same as leaving the
+        // key out — so a front-end can send one shape of options either way.
+        opts.threshold_dbfs = if v.is_null() {
+            None
+        } else {
+            let threshold = v.as_f64().ok_or(IAX_ERR_IAX)?;
+            // A dBFS level is a small number; the engine clamps it to
+            // -140..=0 anyway.
+            #[allow(clippy::cast_possible_truncation)]
+            Some(threshold as f32)
+        };
+    }
+    Ok(opts)
+}
+
+/// Characterize the monitored mic with JSON options — the same buffer contract
+/// and the same output JSON as [`iax_station_characterize`], but the caller
+/// chooses the peak margin as well as the harmonic comb.
+///
+/// `opts_json` is
+/// `{"harmonic_comb":false,"peak_margin_db":12.0,"threshold_dbfs":-60.0}`. Every
+/// key is optional and NULL or an empty string means "all defaults" (comb off,
+/// 12 dB, no absolute threshold — exactly
+/// `iax_station_characterize(st, false, …)`).
+///
+/// The two detection knobs are alternatives, and `threshold_dbfs` wins:
+///
+/// * `peak_margin_db` is RELATIVE — how far above the spectral-median noise
+///   floor a tone must stand to be worth notching. Raise it to leave quiet
+///   peaks alone. Clamped to 0–60 dB.
+/// * `threshold_dbfs` is ABSOLUTE — a level, in the same sinusoid-normalised
+///   dBFS the live spectrum ([`iax_station_mic_spectrum`]) reports, that a peak
+///   must exceed. A tone drawn above that line on a spectrum display is above
+///   it for the detector too. Clamped to −140–0 dBFS. `null` (or an absent key)
+///   means "no absolute threshold": the relative margin decides.
+///
+/// Either way, a mic with nothing above the bar characterizes as a PASS-THROUGH
+/// profile (an empty notch list) that changes nothing in the mic lane. The
+/// engine records the clamped values it actually used in the profile it
+/// returns.
+///
+/// Returns the byte length the full JSON needs (excluding the NUL), or a
+/// negative `IAX_ERR_*`: [`IAX_ERR_NULL`] (NULL `st`), [`IAX_ERR_UTF8`]
+/// (non-UTF-8 `opts_json`), [`IAX_ERR_IAX`] (unparsable options), or
+/// [`IAX_ERR_PANIC`]. When not monitoring, writes an empty string and returns 0.
+///
+/// The JSON carries plain DSP numbers only — no credential fields.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_characterize_opts(
+    st: *mut IaxStation,
+    opts_json: *const c_char,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        // NULL options == all defaults.
+        let text = if opts_json.is_null() {
+            ""
+        } else {
+            match unsafe { req_str(opts_json) } {
+                Ok(s) => s,
+                Err(c) => return c,
+            }
+        };
+        let opts = match parse_characterize_opts(text) {
+            Ok(o) => o,
+            Err(c) => return c,
+        };
+        let json = match station.inner.characterize_with(opts) {
             Some(profile) => serde_json::to_string(&profile).unwrap_or_default(),
             None => String::new(),
         };
@@ -2290,6 +2406,110 @@ pub unsafe extern "C" fn iax_station_link_roster_json(
         }
     }))
     .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Render a heard snapshot as the ABI's JSON array, newest first — the row
+/// order the log already hands us, preserved.
+///
+/// Built through `serde_json` rather than `format!` for the same reason the
+/// NXDN renderer is: a callsign is whatever the far end put on the wire, so a
+/// quote or a backslash in one must not be able to break out of the string.
+///
+/// Split out of [`iax_station_heard_json`] so the exact JSON text — the three
+/// key names and the newest-first order a Swift or Python decoder mirrors —
+/// can be pinned by a unit test without a live link.
+fn heard_json(rows: Vec<HeardEntry>) -> Result<String, serde_json::Error> {
+    let rows: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "callsign": e.callsign,
+                "network": e.network,
+                "age_ms": e.age_ms,
+            })
+        })
+        .collect();
+    serde_json::to_string(&rows)
+}
+
+/// Write who has keyed up on the live digital link as a JSON array, newest
+/// first (`[{"callsign":"..","network":"m17","age_ms":1234}]`, `[]` when
+/// nothing has been heard) into the caller buffer. Same contract as
+/// [`iax_station_link_roster_json`]: NUL-terminated + truncate-safe; returns
+/// the byte length the full JSON needs (a `len == 0` call is a sizing query),
+/// or a negative `IAX_ERR_*`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_heard_json(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        match heard_json(station.inner.heard()) {
+            Ok(json) => unsafe { fill_buf(&json, buf, len) },
+            Err(_) => IAX_ERR_IAX,
+        }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+#[cfg(test)]
+mod heard_tests {
+    //! The exact text `iax_station_heard_json` publishes. A Swift or Python
+    //! decoder is written against these three key names and this row order,
+    //! so they are pinned here in literal JSON rather than left to whatever
+    //! the serializer happens to do.
+    use super::*;
+
+    #[test]
+    fn heard_json_pins_the_key_names_and_keeps_the_rows_newest_first() {
+        let rows = vec![
+            HeardEntry {
+                callsign: "W6VS".to_string(),
+                network: "m17",
+                age_ms: 1234,
+            },
+            HeardEntry {
+                callsign: "KF5ILA".to_string(),
+                network: "m17",
+                age_ms: 9000,
+            },
+        ];
+        assert_eq!(
+            heard_json(rows).expect("a heard row always serializes"),
+            r#"[{"age_ms":1234,"callsign":"W6VS","network":"m17"},{"age_ms":9000,"callsign":"KF5ILA","network":"m17"}]"#,
+            "keys sort alphabetically (serde_json's default map) and the log's \
+             newest-first row order survives"
+        );
+    }
+
+    #[test]
+    fn heard_json_of_nothing_heard_is_an_empty_array() {
+        assert_eq!(heard_json(Vec::new()).expect("serializes"), "[]");
+    }
+
+    #[test]
+    fn a_callsign_cannot_break_out_of_its_json_string() {
+        // Whatever the far end put on the wire lands in `callsign`; the
+        // serializer escapes it, `format!` would not have.
+        let rows = vec![HeardEntry {
+            callsign: r#"A"B\C"#.to_string(),
+            network: "ysf",
+            age_ms: 0,
+        }];
+        let json = heard_json(rows).expect("serializes");
+        assert_eq!(
+            json,
+            r#"[{"age_ms":0,"callsign":"A\"B\\C","network":"ysf"}]"#
+        );
+        // And it still parses back to the callsign that went in.
+        let back: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(back[0]["callsign"], r#"A"B\C"#);
+    }
 }
 
 /// Drain the next pending link lifecycle event. Returns 1 and fills `out`
@@ -3758,5 +3978,43 @@ mod resolver_bridge_tests {
             data: std::ptr::null_mut(),
         };
         assert_eq!(ctx.resolve("77777"), "");
+    }
+}
+
+#[cfg(test)]
+mod characterize_opts_tests {
+    use super::{IAX_ERR_IAX, parse_characterize_opts};
+
+    #[test]
+    fn an_absolute_threshold_reaches_the_engine() {
+        // rc == 0 from the boundary only proves the JSON parsed; this proves
+        // the number actually lands on the options the engine is handed.
+        let opts = parse_characterize_opts(r#"{"threshold_dbfs":-60}"#).expect("parses");
+        assert_eq!(opts.threshold_dbfs, Some(-60.0));
+        let opts = parse_characterize_opts(r#"{"threshold_dbfs":-60.5}"#).expect("parses");
+        assert_eq!(opts.threshold_dbfs, Some(-60.5));
+    }
+
+    #[test]
+    fn null_and_absent_both_mean_no_absolute_threshold() {
+        for text in [
+            "{}",
+            r#"{"threshold_dbfs":null}"#,
+            r#"{"peak_margin_db":18}"#,
+        ] {
+            let opts = parse_characterize_opts(text).expect("parses");
+            assert_eq!(opts.threshold_dbfs, None, "{text} must leave it unset");
+        }
+    }
+
+    #[test]
+    fn a_threshold_of_the_wrong_type_is_rejected() {
+        for bad in [
+            r#"{"threshold_dbfs":"x"}"#,
+            r#"{"threshold_dbfs":true}"#,
+            r#"{"threshold_dbfs":[]}"#,
+        ] {
+            assert_eq!(parse_characterize_opts(bad), Err(IAX_ERR_IAX), "{bad}");
+        }
     }
 }

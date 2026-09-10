@@ -55,6 +55,8 @@ const DEFAULT_PORT: u16 = 41_400;
 /// How often the control loop polls `Station::nxdn_state()`. Cheap
 /// (atomics-backed) — no faster than a human needs to see a transition.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// How often a quiet link reports its frame count.
+const HEARTBEAT: Duration = Duration::from_secs(30);
 /// Bound on how long `listen` waits, after requesting the unlink, for the
 /// state to clear before exiting.
 const UNLINK_TIMEOUT: Duration = Duration::from_secs(2);
@@ -262,6 +264,9 @@ fn listen(opts: &ListenOptions) -> Result<(), String> {
 
     let mut tracker = PrintTracker::new(target.clone());
     let mut link_failed = false;
+    // A quiet link says so every HEARTBEAT, with its frame count, so a silent
+    // half hour reads as "linked, nobody talking" rather than "hung".
+    let mut next_heartbeat = Instant::now() + HEARTBEAT;
 
     while !stop.load(Ordering::Relaxed) {
         let Some(state) = station.nxdn_state() else {
@@ -271,6 +276,14 @@ fn listen(opts: &ListenOptions) -> Result<(), String> {
         };
         for line in tracker.on_snapshot(&state) {
             println!("{line}");
+        }
+        if Instant::now() >= next_heartbeat {
+            next_heartbeat = Instant::now() + HEARTBEAT;
+            if !state.receiving
+                && let Some(line) = tracker.heartbeat(&state)
+            {
+                println!("{line}");
+            }
         }
         if state.link_state == "failed" {
             link_failed = true;
@@ -304,6 +317,10 @@ struct PrintTracker {
     last_heard: Option<String>,
     last_heard_id: Option<u16>,
     receiving: bool,
+    /// Whether the "frames arriving" line has been printed. It fires on the
+    /// first data frame the link counts, talker or not — the one line that
+    /// separates "nobody is talking" from "nothing reaches the decoder".
+    printed_frames: bool,
 }
 
 impl PrintTracker {
@@ -314,7 +331,22 @@ impl PrintTracker {
             last_heard: None,
             last_heard_id: None,
             receiving: false,
+            printed_frames: false,
         }
+    }
+
+    /// The periodic line for a quiet link: how many data frames have arrived
+    /// since linking. Printed by the caller on its own clock, so the tracker
+    /// stays pure. `None` before the link is up.
+    fn heartbeat(&self, state: &NxdnSnapshot) -> Option<String> {
+        if !self.printed_link {
+            return None;
+        }
+        Some(format!(
+            "still linked · {} data frame{} received so far",
+            state.frames_rx,
+            if state.frames_rx == 1 { "" } else { "s" }
+        ))
     }
 
     fn on_snapshot(&mut self, state: &NxdnSnapshot) -> Vec<String> {
@@ -332,6 +364,11 @@ impl PrintTracker {
             // point of running this.
             let backend = state.backend.unwrap_or("none");
             lines.push(format!("linked {} (backend: {backend})", self.target));
+        }
+
+        if !self.printed_frames && state.frames_rx > 0 {
+            self.printed_frames = true;
+            lines.push("frames arriving — the reflector is relaying to this link".to_string());
         }
 
         // Transmissions. Print on the start of one, and on a talker change
@@ -574,6 +611,36 @@ mod tests {
         let mut t = PrintTracker::new("nxdn.example:41400".into());
         let lines = t.on_snapshot(&snap("failed"));
         assert_eq!(lines, vec!["link failed".to_string()]);
+    }
+
+    #[test]
+    fn the_first_data_frame_is_announced_once_and_the_heartbeat_counts_them() {
+        let mut t = PrintTracker::new("nxdn.example:41400".into());
+        assert!(
+            t.heartbeat(&snap("linking")).is_none(),
+            "no heartbeat before the link is up"
+        );
+        let _ = t.on_snapshot(&snap("linked"));
+        assert_eq!(
+            t.heartbeat(&snap("linked")).as_deref(),
+            Some("still linked · 0 data frames received so far")
+        );
+        let mut one = snap("linked");
+        one.frames_rx = 1;
+        assert_eq!(
+            t.on_snapshot(&one),
+            vec!["frames arriving — the reflector is relaying to this link".to_string()]
+        );
+        let mut more = snap("linked");
+        more.frames_rx = 250;
+        assert!(
+            t.on_snapshot(&more).is_empty(),
+            "announced once, not per frame"
+        );
+        assert_eq!(
+            t.heartbeat(&more).as_deref(),
+            Some("still linked · 250 data frames received so far")
+        );
     }
 
     #[test]

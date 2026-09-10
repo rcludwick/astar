@@ -223,6 +223,30 @@ public final class CallSession: ObservableObject {
     /// on the wire. Render it as text, never as markup.
     @Published public private(set) var lastHeard: String?
 
+    /// The last few stations heard on the live digital link, newest first.
+    ///
+    /// The list behind `lastHeard`: same source, same rules, more than one
+    /// row. It holds at most ``heardHistoryLimit`` entries, and only rows from
+    /// the network `activeCallNetwork` names — a callsign heard on a Fusion
+    /// link a minute ago is not part of the M17 link that is up now.
+    ///
+    /// **Last heard, not talking now**: a row persists past
+    /// end-of-transmission, exactly like `lastHeard`. `remotePTT` and the
+    /// per-network `*Receiving` flags are what say a transmission is in
+    /// progress.
+    ///
+    /// Ages are rounded down to whole seconds, so the list publishes when the
+    /// displayed age changes rather than once per poll.
+    ///
+    /// **Attacker-controlled**: every callsign is whatever whoever keyed up
+    /// put on the wire. Render as text, never as markup, and interpret
+    /// nothing.
+    @Published public private(set) var heardHistory: [HeardEntry] = []
+
+    /// How many rows ``heardHistory`` keeps. Three is what the popover has
+    /// room for without pushing the controls off the bottom.
+    public static let heardHistoryLimit = 3
+
     /// The node most recently dialed (set at `connect`, cleared at `disconnect`).
     /// Surfaces who we're connected to — e.g. the menu-bar right-click menu.
     /// Display should still gate on `status`, since a stale value can outlive a
@@ -254,7 +278,7 @@ public final class CallSession: ObservableObject {
     /// while the classical filter+gate chain is running, which
     /// `denoiseSummary` names.
     @Published public private(set) var denoiseStrength: Float = 1.0
-    /// TX trim (0…2, 1.0 = unity): the always-on final TX gain stage after
+    /// TX trim (0…4, 1.0 = unity): the always-on final TX gain stage after
     /// compression.
     @Published public private(set) var txTrim: Float = 1.0
     /// Mic noise reduction (denoise) is engaged. Persisted via the audio store.
@@ -943,6 +967,7 @@ public final class CallSession: ObservableObject {
             // reads. Done here, after every source has been advanced, so a
             // single poll can never publish a `lastHeard` from the network
             // that was live a tick ago.
+            refreshHeardHistory(snapshot: snap)
             refreshLastHeard()
             // Quarter-second peak-hold for the VU meters (astar-f78a) so they read
             // steadily instead of flickering at the poll rate.
@@ -2123,6 +2148,7 @@ public final class CallSession: ObservableObject {
         dstarTalker = nil
         dstarSlowText = nil
         dstarLink = nil
+        if !heardHistory.isEmpty { heardHistory = [] }
         refreshLastHeard()
     }
 
@@ -2136,6 +2162,7 @@ public final class CallSession: ObservableObject {
         ysfReceiving = false
         ysfLink = nil
         ysfUnsupportedMode = nil
+        if !heardHistory.isEmpty { heardHistory = [] }
         refreshLastHeard()
     }
 
@@ -2146,6 +2173,7 @@ public final class CallSession: ObservableObject {
         nxdnLastHeard = nil
         nxdnReceiving = false
         nxdnLink = nil
+        if !heardHistory.isEmpty { heardHistory = [] }
         refreshLastHeard()
     }
 
@@ -2156,6 +2184,7 @@ public final class CallSession: ObservableObject {
         dmrLastHeard = nil
         dmrReceiving = false
         dmrLink = nil
+        if !heardHistory.isEmpty { heardHistory = [] }
         refreshLastHeard()
     }
 
@@ -2165,7 +2194,36 @@ public final class CallSession: ObservableObject {
     private func clearM17State() {
         m17Talker = nil
         m17Link = nil
+        if !heardHistory.isEmpty { heardHistory = [] }
         refreshLastHeard()
+    }
+
+    /// Read the engine's heard log while a digital link is live, keep the
+    /// active network's rows, cap them, and publish only when a callsign or a
+    /// whole second of age changed.
+    ///
+    /// The rounding is the publish gate: ages tick at the poll rate, so
+    /// storing them to the millisecond would hand the view a new array four
+    /// times a second to redraw the same text. With no link, the list goes —
+    /// who was heard on a link that no longer exists is a claim about the
+    /// present that is no longer true.
+    private func refreshHeardHistory(snapshot snap: CallSnapshot) {
+        let linkIsLive =
+            snap.m17Active || snap.dstarActive || snap.ysfActive || snap.nxdnActive
+            || snap.dmrActive
+        guard linkIsLive, let network = activeCallNetwork?.rawValue else {
+            if !heardHistory.isEmpty { heardHistory = [] }
+            return
+        }
+        let rows = ((try? station.heard()) ?? [])
+            .filter { $0.network == network }
+            .prefix(Self.heardHistoryLimit)
+            .map {
+                HeardEntry(
+                    callsign: $0.callsign, network: $0.network,
+                    ageMs: $0.ageMs / 1_000 * 1_000)
+            }
+        if heardHistory != rows { heardHistory = rows }
     }
 
     /// Recompute `lastHeard` from the active network's own talker field.
@@ -2212,10 +2270,16 @@ public final class CallSession: ObservableObject {
             // `lastHeard` is derived from this, so it would otherwise show the
             // PREVIOUS network's talker until the next poll tick.
             refreshLastHeard()
+            // Same for the list behind it — the next poll refills it from the
+            // new link.
+            if !heardHistory.isEmpty { heardHistory = [] }
         } else {
             DispatchQueue.main.async { [weak self] in
                 self?.activeCallNetwork = network
                 self?.refreshLastHeard()
+                // Same for the list behind it — the next poll refills it from
+                // the new link.
+                if self?.heardHistory.isEmpty == false { self?.heardHistory = [] }
             }
         }
     }
@@ -2254,7 +2318,7 @@ public final class CallSession: ObservableObject {
         persistAudio { $0.denoiseStrength = level }
     }
 
-    /// Set the TX trim gain (0…2, 1.0 = unity; the engine clamps): publish, push
+    /// Set the TX trim gain (0…4, 1.0 = unity; the engine clamps): publish, push
     /// to the station, and persist (preserving the other audio prefs).
     public func setTxTrim(_ gain: Float) {
         txTrim = gain
@@ -2322,7 +2386,7 @@ public final class CallSession: ObservableObject {
         }
     }
 
-    /// Set the M17 override's TX trim (0…2, 1.0 = unity): publish, persist,
+    /// Set the M17 override's TX trim (0…4, 1.0 = unity): publish, persist,
     /// push live while an M17 call is active (see `setM17NoiseReduction`).
     public func setM17TxTrim(_ gain: Float) {
         m17Overrides.txTrim = gain
@@ -2332,7 +2396,7 @@ public final class CallSession: ObservableObject {
         }
     }
 
-    /// Set the M17 override's mic (input) gain (0…2, unity 1.0): publish,
+    /// Set the M17 override's mic (input) gain (0…4, unity 1.0): publish,
     /// persist, push live while an M17 call is active (see
     /// `setM17NoiseReduction`). Output gain has no M17 counterpart — it
     /// stays whatever the shared `AudioSettings` says for both networks.
@@ -2456,14 +2520,35 @@ public final class CallSession: ObservableObject {
     /// Open the mic lane without a call so a front-end can preview/characterize it
     /// (the engine shares the live path if a call is active).
     public func monitorStart(input: String?) throws {
-        try station.monitorStart(input: input)
+        // One lane, one record of which device it is on: a direct start moves the
+        // lane, so the retain bookkeeping has to learn about it too or a later
+        // `monitorRetain` would think the wrong device was already asserted. A
+        // FAILED start is recorded as "no device": the engine drops the old
+        // monitor before opening the new one, so on the throw path nothing is
+        // open and the next retain — even one naming the old device — has to
+        // really reopen it.
+        do {
+            try station.monitorStart(input: input)
+            monitorInput = input
+        } catch {
+            monitorInput = nil
+            throw error
+        }
         // The mic analyzer comes up at the engine's default decay; re-assert the
         // app-global value onto it now that it's live (astar-68a6). Best-effort.
         try? station.setSpectrumDecay(dbPerSecond: spectrumDecayDbPerSec)
     }
 
     /// Close the monitor mic lane (no-op if a call is using it).
-    public func monitorStop() throws { try station.monitorStop() }
+    ///
+    /// WARNING: this bypasses the retain count — stopping directly while another
+    /// holder still has a retain out desynchronises `monitorRetainCount` from the
+    /// lane. No app caller does that today; holders pair `monitorRetain` with
+    /// `monitorRelease`.
+    public func monitorStop() throws {
+        monitorInput = nil
+        try station.monitorStop()
+    }
 
     /// How many front-ends currently want the monitor mic lane open (the Mic
     /// Analyzer and the VOX calibration meter can both want it at once). The lane
@@ -2471,20 +2556,28 @@ public final class CallSession: ObservableObject {
     /// closing doesn't pull the mic out from under the other.
     private var monitorRetainCount = 0
 
-    /// Reference-counted `monitorStart`: open the mic lane if it isn't already
-    /// (re-asserting `input` each time is harmless — the engine guards a double
-    /// open). Pair every call with `monitorRelease()`. Lets independent UI (Mic
-    /// Analyzer, VOX calibration) share the live mic without fighting over it.
+    /// The device the open lane was last started on, so a retain naming another
+    /// one is recognised as a device CHANGE rather than a duplicate hold.
+    /// `nil` while nothing is held.
+    private var monitorInput: String?
+
+    /// Reference-counted `monitorStart`: open the mic lane if it isn't already,
+    /// and move it if this holder wants a different device. Pair every call with
+    /// `monitorRelease()`. Lets independent UI (Mic Analyzer, VOX calibration)
+    /// share the live mic without fighting over it.
     public func monitorRetain(input: String?) throws {
-        // Re-assert on the cold first retain so the chosen device is honored;
-        // later retains piggyback on the already-open lane.
-        if monitorRetainCount == 0 {
-            try station.monitorStart(input: input)
-            // Fresh mic-analyzer lane → re-assert the app-global spectrum decay
-            // onto it (astar-68a6); the engine brings it up at its own default.
-            try? station.setSpectrumDecay(dbPerSecond: spectrumDecayDbPerSec)
-        }
+        // Open on the cold first retain; on a later retain, re-assert only when
+        // the device differs — that is how the analyzer's picker switches mics
+        // while the VOX meter is still holding the lane. Naming the same device
+        // again piggybacks on the already-open lane.
+        let needsStart = monitorRetainCount == 0 || input != monitorInput
+        // Count the hold FIRST, and keep it even if the start throws: callers
+        // treat a failed retain as held anyway (`try?` + a `holdsMonitor` flag)
+        // and will release it later. Dropping the count here would let that
+        // release close the lane out from under the other holder.
         monitorRetainCount += 1
+        guard needsStart else { return }
+        try monitorStart(input: input)
     }
 
     /// Balance a `monitorRetain()`: close the lane only when the last holder
@@ -2493,6 +2586,7 @@ public final class CallSession: ObservableObject {
         guard monitorRetainCount > 0 else { return }
         monitorRetainCount -= 1
         if monitorRetainCount == 0 {
+            monitorInput = nil
             try station.monitorStop()
         }
     }
@@ -2511,8 +2605,17 @@ public final class CallSession: ObservableObject {
 
     /// Characterize the monitored mic from buffered silence; returns opaque
     /// `MicProfile` JSON (`""` when not enough silence has been captured).
-    public func characterize(harmonicComb: Bool) throws -> String {
-        try station.characterize(harmonicComb: harmonicComb)
+    /// `peakMarginDb` sets how far above the noise floor a bin must stand to be
+    /// notched; `thresholdDbfs` sets an absolute level, in the dBFS the live
+    /// spectrum reports, that it must exceed instead — the analyzer's line and
+    /// the detector then read the same scale. `nil` keeps the engine default,
+    /// and a fussy enough bar either way yields a pass-through profile (no
+    /// notches at all).
+    public func characterize(harmonicComb: Bool, peakMarginDb: Float?, thresholdDbfs: Float?)
+        throws -> String
+    {
+        try station.characterize(
+            harmonicComb: harmonicComb, peakMarginDb: peakMarginDb, thresholdDbfs: thresholdDbfs)
     }
 
     /// Apply (or clear) a raw profile JSON on the live/next call.

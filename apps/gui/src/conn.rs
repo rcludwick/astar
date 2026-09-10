@@ -15,7 +15,7 @@
 
 use crate::dial_target::DialTarget;
 use crate::settings::AudioSettings;
-use crate::snapshot::{db_to_unit, Snapshot, Status};
+use crate::snapshot::{db_to_unit, Heard, Snapshot, Status};
 
 /// The seam the UI renders against. Object-safe so `Box<dyn Conn>` works.
 pub trait Conn {
@@ -486,6 +486,20 @@ impl Conn for DemoConn {
                 ..Snapshot::default()
             },
         };
+        // A two-row "last heard" list rides the connected scenes (astar-heard)
+        // so the shots show the real layout. Newest first, like the engine.
+        if snap.status == Status::Connected {
+            snap.heard = vec![
+                Heard {
+                    callsign: "W6ABC".to_string(),
+                    age_ms: 4_000,
+                },
+                Heard {
+                    callsign: "K7XYZ".to_string(),
+                    age_ms: 92_000,
+                },
+            ];
+        }
         // The fake sequence's progress rides every connected scene (astar-7d21).
         if let Some((digits, played, _)) = &self.dtmf_seq {
             snap.dtmf_played = *played;
@@ -889,6 +903,29 @@ impl Conn for RealConn {
             // Engine sequencer progress (astar-7d21): 0/0 when nothing plays.
             dtmf_played: cs.dtmf_played,
             dtmf_total: cs.dtmf_total,
+            // Last heard (astar-heard): the engine's log lives in the live
+            // digital session, so it is empty on AllStar and while idle —
+            // read it only when one of those links is up, and the idle path
+            // never crosses the lock a second time each tick. The card shows
+            // three, so take three.
+            heard: if cs.m17_active
+                || cs.dstar_active
+                || cs.ysf_active
+                || cs.nxdn_active
+                || cs.dmr_active
+            {
+                self.station
+                    .heard()
+                    .into_iter()
+                    .take(3)
+                    .map(|h| Heard {
+                        callsign: h.callsign,
+                        age_ms: h.age_ms,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -913,6 +950,19 @@ mod tests {
         assert_eq!(DemoState::parse("Tx"), Some(DemoState::Tx));
         assert_eq!(DemoState::parse("error"), Some(DemoState::Error));
         assert_eq!(DemoState::parse("bogus"), None);
+    }
+
+    #[test]
+    fn a_demo_snapshot_carries_a_heard_history_newest_first() {
+        let snap = DemoConn::new(DemoState::Connected).snapshot();
+        assert_eq!(snap.heard.len(), 2);
+        assert!(snap.heard[0].age_ms <= snap.heard[1].age_ms);
+    }
+
+    #[test]
+    fn a_disconnected_demo_scene_has_no_heard_history() {
+        // Idle carries none, mirroring the engine (empty while nothing is up).
+        assert!(DemoConn::new(DemoState::Idle).snapshot().heard.is_empty());
     }
 
     #[test]

@@ -24,7 +24,7 @@ public struct M17AudioOverrides: Equatable {
     public var compression: Bool
     public var compressionLevel: Float
     public var txTrim: Float
-    /// Mic (TX input) gain multiplier (0…2, unity 1.0) — see the type doc for
+    /// Mic (TX input) gain multiplier (0…4, unity 1.0) — see the type doc for
     /// Rob's field-tested default (astar-m17defaults).
     public var inputGain: Float
 

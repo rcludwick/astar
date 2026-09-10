@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use astar_audio::AudioBackend;
 use astar_console::{
-    CallStatus, ConsoleConfig, ConsoleSession, ConsoleState, LinkConnectSpec, OperatingMode,
-    RegisterOutcome,
+    CallStatus, ConsoleConfig, ConsoleSession, ConsoleState, HeardEntry, LinkConnectSpec,
+    OperatingMode, RegisterOutcome,
 };
 use astar_iax::{CallMode, CodecPolicy, IncomingCallPolicy, LinkEvent, LinkMode, LinkRoster};
 use astar_iax_core::session::auth::Secret;
@@ -181,10 +181,12 @@ pub struct Station {
     /// a stream opens.
     capture_probe: Mutex<Option<CaptureProbe>>,
     /// Mic monitor (iax-2377): opens the input device WITHOUT a call so a
-    /// front-end can preview/characterize the mic. `Some` only while monitoring.
-    /// Never started while a call is active (the device would be double-opened);
-    /// `Drop` (on `monitor_stop`) releases the device.
-    monitor: Mutex<Option<astar_audio::MicMonitor>>,
+    /// front-end can preview/characterize the mic. `Some` only while monitoring,
+    /// holding the RESOLVED device name beside the monitor so `monitor_start`
+    /// can tell "this device again" (a no-op) from "a different device" (a
+    /// switch). Never started while a call is active (the device would be
+    /// double-opened); `Drop` (on `monitor_stop`) releases the device.
+    monitor: Mutex<Option<(String, astar_audio::MicMonitor)>>,
     /// Buffered link lifecycle events (iax-1075): [`Station::next_link_event`]
     /// drains the session in bursts and hands them out one per poll.
     link_events_buf: Mutex<std::collections::VecDeque<astar_iax::LinkEvent>>,
@@ -623,6 +625,16 @@ impl Station {
             .expect("station session poisoned")
             .link_roster()
             .unwrap_or(LinkRoster { links: Vec::new() })
+    }
+
+    /// Who has keyed up on the live digital link, newest first (empty on
+    /// `AllStar` and while idle). See `astar_console::HeardLog`.
+    #[must_use]
+    pub fn heard(&self) -> Vec<HeardEntry> {
+        self.session
+            .lock()
+            .expect("station session poisoned")
+            .heard()
     }
 
     /// Announce to every non-link conference member (iax-9e02) — the
@@ -2336,7 +2348,7 @@ impl Station {
             })
     }
 
-    /// Set the input (TX/mic) gain multiplier (clamped `[0.0, 2.0]`).
+    /// Set the input (TX/mic) gain multiplier (clamped `[0.0, 4.0]`).
     pub fn set_input_gain(&self, gain: f32) {
         self.session.lock().unwrap().set_input_gain(gain);
     }
@@ -2370,7 +2382,7 @@ impl Station {
         self.session.lock().unwrap().set_denoise_strength(level);
     }
 
-    /// Set the TX trim gain (`0.0..=2.0`, clamped; default `1.0` = unity) on
+    /// Set the TX trim gain (`0.0..=4.0`, clamped; default `1.0` = unity) on
     /// the live/next call: the always-on FINAL TX gain stage, applied after the
     /// compressor so it attenuates a hot mic that compression makeup gain would
     /// otherwise keep loud (iax-750a). Values above `1.0` boost (clamped at
@@ -2413,14 +2425,21 @@ impl Station {
         self.session.lock().unwrap().set_vox_preroll_ms(ms);
     }
 
-    /// Start monitor mode (iax-2377): open the input device and run the mic lane
+    /// Monitor THIS device (iax-2377): open the input device and run the mic lane
     /// WITHOUT a call (no µ-law encode, no TX), so a front-end can preview /
     /// characterize the mic before dialing. `input` is the capture-device
     /// substring (`None`/empty = system default).
     ///
-    /// Idempotent and call-safe: a **no-op** if a call is already active (the
-    /// device is already open on the call's mic lane — never double-open it) or
-    /// if a monitor is already running. Stop it with [`Station::monitor_stop`].
+    /// Call it again to change mics: asking for a **different** resolved device
+    /// stops the running monitor and opens the new one (a front-end's device
+    /// picker must be able to move the stream, not just its label); asking for
+    /// the device already monitored is a no-op. Still call-safe: a **no-op** if
+    /// a call is already active (the device is already open on the call's mic
+    /// lane — never double-open it). Stop it with [`Station::monitor_stop`].
+    ///
+    /// The device is resolved BEFORE the running monitor is touched, so a name
+    /// that resolves to nothing is an error that leaves the current monitor
+    /// running.
     ///
     /// # Errors
     /// [`StationError::Audio`] if the device can't be resolved or opened.
@@ -2430,20 +2449,38 @@ impl Station {
         if self.session.lock().unwrap().is_active() {
             return Ok(());
         }
-        let mut slot = self.monitor.lock().unwrap();
-        if slot.is_some() {
-            return Ok(()); // already monitoring — idempotent
-        }
         let backend = (self.make_backend)();
         let device =
             astar_console::resolve_device(backend.as_ref(), input, astar_audio::Direction::Input)
                 .map_err(|e| StationError::Audio(e.to_string()))?;
+        let mut slot = self.monitor.lock().unwrap();
+        if slot.as_ref().is_some_and(|(current, _)| current == &device) {
+            return Ok(()); // already monitoring THIS device — idempotent
+        }
+        // A different device: drop the running monitor first so the two never
+        // overlap on one capture device, then open the new one.
+        *slot = None;
         let backend = (self.make_backend)();
         let monitor =
             astar_audio::MicMonitor::start(backend, &device, astar_audio::StreamConfig::default())
                 .map_err(|e| StationError::Audio(e.to_string()))?;
-        *slot = Some(monitor);
+        *slot = Some((device, monitor));
         Ok(())
+    }
+
+    /// The resolved capture-device name the mic monitor is open on, or `None`
+    /// when not monitoring — the mic the analyzer is actually listening to,
+    /// which is not always the one a picker last named (see
+    /// [`Station::monitor_start`]). Engine- and test-side only for now: it is on
+    /// neither the C ABI nor the Swift binding, so a front-end that wants to
+    /// display it needs that binding first.
+    #[must_use]
+    pub fn monitor_input(&self) -> Option<String> {
+        self.monitor
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(device, _)| device.clone())
     }
 
     /// Stop monitor mode and release the input device. Idempotent (no-op if not
@@ -2472,7 +2509,7 @@ impl Station {
             .lock()
             .unwrap()
             .as_ref()
-            .and_then(astar_audio::MicMonitor::input_dbfs)
+            .and_then(|(_, mon)| mon.input_dbfs())
     }
 
     /// Copy the live voice-band mic spectrum (iax-e73e) into `out` and return the
@@ -2481,7 +2518,7 @@ impl Station {
     /// band (~100 Hz..3.9 kHz) and peak-held so a steady whine stays visible.
     pub fn mic_spectrum(&self, out: &mut [f32]) -> usize {
         match self.monitor.lock().unwrap().as_ref() {
-            Some(mon) => mon.spectrum_into(out),
+            Some((_, mon)) => mon.spectrum_into(out),
             None => 0,
         }
     }
@@ -2520,7 +2557,7 @@ impl Station {
     /// scrub them too.
     pub fn set_spectrum_decay(&self, db_per_sec: f32) {
         // Mic monitor (if running).
-        if let Some(mon) = self.monitor.lock().unwrap().as_ref() {
+        if let Some((_, mon)) = self.monitor.lock().unwrap().as_ref() {
             mon.set_spectrum_decay(db_per_sec);
         }
         // Active call TX + RX analyzers (if a call is up).
@@ -2535,11 +2572,28 @@ impl Station {
     /// rolled-off upper harmonics). Returns `None` if not currently monitoring.
     #[must_use]
     pub fn characterize(&self, harmonic_comb: bool) -> Option<astar_audio::MicProfile> {
+        self.characterize_with(astar_audio::CharacterizeOpts {
+            harmonic_comb,
+            ..astar_audio::CharacterizeOpts::default()
+        })
+    }
+
+    /// Characterize the monitored mic with explicit
+    /// [`astar_audio::CharacterizeOpts`] — the harmonic-comb toggle plus the
+    /// peak margin (how far above the spectral-median floor a tone must stand
+    /// to be worth notching). A mic with nothing above its floor at that margin
+    /// characterizes as a pass-through profile, which changes nothing in the
+    /// mic lane. Returns `None` if not currently monitoring.
+    #[must_use]
+    pub fn characterize_with(
+        &self,
+        opts: astar_audio::CharacterizeOpts,
+    ) -> Option<astar_audio::MicProfile> {
         self.monitor
             .lock()
             .unwrap()
             .as_ref()
-            .map(|mon| mon.characterize(astar_audio::CharacterizeOpts { harmonic_comb }))
+            .map(|(_, mon)| mon.characterize(opts))
     }
 
     /// Apply (or clear) a calibrated per-mic profile (iax-2095). A recalled

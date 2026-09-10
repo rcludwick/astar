@@ -69,9 +69,12 @@
                     .accessibilityLabel("Delete this mic profile")
                 }
                 let freqs = profile.notchFrequencies
+                // A profile that notches nothing is a pass-through: the mic was
+                // clean at the margin it was analyzed with, so it adds no extra
+                // correction. Say that instead of listing an empty filter set.
                 Text(
                     freqs.isEmpty
-                        ? "No tones filtered"
+                        ? "pass-through"
                         : "Filters " + freqs.map { "\(Int($0)) Hz" }.joined(separator: ", ")
                 )
                 .font(.caption.monospacedDigit())

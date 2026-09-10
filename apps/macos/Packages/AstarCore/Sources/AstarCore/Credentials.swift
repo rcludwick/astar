@@ -8,20 +8,25 @@
 /// `StationConfig` solely at station construction (consumed by the binding,
 /// never retained), and deliberately redacted from debug output. Honors the
 /// secret-free contract (PTT/secret prime rules).
+///
+/// There is no node number. The token comes from AllStarLink's documented API
+/// (`POST /api/v2/auth-wt-legacy`, username + password), which needs none. A
+/// Keychain blob written by an earlier build carries a `portalNode` key; the
+/// synthesized decoder ignores keys it has no property for, so those blobs
+/// keep loading — which is why this needed no config-version bump: nothing is
+/// misread, a field is simply no longer looked at.
 public struct Credentials: Equatable, Codable {
     public var portalUser: String
     public var portalPass: String
-    public var portalNode: String
 
-    public init(portalUser: String, portalPass: String, portalNode: String) {
+    public init(portalUser: String, portalPass: String) {
         self.portalUser = portalUser
         self.portalPass = portalPass
-        self.portalNode = portalNode
     }
 }
 
 extension Credentials: CustomDebugStringConvertible {
     public var debugDescription: String {
-        "Credentials(user: \(portalUser), node: \(portalNode), pass: <redacted>)"
+        "Credentials(user: \(portalUser), pass: <redacted>)"
     }
 }

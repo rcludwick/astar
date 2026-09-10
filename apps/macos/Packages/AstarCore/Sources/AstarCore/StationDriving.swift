@@ -103,6 +103,8 @@ public protocol StationDriving {
     /// Costlier than `readSnapshot()`: it crosses the ABI with a buffer and
     /// parses JSON. Poll the snapshot for meters; call this at UI rate.
     func m17State() throws -> M17State?
+    /// Station.heard() 1:1.
+    func heard() throws -> [HeardEntry]
 
     // MARK: System Fusion
 
@@ -215,7 +217,7 @@ public protocol StationDriving {
     func setCompression(_ on: Bool) throws
     /// Set the compression strength (0…1). Takes effect on the live capture lane.
     func setCompressionLevel(_ level: Float) throws
-    /// Set the TX trim gain (0…2, engine clamps; 1.0 = unity): the always-on
+    /// Set the TX trim gain (0…4, engine clamps; 1.0 = unity): the always-on
     /// final TX gain stage after compression. Takes effect on the live capture lane.
     func setTxTrim(_ gain: Float) throws
     func setNoiseReduction(_ on: Bool) throws
@@ -243,6 +245,13 @@ public protocol StationDriving {
     /// poll-only (~20 Hz). Vendored Station exposes these; NullStation returns [].
     func txSpectrum() throws -> [Float]
     func rxSpectrum() throws -> [Float]
-    func characterize(harmonicComb: Bool) throws -> String
+    /// Two ways to say what counts as a tone, and `thresholdDbfs` wins:
+    /// `peakMarginDb` is RELATIVE (how far above the measured noise floor a bin
+    /// must stand), `thresholdDbfs` ABSOLUTE (a level in the same dBFS
+    /// `micSpectrum()` reports, so what is drawn above the line is what the
+    /// detector catches). `nil` for either leaves the engine's own default in
+    /// charge.
+    func characterize(harmonicComb: Bool, peakMarginDb: Float?, thresholdDbfs: Float?) throws
+        -> String
     func setMicProfile(_ json: String?) throws
 }

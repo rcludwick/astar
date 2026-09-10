@@ -77,6 +77,8 @@ portal_node=None, secret=None, lib=None)`
 | `set_compression_level(level)` (0.0–1.0, default 0.90) | `iax_station_set_compression_level` |
 | `snapshot() -> Snapshot` | `iax_station_snapshot` |
 | `next_event() -> Event \| None` | `iax_station_next_event` |
+| `heard() -> list[dict]` (newest first; `callsign`/`network`/`age_ms`) | `iax_station_heard_json` |
+| `characterize(harmonic_comb=False, peak_margin_db=None, threshold_dbfs=None) -> str` (MicProfile JSON; `""` when not monitoring; `None` = the engine's default. `peak_margin_db` is relative to the measured floor, `threshold_dbfs` an absolute level in the display's dBFS and wins when both are given) | `iax_station_characterize_opts` |
 | `list_inputs()` / `list_outputs()` | `iax_station_list_*` |
 | `set_devices(input, output)` | `iax_station_set_devices` |
 | `close()` / `__enter__`/`__exit__` | `iax_station_free` |

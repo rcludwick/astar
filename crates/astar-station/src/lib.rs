@@ -54,7 +54,7 @@ pub use astar_audio::{
     SPECTRUM_BINS,
 };
 pub use astar_console::{
-    CallStatus, ConsoleConfig, ConsoleSession, ConsoleState, OperatingMode, VoiceFormat,
+    CallStatus, ConsoleConfig, ConsoleSession, ConsoleState, HeardEntry, OperatingMode, VoiceFormat,
 };
 pub use astar_iax::{
     CallMode, CodecPolicy, IncomingAuthPolicy, IncomingCallPolicy, IncomingCallTokenPolicy,

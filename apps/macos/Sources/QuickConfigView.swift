@@ -98,7 +98,7 @@
                             + "codec. Use a direct microphone to send true wideband audio."
                     )
                     .padding(.bottom, 8)
-                    gainSlider("Mic Level", tint: .red, value: inputGainBinding) { gain in
+                    gainSlider("Mic Level", tint: .red, range: 0...4, value: inputGainBinding) { gain in
                         if !m17Context {
                             try? session.setInputGain(Float(gain))
                             persistGains()
@@ -172,7 +172,7 @@
                     // gain stage, applied after compression (100% = unity).
                     HStack(spacing: 8) {
                         label("TX Gain")
-                        Slider(value: txTrimBinding, in: 0...2)
+                        Slider(value: txTrimBinding, in: 0...4)
                             .tint(.red)
                             .accessibilityLabel("TX Gain")
                             .accessibilityValue(AccessibilityValueFormatter.percent(Double(txTrim)))

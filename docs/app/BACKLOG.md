@@ -12,7 +12,7 @@ inline. All 129 issues (107 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (37)
+## Open items (39)
 
 ### astar-guidv — the Iced client has no digital voice at all
 *P2 medium · feature · labels: gui, cross-platform, dstar, ysf, cx:8*
@@ -22,12 +22,16 @@ Found 2026-09-05 while landing `Network.ysf` in the Mac app. `apps/gui`'s
 no YSF either. Windows and Linux cannot reach either dongle network.
 
 This is the cross-platform principle unmet — "every feature ships on all
-platforms with per-platform native UI" — and it is one job, not two. What is
-missing is the whole digital-voice layer for that client: the availability
-capability plumbed from the snapshot, a talker/last-heard line, the
-YSF unsupported-mode warning, and the dial arms. `astar-station` is linked
-directly there, so none of it needs ABI work — §3 of the YSF design is the
-whole story for this client.
+platforms with per-platform native UI" — and it is one job, not two. The
+last-heard rows landed on the Iced status card (heard-history Task 7) — that
+part is done, though they can only ever populate on M17 today, because the
+dial arms this client still lacks are exactly what would put a D-Star, YSF,
+NXDN or DMR link up for them to report. What is still missing is the rest of
+the digital-voice layer for that client: the availability capability plumbed
+from the snapshot, the dial arms for D-Star/YSF/NXDN/DMR, and the YSF
+unsupported-mode warning.
+`astar-station` is linked directly there, so none of it needs ABI work — §3
+of the YSF design is the whole story for this client.
 
 Deliberately NOT half-built with the YSF work: a picker entry that could never
 connect is the same mistake as one that always fails to. D-Star should land
@@ -513,3 +517,34 @@ The 'Save changes to <config>' button in Quick settings always shows even when n
 *P3 low · feature · labels: cx:3, gui-rs, phase2*
 
 **Design:** Phase 2 analysis tool, deliberately undesigned for now. Port of the Mac call spectrum; FFT axis math and trace state belong in shared Rust per the fat-core principle. Design when phase 1 operating set ships: docs/superpowers/specs/2026-07-01-gui-rs-parity-roadmap-design.md
+
+### astar-kcprompt — AstarCore tests read the real Keychain and hang on a locked screen
+*P2 · test hygiene · labels: app, tests*
+
+`CallSessionTests.testLiveSessionReflectsRealStationIdle` constructs a real
+`CallSession`, whose init calls `KeychainCredentialStore.load()` →
+`SecItemCopyMatching`. On a Mac whose screen is locked the Keychain prompt
+cannot be drawn and the whole `swift test` run parks there forever (seen
+twice on 2026-09-08 — the suite otherwise takes ~15 s). A unit-test target
+should never touch the login Keychain, and the type to avoid it already exists:
+`InMemoryCredentialStore` (`CredentialStore.swift` ~17). The fix is one argument
+at the `CallSession.live()` call in `CallSessionTests.swift` (~2497) —
+`CallSession.live(store: InMemoryCredentialStore())` — leaving the real store to
+the app target. Until then a locked screen means "kill xctest and rerun later".
+
+### astar-bgline — The analyzer's background line reads high, and the threshold line is peak-held
+*P3 · polish · labels: app, engine, audio*
+
+The threshold line is exact for tones since the display and the detector
+share one sinusoid normalisation (`bin_dbfs`). Two things are still not the
+detector's own numbers: (1) the grey background line is the one-second mean
+of the DISPLAY spectrum's scan-band median — a 2048-point FFT max-folded into
+log bins and peak-held — so for broadband noise it sits several dB (roughly
+9 dB from resolution alone, before the fold and the hold) above the floor
+the detector's up-to-16384-point FFT measures; (2) the display peak-holds
+(800 dB/s decay) while `characterize` averages a 1.5 s capture, so a held
+transient can sit visibly on the threshold line and still not be notched.
+The honest fix for both: have the monitor/characterize path return the
+detector's own per-bin floor and, for a capture, its per-bin levels in
+`bin_dbfs` units, and draw those; then the background line is the detector's
+and the markers can be drawn from the same numbers the decision used.

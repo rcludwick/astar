@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import ctypes
 import enum
+import json
 import os
 import sys
 from ctypes import (
@@ -511,6 +512,17 @@ def _bind(lib: ctypes.CDLL) -> None:
     lib.iax_station_list_outputs.argtypes = [_IaxStationPtr, c_char_p, c_size_t]
     lib.iax_station_list_outputs.restype = c_int
 
+    lib.iax_station_heard_json.argtypes = [_IaxStationPtr, c_char_p, c_size_t]
+    lib.iax_station_heard_json.restype = c_int
+
+    lib.iax_station_characterize_opts.argtypes = [
+        _IaxStationPtr,
+        c_char_p,
+        c_char_p,
+        c_size_t,
+    ]
+    lib.iax_station_characterize_opts.restype = c_int
+
     lib.iax_station_set_devices.argtypes = [_IaxStationPtr, c_char_p, c_char_p]
     lib.iax_station_set_devices.restype = c_int
 
@@ -894,7 +906,7 @@ class Station:
         self._check(self._lib.iax_station_set_ptt(self._handle, bool(on)))
 
     def set_input_gain(self, gain: float) -> None:
-        """Set the input (TX/mic) gain multiplier (clamped ``[0.0, 2.0]``)."""
+        """Set the input (TX/mic) gain multiplier (clamped ``[0.0, 4.0]``)."""
         self._require_handle()
         self._check(self._lib.iax_station_set_input_gain(self._handle, float(gain)))
 
@@ -966,21 +978,95 @@ class Station:
             return None
         return Event(kind=EventKind(out.kind), remote_ptt=bool(out.remote_ptt))
 
-    # -- devices ---------------------------------------------------------- #
+    # -- heard history ---------------------------------------------------- #
 
-    def _list(self, fn) -> list[str]:
+    def _read_json(self, fn) -> str:
+        """Read a JSON string out of a sizing-then-fill C function."""
         self._require_handle()
         # Query the required size (len == 0), then fill.
         needed = fn(self._handle, None, 0)
         if needed < 0:
             self._check(needed)
         if needed == 0:
-            return []
+            return ""
         buf = ctypes.create_string_buffer(needed + 1)
         rc = fn(self._handle, buf, len(buf))
         if rc < 0:
             self._check(rc)
-        text = buf.value.decode("utf-8", "replace")
+        # A station can key between the sizing call and the fill, which makes
+        # the text longer than the buffer we just sized. The fill truncates
+        # and reports the size it wanted, so grow once and fill again -- once
+        # only, because the same race can always recur and a retry loop on a
+        # busy reflector would spin.
+        if rc > len(buf) - 1:
+            buf = ctypes.create_string_buffer(rc + 1)
+            rc = fn(self._handle, buf, len(buf))
+            if rc < 0:
+                self._check(rc)
+        return buf.value.decode("utf-8", "replace")
+
+    def heard(self) -> list[dict]:
+        """Who has keyed up on the live digital link, newest first: dicts with
+        ``callsign``, ``network`` and ``age_ms``. Empty on AllStar and while
+        idle."""
+        text = self._read_json(self._lib.iax_station_heard_json)
+        return json.loads(text) if text else []
+
+    # -- mic characterization --------------------------------------------- #
+
+    def characterize(
+        self,
+        harmonic_comb: bool = False,
+        peak_margin_db: float | None = None,
+        threshold_dbfs: float | None = None,
+    ) -> str:
+        """Characterize the monitored mic and return its profile as JSON.
+
+        Requires monitor mode; call after a few seconds of monitored silence.
+        Returns ``""`` when not monitoring.
+
+        The two detection knobs are alternatives, and ``threshold_dbfs`` wins:
+
+        ``peak_margin_db`` is RELATIVE -- how far (dB) above the spectral-median
+        noise floor a tone must stand to be worth notching. Raise it to leave
+        quiet peaks alone. The engine clamps it to 0-60 dB.
+
+        ``threshold_dbfs`` is ABSOLUTE -- a level, in the same
+        sinusoid-normalised dBFS the live ``mic_spectrum()`` reports, that a
+        peak must exceed. A tone drawn above that line on a spectrum display is
+        above it for the detector too, whatever the noise underneath is doing.
+        The engine clamps it to -140-0 dBFS.
+
+        Either way, a mic with nothing above the bar characterizes as a
+        pass-through profile (an empty ``notches`` list) that changes nothing in
+        the mic lane. ``None`` (the default) for either omits the key entirely,
+        so the engine's own default is the one number that decides -- this
+        binding does not carry a copy of it. ``harmonic_comb`` enables
+        harmonic-aware notch detection (default off).
+        """
+        options: dict[str, object] = {"harmonic_comb": bool(harmonic_comb)}
+        if peak_margin_db is not None:
+            options["peak_margin_db"] = float(peak_margin_db)
+        if threshold_dbfs is not None:
+            options["threshold_dbfs"] = float(threshold_dbfs)
+        opts = json.dumps(options).encode("utf-8")
+
+        def _call(handle, buf, size):
+            return self._lib.iax_station_characterize_opts(handle, opts, buf, size)
+
+        return self._read_json(_call)
+
+    # -- devices ---------------------------------------------------------- #
+
+    def _list(self, fn) -> list[str]:
+        """Read a newline-separated list out of a sizing-then-fill C function.
+
+        The read itself -- sizing, filling, and the once-only retry when the
+        device list grows between the two -- is ``_read_json``'s; this only
+        splits what comes back. An empty read is an empty list, and so is a
+        read that is nothing but separators.
+        """
+        text = self._read_json(fn)
         return [line for line in text.split("\n") if line]
 
     def list_inputs(self) -> list[str]:

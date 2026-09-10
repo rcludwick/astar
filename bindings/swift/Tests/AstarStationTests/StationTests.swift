@@ -635,4 +635,45 @@ final class StationTests: XCTestCase {
         }
     }
 
+    /// The heard history's ABI shape: a top-level array, newest first, with
+    /// `age_ms` snake-cased on the wire. Callsigns are far-end text, stored
+    /// verbatim.
+    func testHeardEntryDecodesTheABIShape() throws {
+        let json = #"[{"age_ms":1234,"callsign":"W6VS","network":"m17"}]"#
+        let rows = try JSONDecoder().decode([HeardEntry].self, from: Data(json.utf8))
+        XCTAssertEqual(rows, [HeardEntry(callsign: "W6VS", network: "m17", ageMs: 1234)])
+    }
+
+    func testHeardIsEmptyOnAFreshStation() throws {
+        let station = try Station()
+        XCTAssertEqual(try station.heard(), [], "a never-connected station has heard nobody")
+    }
+
+    /// `characterize` routes through the options ABI whether or not a peak margin
+    /// is supplied, and both spellings honour the empty-string contract: a station
+    /// that was never put into monitor mode has no silence to characterize, so it
+    /// returns "" rather than throwing or inventing a profile.
+    func testCharacterizeWithAPeakMarginIsEmptyWhileNotMonitoring() throws {
+        let station = try Station()
+        XCTAssertEqual(try station.characterize(harmonicComb: false, peakMarginDb: nil), "")
+        XCTAssertEqual(try station.characterize(harmonicComb: false, peakMarginDb: 18), "")
+        XCTAssertEqual(try station.characterize(harmonicComb: true, peakMarginDb: 18), "")
+        // The one-argument spelling still compiles and still means "engine default".
+        XCTAssertEqual(try station.characterize(harmonicComb: false), "")
+    }
+
+    /// The absolute detection threshold takes the same route and honours the same
+    /// empty-string contract. A level is encoded as `threshold_dbfs`; a `nil` is
+    /// omitted from the options entirely, so the engine's own default decides.
+    func testCharacterizeWithAnAbsoluteThresholdIsEmptyWhileNotMonitoring() throws {
+        let station = try Station()
+        XCTAssertEqual(try station.characterize(thresholdDbfs: -60), "")
+        XCTAssertEqual(try station.characterize(harmonicComb: true, thresholdDbfs: -100), "")
+        XCTAssertEqual(
+            try station.characterize(harmonicComb: false, peakMarginDb: nil, thresholdDbfs: nil),
+            "")
+        // Out of range is the engine's business to clamp, not the binding's to
+        // reject: it must still round-trip rather than throw.
+        XCTAssertEqual(try station.characterize(thresholdDbfs: -400), "")
+    }
 }

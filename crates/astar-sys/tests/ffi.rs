@@ -586,6 +586,98 @@ fn characterize_null_guard_and_idle_empty() {
 }
 
 #[test]
+fn characterize_opts_null_station_is_err_null() {
+    // iax-5fb6 / mic noise floor: NULL station → IAX_ERR_NULL, whatever the
+    // options say.
+    let mut buf = [0_i8; 256];
+    let opts = CString::new("{}").unwrap();
+    assert_eq!(
+        unsafe {
+            iax_station_characterize_opts(
+                ptr::null_mut(),
+                opts.as_ptr(),
+                buf.as_mut_ptr(),
+                buf.len(),
+            )
+        },
+        IAX_ERR_NULL
+    );
+}
+
+#[test]
+fn characterize_opts_rejects_bad_json() {
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(std::ptr::from_ref(&cfg)) };
+    let mut buf = [0_i8; 256];
+    for bad in [
+        "not json",
+        "[1,2]",
+        r#"{"peak_margin_db":"loud"}"#,
+        // A dBFS level is a number or `null`; a string is not a level.
+        r#"{"threshold_dbfs":"x"}"#,
+        r#"{"threshold_dbfs":true}"#,
+    ] {
+        let opts = CString::new(bad).unwrap();
+        assert_eq!(
+            unsafe {
+                iax_station_characterize_opts(st, opts.as_ptr(), buf.as_mut_ptr(), buf.len())
+            },
+            IAX_ERR_IAX,
+            "unparsable options {bad:?} must be rejected"
+        );
+    }
+    unsafe { iax_station_free(st) };
+}
+
+#[test]
+fn characterize_opts_with_defaults_matches_the_bool_call_when_idle() {
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(std::ptr::from_ref(&cfg)) };
+    let mut buf = [0_i8; 256];
+    // Dirty the buffer before every call: returning 0 is only half the claim,
+    // the other half is that an empty string was actually written.
+    // Not monitoring → empty string, length 0 — same as the bool call.
+    buf[0] = b'x'.cast_signed();
+    assert_eq!(
+        unsafe { iax_station_characterize(st, false, buf.as_mut_ptr(), buf.len()) },
+        0
+    );
+    assert_eq!(buf[0], 0, "the bool call writes an empty string");
+    // NULL, empty and explicit options all take the default path.
+    buf[0] = b'x'.cast_signed();
+    assert_eq!(
+        unsafe { iax_station_characterize_opts(st, ptr::null(), buf.as_mut_ptr(), buf.len()) },
+        0
+    );
+    assert_eq!(buf[0], 0, "NULL options write an empty string");
+    for good in [
+        "",
+        "{}",
+        r#"{"harmonic_comb":true,"peak_margin_db":24.0}"#,
+        // An absolute detection threshold, as a number and as an explicit
+        // `null` (which means "no absolute threshold", like an absent key).
+        r#"{"threshold_dbfs":-60}"#,
+        r#"{"threshold_dbfs":-60.0,"harmonic_comb":true}"#,
+        r#"{"threshold_dbfs":null}"#,
+        // Unknown keys are ignored, so a newer front-end can talk to an older
+        // library.
+        r#"{"future_key":1}"#,
+    ] {
+        let opts = CString::new(good).unwrap();
+        buf[0] = b'x'.cast_signed();
+        assert_eq!(
+            unsafe {
+                iax_station_characterize_opts(st, opts.as_ptr(), buf.as_mut_ptr(), buf.len())
+            },
+            0,
+            "idle characterize with {good:?} writes an empty profile"
+        );
+        assert_eq!(buf[0], 0, "options {good:?} write an empty string");
+    }
+    unsafe { iax_station_free(st) };
+}
+
+#[test]
 fn set_mic_profile_null_guards_clear_and_round_trip() {
     // iax-2095: NULL station → IAX_ERR_NULL.
     assert_eq!(
@@ -951,6 +1043,31 @@ fn link_roster_json_is_empty_list_before_any_link() {
         .unwrap();
     assert_eq!(json, r#"{"links":[]}"#);
     unsafe { iax_station_free(st) };
+}
+
+#[test]
+fn heard_json_is_an_empty_array_before_any_link() {
+    let scfg = null_config();
+    let st = unsafe { iax_station_new(std::ptr::from_ref(&scfg)) };
+    let mut buf = [0i8; 256];
+    let n = unsafe { iax_station_heard_json(st, buf.as_mut_ptr(), buf.len()) };
+    assert!(n >= 0, "heard json fills, got {n}");
+    let json = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().unwrap();
+    assert_eq!(json, "[]", "nothing has keyed up on a station with no link");
+    let sizing = unsafe { iax_station_heard_json(st, std::ptr::null_mut(), 0) };
+    assert_eq!(
+        sizing, 2,
+        "a sizing query answers the byte length of \"[]\""
+    );
+    unsafe { iax_station_free(st) };
+}
+
+#[test]
+fn heard_json_null_station_is_err_null() {
+    assert_eq!(
+        unsafe { iax_station_heard_json(std::ptr::null_mut(), std::ptr::null_mut(), 0) },
+        IAX_ERR_NULL
+    );
 }
 
 #[test]

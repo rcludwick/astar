@@ -552,19 +552,21 @@ fn picker_row(
         .into()
 }
 
-/// A top-level gain slider row (0…2, 100% = unity) with a percent readout.
+/// A top-level gain slider row (0…4, 100% = unity) with a percent readout —
+/// Mic Level and TX Gain, both 100%-400% headroom, matching the Speaker
+/// card's "Vol" ceiling.
 fn gain_row(
     t: &'static str,
     accent: Color,
     value: f32,
     msg: fn(f32) -> Message,
 ) -> Element<'static, Message> {
-    gain_row_range(t, accent, 0.0..=2.0, value, msg)
+    gain_row_range(t, accent, 0.0..=4.0, value, msg)
 }
 
 /// [`gain_row`] with an explicit range — the Speaker card's "Vol" is
-/// 100%-400% (floored at unity, iax-a4e7) where every other gain row stays
-/// 0…2.
+/// 100%-400% (floored at unity, iax-a4e7) where [`gain_row`]'s Mic Level and
+/// TX Gain start at 0.
 fn gain_row_range(
     t: &'static str,
     accent: Color,

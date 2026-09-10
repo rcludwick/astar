@@ -264,8 +264,8 @@
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityLabel("Duplicate device names")
                 }
-                gainSlider("Mic", tint: .red, value: $inputGain) { commitInputGain() }
-                gainSlider("Vol", tint: .green, value: $outputGain) { commitOutputGain() }
+                gainSlider("Mic", tint: .red, range: 0...4, value: $inputGain) { commitInputGain() }
+                gainSlider("Vol", tint: .green, range: 1...4, value: $outputGain) { commitOutputGain() }
 
                 Toggle("Voice compression", isOn: compressionBinding)
                 Toggle("Noise reduction", isOn: noiseReductionBinding)
@@ -364,8 +364,14 @@
                     }
                 }
                 .labelsHidden()
-                Button("Analyze…") { micAnalyzer.open(input: setup.inputDevice) }
-                    .buttonStyle(.link)
+                // `seedsFromProfile: false`: this row already says which device
+                // this config uses, and "System Default" (a nil `inputDevice`) is
+                // a deliberate answer here — seeding it from the active profile
+                // would analyze a mic this config never opens.
+                Button("Analyze…") {
+                    micAnalyzer.open(input: setup.inputDevice, seedsFromProfile: false)
+                }
+                .buttonStyle(.link)
                 if let id = setup.micProfileID {
                     Button(role: .destructive) {
                         session.deleteMicProfile(id: id)
@@ -550,12 +556,13 @@
         }
 
         private func gainSlider(
-            _ title: String, tint: Color, value: Binding<Double>,
+            _ title: String, tint: Color, range: ClosedRange<Double> = 0...2,
+            value: Binding<Double>,
             commit: @escaping () -> Void
         ) -> some View {
             HStack(spacing: 8) {
                 label(title)
-                Slider(value: value, in: 0...2) { editing in if !editing { commit() } }
+                Slider(value: value, in: range) { editing in if !editing { commit() } }
                     .tint(tint)
                     .accessibilityLabel(title)
                     .accessibilityValue(AccessibilityValueFormatter.percent(value.wrappedValue))

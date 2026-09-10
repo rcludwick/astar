@@ -7,7 +7,7 @@
     import Combine
     import Foundation
 
-    /// Drives the Mic Analyzer window: opens the monitor mic lane, polls the live
+    /// Drives the Mic Analyzer pane: opens the monitor mic lane, polls the live
     /// spectrum ~20 Hz, runs `characterize()` (with a short stay-silent capture),
     /// and saves/recalls named per-device profiles. Holds a weak `CallSession` (the
     /// single station owner).
@@ -16,6 +16,28 @@
         @Published private(set) var spectrum: [Float] = []
         @Published var selectedInput: String?
         @Published var harmonicComb = false
+        /// The ABSOLUTE level (dBFS) a bin must exceed to be notched. Analyze
+        /// passes it to the characterizer, and the canvas draws it as a flat line
+        /// on the same axis the spectrum is drawn on — the engine measures a bin
+        /// in the display's own sinusoid normalisation, so a tone that shows above
+        /// the line is above it for the detector too. Nothing to estimate: the two
+        /// sides read one scale.
+        @Published var thresholdDbfs: Double = -60
+        /// The scan-band median of the live spectrum, averaged over the last
+        /// second of polls (20 at 50 ms), so the background line the canvas draws
+        /// from it holds still instead of jittering with the peak hold. This is
+        /// the ambient noise the mic is sitting in — informational, and no longer
+        /// part of the threshold, which is now absolute. `nil` until the mic
+        /// delivers bins; reset when the device changes.
+        @Published private(set) var floorMedianDb: Float?
+        private var floorMean = RollingMean(window: 20)
+        /// The characterizer scans 100–3800 Hz; the background line reads the same
+        /// band of the DISPLAY spectrum. It is a display-side reading: the live
+        /// analyzer's bins are coarser (2048-point FFT, max-folded into log bins,
+        /// peak-held) than the detector's own FFT, so for broadband noise this
+        /// line reads several dB above the detector's floor. The threshold line
+        /// is exact for tones; this one is a guide.
+        private static let scanLoHz = 100.0, scanHiHz = 3800.0
         /// User-entered label for the profile being saved, e.g. "fake icom".
         @Published var profileName = ""
         /// True while a stay-silent capture is in progress (drives the spinner).
@@ -26,14 +48,18 @@
         /// Notch frequencies (Hz) the saved profile would filter — shown as markers.
         @Published private(set) var detectedPeaks: [Double] = []
         @Published private(set) var saved = false
+        /// Whether the profile the last `save` wrote filters nothing — a clean mic
+        /// at this threshold. Drives the confirmation copy; a legitimate result,
+        /// not a failure.
+        @Published private(set) var savedPassThrough = false
 
         /// Seconds of silence to buffer before characterizing.
         private static let captureSeconds: TimeInterval = 1.5
         /// Max ~0.7 s retries while the monitor warms up on a cold first open.
         private static let maxAnalyzeAttempts = 8
 
-        /// Set by the controller; closes the analyzer window. Closing tears down the
-        /// monitor via the view's `onDisappear`.
+        /// Set by the controller; leaves the analyzer pane (`AppNavigation.goBack`).
+        /// Leaving tears down the monitor via the view's `onDisappear`.
         var onClose: (() -> Void)?
 
         private weak var session: CallSession?
@@ -46,8 +72,9 @@
 
         func attach(session: CallSession) { self.session = session }
 
-        /// Close the analyzer window (Cancel). Teardown happens in `stop()` via the
-        /// view's `onDisappear`.
+        /// Leave the analyzer pane. Teardown happens in `stop()` via the view's
+        /// `onDisappear`. The pane's own way out is the header's Back chevron; this
+        /// is the model-level equivalent for anything that has only the model.
         func requestClose() { onClose?() }
 
         /// Whether there's a fresh characterization ready to save.
@@ -62,8 +89,15 @@
 
         // MARK: - Monitor lifecycle
 
-        /// Start monitoring `input` and polling the spectrum. Safe to call repeatedly.
+        /// Start monitoring `input` and polling the spectrum. Safe to call repeatedly;
+        /// calling it with a different device switches the mic being monitored.
         func start(input: String?) {
+            // A different microphone has a different floor: start its average fresh
+            // rather than dragging the previous device's second along.
+            if input != selectedInput {
+                floorMean.reset()
+                floorMedianDb = nil
+            }
             selectedInput = input
             // Best-effort: a cold first open can fail/race the capture device here.
             // The poll timer runs regardless — so the spectrum reflects the mic the
@@ -71,14 +105,18 @@
             // each retry until it's live. (Don't early-return on failure; that left
             // the timer uninstalled, so the first analyze could never recover.)
             //
-            // Retain (not raw start) so the lane is shared with the VOX calibration
-            // meter: whichever opens it first owns the open, and neither closing pulls
-            // the mic from the other. Retain only on the first start() so repeated
-            // calls don't leak retains; mid-session device changes still re-assert the
-            // input via the idempotent `monitorStart` in `analyze()`/`finishAnalyze()`.
+            // Retain (not raw start) on the FIRST start so the lane is shared with the
+            // VOX calibration meter: whichever opens it first owns the open, and
+            // neither closing pulls the mic from the other. One retain per start()
+            // would leak holds, so once we hold one, a later start() asks the engine
+            // to move the lane to `input` instead — that is what makes the device
+            // picker change the stream and not just the label. Naming the same device
+            // is a no-op down in the station.
             if !holdsMonitor {
                 try? session?.monitorRetain(input: input)
                 holdsMonitor = true
+            } else {
+                try? session?.monitorStart(input: input)
             }
             timer?.invalidate()
             timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
@@ -96,11 +134,27 @@
                 holdsMonitor = false
             }
             spectrum = []
+            floorMean.reset()
+            floorMedianDb = nil
         }
 
         private func poll() {
             guard let s = try? session?.micSpectrum() else { return }
             spectrum = s
+            // Only average bins the mic is actually delivering. Before the
+            // capture device starts (or on a cold open) every bin reads the
+            // display's -120 dBFS empty value; folding those into the mean would
+            // drag the background line down to the floor for a second after the
+            // audio arrives, and park it on the frequency ticks until then. The
+            // same test `finishAnalyze` uses to decide the mic is live.
+            guard s.contains(where: { $0 > -119 }) else { return }
+            if let lo = SpectrumAxis.binFraction(Self.scanLoHz, binCount: s.count),
+                let hi = SpectrumAxis.binFraction(Self.scanHiHz, binCount: s.count),
+                let median = SpectrumFloor.scanBandMedian(s, lowFraction: lo, highFraction: hi)
+            {
+                floorMean.push(median)
+                if floorMedianDb != floorMean.value { floorMedianDb = floorMean.value }
+            }
         }
 
         // MARK: - Analyze / cancel
@@ -114,6 +168,7 @@
             start(input: selectedInput)
             captureWork?.cancel()
             saved = false
+            savedPassThrough = false
             lastError = nil
             lastJSON = nil
             floorReadout = nil
@@ -132,7 +187,15 @@
             // floor above the -120 dBFS empty value); retry until it's delivering or
             // we hit the attempt cap.
             let delivering = spectrum.contains { $0 > -119 }
-            let json = (try? session?.characterize(harmonicComb: harmonicComb) ?? "") ?? ""
+            // The operator's slider level — the same number the canvas draws its
+            // threshold line at, on the same scale, so the detected notches are
+            // exactly the peaks standing above the line they can see. The relative
+            // margin is left unset: the absolute threshold is the one that decides.
+            let json =
+                (try? session?.characterize(
+                    harmonicComb: harmonicComb, peakMarginDb: nil,
+                    thresholdDbfs: Float(thresholdDbfs)) ?? "")
+                ?? ""
             if !delivering || json.isEmpty, analyzeAttempt < Self.maxAnalyzeAttempts {
                 analyzeAttempt += 1
                 // Re-attempt the monitor each retry — recovers a cold/failed initial
@@ -172,6 +235,7 @@
             floorReadout = nil
             detectedPeaks = []
             saved = false
+            savedPassThrough = false
             lastError = nil
         }
 
@@ -191,6 +255,7 @@
             session?.saveMicProfile(p)
             session?.setMicProfileSelection(id: p.id)
             saved = true
+            savedPassThrough = p.isPassThrough
         }
 
         // MARK: - JSON readouts (display only — application stays opaque)
@@ -212,13 +277,15 @@
                 let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { return nil }
             var parts: [String] = []
+            // "broadband" distinguishes this from the canvas's per-bin lines: this
+            // is one wideband RMS number over the whole capture.
             if let floor = (obj["noise_floor_dbfs"] as? NSNumber)?.doubleValue {
-                parts.append("floor \(Int(floor)) dBFS")
+                parts.append("broadband floor \(Int(floor)) dBFS")
             }
             let notches = peaks(from: json)
             parts.append(
                 notches.isEmpty
-                    ? "no tones to notch"
+                    ? "nothing clears the threshold — pass-through"
                     : "notch " + notches.map { String(Int($0)) }.joined(separator: ", ") + " Hz")
             return parts.isEmpty ? nil : parts.joined(separator: " · ")
         }

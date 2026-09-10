@@ -115,6 +115,7 @@ use astar_ysf::{
     Callsign, DataPacket, DataType, Fich, Frame, FrameInfo, FsmAction, LinkState, YsfFsm, dch, wire,
 };
 
+use crate::heard::{HeardEntry, HeardLog};
 use crate::session::ConsoleError;
 
 /// How long the socket blocks before the loop runs `tick` anyway.
@@ -248,6 +249,10 @@ struct Shared {
     /// `LinkState` as its discriminant index; see `state_from_u32`.
     link_state: AtomicU32,
     last_heard: Mutex<Option<String>>,
+    /// Everyone heard on this link, newest first — `last_heard` keeps only
+    /// the most recent name, which a short courtesy tail overwrites a second
+    /// after the real talker unkeys.
+    heard: HeardLog,
     frames_rx: AtomicU64,
     receiving: AtomicBool,
     stop: AtomicBool,
@@ -271,6 +276,7 @@ impl Shared {
         Shared {
             link_state: AtomicU32::new(state_index(LinkState::Idle)),
             last_heard: Mutex::new(None),
+            heard: HeardLog::new(),
             frames_rx: AtomicU64::new(0),
             receiving: AtomicBool::new(false),
             stop: AtomicBool::new(false),
@@ -548,6 +554,14 @@ impl YsfLink {
         }
     }
 
+    /// Who has keyed up on this link, newest first — see
+    /// [`crate::heard::HeardLog`]. Attacker-supplied text, like
+    /// [`YsfSnapshot::last_heard`].
+    #[must_use]
+    pub fn heard(&self) -> Vec<HeardEntry> {
+        self.shared.heard.snapshot()
+    }
+
     /// Request transmit on or off.
     ///
     /// Stores a request; the run loop applies the edge on its next pass. This
@@ -701,10 +715,11 @@ fn handle(
             // involved. `to_trimmed_string` drops the space padding the
             // ten-byte wire field requires.
             let source = packet.source.to_trimmed_string();
-            if !source.is_empty()
-                && let Ok(mut slot) = shared.last_heard.lock()
-            {
-                *slot = Some(source);
+            if !source.is_empty() {
+                shared.heard.note("ysf", &source);
+                if let Ok(mut slot) = shared.last_heard.lock() {
+                    *slot = Some(source);
+                }
             }
             if let Some(a) = audio {
                 // HALF-DUPLEX. The ThumbDV is one physical link with one
@@ -1299,6 +1314,58 @@ mod tests {
         );
         link.disconnect();
         reflector.shutdown();
+    }
+
+    /// A `YSFD` carries its source callsign in the header, in clear, so both
+    /// the one-name `last_heard` slot and the history are filled without a
+    /// vocoder ever being opened. The history is what survives a second
+    /// station keying over the first.
+    #[test]
+    fn the_talker_is_read_from_the_header_and_lands_in_the_history() {
+        let shared = Arc::new(Shared::new());
+        let (sock, addr, _peer) = udp_pair();
+        let packet = |source: &str, end: bool| {
+            Box::new(DataPacket {
+                gateway: Callsign::new("N0CALL").expect("legal"),
+                source: Callsign::new(source).expect("legal"),
+                destination: Callsign::new("ALL").expect("legal"),
+                counter: 0,
+                end,
+                frame: [0u8; astar_ysf::FRAME_LEN],
+            })
+        };
+
+        assert!(handle(
+            &FsmAction::Data(packet("AJ7HR", true)),
+            &sock,
+            addr,
+            &shared,
+            None,
+        ));
+        assert!(handle(
+            &FsmAction::Data(packet("W1AW", true)),
+            &sock,
+            addr,
+            &shared,
+            None,
+        ));
+
+        assert_eq!(
+            shared.last_heard.lock().expect("mutex").as_deref(),
+            Some("W1AW"),
+            "the one-name slot holds only the newest"
+        );
+        let heard: Vec<_> = shared
+            .heard
+            .snapshot()
+            .into_iter()
+            .map(|e| (e.network, e.callsign))
+            .collect();
+        assert_eq!(
+            heard,
+            [("ysf", "W1AW".to_string()), ("ysf", "AJ7HR".to_string())],
+            "the history keeps the first talker after the second replaces the line"
+        );
     }
 
     // ── The receive path (astar-e7b3 §2) ────────────────────────────────

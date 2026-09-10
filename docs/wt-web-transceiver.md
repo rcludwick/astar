@@ -24,7 +24,7 @@ important thing to understand about WT.
 
 | Credential | Where it's used | What it proves | Secret-free handling |
 |---|---|---|---|
-| **Portal account** (`user`, `password`, `node`) | HTTPS to `allstarlink.org/portal` to mint a token | "I own this account/node" | Resolved on demand; the password lives only inside `mint_wt_token` and is never stored in config/snapshot/event/log nor transmitted over IAX2 |
+| **Portal account** (`user`, `password`, `node`) | HTTPS to `allstarlink.org` to mint a token — the auth API, or `/portal` as a fallback | "I own this account/node" | Resolved on demand; the password lives only inside `mint_wt_token` and is never stored in config/snapshot/event/log nor transmitted over IAX2 |
 | **IAX2 guest secret** (`"allstar"`) | MD5 challenge/response in the IAX2 handshake | "I can complete the IAX2 auth" | Passed in-arg to the call; the same secret guest dials use |
 
 The **on-air vs off-air** distinction is enforced entirely on the AllStar
@@ -62,27 +62,132 @@ A generic `connect` instead sends the real caller-id as `USERNAME`, includes the
 
 ### Stage 1 — Mint the portal token (`astar-asl3::mint_wt_token`)
 
-A three-step HTTPS sequence against the AllStar portal:
+Minting happens fresh for every connect and for the Settings **Test** button,
+and there are **two** ways to do it:
 
-1. `POST /portal/login.php` with `user=<account>&pass=<password>`. Redirects are
-   disabled so the `302`'s `Set-Cookie` (the `PHPSESSID` session cookie, and the
-   `allstar_token` JWT) can be read directly. Both cookies are kept (any
-   non-expired `Set-Cookie`) and forwarded — drop either and the next page
-   renders unauthenticated.
-2. `GET /portal/webtransceiver.php` with the cookie jar — `?node=<owned-node>`
-   only when a node is configured; the portal mints without one.
-3. Extract the token from the returned HTML — the `callingName` param
-   (e.g. `value="84906e5c0000"`).
+* **Request 0, the API** — the endpoint AllStarLink's developer documentation
+  publishes. One JSON POST, a token back, **no node involved**. This is what
+  the engine tries first.
+* **Requests 1 and 2, the scrape** — log in to the portal
+  (`https://www.allstarlink.org/portal`) and read the token out of the Web
+  Transceiver page's HTML. This is what the portal's own page
+  does in a browser, and what DroidStar's `obtain_asl_wt_creds()` and the old
+  `scripts/asl-wt-token.py` did before the Rust port. The engine now uses it
+  **only as a fallback**, when the API gave nothing usable (unreachable, an
+  unexpected status, a body it could not read, or no token at all) *and* a node
+  is configured — the scrape cannot mint without one.
 
-The result is a short token string destined for the IAX2 `CALLING_NAME` IE. The
-AllStar node's server-side validator maps that token back to the account's
-callsign.
+A login the API *refuses* is never retried against the scrape: wrong
+credentials are wrong on both paths. The fallback exists for an endpoint that
+moved or a portal that answered something the API grammar does not cover.
 
-`PortalCredentials { user, password, node }` — note `user` is the **portal
-account callsign**, `password` is the **portal account password** (not any IAX2
-secret), and `node` is an **optional** selector for a node the account owns.
-The portal issues a token without one, so an empty `node` sends no query
-parameter; the macOS account panel no longer asks for it.
+#### Request 0 — the API (`POST /api/v2/auth-wt-legacy`)
+
+| | |
+|---|---|
+| Method / URL | `POST https://www.allstarlink.org/api/v2/auth-wt-legacy` — the portal's **origin**, not under `/portal` (documented at <https://allstarlink.github.io/developers/api/#webtransceiver>) |
+| Header | `Content-Type: application/json` |
+| Body | JSON, exactly two keys: `username` = the allstarlink.org account callsign, `password` = its **account** password. Built with `serde_json`, never string formatting — a password is arbitrary text and must be escaped by something that knows the grammar. |
+| Node | **none.** The token is the account's, so nothing here needs a node the account owns. This is the whole reason the API path exists: an account saved without a node could not mint at all through the scrape. |
+| Success | JSON `{"status":"OK","auth":1,"token":"<TOKEN>","msg":…}`. astar accepts the response when **`token` is a non-empty string**; `status` and `auth` are read for the error message only, never required to hold particular values. |
+| Refused login | `HTTP 401` `{"status":"ERR","auth":0,"token":"","msg":"login failed"}` (probed live 2026-09-08) → `Asl3Error::Login`, and **no** fallback to the scrape. The status decides this **before** the body is parsed, so a refusal wrapped in HTML (an nginx page, a WAF challenge) is still a refusal and the password is not sent a second time. A 200-shaped refusal — `auth: 0` with a `msg` naming the login — is read the same way. |
+| Malformed request | `HTTP 400` with `"msg":"Invalid JSON payload"` for a body that is not JSON, `"msg":"Invalid JSON fields"` for other field names (both probed live 2026-09-08). That is a bug in our own request, so the engine treats it like any other unusable answer: fall back to the scrape when a node is configured, `Asl3Error::Http` when there is none. |
+| Authenticated but empty | a 2xx whose `token` is missing or empty is treated as "the API issued nothing" — fall back / `Http`, **not** a final `TokenNotFound`. Deliberately soft: the live success shape has not been observed yet, so if the token turns out to live under another key an account with a node still mints through the scrape instead of failing outright. Tighten it to `TokenNotFound` once a real success response has been seen. |
+| Unreachable | transport failure, a non-JSON body, another status (404 because the endpoint moved, a 5xx), or a 2xx with no token → fall back to the scrape **if `creds.node` is non-empty**; otherwise `Asl3Error::Http`, whose message always names the path and the reason — `POST /api/v2/auth-wt-legacy: HTTP 404`, `…: HTTP 200, no token in the response`, or the transport error itself — so the failure is not mistaken for a portal problem |
+| Timeout | 15 s |
+
+#### Request 1 — log in *(fallback path)*
+
+| | |
+|---|---|
+| Method / URL | `POST /portal/login.php` |
+| Body | `application/x-www-form-urlencoded`: `user=<callsign>&pass=<portal password>` |
+| What the portal expects | the **allstarlink.org account** callsign and its **account** password — not a node's IAX secret, not an ASL admin password |
+| Redirects | **not followed** (`ureq` `redirects(0)`). The live portal answers a good login with a `302` to `/portal/`, and the cookies ride on that `302`. Following it would drop them. A direct `200` is accepted the same way. |
+| Success signal | a `Set-Cookie` for **`PHPSESSID`**. No `PHPSESSID` → `Asl3Error::Login` ("portal login failed"). |
+| Cookies kept | every `Set-Cookie` name=value pair the response carries, **except** ones the server is expiring (`Max-Age=0` or `expires=Thu, 01 Jan 1970`). Live login sets `PHPSESSID` **and** an `allstar_token` JWT, and expires a stale `allstar_become`. Forwarding only `PHPSESSID` renders the next page unauthenticated — the portal authenticates on the whole jar. |
+| Timeout | 15 s per request |
+
+#### Request 2 — fetch the transceiver page *(fallback path)*
+
+| | |
+|---|---|
+| Method / URL | `GET /portal/webtransceiver.php?node=<node>` |
+| Header | `Cookie: PHPSESSID=…; allstar_token=…` — the jar from request 1, `; `-joined |
+| What the portal expects | a **node number the account owns** in `node`. With no `node` the page comes back with no token (checked live 2026-09-08; the Settings Test button read "rejected" for an account saved without one). Any owned node will do — the token is the account's, not the node's; the node is how the page decides you may have one. |
+| Empty node | the engine sends **no** `node` parameter rather than `node=`, for configs that carry none; expect `TokenNotFound` from the live portal in that case |
+| Success signal | the HTML contains `<param name="callingName" value="<TOKEN>"/>` (the applet parameter block of the page's embedded transceiver). A looser fallback scan for `callingName` followed by a quoted run of `[A-Za-z0-9_-]` covers markup drift. |
+| Token shape | a short opaque string, e.g. `84906e5c0000`. Treat it as a per-session credential: it is not logged, not stored, not put in any snapshot or event. |
+| Failure | no token in the page → `Asl3Error::TokenNotFound` ("no web-transceiver token in the portal response"). Causes, in the order to check: no node / a node the account does not own · a login that returned a cookie but is not actually authenticated (only `PHPSESSID` forwarded) · the portal changed its markup. |
+| Transport | any connect/TLS/timeout failure → `Asl3Error::Http(<message>)` |
+
+#### What the token is for
+
+The token goes out **once**, as the IAX2 `CALLING_NAME` IE of the `NEW` frame
+(`CallMode::WebTransceiver { node, name }` → `CallProfile.calling_name`), with
+`CALLING_NUMBER` = the destination node and `CALLED_NUMBER` = `"s"`. The
+AllStar node's dialplan hands `CALLING_NAME` to `authwebphone.pl`, which maps
+the token back to the account's callsign and decides whether this caller keys
+the radio. The IAX2 secret is still the guest `"allstar"`; the portal password
+never leaves request 1.
+
+#### Errors, as the layers see them
+
+| Engine (`Asl3Error`) | Station (`StationError::Portal`) | App |
+|---|---|---|
+| `Login` | `portal/token error: portal login failed (no session cookie)` | "The AllStarLink portal rejected these credentials. Check the callsign, password, and node." |
+| `TokenNotFound` | `portal/token error: no web-transceiver token in the portal response (…)` | same line |
+| `Http(msg)` | `portal/token error: portal HTTP error: <msg>` | same line |
+
+The app shows one line for all three today; the station text (since
+`71fa215`) carries the category, so a future build can say which. The API path
+raises `Login` for a refusal (final, never retried against the scrape) and
+`Http` for anything it could not use when there is no node to fall back with —
+that message names `/api/v2/auth-wt-legacy` and the reason. `TokenNotFound`
+comes only from the scrape today.
+
+#### Checking it by hand
+
+Two ways, both reading the password from the environment and never putting
+it on a command line.
+
+`scripts/asl-wt-check.sh` is the flow in plain `curl`, one request at a
+time, and it says what the portal answered at each step. Step 1 is the API
+call — the status and the JSON, token masked to its first four characters —
+and the script stops there, exit 0, when a token comes back. Steps 2 and 3
+are the fallback scrape, run for comparison when the API issued nothing:
+the login status, the cookies set and kept, whether a token came back.
+It mirrors the engine's own rules: a step-1 transport failure falls
+through to the scrape when a node is set and exits 4 when there is none,
+and after a 401 it says the engine stops there — the scrape steps still
+run, but only for comparison, and the exit stays 2 whatever they return.
+`--no-node` reproduces the unsaved-node case; `--show-token` prints whole
+tokens. Exit status 2 means the login was refused (by the API, or by the
+portal — after an API refusal the scrape's own result is informational),
+3 a page with no token, 4 a transport failure with no node to fall back
+with. Step 1 needs `python3` to build the JSON body; without it the
+script says so and runs the scrape.
+(`scripts/asl-wt-token.py` is the older Python original of the scrape
+half, run with `uv`.)
+
+```text
+ASL_USER=<callsign> ASL_PASS='<portal password>' ASL_NODE=<owned node> scripts/asl-wt-check.sh
+```
+
+`live_mint` does the same thing through the engine's own code path and prints
+the token or the category of failure, nothing else. The password goes in the environment,
+never on a command line:
+
+```text
+ASL_USER=<callsign> ASL_PASS='<portal password>' ASL_NODE=<owned node> \
+  cargo run -q -p astar-asl3 --example live_mint
+```
+
+`ASL_NODE` now only matters for the fallback: the API path mints without one.
+The offline tests in `crates/astar-asl3/src/mint.rs` play both halves with a
+`tiny_http` stub — the API's success/refusal/absent shapes, and the scrape's
+`302`-with-cookies login and full-jar requirement — so the sequence above is
+pinned without touching the live site.
 
 ### Stage 2 — Resolve the node to an address (`astar-asl3::resolve_node`)
 
@@ -192,7 +297,7 @@ never echoed into a snapshot, event, log, or any IAX2 frame.
 |---|---|
 | `Station::connect_wt` (entry) | `crates/astar-station/src/station.rs` (`connect_wt`) |
 | `StationConfig` + `PortalCredentials` | `crates/astar-station/src/config.rs` |
-| Portal token mint (HTTPS) | `crates/astar-asl3/src/mint.rs` (`mint_wt_token`) |
+| Portal token mint (HTTPS) | `crates/astar-asl3/src/mint.rs` (`mint_wt_token`, API; `mint_wt_token_legacy_at`, scrape fallback) |
 | Node resolution (DNS TXT) | `crates/astar-asl3/src/resolve.rs` (`resolve_node`), `dns.rs` |
 | WT call mode → CallProfile | `crates/astar-iax/src/call_mode.rs` (`CallMode::WebTransceiver`) |
 | NEW frame IEs | `crates/astar-iax-core/src/session/builders.rs` (`build_new`) |

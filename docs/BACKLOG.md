@@ -12,7 +12,7 @@ inline. All 228 issues (164 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (104)
+## Open items (106)
 
 ### astar-uid — Audio devices need a stable identity, not their name
 *P2 medium · bug · labels: audio, macos, migration, cx:5*
@@ -1789,3 +1789,21 @@ no UI gate for a missing NXDN ID (Connect enabled, refused on press); no
 detail does reach the operator, the framing does not); `message_type` in
 `astar-nxdn::frame` is returned unmasked where Layer 3 masks `0x3F`;
 `read_bit`/`write_bit` duplicated between `astar-codec`'s `ysf` and `nxdn`.
+
+### iax-heard-gate — Heard-history gates enumerate the digital networks by hand
+*P4 backlog · task · labels: heard, gui, macos, cx:2*
+
+`CallSession.refreshHeardHistory` (Swift) and `RealConn::snapshot` (Iced)
+each OR the five `*_active` flags to decide the link is live, and
+`ConsoleSession::heard()` has one `#[cfg]` arm per session
+(`crates/astar-console/src/session.rs`). A sixth digital network owes an arm
+in all three places or its rows never show, with no compiler error to catch
+the omission.
+
+### iax-serde-allfeat — astar-console --all-features does not compile
+*P4 backlog · bug · labels: build, ci, cx:1*
+
+`astar-console`'s `serde` feature does not forward `astar-audio/serde`, so
+`DenoiseStatus` in `state.rs` lacks `Serialize` under `--all-features`. CI
+never runs that combination, so it went unnoticed. Fix is one line in
+`crates/astar-console/Cargo.toml`.

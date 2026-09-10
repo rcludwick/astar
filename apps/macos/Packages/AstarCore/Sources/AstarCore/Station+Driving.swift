@@ -81,6 +81,8 @@ public struct NullStation: StationDriving {
     /// No engine, so no session — the same answer the real station gives
     /// while idle, which keeps the last-heard line absent rather than wrong.
     public func m17State() throws -> M17State? { nil }
+    /// No engine, so nobody has been heard.
+    public func heard() throws -> [HeardEntry] { [] }
     public func connectYSF(host: String, callsign: String, options: String?) throws {
         throw NullStationError.noEngine
     }
@@ -126,7 +128,9 @@ public struct NullStation: StationDriving {
     public func micSpectrum() throws -> [Float] { [] }
     public func txSpectrum() throws -> [Float] { [] }
     public func rxSpectrum() throws -> [Float] { [] }
-    public func characterize(harmonicComb: Bool) throws -> String { "" }
+    public func characterize(harmonicComb: Bool, peakMarginDb: Float?, thresholdDbfs: Float?)
+        throws -> String
+    { "" }
     public func setMicProfile(_ json: String?) throws {}
 }
 
@@ -143,7 +147,8 @@ extension CallSession {
         if let c = credentials {
             config.portalUser = c.portalUser
             config.portalPass = c.portalPass
-            config.portalNode = c.portalNode
+            // No node: the API mint needs none, and the engine's legacy scrape
+            // (which does) is therefore unreachable from the app.
         }
         config.codecPolicy = audio.codecPolicyString
         return config

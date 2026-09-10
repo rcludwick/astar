@@ -71,9 +71,20 @@ final class FakeStation: StationDriving {
     var txSpectrumToReturn: [Float] = []
     var rxSpectrumToReturn: [Float] = []
     var characterizeJSON = ""
+    /// Every `characterize` argument pair, in order — so a test can prove WHICH
+    /// peak margin the session handed the engine, not just that it asked.
+    private(set) var characterizeCalls:
+        [(harmonicComb: Bool, peakMarginDb: Float?, thresholdDbfs: Float?)] = []
     private(set) var setMicProfileCalls: [String?] = []
     private(set) var monitorStartCount = 0
     private(set) var monitorStopCount = 0
+    /// Every `monitorStart(input:)` argument, in order — so a test can see WHICH
+    /// device the lane was opened on, not just how many times.
+    private(set) var monitorStartInputs: [String?] = []
+    /// When set, `monitorStart` throws for this input (a device that won't open),
+    /// so a test can drive the failed-switch path. The attempt is still recorded.
+    var monitorStartFailsFor: String?
+    struct MonitorStartFailure: Error {}
 
     func readSnapshot() throws -> CallSnapshot { snapshotToReturn }
     func readEvent() throws -> Event? { events.isEmpty ? nil : events.removeFirst() }
@@ -143,12 +154,22 @@ final class FakeStation: StationDriving {
     func setDenoiseStrength(_ level: Float) throws { denoiseStrengthCalls.append(level) }
     func setRxCompression(_ on: Bool) throws { rxCompressionCalls.append(on) }
     func setRxCompressionLevel(_ level: Float) throws { rxCompressionLevelCalls.append(level) }
-    func monitorStart(input: String?) throws { monitorStartCount += 1 }
+    func monitorStart(input: String?) throws {
+        monitorStartCount += 1
+        monitorStartInputs.append(input)
+        if let failing = monitorStartFailsFor, input == failing { throw MonitorStartFailure() }
+    }
     func monitorStop() throws { monitorStopCount += 1 }
     func micSpectrum() throws -> [Float] { spectrumToReturn }
     func txSpectrum() throws -> [Float] { txSpectrumToReturn }
     func rxSpectrum() throws -> [Float] { rxSpectrumToReturn }
-    func characterize(harmonicComb: Bool) throws -> String { characterizeJSON }
+    func characterize(harmonicComb: Bool, peakMarginDb: Float?, thresholdDbfs: Float?) throws
+        -> String
+    {
+        characterizeCalls.append(
+            (harmonicComb: harmonicComb, peakMarginDb: peakMarginDb, thresholdDbfs: thresholdDbfs))
+        return characterizeJSON
+    }
     func setMicProfile(_ json: String?) throws { setMicProfileCalls.append(json) }
 
     // M17 (iax-f2b8 Task 8) scripting/recording.
@@ -203,6 +224,11 @@ final class FakeStation: StationDriving {
     /// What `m17State()` reports; `nil` is "no session", the idle answer.
     var m17StateValue: M17State?
     func m17State() throws -> M17State? { m17StateValue }
+    /// What `heard()` reports — newest first, as the engine orders it. Named
+    /// like its neighbours because a stored `heard` would collide with the
+    /// method Swift needs for the protocol.
+    var heardValue: [HeardEntry] = []
+    func heard() throws -> [HeardEntry] { heardValue }
 
     // System Fusion. `host` is recorded whole — `host:port` is one string
     // across this ABI, and the port being folded into it is exactly the sort
@@ -316,13 +342,16 @@ private struct ThrowingStation: StationDriving {
     func micSpectrum() throws -> [Float] { throw Boom() }
     func txSpectrum() throws -> [Float] { throw Boom() }
     func rxSpectrum() throws -> [Float] { throw Boom() }
-    func characterize(harmonicComb: Bool) throws -> String { throw Boom() }
+    func characterize(harmonicComb: Bool, peakMarginDb: Float?, thresholdDbfs: Float?) throws
+        -> String
+    { throw Boom() }
     func setMicProfile(_ json: String?) throws { throw Boom() }
     func connectM17(host: String, port: UInt16, module: Character, callsign: String) throws {
         throw Boom()
     }
     func m17Disconnect() throws { throw Boom() }
     func m17State() throws -> M17State? { throw Boom() }
+    func heard() throws -> [HeardEntry] { throw Boom() }
     func setCodecDirs(_ dirs: [String]) throws { throw Boom() }
     func connectDStar(
         host: String, port: UInt16, module: Character, callsign: String,
@@ -418,13 +447,13 @@ final class CallSessionTests: XCTestCase {
         // The construction-time seam (astar-eb6c): makeStation builds its
         // StationConfig here. Wideband is always on (astar-e542), so the codec
         // policy is unconditionally prefer_slin16 alongside the credentials.
-        let creds = Credentials(portalUser: "AJ7HR", portalPass: "pw", portalNode: "77777")
+        let creds = Credentials(portalUser: "AJ7HR", portalPass: "pw")
         let audio = AudioSettings()
 
         let config = CallSession.stationConfig(credentials: creds, audio: audio)
         XCTAssertEqual(config.portalUser, "AJ7HR")
         XCTAssertEqual(config.portalPass, "pw")
-        XCTAssertEqual(config.portalNode, "77777")
+        XCTAssertNil(config.portalNode, "the app never sets a node; the API mint needs none")
         XCTAssertEqual(config.codecPolicy, "prefer_slin16")
 
         let noCreds = CallSession.stationConfig(credentials: nil, audio: audio)
@@ -2706,7 +2735,7 @@ final class CallSessionTests: XCTestCase {
 
     func testM17CallsignPrefillsFromPortalUserWhenNothingSaved() {
         let defaults = scratchM17Defaults()
-        let creds = Credentials(portalUser: "AJ7HR", portalPass: "pw", portalNode: "77777")
+        let creds = Credentials(portalUser: "AJ7HR", portalPass: "pw")
 
         let session = CallSession(
             station: FakeStation(), credentials: creds, userDefaults: defaults)
@@ -2719,7 +2748,7 @@ final class CallSessionTests: XCTestCase {
         // wins over the prefill.
         let defaults = scratchM17Defaults()
         defaults.set("N7XYZ", forKey: "m17.callsign")
-        let creds = Credentials(portalUser: "AJ7HR", portalPass: "pw", portalNode: "77777")
+        let creds = Credentials(portalUser: "AJ7HR", portalPass: "pw")
 
         let session = CallSession(
             station: FakeStation(), credentials: creds, userDefaults: defaults)
@@ -2729,7 +2758,7 @@ final class CallSessionTests: XCTestCase {
 
     func testM17CallsignPrefillSkipsWhenPortalUserDoesntLookLikeACallsign() {
         let defaults = scratchM17Defaults()
-        let creds = Credentials(portalUser: "myallstarlogin", portalPass: "pw", portalNode: "1")
+        let creds = Credentials(portalUser: "myallstarlogin", portalPass: "pw")
 
         let session = CallSession(
             station: FakeStation(), credentials: creds, userDefaults: defaults)

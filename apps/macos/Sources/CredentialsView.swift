@@ -17,12 +17,16 @@ import SwiftUI
 /// top of Settings. A second box for the same fact is a way to get them out of
 /// step, not a feature.
 ///
-/// **There is no node number field either.** The portal mints a token without
-/// one, so asking for a node your account owns was a hoop, not a credential.
-/// `Credentials.portalNode` stays in the config for the engine's optional
-/// selector; this panel never writes a new one, and a node saved by an earlier
-/// build is carried through untouched. So this panel owns one field: Account
-/// password → portalPass. `portalUser` is written from
+/// **There is no node number field either.** The token comes from AllStarLink's
+/// documented API (`POST /api/v2/auth-wt-legacy`, username + password), which
+/// needs no node. The field went, came back for a day while the engine still
+/// scraped the portal's transceiver page (which does need an owned node), and
+/// went again on 2026-09-09 once the API path shipped, and this time the app
+/// stores no node at all (`Credentials` lost the property; an older Keychain
+/// blob's `portalNode` key is simply ignored on read). The engine keeps its
+/// legacy scrape as a fallback for configs that carry a node — none written
+/// by this app do, so from here the API is the only path. So this panel owns
+/// one field: Account password → portalPass. `portalUser` is written from
 /// `session.operatorCallsign`, and kept in step when that changes.
 ///
 /// The password lives only in the Keychain, is consumed into `StationConfig` at
@@ -241,16 +245,9 @@ struct CredentialsView: View {
         // An empty box means "unchanged", not "blank" — the password is never
         // pre-filled, so it is read back out of the Keychain and written
         // straight in again. It reaches no view state on the way through.
-        // The node rides along the same way: nothing here edits it, so a
-        // value saved by an earlier build survives and a new account gets none.
-        let existing = store.load()
-        let password = accountPassword.isEmpty ? (existing?.portalPass ?? "") : accountPassword
+        let password = accountPassword.isEmpty ? (store.load()?.portalPass ?? "") : accountPassword
         guard !password.isEmpty else { return }
-        let creds = Credentials(
-            portalUser: loginCallsign,
-            portalPass: password,
-            portalNode: existing?.portalNode ?? ""
-        )
+        let creds = Credentials(portalUser: loginCallsign, portalPass: password)
         do {
             try store.save(creds)
             // Rebuilding the station re-applies construction-time knobs — read

@@ -23,8 +23,6 @@ pub use config::QuickConfig;
 pub use dial::Dialpad;
 pub use favorites::Favorites;
 
-use std::sync::LazyLock;
-
 use iced::widget::{button, column, container, row, scrollable, text, Space};
 use iced::{Alignment, Background, Border, Color, Element, Fill};
 
@@ -64,10 +62,10 @@ pub struct NetworkInfo<'a> {
 /// The version this build reports in the footer, derived from the crate's own
 /// `version` (inherited from the workspace) instead of being written out a
 /// second time — a literal here goes stale the first time the workspace
-/// version is bumped. Cargo demands SemVer's hyphenated pre-release form
-/// (`0.1.0-beta`); the hyphen is dropped for display so this matches the macOS
-/// bundle's MARKETING_VERSION (`0.1.0beta`) exactly.
-static APP_VERSION: LazyLock<String> = LazyLock::new(|| env!("CARGO_PKG_VERSION").replace('-', ""));
+/// version is bumped. Shown verbatim: since `0.1.10-beta` all five version
+/// homes (including the macOS bundle's `MARKETING_VERSION`) carry the same
+/// hyphenated SemVer string, so there is nothing left to reconcile.
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Build the full screen for `snap`. `node_entry` is the current text in the
 /// node-entry field; `favorites` feeds the dial-row star and the "Saved
@@ -119,7 +117,7 @@ pub fn view<'a>(
     // The running build's version, so a user can say what they are on without
     // hunting for it. Mirrors the Mac popover's footer.
     content = content.push(
-        text(format!("astar {}", APP_VERSION.as_str()))
+        text(format!("astar {APP_VERSION}"))
             .size(11)
             .color(theme::MUTED),
     );

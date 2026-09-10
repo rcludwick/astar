@@ -83,7 +83,9 @@ impl std::fmt::Display for StationError {
         match self {
             Self::NotConnected => write!(f, "no active call"),
             Self::AlreadyConnected => write!(f, "a call is already in progress"),
-            Self::Portal(_) => write!(f, "portal/token error"),
+            // The inner error names its category (login refused, no token in
+            // the page, transport) and carries no credential.
+            Self::Portal(e) => write!(f, "portal/token error: {e}"),
             Self::Resolve(_) => write!(f, "node resolution failed"),
             Self::Audio(m) => write!(f, "audio error: {m}"),
             Self::Iax(m) => write!(f, "iax error: {m}"),

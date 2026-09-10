@@ -995,7 +995,7 @@ int iax_station_cancel_dtmf(IaxStation *st);
 int iax_station_set_dtmf_mode(IaxStation *st, IaxDtmfMode mode);
 
 /**
- * Set the input (TX/mic) gain multiplier (clamped `[0.0, 2.0]`).
+ * Set the input (TX/mic) gain multiplier (clamped `[0.0, 4.0]`).
  */
 int iax_station_set_input_gain(IaxStation *st, float gain);
 
@@ -1053,7 +1053,7 @@ int iax_station_set_denoise_strength(IaxStation *st, float level);
 int iax_station_set_compression_level(IaxStation *st, float level);
 
 /**
- * Set the TX trim gain (0.0..=2.0 clamped, default 1.0): the final output
+ * Set the TX trim gain (0.0..=4.0 clamped, default 1.0): the final output
  * stage after compression. Attenuates a hot mic that compression makeup gain
  * would otherwise keep loud; values above 1.0 boost (clamped at full scale).
  * Takes effect immediately on the live/next call. Returns [`IAX_OK`],
@@ -1090,13 +1090,22 @@ int iax_station_set_vox_preroll_ms(IaxStation *st, unsigned int ms);
 int iax_station_set_noise_reduction(IaxStation *st, bool on);
 
 /**
- * Start monitor mode (iax-2377): open the capture device and run the mic lane
+ * Monitor THIS device (iax-2377): open the capture device and run the mic lane
  * WITHOUT a call so a front-end can preview / characterize the mic before
  * dialing. `input` is a capture-device name substring, or NULL for the system
- * default. Idempotent and call-safe: a no-op if a call is already active (the
- * device is already open) or if a monitor is already running. Stop it with
- * [`iax_station_monitor_stop`]. Returns [`IAX_OK`], [`IAX_ERR_AUDIO`] (device
- * resolve/open failed), [`IAX_ERR_NULL`] (NULL `st`), or [`IAX_ERR_PANIC`].
+ * default.
+ *
+ * Call it again to change mics: asking for a DIFFERENT resolved device stops
+ * the running monitor and opens the new one, so a front-end's device picker
+ * moves the stream and not just its label; asking for the device already
+ * monitored is a no-op. The device is resolved before the running monitor is
+ * touched, so a name that resolves to nothing returns an error and leaves the
+ * current monitor running. Still call-safe: a no-op if a call is already
+ * active (the device is already open on the call's mic lane).
+ *
+ * Stop it with [`iax_station_monitor_stop`]. Returns [`IAX_OK`],
+ * [`IAX_ERR_AUDIO`] (device resolve/open failed), [`IAX_ERR_NULL`] (NULL `st`),
+ * or [`IAX_ERR_PANIC`].
  *
  * NOTE: opens an audio device (blocking); call it off any UI thread.
  */
@@ -1168,6 +1177,42 @@ int iax_station_rx_spectrum(IaxStation *st, float *out, uintptr_t cap);
  * noise floor, gate threshold) — no credential fields.
  */
 int iax_station_characterize(IaxStation *st, bool harmonic_comb, char *buf, uintptr_t len);
+
+/**
+ * Characterize the monitored mic with JSON options — the same buffer contract
+ * and the same output JSON as [`iax_station_characterize`], but the caller
+ * chooses the peak margin as well as the harmonic comb.
+ *
+ * `opts_json` is
+ * `{"harmonic_comb":false,"peak_margin_db":12.0,"threshold_dbfs":-60.0}`. Every
+ * key is optional and NULL or an empty string means "all defaults" (comb off,
+ * 12 dB, no absolute threshold — exactly
+ * `iax_station_characterize(st, false, …)`).
+ *
+ * The two detection knobs are alternatives, and `threshold_dbfs` wins:
+ *
+ * * `peak_margin_db` is RELATIVE — how far above the spectral-median noise
+ *   floor a tone must stand to be worth notching. Raise it to leave quiet
+ *   peaks alone. Clamped to 0–60 dB.
+ * * `threshold_dbfs` is ABSOLUTE — a level, in the same sinusoid-normalised
+ *   dBFS the live spectrum ([`iax_station_mic_spectrum`]) reports, that a peak
+ *   must exceed. A tone drawn above that line on a spectrum display is above
+ *   it for the detector too. Clamped to −140–0 dBFS. `null` (or an absent key)
+ *   means "no absolute threshold": the relative margin decides.
+ *
+ * Either way, a mic with nothing above the bar characterizes as a PASS-THROUGH
+ * profile (an empty notch list) that changes nothing in the mic lane. The
+ * engine records the clamped values it actually used in the profile it
+ * returns.
+ *
+ * Returns the byte length the full JSON needs (excluding the NUL), or a
+ * negative `IAX_ERR_*`: [`IAX_ERR_NULL`] (NULL `st`), [`IAX_ERR_UTF8`]
+ * (non-UTF-8 `opts_json`), [`IAX_ERR_IAX`] (unparsable options), or
+ * [`IAX_ERR_PANIC`]. When not monitoring, writes an empty string and returns 0.
+ *
+ * The JSON carries plain DSP numbers only — no credential fields.
+ */
+int iax_station_characterize_opts(IaxStation *st, const char *opts_json, char *buf, uintptr_t len);
 
 /**
  * Apply (or clear) a calibrated per-mic profile (iax-2095). `json` is a
@@ -1296,6 +1341,16 @@ int iax_station_link_key(IaxStation *st, const char *node, bool on);
  * sizing query), or a negative `IAX_ERR_*`.
  */
 int iax_station_link_roster_json(IaxStation *st, char *buf, uintptr_t len);
+
+/**
+ * Write who has keyed up on the live digital link as a JSON array, newest
+ * first (`[{"callsign":"..","network":"m17","age_ms":1234}]`, `[]` when
+ * nothing has been heard) into the caller buffer. Same contract as
+ * [`iax_station_link_roster_json`]: NUL-terminated + truncate-safe; returns
+ * the byte length the full JSON needs (a `len == 0` call is a sizing query),
+ * or a negative `IAX_ERR_*`.
+ */
+int iax_station_heard_json(IaxStation *st, char *buf, uintptr_t len);
 
 /**
  * Drain the next pending link lifecycle event. Returns 1 and fills `out`

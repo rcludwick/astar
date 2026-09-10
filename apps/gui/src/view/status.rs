@@ -10,7 +10,7 @@ use iced::{Background, Border, Element};
 use super::{dot, surface, tip_style, NetworkInfo};
 use crate::app::Message;
 use crate::network::Network;
-use crate::snapshot::{Snapshot, Status};
+use crate::snapshot::{Heard, Snapshot, Status};
 use crate::theme;
 
 /// Status text + dialed node + friendly name.
@@ -129,7 +129,54 @@ pub fn status_card<'a>(snap: &'a Snapshot, network: NetworkInfo<'a>) -> Element<
         );
     }
 
+    // Last heard (astar-heard): up to three stations that keyed the live
+    // digital link, newest first, in the same secondary style as the hints
+    // above. The strings come from `heard_lines` so the wording is testable
+    // without rendering; this loop only paints them.
+    for line in heard_lines(&snap.heard) {
+        lines = lines.push(text(line).size(13).color(theme::MUTED));
+    }
+
     surface(lines).into()
+}
+
+/// The heard-history rows as text, newest first, at most three.
+///
+/// The first row carries the Mac's caption verbatim — "Last heard W6VS · now"
+/// — so the two clients name the current talker the same way; the rows under
+/// it are bare `callsign · age`, the Mac's history lines.
+///
+/// Callsigns arrive off the air and are attacker-controlled text. Nothing
+/// here interprets them: they are interpolated into a plain `String` and
+/// Iced's `text()` renders that verbatim (no markup, no format string), so a
+/// hostile callsign is only ever a strange-looking row.
+#[must_use]
+pub(super) fn heard_lines(rows: &[Heard]) -> Vec<String> {
+    rows.iter()
+        .take(3)
+        .enumerate()
+        .map(|(i, row)| {
+            let age = age_label(row.age_ms);
+            if i == 0 {
+                format!("Last heard {} · {age}", row.callsign)
+            } else {
+                format!("{} · {age}", row.callsign)
+            }
+        })
+        .collect()
+}
+
+/// How long ago a station was heard, in the shortest honest unit — the same
+/// table as the Mac's `HeardAge` so both clients read identically. Integer
+/// division throughout: 90 s is "1 min", not "1.5 min".
+#[must_use]
+pub(super) fn age_label(ms: u64) -> String {
+    match ms {
+        ms if ms < 2_000 => "now".to_string(),
+        ms if ms < 60_000 => format!("{} s", ms / 1_000),
+        ms if ms < 3_600_000 => format!("{} min", ms / 60_000),
+        ms => format!("{} h", ms / 3_600_000),
+    }
 }
 
 /// The codec capsule (the Mac's caption2-semibold badge with a tinted capsule
@@ -149,4 +196,57 @@ pub(super) fn badge_capsule(label: &'static str, wideband: bool) -> Element<'sta
             ..container::Style::default()
         })
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{age_label, heard_lines};
+    use crate::snapshot::Heard;
+
+    fn heard(callsign: &str, age_ms: u64) -> Heard {
+        Heard {
+            callsign: callsign.to_string(),
+            age_ms,
+        }
+    }
+
+    #[test]
+    fn the_first_heard_row_carries_the_macs_caption() {
+        let rows = [heard("W6VS", 900), heard("KF5ILA", 9_000)];
+        assert_eq!(
+            heard_lines(&rows),
+            vec![
+                "Last heard W6VS · now".to_string(),
+                "KF5ILA · 9 s".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn heard_rows_stop_at_three_and_empty_yields_nothing() {
+        let rows = [
+            heard("A", 0),
+            heard("B", 2_000),
+            heard("C", 60_000),
+            heard("D", 3_600_000),
+        ];
+        let lines = heard_lines(&rows);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[2], "C · 1 min");
+        assert!(heard_lines(&[]).is_empty());
+    }
+
+    #[test]
+    fn age_labels_match_the_macs_table() {
+        // Verbatim from the Mac's `HeardAge` (Task 6) — the two clients must
+        // never disagree about how old a station is.
+        assert_eq!(age_label(0), "now");
+        assert_eq!(age_label(1_999), "now");
+        assert_eq!(age_label(2_000), "2 s");
+        assert_eq!(age_label(59_999), "59 s");
+        assert_eq!(age_label(60_000), "1 min");
+        assert_eq!(age_label(3_599_000), "59 min");
+        assert_eq!(age_label(3_600_000), "1 h");
+        assert_eq!(age_label(90_000_000), "25 h");
+    }
 }
