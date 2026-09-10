@@ -13,6 +13,25 @@ pre-release to the patch number, which sorts wrongly: `0.1.10beta` is newer
 than `0.1.9beta` and a string comparison says the opposite. Shipped versions
 are left as they were spelled.
 
+## 0.1.14-beta — 2026-09-10
+
+One fix, reported on GitHub the day the public repo opened.
+
+### Fixed
+
+- **The Keychain items are filed under `com.astar.app`, not the author's
+  callsign.** Keychain Access shows a password item by its service name, and
+  astar's was `com.aj7hr.astar` — so what a new user saw first was somebody
+  else's callsign. Both items, the AllStarLink account and the DMR passwords,
+  now live under `com.astar.app`. Anything saved under the old name is moved
+  on the next launch and the old item removed; nobody re-enters a password.
+  (Fixes [#1](https://github.com/rcludwick/astar/issues/1).)
+
+- **The unit tests no longer touch the login Keychain.** One test built a real
+  session through the live factory and read the Keychain on every run, which
+  raised a password prompt — and parked the whole suite when the screen was
+  locked. It uses in-memory stores now.
+
 ## 0.1.13-beta — 2026-09-09
 
 A microphone-setup release, mostly. The analyzer is a pane of the main window
