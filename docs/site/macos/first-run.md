@@ -176,7 +176,7 @@ Listen first, then key up and identify.
 **Where your settings live.** Preferences — devices, gains, VOX, favorites,
 saved configs — are in `~/Library/Preferences/com.aj7hr.astar.plist`. Your
 portal password is not in there; it is in the login Keychain under
-`com.aj7hr.astar`, which is what you want.
+`com.astar.app`, which is what you want.
 
 Settings can be exported to a file and imported back, in whole or in part, so
 a second Mac does not mean re-entering everything — see
