@@ -26,7 +26,7 @@ astar-ysf = { path = "../astar-ysf" }
 # `nxdn.rs` — two 49-bit AMBE+2 frames per 14-byte block, at bit offsets 0
 # and 49 — was read out of other people's implementations, so it is exactly
 # the code that must be under test on every `just ci` run.
-astar-nxdn = { path = "../astar-nxdn", version = "0.1.13-beta" }
+astar-nxdn = { path = "../astar-nxdn", version = "0.1.14-beta" }
 # DMR protocol primitives. Same reasoning as `astar-ysf` and `astar-nxdn`
 # above: pure protocol, no licensing question, and deliberately NOT behind a
 # feature. `dmr.rs`'s rate word and 72-bit frame layout were read out of
@@ -34,7 +34,7 @@ astar-nxdn = { path = "../astar-nxdn", version = "0.1.13-beta" }
 # AMBE-3000 answers a wrongly-configured link with confident noise rather
 # than an error — so that byte layout must be under test on every `just ci`
 # run, not behind a flag nobody turns on.
-astar-dmr = { path = "../astar-dmr", version = "0.1.13-beta" }
+astar-dmr = { path = "../astar-dmr", version = "0.1.14-beta" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 codec2 = { workspace = true, optional = true }
