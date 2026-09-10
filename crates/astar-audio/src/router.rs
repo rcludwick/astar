@@ -2450,6 +2450,18 @@ mod tests {
     /// — `None` leaves the cell at its default), and return the post-DSP TX
     /// peak plus the emitted PCM frame.
     fn run_lane_frame(input: f32, compress: bool, trim: Option<f32>) -> (f32, Vec<i16>) {
+        run_lane_frame_with_gain(input, compress, trim, None)
+    }
+
+    /// [`run_lane_frame`] with an optional capture-gain override (default
+    /// unity when `None`) — used to exercise `set_mic_gain`'s boost path the
+    /// same way `trim` exercises the TX-trim stage.
+    fn run_lane_frame_with_gain(
+        input: f32,
+        compress: bool,
+        trim: Option<f32>,
+        gain: Option<f32>,
+    ) -> (f32, Vec<i16>) {
         use std::sync::mpsc::channel;
         use std::sync::{Arc, Mutex};
         let dest = Arc::new(Mutex::new(None));
@@ -2465,6 +2477,9 @@ mod tests {
         lane.compress_flag().store(compress, Ordering::Relaxed);
         if let Some(t) = trim {
             lane.tx_trim_cell().store(t.to_bits(), Ordering::Relaxed);
+        }
+        if let Some(g) = gain {
+            lane.gain_cell().store(g.to_bits(), Ordering::Relaxed);
         }
         let (tx, rx) = channel();
         *dest.lock().unwrap() = Some(test_dest(tx));
@@ -2544,6 +2559,27 @@ mod tests {
             "4.0 trim boosted peak clamps to exactly 1.0: {peak}"
         );
         assert_eq!(frame[0], 32767, "PCM sample is full scale at 4.0 trim");
+    }
+
+    #[test]
+    fn mic_lane_capture_gain_boost_clamps_at_full_scale() {
+        // set_mic_gain's own ceiling is enforced by the session/router
+        // caller, not the lane — but the lane's saturation must still hold
+        // for whatever gain lands on it. A hot 0.8 input at the new 400%
+        // capture-gain ceiling (0.8 * 4.0 = 3.2) clamps to EXACTLY 1.0, no
+        // trim involved, and no sample wraps to a bogus negative value.
+        let (peak, frame) = run_lane_frame_with_gain(0.8, false, None, Some(4.0));
+        assert_eq!(
+            peak.to_bits(),
+            1.0_f32.to_bits(),
+            "4.0 mic gain boosted peak clamps to exactly 1.0: {peak}"
+        );
+        for (i, &s) in frame.iter().enumerate() {
+            assert_eq!(
+                s, 32767,
+                "sample {i} must saturate to full scale, not wrap: {s}"
+            );
+        }
     }
 
     #[test]

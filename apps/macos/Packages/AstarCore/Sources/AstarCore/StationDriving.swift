@@ -217,7 +217,7 @@ public protocol StationDriving {
     func setCompression(_ on: Bool) throws
     /// Set the compression strength (0…1). Takes effect on the live capture lane.
     func setCompressionLevel(_ level: Float) throws
-    /// Set the TX trim gain (0…2, engine clamps; 1.0 = unity): the always-on
+    /// Set the TX trim gain (0…4, engine clamps; 1.0 = unity): the always-on
     /// final TX gain stage after compression. Takes effect on the live capture lane.
     func setTxTrim(_ gain: Float) throws
     func setNoiseReduction(_ on: Bool) throws

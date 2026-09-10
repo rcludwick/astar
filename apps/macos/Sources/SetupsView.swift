@@ -265,7 +265,7 @@
                         .accessibilityLabel("Duplicate device names")
                 }
                 gainSlider("Mic", tint: .red, range: 0...4, value: $inputGain) { commitInputGain() }
-                gainSlider("Vol", tint: .green, value: $outputGain) { commitOutputGain() }
+                gainSlider("Vol", tint: .green, range: 1...4, value: $outputGain) { commitOutputGain() }
 
                 Toggle("Voice compression", isOn: compressionBinding)
                 Toggle("Noise reduction", isOn: noiseReductionBinding)
