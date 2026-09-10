@@ -995,7 +995,7 @@ int iax_station_cancel_dtmf(IaxStation *st);
 int iax_station_set_dtmf_mode(IaxStation *st, IaxDtmfMode mode);
 
 /**
- * Set the input (TX/mic) gain multiplier (clamped `[0.0, 2.0]`).
+ * Set the input (TX/mic) gain multiplier (clamped `[0.0, 4.0]`).
  */
 int iax_station_set_input_gain(IaxStation *st, float gain);
 
@@ -1053,7 +1053,7 @@ int iax_station_set_denoise_strength(IaxStation *st, float level);
 int iax_station_set_compression_level(IaxStation *st, float level);
 
 /**
- * Set the TX trim gain (0.0..=2.0 clamped, default 1.0): the final output
+ * Set the TX trim gain (0.0..=4.0 clamped, default 1.0): the final output
  * stage after compression. Attenuates a hot mic that compression makeup gain
  * would otherwise keep loud; values above 1.0 boost (clamped at full scale).
  * Takes effect immediately on the live/next call. Returns [`IAX_OK`],

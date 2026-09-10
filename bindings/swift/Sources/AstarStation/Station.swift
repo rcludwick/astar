@@ -1246,7 +1246,7 @@ public final class Station {
         try check(iax_station_set_dtmf_mode(handle, IaxDtmfMode(rawValue: UInt32(mode.rawValue))))
     }
 
-    /// Set the input (TX/mic) gain multiplier (clamped `0.0...2.0`).
+    /// Set the input (TX/mic) gain multiplier (clamped `0.0...4.0`).
     public func setInputGain(_ gain: Float) throws {
         try check(iax_station_set_input_gain(handle, gain))
     }
@@ -1300,7 +1300,7 @@ public final class Station {
         try check(iax_station_set_denoise_strength(handle, level))
     }
 
-    /// Set the TX trim gain (`0.0...2.0`, clamped; default `1.0` = unity): the
+    /// Set the TX trim gain (`0.0...4.0`, clamped; default `1.0` = unity): the
     /// always-on final TX gain stage after compression. Attenuates a hot mic
     /// that compression makeup gain would otherwise keep loud; values above
     /// 1.0 boost (clamped at full scale). Takes effect immediately on the

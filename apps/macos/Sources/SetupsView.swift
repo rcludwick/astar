@@ -264,7 +264,7 @@
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityLabel("Duplicate device names")
                 }
-                gainSlider("Mic", tint: .red, value: $inputGain) { commitInputGain() }
+                gainSlider("Mic", tint: .red, range: 0...4, value: $inputGain) { commitInputGain() }
                 gainSlider("Vol", tint: .green, value: $outputGain) { commitOutputGain() }
 
                 Toggle("Voice compression", isOn: compressionBinding)
@@ -556,12 +556,13 @@
         }
 
         private func gainSlider(
-            _ title: String, tint: Color, value: Binding<Double>,
+            _ title: String, tint: Color, range: ClosedRange<Double> = 0...2,
+            value: Binding<Double>,
             commit: @escaping () -> Void
         ) -> some View {
             HStack(spacing: 8) {
                 label(title)
-                Slider(value: value, in: 0...2) { editing in if !editing { commit() } }
+                Slider(value: value, in: range) { editing in if !editing { commit() } }
                     .tint(tint)
                     .accessibilityLabel(title)
                     .accessibilityValue(AccessibilityValueFormatter.percent(value.wrappedValue))

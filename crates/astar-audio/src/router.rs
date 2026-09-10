@@ -84,7 +84,7 @@ struct MicSlot {
     compress: Arc<AtomicBool>,
     /// Compressor strength cell (f32 bits, 0.0..=1.0) shared with the lane.
     compress_level: Arc<AtomicU32>,
-    /// TX trim cell (f32 bits, 0.0..=2.0, default 1.0 = unity) shared with the
+    /// TX trim cell (f32 bits, 0.0..=4.0, default 1.0 = unity) shared with the
     /// lane: the always-on final gain stage after the compressor (iax-750a).
     tx_trim: Arc<AtomicU32>,
     /// Calibrated per-mic profile cell; the lane rebuilds its NR on `profile_gen` bump.
@@ -842,13 +842,13 @@ impl AudioRouter {
             .map(|s| f32::from_bits(s.denoise_strength.load(Ordering::Relaxed)))
     }
 
-    /// Set the TX trim (0.0..=2.0, clamped; 1.0 = unity) on an open mic lane:
+    /// Set the TX trim (0.0..=4.0, clamped; 1.0 = unity) on an open mic lane:
     /// the always-on final gain stage after the compressor (iax-750a). No-op if
     /// the mic isn't open.
     pub fn set_mic_tx_trim(&self, mic: &MicId, g: f32) {
         if let Some(s) = self.mics.get(mic) {
             s.tx_trim
-                .store(g.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+                .store(g.clamp(0.0, 4.0).to_bits(), Ordering::Relaxed);
         }
     }
     /// Set the VOX pre-roll / look-back length (ms, clamped to
@@ -1274,7 +1274,7 @@ pub struct MicLane {
     /// Bits of the last compress level applied to `comp` (audio-thread-private;
     /// compared as bits so an unchanged cell is a cheap, exact no-op).
     applied_compress_level_bits: u32,
-    /// TX trim 0.0..=2.0 (f32 bits, default 1.0 = unity), shared with the
+    /// TX trim 0.0..=4.0 (f32 bits, default 1.0 = unity), shared with the
     /// control side (iax-750a). The always-on FINAL gain stage, applied after
     /// the compressor (so it defeats makeup gain) and before the TX peak /
     /// spectrum taps (meters show what is transmitted). A plain multiply — no
@@ -1479,7 +1479,7 @@ impl MicLane {
     pub fn compress_level_cell(&self) -> Arc<AtomicU32> {
         Arc::clone(&self.compress_level)
     }
-    /// TX trim cell (control side; f32 bits, 0.0..=2.0, default 1.0 = unity):
+    /// TX trim cell (control side; f32 bits, 0.0..=4.0, default 1.0 = unity):
     /// the always-on final gain stage after the compressor (iax-750a).
     #[must_use]
     pub fn tx_trim_cell(&self) -> Arc<AtomicU32> {
@@ -2535,13 +2535,23 @@ mod tests {
             (peak - 0.6).abs() < 1e-6,
             "in-range boost is a plain doubling: {peak}"
         );
+        // The new 400% ceiling: trim 4.0 on a hot 0.3 input (0.3 * 4.0 = 1.2)
+        // still clamps to EXACTLY 1.0, not wraps/overflows.
+        let (peak, frame) = run_lane_frame(0.3, false, Some(4.0));
+        assert_eq!(
+            peak.to_bits(),
+            1.0_f32.to_bits(),
+            "4.0 trim boosted peak clamps to exactly 1.0: {peak}"
+        );
+        assert_eq!(frame[0], 32767, "PCM sample is full scale at 4.0 trim");
     }
 
     #[test]
     fn router_set_mic_tx_trim_clamps_out_of_range_input() {
-        // The router setter clamps to 0.0..=2.0. Observed through the lane's
-        // post-DSP TX meter (no getter — YAGNI): 5.0 clamps to 2.0 (a 0.4 input
-        // meters at 0.8, NOT full scale), and -1.0 clamps to 0.0 (silence).
+        // The router setter clamps to 0.0..=4.0. Observed through the lane's
+        // post-DSP TX meter (no getter — YAGNI): 10.0 clamps to 4.0 (a 0.2
+        // input meters at 0.8, NOT full scale), and -1.0 clamps to 0.0
+        // (silence).
         let (backend, controls) = test_support_router::NullBackend::with_controls();
         let mut router = AudioRouter::new(Box::new(backend));
         let mic = MicId::new("in:test");
@@ -2550,13 +2560,13 @@ mod tests {
         let _audio = router
             .open_call(&mic, &out, crate::StreamConfig::default())
             .unwrap();
-        router.set_mic_tx_trim(&mic, 5.0); // → 2.0
-        controls.push_mic(&[0.4_f32; 160]);
+        router.set_mic_tx_trim(&mic, 10.0); // → 4.0
+        controls.push_mic(&[0.2_f32; 160]);
         let dbfs = router.mic_tx_dbfs(&mic).expect("mic open");
-        let expect = 20.0 * 0.8_f32.log10(); // 0.4 * 2.0
+        let expect = 20.0 * 0.8_f32.log10(); // 0.2 * 4.0
         assert!(
             (dbfs - expect).abs() < 0.05,
-            "5.0 clamps to 2.0 (peak 0.8 = {expect} dBFS): {dbfs}"
+            "10.0 clamps to 4.0 (peak 0.8 = {expect} dBFS): {dbfs}"
         );
         router.set_mic_tx_trim(&mic, -1.0); // → 0.0
         controls.push_mic(&[0.4_f32; 160]);

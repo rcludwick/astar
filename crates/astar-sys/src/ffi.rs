@@ -1358,7 +1358,7 @@ pub unsafe extern "C" fn iax_station_set_dtmf_mode(
     .unwrap_or(IAX_ERR_PANIC)
 }
 
-/// Set the input (TX/mic) gain multiplier (clamped `[0.0, 2.0]`).
+/// Set the input (TX/mic) gain multiplier (clamped `[0.0, 4.0]`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iax_station_set_input_gain(st: *mut IaxStation, gain: c_float) -> c_int {
     if st.is_null() {
@@ -1488,7 +1488,7 @@ pub unsafe extern "C" fn iax_station_set_compression_level(
     .unwrap_or(IAX_ERR_PANIC)
 }
 
-/// Set the TX trim gain (0.0..=2.0 clamped, default 1.0): the final output
+/// Set the TX trim gain (0.0..=4.0 clamped, default 1.0): the final output
 /// stage after compression. Attenuates a hot mic that compression makeup gain
 /// would otherwise keep loud; values above 1.0 boost (clamped at full scale).
 /// Takes effect immediately on the live/next call. Returns [`IAX_OK`],

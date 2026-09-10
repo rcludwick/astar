@@ -906,7 +906,7 @@ class Station:
         self._check(self._lib.iax_station_set_ptt(self._handle, bool(on)))
 
     def set_input_gain(self, gain: float) -> None:
-        """Set the input (TX/mic) gain multiplier (clamped ``[0.0, 2.0]``)."""
+        """Set the input (TX/mic) gain multiplier (clamped ``[0.0, 4.0]``)."""
         self._require_handle()
         self._check(self._lib.iax_station_set_input_gain(self._handle, float(gain)))
 
