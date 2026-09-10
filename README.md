@@ -6,13 +6,13 @@
 
 <p align="center">
   A native ham-radio digital-voice client and node —
-  <strong>AllStarLink (IAX2)</strong> and <strong>M17</strong>, plus
-  <strong>D-Star</strong> in the engine, on one Rust core with native
-  front-ends.
+  <strong>AllStarLink (IAX2)</strong>, <strong>M17</strong>,
+  <strong>D-Star</strong> and <strong>System Fusion</strong>, on one Rust core
+  with native front-ends.
 </p>
 
 <p align="center">
-  <strong>0.1.7beta</strong> (<a href="CHANGELOG.md">changelog</a>) · AGPL-3.0-only · macOS today, Windows and Linux in progress
+  <strong>0.1.13-beta</strong> (<a href="CHANGELOG.md">changelog</a>) · AGPL-3.0-only · macOS today, Windows and Linux in progress
 </p>
 
 <p align="center">
@@ -25,11 +25,13 @@
 ---
 
 astar dials nodes and reflectors as a client — audio, push-to-talk, DTMF, live
-meters — with support for generic USB radio interfaces (serial PTT + USB audio;
-the AllScan UCI150 is the reference device). It also runs as an always-on node
-daemon.
+meters and spectrum, a last-heard history, VOX, and a microphone analyzer that
+measures your mic's noise and writes a per-device profile (notches for hum and
+whine, RNNoise for the rest, or a pass-through when there is nothing to fix).
+It drives generic USB radio interfaces (serial PTT + USB audio; the AllScan
+UCI150 is the reference device) and also runs as an always-on node daemon.
 
-> ### Latest release — `0.1.7beta`
+> ### Latest release — `0.1.13-beta`
 >
 > A signed and notarized **`astar.dmg`** is on the
 > [releases page](https://github.com/rcludwick/astar/releases/latest). It opens
@@ -43,12 +45,12 @@ daemon.
 > **M17 needs nothing installed.** The app has linked Codec 2 in since
 > `0.1.4beta`; a system `libcodec2` is still preferred when one is present.
 >
-> **D-Star, System Fusion and NXDN need a dongle.** All three are AMBE+2 with
-> no software vocoder, so they run on an AMBE-3000 USB stick: the **DVMEGA
+> **D-Star, System Fusion, NXDN and DMR need a dongle.** All four are AMBE+2
+> with no software vocoder, so they run on an AMBE-3000 USB stick: the **DVMEGA
 > DVstick 30** or NW Digital Radio's **ThumbDV / DV3000**. Plug one in and the
 > networks appear; pull it and they go. D-Star and System Fusion are in the
-> macOS app fully; NXDN is receive only, everywhere it exists — astar has no
-> NXDN transmit path yet. AllStarLink and M17 need neither.
+> macOS app fully; NXDN and DMR are receive only, everywhere they exist —
+> astar has no transmit path for either yet. AllStarLink and M17 need neither.
 >
 > This is a beta of a project that has only just started shipping. Expect rough
 > edges, expect things to move.
@@ -60,26 +62,26 @@ daemon.
 Be aware that "the engine supports it" and "you can click it in the app" are
 two different things right now. This is the honest state:
 
-| | AllStar (IAX2) | M17 | D-Star | System Fusion (YSF) | NXDN |
-|---|---|---|---|---|---|
-| **Engine** (`crates/`) | yes | yes | yes — `dstar` feature | yes — `ysf` feature | yes — `nxdn` feature |
-| **macOS app** (`apps/macos`) | yes | yes¹ | yes² | yes² | receive only² |
-| **Iced client** (`apps/gui`) | yes | yes¹ | **no** — not lit up yet | **no** — not lit up yet | **no** — not lit up yet |
-| **CLI** (`astar-cli`) | yes | **no** — IAX2 only | `dstar-listen` (receive) | `ysf-listen` (receive) | `nxdn-listen` (receive) |
+| | AllStar (IAX2) | M17 | D-Star | System Fusion (YSF) | NXDN | DMR |
+|---|---|---|---|---|---|---|
+| **Engine** (`crates/`) | yes | yes | yes — `dstar` feature | yes — `ysf` feature | yes — `nxdn` feature | yes — `dmr` feature |
+| **macOS app** (`apps/macos`) | yes | yes¹ | yes² | yes² | receive only² | receive only² |
+| **Iced client** (`apps/gui`) | yes | yes¹ | **no** — not lit up yet | **no** — not lit up yet | **no** — not lit up yet | **no** — not lit up yet |
+| **CLI** (`astar-cli`) | yes | **no** — IAX2 only | `dstar-listen` (receive) | `ysf-listen` (receive) | `nxdn-listen` (receive) | `dmr-listen` (receive) |
 
 ¹ M17 is capability-gated: the client shows it only when the running build can
 actually place the call. Since `0.1.4beta` the macOS app links Codec 2 in, so
 that is satisfied out of the box — see [M17 and Codec 2](#m17-and-codec-2).
 
-² D-Star, System Fusion and NXDN are capability-gated on **hardware** rather
-than on the build: the vocoder is an AMBE-3000 USB dongle — a DVMEGA DVstick
-30 or a ThumbDV / DV3000 — so each network appears in the picker when one is
-plugged in and disappears when it is pulled. One dongle serves all three, one
-network at a time. NXDN is receive only everywhere it exists — astar has no
-NXDN transmit path yet. `astar-server` does not enable `dstar`, `ysf` or
-`nxdn` in its own manifest, though a workspace build unifies features and
-compiles them in anyway; the daemon refuses to key while any of the three
-sessions is active. See
+² D-Star, System Fusion, NXDN and DMR are capability-gated on **hardware**
+rather than on the build: the vocoder is an AMBE-3000 USB dongle — a DVMEGA
+DVstick 30 or a ThumbDV / DV3000 — so each network appears in the picker when
+one is plugged in and disappears when it is pulled. One dongle serves all
+four, one network at a time. NXDN and DMR are receive only everywhere they
+exist — astar has no transmit path for either yet. `astar-server` does not
+enable `dstar`, `ysf`, `nxdn` or `dmr` in its own manifest, though a workspace
+build unifies features and compiles them in anyway; the daemon refuses to key
+while any of those sessions is active. See
 [On-air safety](https://rcludwick.github.io/astar/about/safety/).
 
 M17 is **compiled in by default** everywhere it is implemented — the engine,
@@ -136,7 +138,7 @@ native UI rather than a shared web shell.
 | `astar-audio` | cpal device I/O, network-agnostic. |
 | `astar-station` | The multi-network station facade the clients drive. |
 | `astar-console` | Front-end-agnostic operator-console core. |
-| `astar-asl3` / `astar-m17` / `astar-dstar` | Per-network service layers. |
+| `astar-asl3` / `astar-m17` / `astar-dstar` / `astar-ysf` / `astar-nxdn` / `astar-dmr` | Per-network service layers. |
 | `astar-ptt` | Pluggable PTT backends (serial, HID, VOX, UI). |
 | `astar-wireguard` | Userspace WireGuard link transport. |
 | `astar-sys` / `astar-serial-sys` | The C ABI (`astar.h`, `astarserial.h`) the Swift/Python bindings consume. |
@@ -199,7 +201,7 @@ After launch, look for the **rainbow asterisk** in the menu bar — and, unless 
 turn it off, an astar icon in the Dock. Left-click the asterisk opens the dial
 popover; `Show in Dock` in the right-click menu drops back to menu-bar-only. The
 running
-version (`0.1.7beta`) is shown in the popover footer, so you can always tell
+version (`0.1.13-beta`) is shown in the popover footer, so you can always tell
 what you are actually running.
 
 ### A local .dmg
@@ -215,6 +217,19 @@ stapled** if a `notarytool` keychain profile is also configured — the last bei
 what the [published release](https://github.com/rcludwick/astar/releases/latest)
 is built with. Nothing is hard-coded to one developer; see
 [the build guide](https://rcludwick.github.io/astar/build/macos-app/).
+
+### Cutting a release (maintainers)
+
+```bash
+just release 0.1.14-beta    # bump, gates, signed + notarized dmg, tag, push origin
+just publish 0.1.14-beta    # push public, create the GitHub release — separate on purpose
+```
+
+The first command bumps the version in all five of its homes, refreshes the
+bundled reflector snapshot, runs every gate and builds the DMG; the second is
+the deliberate step that makes it public. Both refuse to run unless the
+newest `CHANGELOG.md` section is the version being released — the notes are
+written by hand first. See [`docs/RELEASING.md`](docs/RELEASING.md).
 
 ### The Windows / Linux client
 
