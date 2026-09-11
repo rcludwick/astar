@@ -15,7 +15,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use crate::meter::peak;
-use crate::mixer::Mixer;
+use crate::mixer::{Mixer, RxFrame, RxJitterConfig, RxJitterSettings};
 use crate::spectrum::SpectrumAnalyzer;
 use crate::{
     AudioBackend, AudioError, Compressor, CompressorParams, DenoiseChain, DenoiseMode,
@@ -56,7 +56,11 @@ pub struct CallAudio {
     /// 20 ms PCM TX frames the run-loop encodes and pumps onto the wire.
     pub tx_frames: Receiver<Vec<i16>>,
     /// Decoded PCM RX frames the run-loop forwards from `VoiceReceived`.
-    pub rx_frames: Sender<Vec<i16>>,
+    ///
+    /// An [`RxFrame`] carrying an [`crate::RxClock`] is played out of the
+    /// lane's adaptive jitter buffer; bare PCM (`RxFrame::from(pcm)`) goes
+    /// straight through, as it always did (iax-rxjb).
+    pub rx_frames: Sender<RxFrame>,
     /// VOX pre-roll lead signal (iax-2733): the mic lane stores the number of
     /// look-back frames it just flushed AHEAD of the live stream on each
     /// gate-up edge; the run-loop reads-and-clears it to keep its media-clock
@@ -178,6 +182,9 @@ pub struct AudioRouter {
     backend: Box<dyn AudioBackend>,
     mics: HashMap<MicId, MicSlot>,
     outputs: HashMap<OutputId, OutSlot>,
+    /// Live RX jitter-buffer configuration (iax-rxjb), shared with every bus
+    /// this router opens so a change reaches a call in progress.
+    rx_jitter: Arc<RxJitterSettings>,
 }
 
 impl AudioRouter {
@@ -189,7 +196,22 @@ impl AudioRouter {
             backend,
             mics: HashMap::new(),
             outputs: HashMap::new(),
+            rx_jitter: Arc::new(RxJitterSettings::default()),
         }
+    }
+
+    /// Set the RX jitter-buffer configuration on every open bus and every bus
+    /// opened after this (iax-rxjb). Clamped, never refused; applies to a call
+    /// in progress on the next device callback.
+    pub fn set_rx_jitter(&self, cfg: RxJitterConfig) {
+        self.rx_jitter.set(cfg);
+    }
+
+    /// The RX jitter-buffer configuration the router is actually using —
+    /// clamped, so this is what a client should render.
+    #[must_use]
+    pub fn rx_jitter(&self) -> RxJitterConfig {
+        self.rx_jitter.get()
     }
 
     /// Enumerate the backend's devices (pass-through for caller-side device
@@ -240,7 +262,7 @@ impl AudioRouter {
         config: StreamConfig,
     ) -> Result<CallAudio, AudioError> {
         // 1. Open or reuse the output bus, then add this call's RX lane.
-        let (spk_tx, spk_rx) = channel::<Vec<i16>>();
+        let (spk_tx, spk_rx) = channel::<RxFrame>();
         self.ensure_output(out, config)?;
         let out_slot = self
             .outputs
@@ -289,7 +311,7 @@ impl AudioRouter {
         config: StreamConfig,
     ) -> Result<(CallAudio, Sender<Vec<i16>>, crate::mixer::MixCallId), AudioError> {
         // RX side: open/join the bus and add this call's lane.
-        let (spk_tx, spk_rx) = channel::<Vec<i16>>();
+        let (spk_tx, spk_rx) = channel::<RxFrame>();
         self.ensure_output(out, config)?;
         let mix_id = self
             .outputs
@@ -421,9 +443,10 @@ impl AudioRouter {
     ) -> Option<crate::AnnounceHandle> {
         let slot = self.outputs.get(out)?;
         let (handle, cells) = crate::AnnounceHandle::new();
-        let (tx, rx) = channel::<Vec<i16>>();
+        let (tx, rx) = channel::<RxFrame>();
         for chunk in pcm.chunks(frame_samples(sample_rate)) {
-            let _ = tx.send(chunk.to_vec());
+            // An announcement has no sender clock: straight through, no buffer.
+            let _ = tx.send(RxFrame::from(chunk.to_vec()));
         }
         drop(tx); // finite: sender closed so the lane ends when drained
         slot.mixer
@@ -448,12 +471,14 @@ impl AudioRouter {
         mix_id: crate::mixer::MixCallId,
         config: StreamConfig,
     ) -> Result<crate::mixer::MixCallId, AudioError> {
-        let rx = self
+        let (rx, stats) = self
             .outputs
             .get(from)
             .and_then(|s| s.mixer.lock().ok().and_then(|mut m| m.take_call(mix_id)))
             .ok_or_else(|| AudioError::DeviceNotFound(from.as_str().to_string()))?;
         self.ensure_output(to, config)?;
+        // The call's jitter counters travel with it: a bus change must not
+        // read as a fresh call in the health line (iax-rxjb).
         Ok(self
             .outputs
             .get(to)
@@ -461,7 +486,7 @@ impl AudioRouter {
             .mixer
             .lock()
             .expect("mixer mutex poisoned")
-            .add_call(rx))
+            .add_call_with_stats(rx, stats))
     }
 
     /// Add a caller-supplied RX `Receiver` to an output bus mixer, opening the
@@ -473,7 +498,7 @@ impl AudioRouter {
     pub fn add_rx_to_bus(
         &mut self,
         out: &OutputId,
-        rx: Receiver<Vec<i16>>,
+        rx: Receiver<RxFrame>,
         config: StreamConfig,
     ) -> Result<crate::mixer::MixCallId, AudioError> {
         self.ensure_output(out, config)?;
@@ -495,10 +520,11 @@ impl AudioRouter {
         &mut self,
         out: &OutputId,
         mix_id: crate::mixer::MixCallId,
-    ) -> Option<Receiver<Vec<i16>>> {
+    ) -> Option<Receiver<RxFrame>> {
         self.outputs
             .get(out)
             .and_then(|s| s.mixer.lock().ok().and_then(|mut m| m.take_call(mix_id)))
+            .map(|(rx, _stats)| rx)
     }
 
     /// Remove a call's RX lane from its bus (hangup teardown). No-op if the bus
@@ -556,7 +582,9 @@ impl AudioRouter {
             return Ok(());
         }
         let out_dev = self.resolve(out.as_str(), Direction::Output)?;
-        let mixer = Arc::new(Mutex::new(Mixer::new()));
+        let mixer = Arc::new(Mutex::new(
+            Mixer::new().with_settings(Arc::clone(&self.rx_jitter)),
+        ));
         let bus = OutputBus::new(Arc::clone(&mixer), config.sample_rate);
         let rx_peak = bus.rx_peak();
         let rx_gain = bus.rx_gain();
@@ -782,6 +810,40 @@ impl AudioRouter {
         self.outputs
             .get(out)
             .map_or(0, |s| s.mixer.lock().map_or(0, |m| m.call_count()))
+    }
+
+    /// Cumulative RX underruns on an open output bus (iax-rxjb): device
+    /// callbacks that got no audio at all while a lane was still mid-talk-spurt
+    /// — the receive-side counterpart of `mic_capture_overruns`, and the number
+    /// that grows while received audio stutters. `None` if the bus isn't open.
+    #[must_use]
+    pub fn bus_rx_underruns(&self, out: &OutputId) -> Option<u64> {
+        self.outputs
+            .get(out)
+            .and_then(|s| s.mixer.lock().ok().map(|m| m.underruns()))
+    }
+
+    /// Clone an open bus's cumulative RX-underrun cell so a consumer (the
+    /// `Manager`, binding it into a call's snapshot) can read it live.
+    /// `None` if the bus isn't open.
+    #[must_use]
+    pub fn bus_underruns_cell(&self, out: &OutputId) -> Option<Arc<AtomicU64>> {
+        self.outputs
+            .get(out)
+            .and_then(|s| s.mixer.lock().ok().map(|m| m.underruns_cell()))
+    }
+
+    /// Clone one lane's live jitter-buffer counters off an open bus
+    /// (iax-rxjb). `None` if the bus or the lane is gone.
+    #[must_use]
+    pub fn bus_jitter_cells(
+        &self,
+        out: &OutputId,
+        mix_id: crate::mixer::MixCallId,
+    ) -> Option<Arc<crate::mixer::RxJitterCells>> {
+        self.outputs
+            .get(out)
+            .and_then(|s| s.mixer.lock().ok().and_then(|m| m.jitter_cells(mix_id)))
     }
 
     // --- per-mic controls (None if the mic isn't open) ---
@@ -1793,7 +1855,7 @@ mod tests {
             .expect("router opens streams");
         // The call side gets a TX receiver and an RX sender.
         let _tx_rx: &std::sync::mpsc::Receiver<Vec<i16>> = &audio.tx_frames;
-        let _rx_tx: &std::sync::mpsc::Sender<Vec<i16>> = &audio.rx_frames;
+        let _rx_tx: &std::sync::mpsc::Sender<RxFrame> = &audio.rx_frames;
         assert_eq!(router.mic_count(), 1);
         assert_eq!(router.output_count(), 1);
     }
@@ -1948,7 +2010,7 @@ mod tests {
         let (tx, rx) = channel();
         mixer.lock().unwrap().add_call(rx);
         let mut bus = OutputBus::new(Arc::clone(&mixer), 8_000);
-        tx.send(vec![8000i16; 160]).unwrap();
+        tx.send(RxFrame::from(vec![8000i16; 160])).unwrap();
         let mut out = [0.0_f32; 160];
         let n = crate::OutputSource::read(&mut bus, &mut out);
         assert_eq!(n, 160);
@@ -1967,7 +2029,7 @@ mod tests {
         let mut bus = OutputBus::new(Arc::clone(&mixer), 8_000);
         let gain = bus.rx_gain();
         gain.store(0.5_f32.to_bits(), Ordering::Relaxed); // half volume
-        tx.send(vec![16000i16; 160]).unwrap();
+        tx.send(RxFrame::from(vec![16000i16; 160])).unwrap();
         let mut out = [0.0_f32; 160];
         let n = crate::OutputSource::read(&mut bus, &mut out);
         assert_eq!(n, 160);
@@ -2001,7 +2063,7 @@ mod tests {
         let frame: Vec<i16> = (0..160)
             .map(|i| if i % 2 == 0 { i16::MAX } else { i16::MIN })
             .collect();
-        tx.send(frame).unwrap();
+        tx.send(RxFrame::from(frame)).unwrap();
         let mut out = [0.0_f32; 160];
         let n = crate::OutputSource::read(&mut bus, &mut out);
         assert_eq!(n, 160);
@@ -2058,7 +2120,7 @@ mod tests {
         let mut bus = OutputBus::new(Arc::clone(&mixer), 8_000);
         bus.rx_gain().store(1.5_f32.to_bits(), Ordering::Relaxed);
         let frame: Vec<i16> = (0..160).map(|i| (i * 97 % 4000) as i16 - 2000).collect();
-        tx.send(frame.clone()).unwrap();
+        tx.send(RxFrame::from(frame.clone())).unwrap();
         let mut out = [0.0_f32; 160];
         let n = crate::OutputSource::read(&mut bus, &mut out);
         assert_eq!(n, 160);
@@ -2098,7 +2160,7 @@ mod tests {
             }
             // A constant-amplitude "quiet" frame: 400/32768 ~= -38.3 dBFS,
             // comfortably below the -26.4 dBFS default threshold.
-            tx.send(vec![400i16; 160]).unwrap();
+            tx.send(RxFrame::from(vec![400i16; 160])).unwrap();
             let mut out = [0.0_f32; 160];
             let n = crate::OutputSource::read(&mut bus, &mut out);
             assert_eq!(n, 160);
@@ -2141,7 +2203,7 @@ mod tests {
         let frame: Vec<i16> = (0..160)
             .map(|i| if i % 2 == 0 { i16::MAX } else { i16::MIN })
             .collect();
-        tx.send(frame).unwrap();
+        tx.send(RxFrame::from(frame)).unwrap();
         let mut out = [0.0_f32; 160];
         let n = crate::OutputSource::read(&mut bus, &mut out);
         assert_eq!(n, 160);
@@ -2993,7 +3055,7 @@ mod tests {
             let frame: Vec<i16> = (0..160)
                 .map(|i| (0.8 * 32_767.0 * (TAU * 1_000.0 * i as f32 / 8_000.0).sin()) as i16)
                 .collect();
-            tx.send(frame).unwrap();
+            tx.send(RxFrame::from(frame)).unwrap();
             let mut out = [0.0_f32; 160];
             let _ = crate::OutputSource::read(&mut bus, &mut out);
         }

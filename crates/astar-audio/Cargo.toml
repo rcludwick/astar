@@ -21,6 +21,10 @@ serde = ["dep:serde"]
 [dependencies]
 cpal.workspace = true
 astar-iax-core = { path = "../astar-iax-core", version = "0.1.14-beta" }
+# The adaptive RX jitter buffer (`jitter.rs`, the `jitterbuf.c` port) the output
+# mixer plays AllStarLink lanes out of — iax-rxjb. Default features only: no
+# codec2, no ambe-hw, so no LGPL and no vocoder driver come along.
+astar-codec = { path = "../astar-codec", version = "0.1.14-beta" }
 mio = { workspace = true }
 rubato.workspace = true
 rustfft = "6"
