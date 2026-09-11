@@ -872,6 +872,7 @@ impl LegCtx<'_> {
                             *format,
                             payload,
                             *ts,
+                            now,
                             self.rx_decode_warned,
                         );
                     } else if let Some(ce) = translate_leg(&ev, negotiated) {
