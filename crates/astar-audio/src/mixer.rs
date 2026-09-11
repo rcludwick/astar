@@ -62,9 +62,15 @@ const DEFAULT_FRAME_MS: i64 = 20;
 /// has set the length (160 = 20 ms at 8 kHz).
 const DEFAULT_FRAME_SAMPLES: usize = 160;
 /// How long after a timestamped frame a lane still counts as mid-talk-spurt
-/// when the jitter buffer is switched OFF. Matches the buffer's own
-/// `max_contig_interp × 20 ms` — the point at which the enabled path decides a
-/// spurt is over — so `rx_underruns` means the same thing either way.
+/// when the jitter buffer is switched OFF, matching the buffer's own
+/// `max_contig_interp × 20 ms`.
+///
+/// Read `rx_underruns` from the direct path with care: with no buffer there is
+/// no cushion, so ANY callback that falls between two arrivals comes back dry
+/// and counts one. That number is the phase between the device's callbacks and
+/// the network's 20 ms frames, not a measure of audible holes, and it says
+/// nothing about how the buffered path would have behaved. The counter is only
+/// meaningful with the buffer ON — where it means the cushion ran out.
 const DIRECT_VOICE_IDLE_MS: i64 = 200;
 
 /// The RX jitter buffer as an operator sees it: on or off, and the window the
@@ -216,18 +222,13 @@ impl RxFrame {
             clock: Some(RxClock { ts_ms, ms }),
         }
     }
-
-    /// A frame with no sender clock — played straight through.
-    #[must_use]
-    pub fn untimed(pcm: Vec<i16>) -> Self {
-        Self { pcm, clock: None }
-    }
 }
 
 impl From<Vec<i16>> for RxFrame {
-    /// Bare PCM: no sender clock, so the lane bypasses the jitter buffer.
+    /// Bare PCM: no sender clock, so the lane bypasses the jitter buffer —
+    /// the one way to build an unstamped frame.
     fn from(pcm: Vec<i16>) -> Self {
-        Self::untimed(pcm)
+        Self { pcm, clock: None }
     }
 }
 
@@ -279,7 +280,10 @@ pub struct RxJitterCells {
     pub jitter_ms: AtomicU32,
     /// Current buffer depth in ms.
     pub depth_ms: AtomicU32,
-    /// Frames the buffer expected and never saw (each one an interpolation).
+    /// `jitterbuf.c`'s own `frames_lost`: frames the buffer expected and did
+    /// not play. Usually an interpolation over a frame that never arrived, but
+    /// it also counts one the buffer chose to skip to shrink an over-deep
+    /// cushion, and a late arrival gives one back.
     pub frames_lost: AtomicU64,
     /// Frames that arrived after their play time and were thrown away.
     pub frames_late: AtomicU64,
@@ -555,12 +559,6 @@ impl Mixer {
         self
     }
 
-    /// The jitter-buffer configuration this bus is running.
-    #[must_use]
-    pub fn rx_jitter(&self) -> RxJitterConfig {
-        self.settings.get()
-    }
-
     /// Cumulative RX underruns on this bus: device callbacks that got no audio
     /// at all while at least one jitter-buffered lane was mid-talk-spurt. A
     /// plain `u64` health counter, credential-free.
@@ -648,8 +646,14 @@ impl Mixer {
             return 0;
         }
         let now = self.clock.now_ms();
-        let cfg = self.settings.get();
+        // Generation FIRST, then the values. A `set` landing between the two
+        // reads then gives us the NEW config against the OLD generation, and
+        // the only cost is re-applying the same thing on the next callback.
+        // The other order loses the change outright: the new generation would
+        // be recorded as applied while the old values were the ones used, and
+        // nothing would re-read them until somebody set the config again.
         let generation = self.settings.generation();
+        let cfg = self.settings.get();
         for slot in out.iter_mut() {
             *slot = 0.0;
         }
@@ -1065,37 +1069,42 @@ mod tests {
         let mut out = [0.0_f32; 160];
 
         // Each frame carries its own index as its level, so a replay is visible.
-        for step in 0..8_i64 {
-            cell.store(step * 20, Ordering::Relaxed);
-            let level = i16::try_from(step + 1).unwrap() * 1000;
-            tx.send(RxFrame::timed(vec![level; 160], step * 20, 20))
-                .unwrap();
-            mixer.read(&mut out);
-        }
-        // Everything still queued in the buffer, in order.
-        settings.set(RxJitterConfig {
-            enabled: false,
-            ..RxJitterConfig::default()
-        });
         let mut played: Vec<i16> = Vec::new();
-        for step in 8..20_i64 {
-            cell.store(step * 20, Ordering::Relaxed);
-            let n = mixer.read(&mut out);
-            for &s in &out[..n] {
+        let collect = |out: &[f32], played: &mut Vec<i16>| {
+            for &s in out {
                 #[allow(clippy::cast_possible_truncation)]
                 let level = (s * 32768.0).round() as i16;
                 if played.last() != Some(&level) {
                     played.push(level);
                 }
             }
+        };
+        for step in 0..8_i64 {
+            cell.store(step * 20, Ordering::Relaxed);
+            let level = i16::try_from(step + 1).unwrap() * 1000;
+            tx.send(RxFrame::timed(vec![level; 160], step * 20, 20))
+                .unwrap();
+            let n = mixer.read(&mut out);
+            collect(&out[..n], &mut played);
         }
-        let mut seen = played.clone();
-        seen.retain(|&l| l != 0);
-        seen.dedup();
-        let mut sorted = seen.clone();
-        sorted.sort_unstable();
-        sorted.dedup();
-        assert_eq!(seen, sorted, "levels came out in order, none replayed");
+        // Some frames have played; the rest are still held in the buffer.
+        settings.set(RxJitterConfig {
+            enabled: false,
+            ..RxJitterConfig::default()
+        });
+        for step in 8..20_i64 {
+            cell.store(step * 20, Ordering::Relaxed);
+            let n = mixer.read(&mut out);
+            collect(&out[..n], &mut played);
+        }
+        played.retain(|&l| l != 0);
+        played.dedup();
+        assert_eq!(
+            played,
+            vec![1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000],
+            "every frame came out, exactly once, in order — the ones the \
+             buffer was still holding when it was switched off included"
+        );
         assert_eq!(
             stats.frames_lost.load(Ordering::Relaxed),
             0,
@@ -1167,8 +1176,14 @@ mod tests {
         );
     }
 
-    /// `rx_underruns` keeps counting with the buffer switched off — that is
-    /// the whole point of being able to switch it off and compare.
+    /// `rx_underruns` keeps counting with the buffer switched off — the wiring
+    /// does not go dead when the buffer does.
+    ///
+    /// But read it for what it is: with no cushion, ANY callback that lands
+    /// between two arrivals comes back dry, so a single perfectly ordinary
+    /// frame is enough to produce one. Off, the number measures the phase
+    /// between the device's callbacks and the network's frames; on, it
+    /// measures the cushion running out. They are not comparable.
     #[test]
     fn underruns_still_count_with_the_buffer_disabled() {
         let (clock, cell) = MixerClock::fake();
@@ -1184,10 +1199,78 @@ mod tests {
         cell.store(0, Ordering::Relaxed);
         tx.send(timed(8000, 0)).unwrap();
         assert_eq!(mixer.read(&mut out), 160, "the frame plays");
-        // Still mid-spurt (a timestamped frame arrived 20 ms ago), nothing left.
+        // Still mid-spurt (a timestamped frame arrived 20 ms ago), nothing left
+        // — which on the direct path is one nominally-timed frame, not a fault.
         cell.store(20, Ordering::Relaxed);
         assert_eq!(mixer.read(&mut out), 0, "and the source is dry");
-        assert_eq!(mixer.underruns(), 1, "which is exactly an underrun");
+        assert_eq!(mixer.underruns(), 1, "the counter is live, not pinned at 0");
+    }
+
+    /// The device callback is not on the network's grid and is not obliged to
+    /// ask for whole frames. A 12.5 ms callback taking 100 samples at a time
+    /// must still come out gap-free once the buffer has settled.
+    #[test]
+    fn a_callback_off_the_frame_grid_still_plays_gap_free() {
+        let (clock, cell) = MixerClock::fake();
+        let mut mixer = Mixer::new().with_clock(clock);
+        let (tx, rx) = channel();
+        mixer.add_call(rx);
+        let mut out = [0.0_f32; 100];
+        let mut holes = 0usize;
+        let mut played = 0usize;
+        let mut next_ts = 0_i64;
+        // 100 samples at 8 kHz = 12.5 ms; step the clock by that, in halves of
+        // a millisecond rounded to the integer ms the lane runs on.
+        for step in 0..160_i64 {
+            let now = step * 25 / 2;
+            cell.store(now, Ordering::Relaxed);
+            // The sender keeps its own 20 ms cadence regardless: deliver
+            // every frame whose moment has come, whenever the callback lands.
+            while next_ts <= now {
+                tx.send(timed(8000, next_ts)).unwrap();
+                next_ts += 20;
+            }
+            let n = mixer.read(&mut out);
+            let v = voiced(&out[..n]);
+            if step >= 40 {
+                if v == 0 {
+                    holes += 1;
+                }
+                played += v;
+            }
+        }
+        assert_eq!(holes, 0, "no gaps once the buffer has settled");
+        assert!(played > 100 * 100, "and the stream keeps playing: {played}");
+    }
+
+    /// 20 ms is the IAX2 frame, not a law of nature: the lane takes its frame
+    /// length and its interpolation width from what actually arrives. A 30 ms
+    /// codec must play gap-free too.
+    #[test]
+    fn a_non_20ms_frame_length_plays_gap_free() {
+        let (clock, cell) = MixerClock::fake();
+        let mut mixer = Mixer::new().with_clock(clock);
+        let (tx, rx) = channel();
+        mixer.add_call(rx);
+        // 30 ms at 8 kHz = 240 samples.
+        let mut out = [0.0_f32; 240];
+        let mut holes = 0usize;
+        let mut played = 0usize;
+        for step in 0..60_i64 {
+            let now = step * 30;
+            cell.store(now, Ordering::Relaxed);
+            tx.send(RxFrame::timed(vec![8000; 240], now, 30)).unwrap();
+            let n = mixer.read(&mut out);
+            let v = voiced(&out[..n]);
+            if step >= 20 {
+                if v == 0 {
+                    holes += 1;
+                }
+                played += v;
+            }
+        }
+        assert_eq!(holes, 0, "no gaps once the buffer has settled");
+        assert!(played > 30 * 240, "and the stream keeps playing: {played}");
     }
 
     /// Moving a call between buses keeps its counters: `set_output` must not

@@ -286,8 +286,11 @@ pub struct IaxState {
     /// audio is being held back to ride out the network. `0` when the buffer
     /// isn't running.
     pub rx_jb_depth_ms: c_uint,
-    /// Frames the RX jitter buffer expected and never saw (iax-rxjb); each one
-    /// cost 20 ms of interpolated silence. `0` when idle.
+    /// `jitterbuf.c`'s own `frames_lost`: frames the RX jitter buffer expected
+    /// and did not play (iax-rxjb). Usually an interpolation over a frame that
+    /// never arrived, but it also counts one the buffer chose to skip to
+    /// shrink an over-deep cushion, and a late arrival gives one back.
+    /// `0` when idle.
     pub rx_frames_lost: u64,
     /// Frames that arrived after their play time and were thrown away
     /// (iax-rxjb). `0` when idle.

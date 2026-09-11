@@ -112,8 +112,10 @@ pub struct CallSnapshot {
     /// running.
     #[cfg_attr(feature = "serde", serde(default))]
     pub rx_jb_depth_ms: u32,
-    /// Frames the RX jitter buffer expected and never saw (iax-rxjb); each one
-    /// cost 20 ms of interpolated silence.
+    /// `jitterbuf.c`'s own `frames_lost`: frames the RX jitter buffer expected
+    /// and did not play (iax-rxjb). Usually an interpolation over a frame that
+    /// never arrived, but it also counts one the buffer chose to skip to
+    /// shrink an over-deep cushion, and a late arrival gives one back.
     #[cfg_attr(feature = "serde", serde(default))]
     pub rx_frames_lost: u64,
     /// Frames that arrived after their play time and were thrown away

@@ -191,8 +191,10 @@ public struct Snapshot: Sendable, Equatable {
     /// Current RX jitter-buffer depth in ms: how much received audio is being
     /// held back to ride out the network. `0` when the buffer isn't running.
     public var rxJitterBufferDepthMS: UInt32 = 0
-    /// Frames the RX jitter buffer expected and never saw; each one cost
-    /// 20 ms of interpolated silence. `0` when idle.
+    /// Frames the RX jitter buffer expected and did not play — usually an
+    /// interpolation over a frame that never arrived, but it also counts one
+    /// the buffer chose to skip to shrink an over-deep cushion, and a late
+    /// arrival gives one back. `0` when idle.
     public var rxFramesLost: UInt64 = 0
     /// Frames that arrived after their play time and were thrown away.
     public var rxFramesLate: UInt64 = 0

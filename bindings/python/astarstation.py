@@ -237,7 +237,7 @@ class _IaxState(ctypes.Structure):
         ("rx_underruns", c_uint64),  # cumulative RX underruns on the bus (iax-rxjb)
         ("rx_jitter_ms", c_uint),  # estimated network jitter, ms
         ("rx_jb_depth_ms", c_uint),  # current jitter-buffer depth, ms
-        ("rx_frames_lost", c_uint64),  # frames the buffer never saw
+        ("rx_frames_lost", c_uint64),  # frames the buffer expected, did not play
         ("rx_frames_late", c_uint64),  # frames that arrived too late to play
         ("rx_frames_ooo", c_uint64),  # frames that arrived out of order
         ("rx_jb_enabled", c_bool),  # the buffer is running
@@ -314,7 +314,7 @@ class Snapshot:
     rx_underruns: int  # cumulative RX underruns on the call's output bus (iax-rxjb)
     rx_jitter_ms: int  # estimated network jitter on the receive path, ms
     rx_jb_depth_ms: int  # current RX jitter-buffer depth, ms
-    rx_frames_lost: int  # frames the buffer expected and never saw
+    rx_frames_lost: int  # frames the buffer expected and did not play (incl. skipped to shrink)
     rx_frames_late: int  # frames that arrived after their play time
     rx_frames_ooo: int  # frames that arrived out of timestamp order
     rx_jb_enabled: bool  # the RX jitter buffer is running

@@ -729,13 +729,6 @@ impl ConsoleSession {
         }
     }
 
-    /// The RX jitter-buffer configuration in force — clamped, so this is what
-    /// a client should render (iax-rxjb).
-    #[must_use]
-    pub fn rx_jitter(&self) -> astar_audio::RxJitterConfig {
-        self.rx_jitter.get()
-    }
-
     /// Set the RX/output compression strength (0.0..=1.0, clamped) on the
     /// next/current network call. Takes effect immediately when RX
     /// compression is enabled (iax-a4e7 PHASE 1).
@@ -3427,6 +3420,15 @@ impl ConsoleSession {
             self.state.rx_level_db = -60.0;
             self.state.denoise_status = astar_audio::DenoiseStatus::default();
         }
+        // Populate the full concurrent-call list (iax-a1fb P5). Secret-free:
+        // CallSnapshot fields are node ids, device names, and health counters only.
+        // Taken ONCE per refresh — the flat per-call fields below read out of
+        // this list rather than asking the Manager to build a second snapshot.
+        self.state.calls = self
+            .manager
+            .as_ref()
+            .map(|m| m.snapshot().calls)
+            .unwrap_or_default();
         // IAX2-only health counters stay call-scoped: an RTT and a ts-ladder
         // re-anchor mean nothing without a call.
         if let (Some(id), Some(mgr)) = (self.active, self.manager.as_ref()) {
@@ -3438,14 +3440,14 @@ impl ConsoleSession {
             self.state.tx_reanchors = mgr.tx_reanchors(id).unwrap_or(0);
             self.state.tx_capture_overruns = mgr.tx_capture_overruns(id).unwrap_or(0);
             // RX health (iax-rxjb): the bus's underrun count and the call
-            // lane's live jitter-buffer counters.
-            let rx = mgr.snapshot().calls.into_iter().find(|c| c.id == id);
-            self.state.rx_underruns = rx.as_ref().map_or(0, |c| c.rx_underruns);
-            self.state.rx_jitter_ms = rx.as_ref().map_or(0, |c| c.rx_jitter_ms);
-            self.state.rx_jb_depth_ms = rx.as_ref().map_or(0, |c| c.rx_jb_depth_ms);
-            self.state.rx_frames_lost = rx.as_ref().map_or(0, |c| c.rx_frames_lost);
-            self.state.rx_frames_late = rx.as_ref().map_or(0, |c| c.rx_frames_late);
-            self.state.rx_frames_ooo = rx.as_ref().map_or(0, |c| c.rx_frames_ooo);
+            // lane's live jitter-buffer counters, out of the list above.
+            let rx = self.state.calls.iter().find(|c| c.id == id);
+            self.state.rx_underruns = rx.map_or(0, |c| c.rx_underruns);
+            self.state.rx_jitter_ms = rx.map_or(0, |c| c.rx_jitter_ms);
+            self.state.rx_jb_depth_ms = rx.map_or(0, |c| c.rx_jb_depth_ms);
+            self.state.rx_frames_lost = rx.map_or(0, |c| c.rx_frames_lost);
+            self.state.rx_frames_late = rx.map_or(0, |c| c.rx_frames_late);
+            self.state.rx_frames_ooo = rx.map_or(0, |c| c.rx_frames_ooo);
         } else {
             self.state.rtt_ms = None;
             self.state.tx_reanchors = 0;
@@ -3464,13 +3466,6 @@ impl ConsoleSession {
         self.state.rx_jb_enabled = jb.enabled;
         self.state.rx_jb_min_ms = jb.min_ms;
         self.state.rx_jb_max_ms = jb.max_ms;
-        // Populate the full concurrent-call list (iax-a1fb P5). Secret-free:
-        // CallSnapshot fields are node ids, device names, and health counters only.
-        self.state.calls = self
-            .manager
-            .as_ref()
-            .map(|m| m.snapshot().calls)
-            .unwrap_or_default();
         // Mirror the active call's negotiated codec into the flat field
         // (iax-3e53), like the levels/rtt above: `None` when idle or while
         // negotiation is still in flight.

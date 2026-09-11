@@ -812,17 +812,6 @@ impl AudioRouter {
             .map_or(0, |s| s.mixer.lock().map_or(0, |m| m.call_count()))
     }
 
-    /// Cumulative RX underruns on an open output bus (iax-rxjb): device
-    /// callbacks that got no audio at all while a lane was still mid-talk-spurt
-    /// — the receive-side counterpart of `mic_capture_overruns`, and the number
-    /// that grows while received audio stutters. `None` if the bus isn't open.
-    #[must_use]
-    pub fn bus_rx_underruns(&self, out: &OutputId) -> Option<u64> {
-        self.outputs
-            .get(out)
-            .and_then(|s| s.mixer.lock().ok().map(|m| m.underruns()))
-    }
-
     /// Clone an open bus's cumulative RX-underrun cell so a consumer (the
     /// `Manager`, binding it into a call's snapshot) can read it live.
     /// `None` if the bus isn't open.

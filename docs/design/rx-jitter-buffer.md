@@ -98,17 +98,22 @@ between "we received this" and "we invented this" is not a detail.
 | `rx_underruns` | Device callbacks that got **no audio at all** while a lane was out of audio mid-talk-spurt. The receive-side counterpart of `tx_capture_overruns`. This is the number that grows while received audio stutters. |
 | `rx_jitter_ms` | Measured network jitter: max-min over the delay history, Asterisk's percentile estimate. |
 | `rx_jb_depth_ms` | How much audio the buffer is currently holding back. Latency you are paying. |
-| `rx_frames_lost` | Frames expected and never seen — each one cost 20 ms of silence. |
+| `rx_frames_lost` | `jitterbuf.c`'s own `frames_lost`: frames the buffer expected and did not play. Usually an interpolation over a frame that never arrived — but it also counts one the buffer *chose* to skip to shrink an over-deep cushion, and a late arrival gives one back. Read it as "frames that did not reach the speaker", not as a packet-loss count. |
 | `rx_frames_late` | Frames that arrived after their play time and were thrown away. |
 | `rx_frames_ooo` | Frames that arrived out of timestamp order (reordered in place, not lost). |
 
 `rx_underruns` is deliberately narrow. A lane that is **holding frames back to
 deepen its cushion** is doing its job, not starving, so it does not count — the
-condition is an empty buffer while the spurt is still open. And because the
-counter keeps working with the buffer switched off (a lane counts as
+condition is an empty buffer while the spurt is still open.
+
+With the buffer switched **off** the counter keeps working (a lane counts as
 mid-spurt for 200 ms after a timestamped frame, the same window the enabled
-path uses), turning the buffer off and watching the number is a real A/B test
-rather than a change of definition.
+path uses) but it does not mean the same thing, and the two numbers must not be
+compared. With no cushion there is nothing to run out of: *any* callback that
+falls between two arrivals comes back dry and counts one, so what the number
+measures off is the phase between the device's callbacks and the network's
+20 ms frames. It is a liveness check on the wiring, not a control reading. The
+counter is only meaningful with the buffer on.
 
 A clean end-of-transmission does **not** produce underruns: the buffer covers
 the first ten missing slots with interpolations — which is what `rx_frames_lost`
