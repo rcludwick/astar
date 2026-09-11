@@ -597,6 +597,22 @@ impl Manager {
         }
     }
 
+    /// Bind a call's receive-side health cells to the bus lane it now sits on
+    /// (iax-rxjb): the bus's cumulative underrun counter and that lane's live
+    /// jitter-buffer counters. Called wherever a call's RX lane joins or moves
+    /// buses; passing `None` for `mix_id` clears them (the call is on no bus —
+    /// a conference member, whose RX the mix engine owns).
+    fn bind_rx_health(&self, call: &Call, out: &OutputId, mix_id: Option<MixCallId>) {
+        let Some(mix_id) = mix_id else {
+            call.set_rx_health(None, None);
+            return;
+        };
+        call.set_rx_health(
+            self.router.bus_underruns_cell(out),
+            self.router.bus_jitter_cells(out, mix_id),
+        );
+    }
+
     /// Enroll ONE pooled call as a conference member, detaching its RX from
     /// the output bus first. No-op when the call is already a member or has no
     /// bus attachment. Shared by the handset→conference live switch
@@ -635,6 +651,7 @@ impl Manager {
             }),
         );
         let conn = self.calls.get_mut(&id).expect("present");
+        conn.call.set_rx_health(None, None);
         conn.member = Some(member);
         conn.mix_id = None;
         // A pre-existing link view keeps its mode's relay flags across the
@@ -659,6 +676,10 @@ impl Manager {
             let taken = self.conference.as_ref().and_then(|c| c.take_member(member));
             if let Some(rx_source) = taken {
                 let mix_id = self.router.add_rx_to_bus(&out, rx_source, self.config)?;
+                {
+                    let conn = self.calls.get(&id).expect("present");
+                    self.bind_rx_health(&conn.call, &out, Some(mix_id));
+                }
                 let conn = self.calls.get_mut(&id).expect("present");
                 conn.mix_id = Some(mix_id);
             }
@@ -754,6 +775,7 @@ impl Manager {
         // Manager owns the routing facts that feed the snapshot.
         call.set_output(spec.output.as_str().to_string());
         call.set_routed_mic(None);
+        self.bind_rx_health(&call, &spec.output, Some(mix_id));
 
         self.calls.insert(
             spec.id,
@@ -863,6 +885,7 @@ impl Manager {
 
         call.set_output(out.as_str().to_string());
         call.set_routed_mic(None);
+        self.bind_rx_health(&call, out, mix_id);
 
         self.calls.insert(
             id,
@@ -1029,6 +1052,10 @@ impl Manager {
         let new_mix = self
             .router
             .move_call_to_bus(&from, out, mix_id, self.config)?;
+        {
+            let conn = self.calls.get(&call).expect("call present");
+            self.bind_rx_health(&conn.call, out, Some(new_mix));
+        }
         let conn = self.calls.get_mut(&call).expect("call present");
         conn.output = out.clone();
         conn.mix_id = Some(new_mix);
@@ -2180,6 +2207,31 @@ impl Manager {
             .map(|c| c.call.snapshot().tx_reanchors)
     }
 
+    /// Cumulative RX underruns on the call's output bus (iax-rxjb): device
+    /// callbacks that got no audio while a lane was out of audio mid-talk-spurt.
+    /// `None` if `call` isn't pooled. The receive-side counterpart of
+    /// [`Manager::tx_capture_overruns`].
+    #[must_use]
+    pub fn rx_underruns(&self, call: CallId) -> Option<u64> {
+        self.calls
+            .get(&call)
+            .map(|c| c.call.snapshot().rx_underruns)
+    }
+
+    /// Set the RX jitter-buffer configuration on every open output bus
+    /// (iax-rxjb). Clamped, never refused; a change reaches a call in progress
+    /// on the next device callback.
+    pub fn set_rx_jitter(&self, cfg: astar_audio::RxJitterConfig) {
+        self.router.set_rx_jitter(cfg);
+    }
+
+    /// The RX jitter-buffer configuration the audio router is using — clamped,
+    /// so this is what a client should render.
+    #[must_use]
+    pub fn rx_jitter(&self) -> astar_audio::RxJitterConfig {
+        self.router.rx_jitter()
+    }
+
     /// Cumulative cpal capture overruns on `call`'s routed mic (dropped input
     /// buffers; iax-9e55). `0` while monitor-only, `None` for an unknown call. A
     /// thin read over the canonical [`Call::snapshot`] — NOT a second source of
@@ -2876,6 +2928,44 @@ mod tests {
         mgr.route(y, &mic).unwrap();
         assert_eq!(mgr.snapshot().mic_of(y).as_deref(), Some("in:a"));
         assert_eq!(mgr.snapshot().mic_of(x), None, "X is now monitor-only");
+    }
+
+    #[test]
+    fn rx_health_counters_follow_the_call_onto_its_bus() {
+        // iax-rxjb: the receive-side counters are bound when a call's RX lane
+        // joins a bus, and they follow it across a set_output. They read zero
+        // on an idle test bus — nothing has stuttered — but they are BOUND,
+        // which is what makes them report the live bus rather than a constant.
+        let mut mgr = test_manager();
+        let id = mgr.dial(test_spec("in:a", "out:s", peer_a())).unwrap();
+        assert_eq!(mgr.rx_underruns(id), Some(0));
+        let snap = mgr.snapshot();
+        let call = snap.calls.iter().find(|c| c.id == id).expect("pooled");
+        assert_eq!(call.rx_jitter_ms, 0);
+        assert_eq!(call.rx_jb_depth_ms, 0);
+        assert_eq!(call.rx_frames_lost, 0);
+        assert_eq!(call.rx_frames_late, 0);
+        assert_eq!(call.rx_frames_ooo, 0);
+        // A bus change re-binds rather than unbinding.
+        mgr.set_output(id, &OutputId::new("out:shared")).unwrap();
+        assert_eq!(mgr.rx_underruns(id), Some(0));
+        assert_eq!(mgr.rx_underruns(CallId(99999)), None, "unknown call");
+    }
+
+    #[test]
+    fn the_rx_jitter_config_is_clamped_and_readable() {
+        // iax-rxjb: settable live, repaired rather than refused.
+        let mgr = test_manager();
+        assert_eq!(mgr.rx_jitter(), astar_audio::RxJitterConfig::default());
+        mgr.set_rx_jitter(astar_audio::RxJitterConfig {
+            enabled: false,
+            min_ms: 900,
+            max_ms: 10,
+        });
+        let cfg = mgr.rx_jitter();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.min_ms, 500, "clamped to the ceiling");
+        assert_eq!(cfg.max_ms, 500, "and max raised to meet min");
     }
 
     #[test]

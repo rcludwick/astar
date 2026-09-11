@@ -234,6 +234,15 @@ class _IaxState(ctypes.Structure):
         ("mode", c_int),  # IaxMode
         ("tx_reanchors", c_uint64),  # cumulative TX ts-ladder re-anchors (iax-9e55)
         ("tx_capture_overruns", c_uint64),  # cumulative cpal capture overruns
+        ("rx_underruns", c_uint64),  # cumulative RX underruns on the bus (iax-rxjb)
+        ("rx_jitter_ms", c_uint),  # estimated network jitter, ms
+        ("rx_jb_depth_ms", c_uint),  # current jitter-buffer depth, ms
+        ("rx_frames_lost", c_uint64),  # frames the buffer never saw
+        ("rx_frames_late", c_uint64),  # frames that arrived too late to play
+        ("rx_frames_ooo", c_uint64),  # frames that arrived out of order
+        ("rx_jb_enabled", c_bool),  # the buffer is running
+        ("rx_jb_min_ms", c_uint),  # effective depth floor, ms
+        ("rx_jb_max_ms", c_uint),  # effective depth ceiling, ms
         ("denoise_chain", c_int),  # IaxDenoiseChain — which mic NR chain is live
         ("denoise_device_rate", c_uint),  # capture stream rate in Hz; 0 = no mic lane
         ("denoise_live", c_bool),  # True = measured, False = predicted
@@ -302,6 +311,15 @@ class Snapshot:
     mode: Mode  # current top-level operating mode (WT dial-out vs Node)
     tx_reanchors: int  # cumulative voice-ts-ladder re-anchors; growth = choppy TX
     tx_capture_overruns: int  # cumulative cpal capture overruns on the routed mic
+    rx_underruns: int  # cumulative RX underruns on the call's output bus (iax-rxjb)
+    rx_jitter_ms: int  # estimated network jitter on the receive path, ms
+    rx_jb_depth_ms: int  # current RX jitter-buffer depth, ms
+    rx_frames_lost: int  # frames the buffer expected and never saw
+    rx_frames_late: int  # frames that arrived after their play time
+    rx_frames_ooo: int  # frames that arrived out of timestamp order
+    rx_jb_enabled: bool  # the RX jitter buffer is running
+    rx_jb_min_ms: int  # effective floor of the adaptive depth, ms
+    rx_jb_max_ms: int  # effective ceiling of the adaptive depth, ms
     denoise_chain: DenoiseChain  # which mic noise-reduction chain is live
     denoise_device_rate: int  # capture stream rate in Hz; 0 when no mic lane is open
     denoise_live: bool  # True = measured from a running stream; False = a prediction
@@ -490,6 +508,9 @@ def _bind(lib: ctypes.CDLL) -> None:
 
     lib.iax_station_set_output_gain.argtypes = [_IaxStationPtr, c_float]
     lib.iax_station_set_output_gain.restype = c_int
+
+    lib.iax_station_set_rx_jitter.argtypes = [_IaxStationPtr, c_bool, c_uint, c_uint]
+    lib.iax_station_set_rx_jitter.restype = c_int
 
     lib.iax_station_set_compression.argtypes = [_IaxStationPtr, c_bool]
     lib.iax_station_set_compression.restype = c_int
@@ -916,6 +937,25 @@ class Station:
         self._require_handle()
         self._check(self._lib.iax_station_set_output_gain(self._handle, float(gain)))
 
+    def set_rx_jitter(self, enabled: bool, min_ms: int, max_ms: int) -> None:
+        """Configure the RX jitter buffer (iax-rxjb): whether received audio is
+        played out of the adaptive buffer at all, and the window
+        (``min_ms``..``max_ms``) its depth may live in.
+
+        The defaults are Asterisk chan_iax2's — on, 40 ms of slack over
+        measured jitter, a 200 ms ceiling — because the node at the other end
+        of an AllStarLink call is Asterisk. A larger ``min_ms`` buys fewer
+        holes with more latency. Both bounds are clamped to ``0..500`` ms and a
+        ``max_ms`` below ``min_ms`` is raised to meet it: a setting is
+        repaired, never refused. Takes effect immediately, mid-call; read the
+        effective values back from ``snapshot()``'s ``rx_jb_*`` fields."""
+        self._require_handle()
+        self._check(
+            self._lib.iax_station_set_rx_jitter(
+                self._handle, bool(enabled), c_uint(int(min_ms)), c_uint(int(max_ms))
+            )
+        )
+
     def set_compression(self, on: bool) -> None:
         """Toggle mic voice compression on the live/next call (capture lane)."""
         self._require_handle()
@@ -951,6 +991,15 @@ class Station:
             mode=Mode(out.mode),
             tx_reanchors=int(out.tx_reanchors),
             tx_capture_overruns=int(out.tx_capture_overruns),
+            rx_underruns=int(out.rx_underruns),
+            rx_jitter_ms=int(out.rx_jitter_ms),
+            rx_jb_depth_ms=int(out.rx_jb_depth_ms),
+            rx_frames_lost=int(out.rx_frames_lost),
+            rx_frames_late=int(out.rx_frames_late),
+            rx_frames_ooo=int(out.rx_frames_ooo),
+            rx_jb_enabled=bool(out.rx_jb_enabled),
+            rx_jb_min_ms=int(out.rx_jb_min_ms),
+            rx_jb_max_ms=int(out.rx_jb_max_ms),
             denoise_chain=DenoiseChain(out.denoise_chain),
             denoise_device_rate=int(out.denoise_device_rate),
             denoise_live=bool(out.denoise_live),
@@ -1135,6 +1184,19 @@ def _self_check() -> None:
         assert (
             snap.tx_capture_overruns == 0
         ), f"expected 0 overruns, got {snap.tx_capture_overruns}"
+        # RX health counters start at zero too, and the jitter buffer reports
+        # Asterisk chan_iax2's defaults (iax-rxjb).
+        assert snap.rx_underruns == 0, f"expected 0 underruns, got {snap.rx_underruns}"
+        assert snap.rx_frames_lost == 0, f"expected 0 lost, got {snap.rx_frames_lost}"
+        assert snap.rx_jb_enabled, "the RX jitter buffer defaults to on"
+        assert snap.rx_jb_min_ms == 40, f"expected 40 ms floor, got {snap.rx_jb_min_ms}"
+        assert snap.rx_jb_max_ms == 200, f"expected 200 ms ceiling, got {snap.rx_jb_max_ms}"
+        # And it is settable live, clamped rather than refused.
+        st.set_rx_jitter(True, 900, 10)
+        clamped = st.snapshot()
+        assert clamped.rx_jb_min_ms == 500, f"expected clamp to 500, got {clamped.rx_jb_min_ms}"
+        assert clamped.rx_jb_max_ms == 500, f"expected max raised to min, got {clamped.rx_jb_max_ms}"
+        st.set_rx_jitter(True, 40, 200)
         print(f"snapshot: {snap}")
 
         try:

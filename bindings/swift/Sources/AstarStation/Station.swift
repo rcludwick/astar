@@ -180,6 +180,33 @@ public struct Snapshot: Sendable, Equatable {
     /// captured mic PCM) on the active call's routed mic. The lead suspect for
     /// choppy TX; `0` when monitor-only. A plain health counter, credential-free.
     public let txCaptureOverruns: UInt64
+    /// Cumulative RX underruns on the active call's output bus: device
+    /// callbacks that got no audio at all while somebody was still talking.
+    /// The receive-side counterpart of `txCaptureOverruns` — the number that
+    /// grows while received audio stutters. `0` when idle.
+    public var rxUnderruns: UInt64 = 0
+    /// Estimated network jitter on the active call's receive path, in ms.
+    /// `0` when idle, or with the jitter buffer switched off.
+    public var rxJitterMS: UInt32 = 0
+    /// Current RX jitter-buffer depth in ms: how much received audio is being
+    /// held back to ride out the network. `0` when the buffer isn't running.
+    public var rxJitterBufferDepthMS: UInt32 = 0
+    /// Frames the RX jitter buffer expected and never saw; each one cost
+    /// 20 ms of interpolated silence. `0` when idle.
+    public var rxFramesLost: UInt64 = 0
+    /// Frames that arrived after their play time and were thrown away.
+    public var rxFramesLate: UInt64 = 0
+    /// Frames that arrived out of timestamp order.
+    public var rxFramesOutOfOrder: UInt64 = 0
+    /// `true` while the RX jitter buffer is running. Reported so a client
+    /// renders what the engine is doing, not what it last asked for.
+    public var rxJitterBufferEnabled: Bool = true
+    /// Floor of the RX jitter buffer's adaptive depth in ms — the effective,
+    /// clamped value.
+    public var rxJitterBufferMinMS: UInt32 = 40
+    /// Ceiling of the RX jitter buffer's adaptive depth in ms — the
+    /// effective, clamped value.
+    public var rxJitterBufferMaxMS: UInt32 = 200
     /// Which mic noise-reduction chain is live. A plain enum,
     /// credential-free.
     public let denoiseChain: DenoiseChain
@@ -1275,6 +1302,22 @@ public final class Station {
         try check(iax_station_set_rx_compression_level(handle, level))
     }
 
+    /// Configure the RX jitter buffer: whether received audio is played out of
+    /// the adaptive buffer at all, and the window (`minMs`...`maxMs`) its
+    /// depth may live in.
+    ///
+    /// The defaults are Asterisk `chan_iax2`'s — on, 40 ms of slack over
+    /// measured jitter, a 200 ms ceiling — because the node at the other end
+    /// of an AllStarLink call is Asterisk. A larger `minMs` buys fewer holes
+    /// with more latency. Both bounds are clamped to `0...500` ms and a
+    /// `maxMs` below `minMs` is raised to meet it: a setting is repaired,
+    /// never refused. Takes effect immediately, mid-call, with no reconnect;
+    /// read the effective values back from `Snapshot`'s
+    /// `rxJitterBufferEnabled` / `rxJitterBufferMinMS` / `rxJitterBufferMaxMS`.
+    public func setRxJitter(enabled: Bool, minMs: UInt32, maxMs: UInt32) throws {
+        try check(iax_station_set_rx_jitter(handle, enabled, minMs, maxMs))
+    }
+
     /// Toggle mic voice compression on the live/next call. Takes effect
     /// immediately on an active call's capture lane.
     public func setCompression(_ on: Bool) throws {
@@ -2236,6 +2279,15 @@ public final class Station {
             mode: Mode(rawValue: Int32(out.mode.rawValue)) ?? .wt,
             txReanchors: out.tx_reanchors,
             txCaptureOverruns: out.tx_capture_overruns,
+            rxUnderruns: out.rx_underruns,
+            rxJitterMS: out.rx_jitter_ms,
+            rxJitterBufferDepthMS: out.rx_jb_depth_ms,
+            rxFramesLost: out.rx_frames_lost,
+            rxFramesLate: out.rx_frames_late,
+            rxFramesOutOfOrder: out.rx_frames_ooo,
+            rxJitterBufferEnabled: out.rx_jb_enabled,
+            rxJitterBufferMinMS: out.rx_jb_min_ms,
+            rxJitterBufferMaxMS: out.rx_jb_max_ms,
             denoiseChain: DenoiseChain(rawValue: out.denoise_chain.rawValue) ?? .notCapturing,
             denoiseDeviceRate: out.denoise_device_rate,
             denoiseLive: out.denoise_live,

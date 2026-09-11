@@ -321,6 +321,12 @@ pub struct ConsoleSession {
     /// as the mic's), persisted across reconnects and pushed to the router on
     /// connect / on change (iax-a4e7 PHASE 1).
     rx_compress_level: Arc<AtomicU32>,
+    /// RX jitter-buffer configuration (iax-rxjb): on/off and the window the
+    /// adaptive depth may live in. Listener-side like the output gain, shared
+    /// across networks, held here so a setting made before the engine exists
+    /// survives to reach it — and pushed to the router on engine build and on
+    /// every change, so it applies mid-call without reconnecting.
+    rx_jitter: Arc<astar_audio::RxJitterSettings>,
     /// VOX pre-roll / look-back length in ms (default 0 = disabled, clamped to
     /// `0..=250`), persisted across reconnects and pushed to the router on
     /// connect / on change (iax-2733). astar opts in from its VOX edge.
@@ -473,6 +479,7 @@ impl ConsoleSession {
             tx_trim: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
             rx_compress: Arc::new(AtomicBool::new(false)),
             rx_compress_level: Arc::new(AtomicU32::new(0.90_f32.to_bits())),
+            rx_jitter: Arc::new(astar_audio::RxJitterSettings::default()),
             vox_preroll_ms: Arc::new(AtomicU32::new(0)),
             calibrated: Arc::new(Mutex::new(None)),
             state: ConsoleState::default(),
@@ -702,6 +709,31 @@ impl ConsoleSession {
             let r = mgr.router();
             r.set_output_compress(route.out(), on);
         }
+    }
+
+    /// Configure the RX jitter buffer (iax-rxjb): whether received audio is
+    /// played out of the adaptive buffer at all, and the window
+    /// (`min_ms`..=`max_ms`) its depth may live in. Both bounds are clamped to
+    /// `0..=500` ms and a `max_ms` under `min_ms` is raised to meet it — a
+    /// setting is repaired, never refused.
+    ///
+    /// Takes effect immediately: a change reaches a call in progress on the
+    /// next device callback, with no reconnect. Switching the buffer off
+    /// drains what it is holding rather than dropping it; switching it on
+    /// starts a fresh, empty buffer. Shared across networks (the buffer is on
+    /// the output bus, same as [`Self::set_output_gain`]).
+    pub fn set_rx_jitter(&self, cfg: astar_audio::RxJitterConfig) {
+        self.rx_jitter.set(cfg);
+        if let Some(mgr) = self.manager.as_ref() {
+            mgr.set_rx_jitter(self.rx_jitter.get());
+        }
+    }
+
+    /// The RX jitter-buffer configuration in force — clamped, so this is what
+    /// a client should render (iax-rxjb).
+    #[must_use]
+    pub fn rx_jitter(&self) -> astar_audio::RxJitterConfig {
+        self.rx_jitter.get()
     }
 
     /// Set the RX/output compression strength (0.0..=1.0, clamped) on the
@@ -3219,6 +3251,12 @@ impl ConsoleSession {
     ) -> &mut Manager {
         if self.manager.is_none() {
             self.manager = Some(Manager::with_policy(make_backend(), self.station_policy));
+            // iax-rxjb: the RX jitter-buffer config is router-wide, so replay
+            // whatever was set before the engine existed onto the fresh one.
+            self.manager
+                .as_ref()
+                .expect("just set")
+                .set_rx_jitter(self.rx_jitter.get());
             // Replay any pending announce config pushed before the Manager existed.
             if let Some(cfg) = self.pending_announce.clone() {
                 self.manager
@@ -3399,11 +3437,33 @@ impl ConsoleSession {
             // cpal capture overruns on the active call / its routed mic.
             self.state.tx_reanchors = mgr.tx_reanchors(id).unwrap_or(0);
             self.state.tx_capture_overruns = mgr.tx_capture_overruns(id).unwrap_or(0);
+            // RX health (iax-rxjb): the bus's underrun count and the call
+            // lane's live jitter-buffer counters.
+            let rx = mgr.snapshot().calls.into_iter().find(|c| c.id == id);
+            self.state.rx_underruns = rx.as_ref().map_or(0, |c| c.rx_underruns);
+            self.state.rx_jitter_ms = rx.as_ref().map_or(0, |c| c.rx_jitter_ms);
+            self.state.rx_jb_depth_ms = rx.as_ref().map_or(0, |c| c.rx_jb_depth_ms);
+            self.state.rx_frames_lost = rx.as_ref().map_or(0, |c| c.rx_frames_lost);
+            self.state.rx_frames_late = rx.as_ref().map_or(0, |c| c.rx_frames_late);
+            self.state.rx_frames_ooo = rx.as_ref().map_or(0, |c| c.rx_frames_ooo);
         } else {
             self.state.rtt_ms = None;
             self.state.tx_reanchors = 0;
             self.state.tx_capture_overruns = 0;
+            self.state.rx_underruns = 0;
+            self.state.rx_jitter_ms = 0;
+            self.state.rx_jb_depth_ms = 0;
+            self.state.rx_frames_lost = 0;
+            self.state.rx_frames_late = 0;
+            self.state.rx_frames_ooo = 0;
         }
+        // The jitter-buffer CONFIG is a station setting, not a call fact: it
+        // reads the same idle or mid-call, so a client can render (and change)
+        // it before anything is connected.
+        let jb = self.rx_jitter.get();
+        self.state.rx_jb_enabled = jb.enabled;
+        self.state.rx_jb_min_ms = jb.min_ms;
+        self.state.rx_jb_max_ms = jb.max_ms;
         // Populate the full concurrent-call list (iax-a1fb P5). Secret-free:
         // CallSnapshot fields are node ids, device names, and health counters only.
         self.state.calls = self

@@ -109,6 +109,15 @@ fn snapshot_fills_idle_state() {
         mode: IaxMode::Node,
         tx_reanchors: 7,
         tx_capture_overruns: 11,
+        rx_underruns: 13,
+        rx_jitter_ms: 17,
+        rx_jb_depth_ms: 19,
+        rx_frames_lost: 23,
+        rx_frames_late: 29,
+        rx_frames_ooo: 31,
+        rx_jb_enabled: false,
+        rx_jb_min_ms: 1,
+        rx_jb_max_ms: 2,
         denoise_chain: IaxDenoiseChain::NotCapturing,
         denoise_device_rate: 0,
         denoise_live: false,
@@ -158,6 +167,40 @@ fn snapshot_fills_idle_state() {
     // they are overwritten from the pre-poisoned values.
     assert_eq!(state.tx_reanchors, 0);
     assert_eq!(state.tx_capture_overruns, 0);
+    // iax-rxjb: idle zeroes the RX health counters too, and reports the
+    // jitter buffer's EFFECTIVE configuration — Asterisk chan_iax2's defaults
+    // on a fresh station — overwriting the pre-poisoned values.
+    assert_eq!(state.rx_underruns, 0);
+    assert_eq!(state.rx_jitter_ms, 0);
+    assert_eq!(state.rx_jb_depth_ms, 0);
+    assert_eq!(state.rx_frames_lost, 0);
+    assert_eq!(state.rx_frames_late, 0);
+    assert_eq!(state.rx_frames_ooo, 0);
+    assert!(state.rx_jb_enabled);
+    assert_eq!(state.rx_jb_min_ms, 40);
+    assert_eq!(state.rx_jb_max_ms, 200);
+
+    // And the three fields round-trip through the ABI setter, clamped: a
+    // min_ms past the ceiling comes back at the ceiling, and a max_ms below
+    // min_ms is raised to meet it rather than refused.
+    assert_eq!(
+        unsafe { iax_station_set_rx_jitter(st, false, 900, 10) },
+        IAX_OK
+    );
+    let rc = unsafe { iax_station_snapshot(st, std::ptr::from_mut(&mut state)) };
+    assert_eq!(rc, IAX_OK);
+    assert!(!state.rx_jb_enabled);
+    assert_eq!(state.rx_jb_min_ms, 500);
+    assert_eq!(state.rx_jb_max_ms, 500);
+    assert_eq!(
+        unsafe { iax_station_set_rx_jitter(st, true, 120, 240) },
+        IAX_OK
+    );
+    let rc = unsafe { iax_station_snapshot(st, std::ptr::from_mut(&mut state)) };
+    assert_eq!(rc, IAX_OK);
+    assert!(state.rx_jb_enabled);
+    assert_eq!(state.rx_jb_min_ms, 120);
+    assert_eq!(state.rx_jb_max_ms, 240);
     // iax-3e53: idle (no active call) reports no negotiated codec (0),
     // overwriting the pre-poisoned value.
     assert_eq!(state.negotiated_format, 0);
@@ -184,6 +227,15 @@ fn null_guards_return_err_null() {
         mode: IaxMode::Wt,
         tx_reanchors: 0,
         tx_capture_overruns: 0,
+        rx_underruns: 0,
+        rx_jitter_ms: 0,
+        rx_jb_depth_ms: 0,
+        rx_frames_lost: 0,
+        rx_frames_late: 0,
+        rx_frames_ooo: 0,
+        rx_jb_enabled: true,
+        rx_jb_min_ms: 40,
+        rx_jb_max_ms: 200,
         denoise_chain: IaxDenoiseChain::NotCapturing,
         denoise_device_rate: 0,
         denoise_live: false,
@@ -330,6 +382,15 @@ fn mint_token_without_portal_is_portal_err() {
         mode: IaxMode::Wt,
         tx_reanchors: 0,
         tx_capture_overruns: 0,
+        rx_underruns: 0,
+        rx_jitter_ms: 0,
+        rx_jb_depth_ms: 0,
+        rx_frames_lost: 0,
+        rx_frames_late: 0,
+        rx_frames_ooo: 0,
+        rx_jb_enabled: true,
+        rx_jb_min_ms: 40,
+        rx_jb_max_ms: 200,
         denoise_chain: IaxDenoiseChain::NotCapturing,
         denoise_device_rate: 0,
         denoise_live: false,
@@ -417,6 +478,10 @@ fn rx_compression_toggles_null_guard() {
     );
     assert_eq!(
         unsafe { iax_station_set_rx_compression_level(ptr::null_mut(), 0.5) },
+        IAX_ERR_NULL
+    );
+    assert_eq!(
+        unsafe { iax_station_set_rx_jitter(ptr::null_mut(), true, 40, 200) },
         IAX_ERR_NULL
     );
 }

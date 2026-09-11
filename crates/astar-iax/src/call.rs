@@ -96,6 +96,34 @@ pub struct CallSnapshot {
     /// monitor-only (no mic). The lead suspect for choppy TX. A plain `u64`
     /// health counter, credential-free.
     pub tx_capture_overruns: u64,
+    /// Cumulative RX underruns on this call's output bus (iax-rxjb): device
+    /// callbacks that got no audio at all while a lane was out of audio
+    /// mid-talk-spurt. The receive-side counterpart of `tx_capture_overruns`,
+    /// and the number that grows while received audio stutters. A plain `u64`
+    /// health counter, credential-free.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub rx_underruns: u64,
+    /// Estimated network jitter on this call's receive path, ms (iax-rxjb).
+    /// `0` with no call, or with the jitter buffer switched off.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub rx_jitter_ms: u32,
+    /// Current RX jitter-buffer depth, ms (iax-rxjb) — how much received
+    /// audio is being held to ride out the network. `0` when the buffer isn't
+    /// running.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub rx_jb_depth_ms: u32,
+    /// Frames the RX jitter buffer expected and never saw (iax-rxjb); each one
+    /// cost 20 ms of interpolated silence.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub rx_frames_lost: u64,
+    /// Frames that arrived after their play time and were thrown away
+    /// (iax-rxjb).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub rx_frames_late: u64,
+    /// Frames that arrived out of timestamp order and were reordered in place
+    /// (iax-rxjb).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub rx_frames_ooo: u64,
     /// Negotiated voice codec, once known (`None` while connecting) —
     /// iax-31f7.
     pub negotiated_format: Option<VoiceFormat>,
@@ -189,6 +217,14 @@ pub struct Call {
     /// (no mic), reported as `0`. Mirrors `routed_mic`: a routing fact the
     /// Manager owns and the snapshot reads.
     capture_overruns: Arc<std::sync::Mutex<Option<Arc<AtomicU64>>>>,
+    /// This call's output bus's cumulative RX-underrun cell (iax-rxjb), set by
+    /// the `Manager` when the call's RX lane joins a bus and re-set when it
+    /// moves. `None` (reported as `0`) while the call is on no bus. Mirrors
+    /// `capture_overruns` on the receive side.
+    rx_underruns: Arc<std::sync::Mutex<Option<Arc<AtomicU64>>>>,
+    /// This call's mixer lane's live jitter-buffer counters (iax-rxjb), set
+    /// alongside `rx_underruns`. `None` = no lane, everything reported as `0`.
+    rx_jitter: Arc<std::sync::Mutex<Option<Arc<astar_audio::RxJitterCells>>>>,
     /// Negotiated-codec cell published by the run-loop once per event-handling
     /// pass (iax-31f7): format bits (`VoiceFormat::as_u32`), `0` = not yet
     /// negotiated. Read by [`Call::snapshot`] via `VoiceFormat::from_u32`.
@@ -238,6 +274,8 @@ impl Call {
             output: Arc::new(std::sync::Mutex::new(String::new())),
             tx_reanchors,
             capture_overruns: Arc::new(std::sync::Mutex::new(None)),
+            rx_underruns: Arc::new(std::sync::Mutex::new(None)),
+            rx_jitter: Arc::new(std::sync::Mutex::new(None)),
             format_bits,
             adopt_rx_source: None,
             adopt_tx_sender: None,
@@ -279,6 +317,8 @@ impl Call {
             output: Arc::new(std::sync::Mutex::new(String::new())),
             tx_reanchors,
             capture_overruns: Arc::new(std::sync::Mutex::new(None)),
+            rx_underruns: Arc::new(std::sync::Mutex::new(None)),
+            rx_jitter: Arc::new(std::sync::Mutex::new(None)),
             format_bits,
             adopt_rx_source: None,
             adopt_tx_sender: None,
@@ -332,6 +372,8 @@ impl Call {
             // still meaningful once a handset mic is routed.
             tx_reanchors: Arc::new(AtomicU64::new(0)),
             capture_overruns: Arc::new(std::sync::Mutex::new(None)),
+            rx_underruns: Arc::new(std::sync::Mutex::new(None)),
+            rx_jitter: Arc::new(std::sync::Mutex::new(None)),
             format_bits,
             adopt_rx_source: Some(rx_source),
             adopt_tx_sender: Some(tx_sender),
@@ -395,6 +437,20 @@ impl Call {
             .expect("capture_overruns mutex") = cell;
     }
 
+    /// Manager-side setter: bind this call's output bus's cumulative
+    /// RX-underrun cell and its mixer lane's live jitter counters (iax-rxjb),
+    /// so [`Call::snapshot`] reports the receive-side health of the bus the
+    /// call is actually on. Set when the RX lane joins a bus, re-set when it
+    /// moves, cleared when it leaves. Mirrors [`Call::set_capture_overruns`].
+    pub(crate) fn set_rx_health(
+        &self,
+        underruns: Option<Arc<AtomicU64>>,
+        jitter: Option<Arc<astar_audio::RxJitterCells>>,
+    ) {
+        *self.rx_underruns.lock().expect("rx_underruns mutex") = underruns;
+        *self.rx_jitter.lock().expect("rx_jitter mutex") = jitter;
+    }
+
     /// Manager-side setter: record the output bus id.
     pub(crate) fn set_output(&self, out: String) {
         *self.output.lock().expect("output mutex") = out;
@@ -423,6 +479,14 @@ impl Call {
             .expect("capture_overruns mutex")
             .as_ref()
             .map_or(0, |c| c.load(Ordering::Relaxed));
+        let rx_underruns = self
+            .rx_underruns
+            .lock()
+            .expect("rx_underruns mutex")
+            .as_ref()
+            .map_or(0, |c| c.load(Ordering::Relaxed));
+        let rx = self.rx_jitter.lock().expect("rx_jitter mutex");
+        let rx = rx.as_ref();
         CallSnapshot {
             id: self.id,
             node: self.node.clone(),
@@ -433,6 +497,12 @@ impl Call {
             output: self.output.lock().expect("output mutex").clone(),
             tx_reanchors: self.tx_reanchors.load(Ordering::Relaxed),
             tx_capture_overruns,
+            rx_underruns,
+            rx_jitter_ms: rx.map_or(0, |c| c.jitter_ms.load(Ordering::Relaxed)),
+            rx_jb_depth_ms: rx.map_or(0, |c| c.depth_ms.load(Ordering::Relaxed)),
+            rx_frames_lost: rx.map_or(0, |c| c.frames_lost.load(Ordering::Relaxed)),
+            rx_frames_late: rx.map_or(0, |c| c.frames_late.load(Ordering::Relaxed)),
+            rx_frames_ooo: rx.map_or(0, |c| c.frames_ooo.load(Ordering::Relaxed)),
             negotiated_format: VoiceFormat::from_u32(self.format_bits.load(Ordering::Relaxed)),
             remote_keyed: self.remote_keyed.load(Ordering::Relaxed),
         }
@@ -533,6 +603,12 @@ mod call_handle_tests {
             output: "out:s".into(),
             tx_reanchors: 0,
             tx_capture_overruns: 0,
+            rx_underruns: 0,
+            rx_jitter_ms: 0,
+            rx_jb_depth_ms: 0,
+            rx_frames_lost: 0,
+            rx_frames_late: 0,
+            rx_frames_ooo: 0,
             negotiated_format: None,
             remote_keyed: false,
         };
@@ -546,6 +622,13 @@ mod call_handle_tests {
         // TX health counters start at zero and are plain u64s (no secret).
         assert_eq!(snap.tx_reanchors, 0);
         assert_eq!(snap.tx_capture_overruns, 0);
+        // RX health counters start at zero too (iax-rxjb).
+        assert_eq!(snap.rx_underruns, 0);
+        assert_eq!(snap.rx_jitter_ms, 0);
+        assert_eq!(snap.rx_jb_depth_ms, 0);
+        assert_eq!(snap.rx_frames_lost, 0);
+        assert_eq!(snap.rx_frames_late, 0);
+        assert_eq!(snap.rx_frames_ooo, 0);
         // negotiated_format is None while connecting (iax-31f7).
         assert_eq!(snap.negotiated_format, None);
     }

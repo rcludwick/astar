@@ -73,6 +73,36 @@ pub struct ConsoleState {
     /// suspect for choppy TX. `0` when idle / monitor-only. A plain `u64` health
     /// counter, credential-free.
     pub tx_capture_overruns: u64,
+    /// Cumulative RX underruns on the active call's output bus (iax-rxjb):
+    /// device callbacks that got no audio while a lane was out of audio
+    /// mid-talk-spurt. The receive-side counterpart of `tx_capture_overruns`,
+    /// and the number that grows while received audio stutters. `0` when idle.
+    /// A plain `u64` health counter, credential-free.
+    pub rx_underruns: u64,
+    /// Estimated network jitter on the active call's receive path, ms
+    /// (iax-rxjb). `0` when idle or with the buffer off.
+    pub rx_jitter_ms: u32,
+    /// Current RX jitter-buffer depth in ms (iax-rxjb): how much received
+    /// audio is being held to ride out the network. `0` when idle or off.
+    pub rx_jb_depth_ms: u32,
+    /// Frames the RX jitter buffer expected and never saw (iax-rxjb) — each
+    /// one cost 20 ms of interpolated silence. `0` when idle.
+    pub rx_frames_lost: u64,
+    /// Frames that arrived after their play time and were thrown away
+    /// (iax-rxjb). `0` when idle.
+    pub rx_frames_late: u64,
+    /// Frames that arrived out of timestamp order (iax-rxjb). `0` when idle.
+    pub rx_frames_ooo: u64,
+    /// Whether the RX jitter buffer is running at all (iax-rxjb). Reported so
+    /// a client renders what the engine is actually doing, not what it last
+    /// asked for.
+    pub rx_jb_enabled: bool,
+    /// Floor of the RX jitter buffer's adaptive depth, ms — the effective,
+    /// clamped value (iax-rxjb).
+    pub rx_jb_min_ms: u32,
+    /// Ceiling of the RX jitter buffer's adaptive depth, ms — the effective,
+    /// clamped value (iax-rxjb).
+    pub rx_jb_max_ms: u32,
     /// Which mic noise-reduction chain is live, and at what device rate
     /// (`docs/design/noise-suppression.md`). Read-only, and reported rather
     /// than inferred: the 48 kHz guard is otherwise invisible, and a mic
@@ -203,6 +233,15 @@ impl Default for ConsoleState {
             mode: OperatingMode::default(),
             tx_reanchors: 0,
             tx_capture_overruns: 0,
+            rx_underruns: 0,
+            rx_jitter_ms: 0,
+            rx_jb_depth_ms: 0,
+            rx_frames_lost: 0,
+            rx_frames_late: 0,
+            rx_frames_ooo: 0,
+            rx_jb_enabled: astar_audio::RxJitterConfig::default().enabled,
+            rx_jb_min_ms: astar_audio::RxJitterConfig::default().min_ms,
+            rx_jb_max_ms: astar_audio::RxJitterConfig::default().max_ms,
             negotiated_format: None,
             calls: Vec::new(),
             answered_seq: 0,
@@ -240,6 +279,17 @@ mod tests {
         // TX health counters start at zero (iax-9e55).
         assert_eq!(s.tx_reanchors, 0);
         assert_eq!(s.tx_capture_overruns, 0);
+        // RX health counters start at zero, and the buffer defaults to on with
+        // chan_iax2's window (iax-rxjb).
+        assert_eq!(s.rx_underruns, 0);
+        assert_eq!(s.rx_jitter_ms, 0);
+        assert_eq!(s.rx_jb_depth_ms, 0);
+        assert_eq!(s.rx_frames_lost, 0);
+        assert_eq!(s.rx_frames_late, 0);
+        assert_eq!(s.rx_frames_ooo, 0);
+        assert!(s.rx_jb_enabled);
+        assert_eq!(s.rx_jb_min_ms, 40);
+        assert_eq!(s.rx_jb_max_ms, 200);
         // No call → no negotiated codec (iax-3e53).
         assert_eq!(s.negotiated_format, None);
         // iax-f2b8 Task 4: byte-identical default (no M17 session ever built).
