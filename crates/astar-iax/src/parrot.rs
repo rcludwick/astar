@@ -104,14 +104,14 @@ pub fn run_parrot(
             match &mut state {
                 State::Idle => {
                     buffer.clear();
-                    buffer.push(frame);
+                    buffer.push(frame.pcm);
                     log_line("recording…");
                     state = State::Recording {
                         last: Instant::now(),
                     };
                 }
                 State::Recording { last } => {
-                    buffer.push(frame);
+                    buffer.push(frame.pcm);
                     *last = Instant::now();
                 }
                 State::Pending(_) => { /* parrot is talking; drop incoming */ }

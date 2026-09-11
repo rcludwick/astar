@@ -344,7 +344,7 @@ fn run_loop(
     cmd_rx: mpsc::Receiver<RuntimeCommand>,
     event_tx: mpsc::Sender<CallEvent>,
     mic_rx: mpsc::Receiver<Vec<i16>>,
-    spk_tx: mpsc::Sender<Vec<i16>>,
+    spk_tx: mpsc::Sender<astar_audio::RxFrame>,
     rtt_micros: Arc<AtomicU32>,
     state: Arc<std::sync::atomic::AtomicU8>,
     frame_observer: Option<mpsc::Sender<crate::trace::TracedFrame>>,
@@ -395,6 +395,9 @@ fn run_loop(
     // negotiated wire rate. On an 8 kHz station (`sample_rate == 8000`) no
     // resampler is ever built and both paths reduce to the pure encode/decode.
     let mut edge = crate::codec_edge::EdgeAudio::new(sample_rate);
+    // iax-rxjb: the receive-side media clock, rebuilding the sender's 32-bit
+    // timestamp from the wire's mix of full and mini frames.
+    let mut rx_clock = crate::rx_clock::RxTimestamps::default();
 
     // Kick the call.
     let actions = fsm.handle(Event::App(AppCommand::StartCall {
@@ -414,6 +417,7 @@ fn run_loop(
         fsm.negotiated_format().unwrap_or(VoiceFormat::G711U),
         &mut rx_decode_warned,
         &mut edge,
+        &mut rx_clock,
     ) {
         return;
     }
@@ -475,6 +479,7 @@ fn run_loop(
                         fsm.negotiated_format().unwrap_or(VoiceFormat::G711U),
                         &mut rx_decode_warned,
                         &mut edge,
+                        &mut rx_clock,
                     ) {
                         return;
                     }
@@ -497,6 +502,7 @@ fn run_loop(
                         fsm.negotiated_format().unwrap_or(VoiceFormat::G711U),
                         &mut rx_decode_warned,
                         &mut edge,
+                        &mut rx_clock,
                     );
                     return;
                 }
@@ -547,6 +553,7 @@ fn run_loop(
                                 fsm.negotiated_format().unwrap_or(VoiceFormat::G711U),
                                 &mut rx_decode_warned,
                                 &mut edge,
+                                &mut rx_clock,
                             ) {
                                 return;
                             }
@@ -581,6 +588,7 @@ fn run_loop(
                                 fsm.negotiated_format().unwrap_or(VoiceFormat::G711U),
                                 &mut rx_decode_warned,
                                 &mut edge,
+                                &mut rx_clock,
                             ) {
                                 return;
                             }
@@ -618,6 +626,7 @@ fn run_loop(
                 fsm.negotiated_format().unwrap_or(VoiceFormat::G711U),
                 &mut rx_decode_warned,
                 &mut edge,
+                &mut rx_clock,
             ) {
                 return;
             }
@@ -694,6 +703,7 @@ fn run_loop(
                 fsm.negotiated_format().unwrap_or(VoiceFormat::G711U),
                 &mut rx_decode_warned,
                 &mut edge,
+                &mut rx_clock,
             ) {
                 return;
             }
@@ -720,6 +730,7 @@ fn run_loop(
                 fsm.negotiated_format().unwrap_or(VoiceFormat::G711U),
                 &mut rx_decode_warned,
                 &mut edge,
+                &mut rx_clock,
             ) {
                 return;
             }
@@ -777,7 +788,7 @@ fn dispatch_actions(
     sock: &dyn LinkSocket,
     rel: &mut Reliability,
     timers: &mut Vec<(Instant, TimerKind)>,
-    spk_tx: &mpsc::Sender<Vec<i16>>,
+    spk_tx: &mpsc::Sender<astar_audio::RxFrame>,
     event_tx: &mpsc::Sender<CallEvent>,
     state: &Arc<std::sync::atomic::AtomicU8>,
     remote_keyed: &Arc<AtomicBool>,
@@ -785,6 +796,7 @@ fn dispatch_actions(
     negotiated_format: VoiceFormat,
     rx_decode_warned: &mut bool,
     edge: &mut crate::codec_edge::EdgeAudio,
+    rx_clock: &mut crate::rx_clock::RxTimestamps,
 ) -> bool {
     let now = Instant::now();
     let mut terminated = false;
@@ -830,27 +842,26 @@ fn dispatch_actions(
                     _ => {}
                 }
                 if let AppEvent::VoiceReceived {
-                    format, payload, ..
+                    format,
+                    payload,
+                    ts,
                 } = &ev
                 {
                     // RX codec edge (iax-31f7 / iax-4348): decode the received
                     // payload on its OWN format into bus-rate PCM (resampling if
                     // the wire rate differs). Undecodable frames are dropped (warn
-                    // once).
-                    match edge.decode(*format, payload) {
-                        Some(pcm) => {
-                            let _ = spk_tx.send(pcm);
-                        }
-                        None if !*rx_decode_warned => {
-                            *rx_decode_warned = true;
-                            tracing::warn!(
-                                ?format,
-                                len = payload.len(),
-                                "dropping undecodable RX voice"
-                            );
-                        }
-                        None => {}
-                    }
+                    // once). The wire timestamp travels with it (iax-rxjb): the
+                    // bus lane's jitter buffer schedules playout on the SENDER's
+                    // clock, and without one the lane has nothing to schedule.
+                    crate::rx_clock::forward_voice(
+                        edge,
+                        rx_clock,
+                        spk_tx,
+                        *format,
+                        payload,
+                        *ts,
+                        rx_decode_warned,
+                    );
                 } else if let Some(ce) = translate(&ev, negotiated_format) {
                     let is_hangup = matches!(ce, CallEvent::Hangup { .. });
                     let _ = event_tx.send(ce);

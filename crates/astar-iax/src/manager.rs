@@ -2507,7 +2507,7 @@ pub(crate) mod test_support {
         // absent) would drain `tx_rx` and fill `rx_tx`; the Manager joins
         // `rx_source` to a bus and binds `tx_sender` to a mic on route().
         let (tx_sender, _tx_rx) = std::sync::mpsc::channel::<Vec<i16>>();
-        let (_rx_tx, rx_source) = std::sync::mpsc::channel::<Vec<i16>>();
+        let (_rx_tx, rx_source) = std::sync::mpsc::channel::<astar_audio::RxFrame>();
         let format_bits = Arc::new(std::sync::atomic::AtomicU32::new(0));
         Call::new_inbound(
             cmd_tx,
@@ -2537,7 +2537,7 @@ pub(crate) mod test_support {
         node: &str,
     ) -> (
         Call,
-        std::sync::mpsc::Sender<Vec<i16>>,
+        std::sync::mpsc::Sender<astar_audio::RxFrame>,
         std::sync::mpsc::Receiver<Vec<i16>>,
     ) {
         fake_inbound_call_wired_at(id, node, 8000)
@@ -2551,7 +2551,7 @@ pub(crate) mod test_support {
         sample_rate: u32,
     ) -> (
         Call,
-        std::sync::mpsc::Sender<Vec<i16>>,
+        std::sync::mpsc::Sender<astar_audio::RxFrame>,
         std::sync::mpsc::Receiver<Vec<i16>>,
     ) {
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<crate::runtime::RuntimeCommand>();
@@ -2569,7 +2569,7 @@ pub(crate) mod test_support {
         let state = Arc::new(std::sync::atomic::AtomicU8::new(STATE_ACTIVE));
         // rx_injector → rx_source: "remote audio in" (call→bridge).
         // tx_sender → tx_observer: "to the wire" (bridge→call run-loop→wire).
-        let (rx_injector, rx_source) = std::sync::mpsc::channel::<Vec<i16>>();
+        let (rx_injector, rx_source) = std::sync::mpsc::channel::<astar_audio::RxFrame>();
         let (tx_sender, tx_observer) = std::sync::mpsc::channel::<Vec<i16>>();
         let format_bits = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let call = Call::new_inbound(
@@ -3085,7 +3085,7 @@ mod tests {
 
         // A's remote speaks → the bridge feeds it to B's TX (B hears A).
         let frame: Vec<i16> = vec![8000i16; 160];
-        a_rx_in.send(frame).unwrap();
+        a_rx_in.send(frame.into()).unwrap();
         let heard = b_tx_out
             .recv_timeout(std::time::Duration::from_millis(500))
             .expect("the bridge delivered A's audio to B");
@@ -3150,7 +3150,7 @@ mod tests {
             .map(<[i16]>::to_vec)
             .collect();
         for f in frames {
-            a_rx_in.send(f).unwrap();
+            a_rx_in.send(f.into()).unwrap();
         }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let mut got = Vec::new();
@@ -3188,7 +3188,7 @@ mod tests {
         // A sounds '5' for ~200 ms; the free-running engine consumes one
         // frame per 20 ms tick, so poll the drain until the digit lands.
         for f in dtmf_pcm_frames(770.0, 1336.0, 10) {
-            a_rx_in.send(f).unwrap();
+            a_rx_in.send(f.into()).unwrap();
         }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         let mut got = Vec::new();
@@ -3471,7 +3471,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut still_pooled = true;
         while std::time::Instant::now() < deadline {
-            let _ = a_rx_in.send(frame.clone());
+            let _ = a_rx_in.send(frame.clone().into());
             mgr.poll_announcements();
             still_pooled = mgr.snapshot().calls.iter().any(|c| c.id == a);
             if !still_pooled {
@@ -3651,7 +3651,7 @@ mod link_layer_tests {
             "a LocalMonitor leg stops being transmitted to"
         );
         // ...and its RX never reaches A (A's mix stays silent).
-        b_rx_in.send(vec![8000i16; 160]).unwrap();
+        b_rx_in.send(vec![8000i16; 160].into()).unwrap();
         assert!(
             !hears(&a_tx_out, 8000, Duration::from_millis(300)),
             "LocalMonitor RX must not relay to the Transceive leg"
@@ -3659,7 +3659,7 @@ mod link_layer_tests {
 
         // Flip B to Transceive live: its RX now relays to A.
         mgr.set_link_mode(b, LinkMode::Transceive).unwrap();
-        b_rx_in.send(vec![8000i16; 160]).unwrap();
+        b_rx_in.send(vec![8000i16; 160].into()).unwrap();
         assert!(
             hears(&a_tx_out, 8000, Duration::from_secs(2)),
             "Transceive B's RX relays to A after the live mode change"
@@ -3671,7 +3671,7 @@ mod link_layer_tests {
             goes_silent(&b_tx_out, Duration::from_millis(100)),
             "a Monitor leg stops being transmitted to"
         );
-        b_rx_in.send(vec![6000i16; 160]).unwrap();
+        b_rx_in.send(vec![6000i16; 160].into()).unwrap();
         assert!(
             hears(&a_tx_out, 6000, Duration::from_secs(2)),
             "Monitor B's RX still relays to A"
@@ -3741,7 +3741,7 @@ mod link_layer_tests {
         // NOT reach the link.
         mgr.sync_link_keying();
         for _ in 0..5 {
-            src_rx_in.send(vec![8000_i16; 160]).unwrap();
+            src_rx_in.send(vec![8000_i16; 160].into()).unwrap();
         }
         assert!(
             link_tx_out
@@ -3757,7 +3757,7 @@ mod link_layer_tests {
             .store(true, std::sync::atomic::Ordering::Relaxed);
         mgr.sync_link_keying();
         for _ in 0..5 {
-            src_rx_in.send(vec![8000_i16; 160]).unwrap();
+            src_rx_in.send(vec![8000_i16; 160].into()).unwrap();
         }
         assert!(
             link_tx_out

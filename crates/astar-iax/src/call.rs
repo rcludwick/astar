@@ -196,7 +196,7 @@ pub struct Call {
     /// Adopt path (iax-8baf): the RX `Receiver` the inbound run-loop fills,
     /// which `Manager::adopt` adds to an output bus mixer. `None` for the dial
     /// path (the router wires RX internally) and once taken.
-    adopt_rx_source: Option<Receiver<Vec<i16>>>,
+    adopt_rx_source: Option<Receiver<astar_audio::RxFrame>>,
     /// Adopt path: the parked TX `Sender` a mic lane is bound to on `route`.
     adopt_tx_sender: Option<Sender<Vec<i16>>>,
     /// Adopt path (iax-4348): the inbound leg's bus sample rate (its listener
@@ -309,7 +309,7 @@ impl Call {
         node: String,
         mode: CallSnapshotMode,
         state: Arc<std::sync::atomic::AtomicU8>,
-        rx_source: Receiver<Vec<i16>>,
+        rx_source: Receiver<astar_audio::RxFrame>,
         tx_sender: Sender<Vec<i16>>,
         format_bits: Arc<AtomicU32>,
         sample_rate: u32,
@@ -349,7 +349,7 @@ impl Call {
 
     /// Adopt path (iax-8baf integration point): the inbound RX `Receiver` the
     /// `Manager` adds to an output bus mixer. `None` for the dial path.
-    pub(crate) fn take_adopt_rx_source(&mut self) -> Option<Receiver<Vec<i16>>> {
+    pub(crate) fn take_adopt_rx_source(&mut self) -> Option<Receiver<astar_audio::RxFrame>> {
         self.adopt_rx_source.take()
     }
 

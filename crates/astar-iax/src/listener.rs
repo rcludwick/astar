@@ -321,7 +321,7 @@ struct LegSpawn {
     cmd_rx: mpsc::Receiver<RuntimeCommand>,
     event_tx: mpsc::Sender<CallEvent>,
     mic_rx: mpsc::Receiver<Vec<i16>>,
-    spk_tx: mpsc::Sender<Vec<i16>>,
+    spk_tx: mpsc::Sender<astar_audio::RxFrame>,
     rtt_micros: Arc<AtomicU32>,
     state: Arc<AtomicU8>,
     format_bits: Arc<AtomicU32>,
@@ -382,6 +382,8 @@ fn leg_run_loop(p: LegSpawn) {
     let mut next_voice_ts: u32 = 0;
     // RX codec edge (iax-31f7): warn once per leg on an undecodable RX payload.
     let mut rx_decode_warned = false;
+    // iax-rxjb: this leg's receive-side media clock.
+    let mut rx_clock = crate::rx_clock::RxTimestamps::default();
     // Rate-adapting codec edge (iax-4348): resamples bus-rate PCM ↔ the
     // negotiated wire rate. `sample_rate == 8000` builds no resampler and the
     // edge is byte-identical to the pure encode/decode.
@@ -401,6 +403,7 @@ fn leg_run_loop(p: LegSpawn) {
             &remote_keyed,
             &mut pending_answer_oseqno,
             &mut rx_decode_warned,
+            &mut rx_clock,
         );
         let actions = fsm.handle(Event::App(AppCommand::DriveInbound {
             now: Instant::now(),
@@ -452,6 +455,7 @@ fn leg_run_loop(p: LegSpawn) {
                 &remote_keyed,
                 &mut pending_answer_oseqno,
                 &mut rx_decode_warned,
+                &mut rx_clock,
             );
             match ctx.rel.on_frame_in(frame, now) {
                 RxOutcome::Deliver { frame, send_ack } => {
@@ -527,6 +531,7 @@ fn leg_run_loop(p: LegSpawn) {
                         &remote_keyed,
                         &mut pending_answer_oseqno,
                         &mut rx_decode_warned,
+                        &mut rx_clock,
                     );
                     let actions = fsm.handle(Event::App(app));
                     if ctx.dispatch(
@@ -565,6 +570,7 @@ fn leg_run_loop(p: LegSpawn) {
                 &remote_keyed,
                 &mut pending_answer_oseqno,
                 &mut rx_decode_warned,
+                &mut rx_clock,
             );
             let actions = fsm.handle(Event::App(app));
             if ctx.dispatch(
@@ -599,6 +605,7 @@ fn leg_run_loop(p: LegSpawn) {
                 &remote_keyed,
                 &mut pending_answer_oseqno,
                 &mut rx_decode_warned,
+                &mut rx_clock,
             );
             let actions = fsm.handle(Event::Timer { kind, now });
             if ctx.dispatch(
@@ -632,6 +639,7 @@ fn leg_run_loop(p: LegSpawn) {
                 &remote_keyed,
                 &mut pending_answer_oseqno,
                 &mut rx_decode_warned,
+                &mut rx_clock,
             );
             let actions = fsm.handle(Event::App(AppCommand::AnswerAcked {
                 now: Instant::now(),
@@ -665,6 +673,7 @@ fn leg_run_loop(p: LegSpawn) {
                 &remote_keyed,
                 &mut pending_answer_oseqno,
                 &mut rx_decode_warned,
+                &mut rx_clock,
             );
             let actions = fsm.handle(Event::App(AppCommand::SendVoice {
                 format,
@@ -701,6 +710,7 @@ fn leg_run_loop(p: LegSpawn) {
                 &remote_keyed,
                 &mut pending_answer_oseqno,
                 &mut rx_decode_warned,
+                &mut rx_clock,
             );
             let actions = fsm.handle(Event::DeliveryFailed { oseqno });
             if ctx.dispatch(
@@ -740,13 +750,16 @@ struct LegCtx<'a> {
     peer_addr: SocketAddr,
     rel: &'a mut Reliability,
     timers: &'a mut Vec<(Instant, TimerKind)>,
-    spk_tx: &'a mpsc::Sender<Vec<i16>>,
+    spk_tx: &'a mpsc::Sender<astar_audio::RxFrame>,
     event_tx: &'a mpsc::Sender<CallEvent>,
     state: &'a Arc<AtomicU8>,
     /// Live remote-PTT-key cell (iax-feab parrot mode), mirroring `state`.
     remote_keyed: &'a Arc<AtomicBool>,
     pending_answer_oseqno: &'a mut Option<u8>,
     rx_decode_warned: &'a mut bool,
+    /// iax-rxjb: this leg's receive-side media clock (mini-frame timestamps
+    /// rebuilt to the sender's full 32-bit millisecond clock).
+    rx_clock: &'a mut crate::rx_clock::RxTimestamps,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -755,12 +768,13 @@ fn leg_ctx<'a>(
     peer_addr: SocketAddr,
     rel: &'a mut Reliability,
     timers: &'a mut Vec<(Instant, TimerKind)>,
-    spk_tx: &'a mpsc::Sender<Vec<i16>>,
+    spk_tx: &'a mpsc::Sender<astar_audio::RxFrame>,
     event_tx: &'a mpsc::Sender<CallEvent>,
     state: &'a Arc<AtomicU8>,
     remote_keyed: &'a Arc<AtomicBool>,
     pending_answer_oseqno: &'a mut Option<u8>,
     rx_decode_warned: &'a mut bool,
+    rx_clock: &'a mut crate::rx_clock::RxTimestamps,
 ) -> LegCtx<'a> {
     LegCtx {
         sock,
@@ -773,6 +787,7 @@ fn leg_ctx<'a>(
         remote_keyed,
         pending_answer_oseqno,
         rx_decode_warned,
+        rx_clock,
     }
 }
 
@@ -839,27 +854,26 @@ impl LegCtx<'_> {
                         _ => {}
                     }
                     if let AppEvent::VoiceReceived {
-                        format, payload, ..
+                        format,
+                        payload,
+                        ts,
                     } = &ev
                     {
                         // RX codec edge (iax-31f7 / iax-4348): decode on the
                         // received frame's own format into bus-rate PCM
                         // (resampling if the wire rate differs); drop undecodable
-                        // frames (warn once per leg).
-                        match edge.decode(*format, payload) {
-                            Some(pcm) => {
-                                let _ = self.spk_tx.send(pcm);
-                            }
-                            None if !*self.rx_decode_warned => {
-                                *self.rx_decode_warned = true;
-                                tracing::warn!(
-                                    ?format,
-                                    len = payload.len(),
-                                    "dropping undecodable RX voice"
-                                );
-                            }
-                            None => {}
-                        }
+                        // frames (warn once per leg). The wire timestamp travels
+                        // with it (iax-rxjb) so the bus lane's jitter buffer has
+                        // a sender clock to schedule playout against.
+                        crate::rx_clock::forward_voice(
+                            edge,
+                            self.rx_clock,
+                            self.spk_tx,
+                            *format,
+                            payload,
+                            *ts,
+                            self.rx_decode_warned,
+                        );
                     } else if let Some(ce) = translate_leg(&ev, negotiated) {
                         let is_hangup = matches!(ce, CallEvent::Hangup { .. });
                         let _ = self.event_tx.send(ce);
@@ -952,7 +966,7 @@ struct LegHandle {
     format_bits: Arc<AtomicU32>,
     /// The unified-Call audio ends (keystone): the RX `Receiver` the Manager
     /// joins to an output bus, and the parked TX `Sender` a mic lane binds to.
-    rx_source: mpsc::Receiver<Vec<i16>>,
+    rx_source: mpsc::Receiver<astar_audio::RxFrame>,
     tx_sender: mpsc::Sender<Vec<i16>>,
     /// The leg's bus sample rate (iax-4348) = its listener policy's codec cap.
     /// Carried into `Call::new_inbound` so `Manager::adopt` can reject a leg
@@ -1586,7 +1600,7 @@ fn spawn_leg(
     // Keystone audio ends: leg drains `mic_rx` (tx_sender side), fills `spk_tx`
     // (rx_source side).
     let (mic_tx, mic_rx) = mpsc::channel::<Vec<i16>>();
-    let (spk_tx, spk_rx) = mpsc::channel::<Vec<i16>>();
+    let (spk_tx, spk_rx) = mpsc::channel::<astar_audio::RxFrame>();
     let rtt_micros = Arc::new(AtomicU32::new(u32::MAX));
     let state = Arc::new(AtomicU8::new(crate::call::STATE_CONNECTING));
     // iax-31f7: negotiated-codec cell, published by the leg run-loop.
