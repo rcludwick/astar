@@ -1173,7 +1173,7 @@ fn pump(rx: &mut RxState<'_>) {
     }
     if rx.tracker.is_primed() {
         while let Some(pcm) = rx.ambe.poll_decoded() {
-            let _ = rx.call_audio.rx_frames.send(pcm.to_vec());
+            let _ = rx.call_audio.rx_frames.send(pcm.to_vec().into());
         }
     }
 }
@@ -1210,7 +1210,7 @@ fn flush_pipeline(rx: &mut RxState<'_>, forward: bool) {
         while let Some(pcm) = rx.ambe.poll_decoded() {
             delivered = true;
             if forward {
-                let _ = rx.call_audio.rx_frames.send(pcm.to_vec());
+                let _ = rx.call_audio.rx_frames.send(pcm.to_vec().into());
             }
         }
         if rx.pending.is_empty() && rx.ambe.in_flight() == 0 {
@@ -2108,9 +2108,9 @@ mod tx_tests {
     /// push raw frames straight onto the exact channel
     /// [`drain_tx_mic_frames`]/[`apply_ptt_edge`] read from. Mirrors
     /// `crate::m17::tests::fake_call_audio` exactly.
-    fn fake_call_audio() -> (CallAudio, Sender<Vec<i16>>, Receiver<Vec<i16>>) {
+    fn fake_call_audio() -> (CallAudio, Sender<Vec<i16>>, Receiver<astar_audio::RxFrame>) {
         let (tx_tx, tx_rx) = channel::<Vec<i16>>();
-        let (rx_tx, rx_rx) = channel::<Vec<i16>>();
+        let (rx_tx, rx_rx) = channel::<astar_audio::RxFrame>();
         let call_audio = CallAudio {
             tx_frames: tx_rx,
             rx_frames: rx_tx,

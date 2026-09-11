@@ -1204,7 +1204,7 @@ fn release(audio: &mut Audio, now: Instant) {
             audio.next_release = None;
             break;
         };
-        let _ = audio.bus.rx_frames.send(pcm.to_vec());
+        let _ = audio.bus.rx_frames.send(pcm.to_vec().into());
         audio.next_release = Some(due + FRAME_INTERVAL);
     }
 }
@@ -1246,7 +1246,7 @@ fn flush(audio: &mut Audio) {
 /// of inheriting a stale clock.
 fn drain_tail(audio: &mut Audio) {
     while let Some(pcm) = audio.decoded.pop_front() {
-        let _ = audio.bus.rx_frames.send(pcm.to_vec());
+        let _ = audio.bus.rx_frames.send(pcm.to_vec().into());
     }
     audio.next_release = None;
 }
@@ -1356,15 +1356,15 @@ mod tests {
 
     /// An `Audio` wired to channels the test can read, with no device
     /// anywhere.
-    fn test_audio() -> (Audio, Receiver<Vec<i16>>) {
+    fn test_audio() -> (Audio, Receiver<astar_audio::RxFrame>) {
         let (audio, rx, _tx) = test_audio_with_capture();
         (audio, rx)
     }
 
     /// [`test_audio`] with the capture end kept, for the tests that deliver
     /// mic frames into the lane the way the router's own `MicLane` does.
-    fn test_audio_with_capture() -> (Audio, Receiver<Vec<i16>>, Sender<Vec<i16>>) {
-        let (rx_tx, rx_rx) = channel::<Vec<i16>>();
+    fn test_audio_with_capture() -> (Audio, Receiver<astar_audio::RxFrame>, Sender<Vec<i16>>) {
+        let (rx_tx, rx_rx) = channel::<astar_audio::RxFrame>();
         let (tx_tx, tx_rx) = channel::<Vec<i16>>();
         let call_audio = CallAudio {
             tx_frames: tx_rx,
@@ -1388,7 +1388,7 @@ mod tests {
 
     /// [`test_audio`] with the vocoder's submit log kept, for the test that
     /// asks what the chip was actually handed.
-    fn test_audio_with_log() -> (Audio, Receiver<Vec<i16>>, SubmitLog) {
+    fn test_audio_with_log() -> (Audio, Receiver<astar_audio::RxFrame>, SubmitLog) {
         let (mut audio, rx) = test_audio();
         let vocoder = FakeVocoder::new();
         let log = Arc::clone(&vocoder.submitted);
@@ -1548,7 +1548,7 @@ mod tests {
         let shared = Arc::new(Shared::new(TG, Timeslot::Ts2));
         decode_burst(&voice_burst(), &mut audio, &shared);
         flush(&mut audio);
-        let played: Vec<Vec<i16>> = rx.try_iter().collect();
+        let played: Vec<Vec<i16>> = rx.try_iter().map(|f| f.pcm).collect();
         assert_eq!(played.len(), 3);
         assert_eq!(played[0][0], 1);
         assert_eq!(played[2][0], 3);
@@ -1702,7 +1702,7 @@ mod tests {
             &shared,
             Some(&mut audio),
         );
-        let first: Vec<i16> = rx.try_iter().map(|f| f[0]).collect();
+        let first: Vec<i16> = rx.try_iter().map(|f| f.pcm[0]).collect();
         assert_eq!(first, vec![1], "paced: only the primed frame so far");
 
         let mut next = voice_packet(0, 0);
@@ -1716,7 +1716,7 @@ mod tests {
             &shared,
             Some(&mut audio),
         );
-        let after: Vec<i16> = rx.try_iter().map(|f| f[0]).collect();
+        let after: Vec<i16> = rx.try_iter().map(|f| f.pcm[0]).collect();
         assert_eq!(
             after,
             vec![2, 3, 7],

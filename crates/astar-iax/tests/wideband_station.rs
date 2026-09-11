@@ -938,14 +938,14 @@ fn ulaw_link_coexists_with_a_slin16_client_without_downgrading_it() {
             .ok();
         thread::sleep(Duration::from_millis(20));
         while let Ok(f) = client.rx_frames.try_recv() {
-            client_frame_len = f.len();
-            if f.iter().any(|&s| s.abs() > 2000) {
+            client_frame_len = f.pcm.len();
+            if f.pcm.iter().any(|&s| s.abs() > 2000) {
                 heard_at_client = true;
             }
         }
         while let Ok(f) = clear.rx_frames.try_recv() {
-            clear_frame_len = f.len();
-            if f.iter().any(|&s| s.abs() > 2000) {
+            clear_frame_len = f.pcm.len();
+            if f.pcm.iter().any(|&s| s.abs() > 2000) {
                 heard_at_clearnode = true;
             }
         }

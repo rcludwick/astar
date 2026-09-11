@@ -914,7 +914,7 @@ fn release(audio: &mut Audio, now: Instant) {
             audio.next_release = None;
             break;
         };
-        let _ = audio.bus.rx_frames.send(pcm.to_vec());
+        let _ = audio.bus.rx_frames.send(pcm.to_vec().into());
         audio.next_release = Some(due + FRAME_INTERVAL);
     }
 }
@@ -956,7 +956,7 @@ fn flush(audio: &mut Audio) {
 /// instead of inheriting a stale clock.
 fn drain_tail(audio: &mut Audio) {
     while let Some(pcm) = audio.decoded.pop_front() {
-        let _ = audio.bus.rx_frames.send(pcm.to_vec());
+        let _ = audio.bus.rx_frames.send(pcm.to_vec().into());
     }
     audio.next_release = None;
 }
@@ -1057,15 +1057,15 @@ mod tests {
 
     /// An `Audio` wired to channels the test can read, with no device
     /// anywhere.
-    fn test_audio() -> (Audio, Receiver<Vec<i16>>) {
+    fn test_audio() -> (Audio, Receiver<astar_audio::RxFrame>) {
         let (audio, rx, _tx) = test_audio_with_capture();
         (audio, rx)
     }
 
     /// [`test_audio`] with the capture end kept, for the tests that deliver
     /// mic frames into the lane the way the router's own `MicLane` does.
-    fn test_audio_with_capture() -> (Audio, Receiver<Vec<i16>>, Sender<Vec<i16>>) {
-        let (rx_tx, rx_rx) = channel::<Vec<i16>>();
+    fn test_audio_with_capture() -> (Audio, Receiver<astar_audio::RxFrame>, Sender<Vec<i16>>) {
+        let (rx_tx, rx_rx) = channel::<astar_audio::RxFrame>();
         let (tx_tx, tx_rx) = channel::<Vec<i16>>();
         let call_audio = CallAudio {
             tx_frames: tx_rx,
@@ -1217,7 +1217,7 @@ mod tests {
         let (mut audio, rx) = test_audio();
         decode_frame(&voice_frame(), &mut audio);
         flush(&mut audio);
-        let played: Vec<Vec<i16>> = rx.try_iter().collect();
+        let played: Vec<Vec<i16>> = rx.try_iter().map(|f| f.pcm).collect();
         assert_eq!(
             played.len(),
             FRAMES_PER_FRAME,
@@ -1490,7 +1490,7 @@ mod tests {
             .expect("timeout");
         let addr = peer.local_addr().expect("addr");
 
-        let (rx_tx, _rx_rx) = channel::<Vec<i16>>();
+        let (rx_tx, _rx_rx) = channel::<astar_audio::RxFrame>();
         let (mic, tx_rx) = channel::<Vec<i16>>();
         let link = NxdnLink::connect_with_stream(
             &NxdnConfig {
@@ -1619,7 +1619,7 @@ mod tests {
     #[test]
     #[ignore = "timing probe, run explicitly: cargo test -p astar-console --features nxdn -- --ignored delivery"]
     fn delivery_cadence_probe() {
-        let (rx_tx, rx_rx) = channel::<Vec<i16>>();
+        let (rx_tx, rx_rx) = channel::<astar_audio::RxFrame>();
         let (_tx_tx, tx_rx) = channel::<Vec<i16>>();
         let mut audio = Audio {
             ambe: Box::new(LatentVocoder {
@@ -1694,7 +1694,7 @@ mod tests {
     #[test]
     fn a_relayed_frame_reaches_the_speaker() {
         let (reflector, addr) = loopback();
-        let (rx_tx, rx_rx) = channel::<Vec<i16>>();
+        let (rx_tx, rx_rx) = channel::<astar_audio::RxFrame>();
         let (_mic, tx_rx) = channel::<Vec<i16>>();
         let link = NxdnLink::connect_with_stream(
             &NxdnConfig {
@@ -1738,7 +1738,7 @@ mod tests {
         let mut frames = 0usize;
         while frames < 4 * FRAMES_PER_FRAME && Instant::now() < deadline {
             if let Ok(pcm) = rx_rx.recv_timeout(Duration::from_millis(200)) {
-                assert_eq!(pcm.len(), 160);
+                assert_eq!(pcm.pcm.len(), 160);
                 frames += 1;
             }
         }

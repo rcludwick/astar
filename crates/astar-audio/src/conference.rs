@@ -47,13 +47,33 @@ pub struct MemberId(u64);
 /// One audio source feeding a conference tick: a PCM `rx` plus the jitter
 /// `residual` that normalizes into. Shared by conference members and the optional
 /// local-mic source so both normalize identically (the shared DSP helper).
-struct Source {
-    rx: Receiver<Vec<i16>>,
+struct Source<T: AsPcm> {
+    rx: Receiver<T>,
     residual: VecDeque<f32>,
 }
 
-impl Source {
-    fn new(rx: Receiver<Vec<i16>>) -> Self {
+/// What a conference source can pull PCM out of. Members carry
+/// [`crate::RxFrame`] (the output bus's frame, sender clock and all — the
+/// conference bridges rather than plays, so it uses only the samples); the
+/// local mic lane sends bare `Vec<i16>`.
+trait AsPcm {
+    fn pcm(&self) -> &[i16];
+}
+
+impl AsPcm for Vec<i16> {
+    fn pcm(&self) -> &[i16] {
+        self
+    }
+}
+
+impl AsPcm for crate::RxFrame {
+    fn pcm(&self) -> &[i16] {
+        &self.pcm
+    }
+}
+
+impl<T: AsPcm> Source<T> {
+    fn new(rx: Receiver<T>) -> Self {
         Self {
             rx,
             residual: VecDeque::new(),
@@ -70,7 +90,7 @@ impl Source {
         // Drain whatever is waiting; Empty or Disconnected ends the loop and the
         // source contributes silence for the rest of the tick.
         while let Ok(frame) = self.rx.try_recv() {
-            for s in frame {
+            for &s in frame.pcm() {
                 self.residual.push_back(f32::from(s) / 32768.0);
             }
         }
@@ -89,7 +109,7 @@ impl Source {
 /// `Sender` its personal mix-minus output is encoded onto.
 struct Member {
     id: MemberId,
-    src: Source,
+    src: Source<crate::RxFrame>,
     tx: Sender<Vec<i16>>,
     /// Per-member private announcement stream (iax-c4ea): a queue of 160-sample
     /// PCM frames played to THIS member's leg only (e.g. the node-id join
@@ -322,7 +342,7 @@ struct Shared {
     members: Vec<Member>,
     next_id: u64,
     mix_minus: bool,
-    local_mic: Option<Source>,
+    local_mic: Option<Source<Vec<i16>>>,
     local_out: Option<Sender<Vec<i16>>>,
     /// Samples per 20 ms tick at the configured station rate (iax-4348).
     frame_samples: usize,
@@ -593,7 +613,7 @@ impl Conference {
     /// the member's slot id for later [`Conference::remove_member`]. Mutex-guarded,
     /// mirroring [`crate::Mixer::add_call`].
     #[must_use]
-    pub fn add_member(&self, rx: Receiver<Vec<i16>>, tx: Sender<Vec<i16>>) -> MemberId {
+    pub fn add_member(&self, rx: Receiver<crate::RxFrame>, tx: Sender<Vec<i16>>) -> MemberId {
         self.add_member_keyed(rx, tx, Arc::new(AtomicBool::new(false)))
     }
 
@@ -607,7 +627,7 @@ impl Conference {
     #[must_use]
     pub fn add_member_keyed(
         &self,
-        rx: Receiver<Vec<i16>>,
+        rx: Receiver<crate::RxFrame>,
         tx: Sender<Vec<i16>>,
         key: Arc<AtomicBool>,
     ) -> MemberId {
@@ -720,7 +740,7 @@ impl Conference {
     /// residual is dropped (≤20 ms glitch on a mode change). `None` if `id` isn't
     /// a current member. The member's TX `Sender` is dropped with the slot.
     #[must_use]
-    pub fn take_member(&self, id: MemberId) -> Option<Receiver<Vec<i16>>> {
+    pub fn take_member(&self, id: MemberId) -> Option<Receiver<crate::RxFrame>> {
         let mut s = self.shared.lock().expect("conference mutex poisoned");
         let pos = s.members.iter().position(|m| m.id == id)?;
         Some(s.members.remove(pos).src.rx)
@@ -787,7 +807,7 @@ mod tests {
 
     /// Helper: wire a member into the conference, returning its tx-feeder
     /// (we send its RX here) and its tx-output (we receive its mix here).
-    fn join(conf: &Conference) -> (Sender<Vec<i16>>, Receiver<Vec<i16>>, MemberId) {
+    fn join(conf: &Conference) -> (Sender<crate::RxFrame>, Receiver<Vec<i16>>, MemberId) {
         let (rx_tx, rx_rx) = channel(); // RX: we send into the conference
         let (tx_tx, tx_rx) = channel(); // TX: conference sends out, we receive
         let id = conf.add_member(rx_rx, tx_tx);
@@ -800,8 +820,8 @@ mod tests {
         let (a_in, a_out, _a) = join(&conf);
         let (b_in, b_out, _b) = join(&conf);
         // A speaks; B is silent.
-        a_in.send(frame(8000)).unwrap();
-        b_in.send(frame(0)).unwrap();
+        a_in.send(frame(8000).into()).unwrap();
+        b_in.send(frame(0).into()).unwrap();
         conf.tick_for_test();
         // B hears A (the only other member).
         let b_heard = b_out.recv().unwrap();
@@ -823,9 +843,9 @@ mod tests {
         let (a_in, a_out, _a) = join(&conf);
         let (b_in, b_out, _b) = join(&conf);
         let (c_in, c_out, _c) = join(&conf);
-        a_in.send(frame(5000)).unwrap();
-        b_in.send(frame(7000)).unwrap();
-        c_in.send(frame(3000)).unwrap();
+        a_in.send(frame(5000).into()).unwrap();
+        b_in.send(frame(7000).into()).unwrap();
+        c_in.send(frame(3000).into()).unwrap();
         conf.tick_for_test();
         // A hears B+C.
         let a_heard = first_sample(&a_out.recv().unwrap());
@@ -855,8 +875,8 @@ mod tests {
         });
         let (a_in, a_out, _a) = join(&conf);
         let (b_in, _b_out, _b) = join(&conf);
-        a_in.send(frame(6000)).unwrap();
-        b_in.send(frame(0)).unwrap();
+        a_in.send(frame(6000).into()).unwrap();
+        b_in.send(frame(0).into()).unwrap();
         conf.tick_for_test();
         // Full mix: A hears the full sum, which includes itself.
         let a_heard = first_sample(&a_out.recv().unwrap());
@@ -878,8 +898,8 @@ mod tests {
         });
         let (a_in, a_out, _a) = join(&conf);
         let (b_in, b_out, _b) = join(&conf);
-        a_in.send(frame(4000)).unwrap();
-        b_in.send(frame(2000)).unwrap();
+        a_in.send(frame(4000).into()).unwrap();
+        b_in.send(frame(2000).into()).unwrap();
         mic_tx.send(frame(1000)).unwrap();
         conf.tick_for_test();
         // A hears B + local mic (not itself).
@@ -910,8 +930,8 @@ mod tests {
         let (t_in, t_out, _t) = join(&conf); // Transceive
         let (m_in, m_out, m) = join(&conf); // Monitor
         conf.set_member_relay(m, true, false);
-        t_in.send(frame(4000)).unwrap();
-        m_in.send(frame(2000)).unwrap();
+        t_in.send(frame(4000).into()).unwrap();
+        m_in.send(frame(2000).into()).unwrap();
         conf.tick_for_test();
         let t_heard = first_sample(&t_out.recv().unwrap());
         assert!(
@@ -936,8 +956,8 @@ mod tests {
         let (t_in, t_out, _t) = join(&conf); // Transceive
         let (lm_in, lm_out, lm) = join(&conf); // LocalMonitor
         conf.set_member_relay(lm, false, false);
-        t_in.send(frame(4000)).unwrap();
-        lm_in.send(frame(2000)).unwrap();
+        t_in.send(frame(4000).into()).unwrap();
+        lm_in.send(frame(2000).into()).unwrap();
         conf.tick_for_test();
         let t_heard = first_sample(&t_out.recv().unwrap());
         assert!(
@@ -963,8 +983,8 @@ mod tests {
         let (a_in, a_out, a) = join(&conf);
         let (b_in, b_out, _b) = join(&conf);
         conf.set_member_relay(a, true, false); // a → Monitor
-        a_in.send(frame(4000)).unwrap();
-        b_in.send(frame(2000)).unwrap();
+        a_in.send(frame(4000).into()).unwrap();
+        b_in.send(frame(2000).into()).unwrap();
         conf.tick_for_test();
         assert!(a_out.try_recv().is_err(), "Monitor a receives nothing");
         let b_heard = first_sample(&b_out.recv().unwrap());
@@ -973,8 +993,8 @@ mod tests {
             "b still hears Monitor a, got {b_heard}"
         );
         conf.set_member_relay(a, true, true); // a → back to Transceive
-        a_in.send(frame(4000)).unwrap();
-        b_in.send(frame(2000)).unwrap();
+        a_in.send(frame(4000).into()).unwrap();
+        b_in.send(frame(2000).into()).unwrap();
         conf.tick_for_test();
         let a_heard = first_sample(&a_out.recv().unwrap());
         assert!(
@@ -1004,7 +1024,7 @@ mod tests {
         let conf = Conference::new(ConferenceConfig::default());
         let (a_in, _a_out, _a) = join(&conf);
         let (_b_in, b_out, _b) = join(&conf); // B never sends — starved.
-        a_in.send(frame(8000)).unwrap();
+        a_in.send(frame(8000).into()).unwrap();
         conf.tick_for_test();
         // B (starved) still gets a frame, and it carries A's audio — A's
         // contribution wasn't blocked by B's empty channel.
@@ -1025,8 +1045,8 @@ mod tests {
         assert_eq!(conf.member_count(), 1);
         // A's RX receiver was dropped with its member slot, so this send has
         // nowhere to land — the failed send is itself evidence A left the mix.
-        let _ = a_in.send(frame(8000));
-        b_in.send(frame(0)).unwrap();
+        let _ = a_in.send(frame(8000).into());
+        b_in.send(frame(0).into()).unwrap();
         conf.tick_for_test();
         // B is now alone: it hears nothing (A was removed from the mix).
         let b_heard = first_sample(&b_out.recv().unwrap());
@@ -1043,9 +1063,9 @@ mod tests {
         let (b_in, _b, _bid) = join(&conf);
         let (c_in, c_out, _cid) = join(&conf);
         // Two near-full-scale talkers: their sum would exceed 1.0 → must clamp.
-        a_in.send(frame(30000)).unwrap();
-        b_in.send(frame(30000)).unwrap();
-        c_in.send(frame(0)).unwrap();
+        a_in.send(frame(30000).into()).unwrap();
+        b_in.send(frame(30000).into()).unwrap();
+        c_in.send(frame(0).into()).unwrap();
         conf.tick_for_test();
         let heard = c_out.recv().unwrap();
         for &b in &heard {
@@ -1063,8 +1083,8 @@ mod tests {
         let (a_in, a_out, a_id) = join(&conf);
         let (b_in, b_out, _b) = join(&conf);
         // Both speak so the normal mix is non-trivial.
-        a_in.send(frame(5000)).unwrap();
-        b_in.send(frame(7000)).unwrap();
+        a_in.send(frame(5000).into()).unwrap();
+        b_in.send(frame(7000).into()).unwrap();
         // Queue a one-frame greeting for A only.
         conf.announce_to_member(a_id, vec![frame(9000)]);
         conf.tick_for_test();
@@ -1090,14 +1110,14 @@ mod tests {
         let (b_in, _b_out, _b) = join(&conf);
         conf.announce_to_member(a_id, vec![frame(9000)]); // one greeting frame
         // Tick 1: A gets the greeting.
-        a_in.send(frame(1000)).unwrap();
-        b_in.send(frame(7000)).unwrap();
+        a_in.send(frame(1000).into()).unwrap();
+        b_in.send(frame(7000).into()).unwrap();
         conf.tick_for_test();
         let t1 = first_sample(&a_out.recv().unwrap());
         assert!((t1 - level_norm(9000)).abs() < 1e-3, "tick1 greeting");
         // Tick 2: queue drained → A is back on the mix (hears B = 7000).
-        a_in.send(frame(1000)).unwrap();
-        b_in.send(frame(7000)).unwrap();
+        a_in.send(frame(1000).into()).unwrap();
+        b_in.send(frame(7000).into()).unwrap();
         conf.tick_for_test();
         let t2 = first_sample(&a_out.recv().unwrap());
         assert!(
@@ -1140,7 +1160,7 @@ mod tests {
         let _b = conf.add_member(b_rx, b_tx_tx);
         let _b_keep = b_rx_tx;
         for _ in 0..3 {
-            a_rx_tx.send(frame(9000)).unwrap();
+            a_rx_tx.send(frame(9000).into()).unwrap();
             conf.tick_for_test();
         }
         for _ in 0..10 {
@@ -1182,7 +1202,7 @@ mod tests {
         let _m = conf.add_member_keyed(rx, tx_tx, Arc::clone(&key));
         key.store(true, Ordering::Relaxed);
         for _ in 0..3 {
-            rx_tx.send(frame(0)).unwrap(); // SILENT but keyed: PTT gate records
+            rx_tx.send(frame(0).into()).unwrap(); // SILENT but keyed: PTT gate records
             conf.tick_for_test();
         }
         key.store(false, Ordering::Relaxed);
@@ -1231,7 +1251,7 @@ mod tests {
         let (tx_tx, tx_rx) = channel();
         let _m = conf.add_member(rx, tx_tx);
         for _ in 0..10 {
-            rx_tx.send(frame(9000)).unwrap();
+            rx_tx.send(frame(9000).into()).unwrap();
             conf.tick_for_test();
         }
         let frames: Vec<Vec<i16>> = std::iter::from_fn(|| tx_rx.try_recv().ok()).collect();
@@ -1286,8 +1306,8 @@ mod tests {
         let (a_in, _a_out, a_id) = join(&conf);
         let (b_in, b_out, _b) = join(&conf);
         for tone in dtmf_frames(770.0, 1336.0, 4) {
-            a_in.send(tone).unwrap();
-            b_in.send(frame(0)).unwrap();
+            a_in.send(tone.into()).unwrap();
+            b_in.send(frame(0).into()).unwrap();
             conf.tick_for_test();
             let b_heard = b_out.recv().unwrap();
             assert!(
@@ -1319,15 +1339,15 @@ mod tests {
         let (a_in, _a_out, _a) = join(&conf);
         let (b_in, b_out, _b) = join(&conf);
         for tone in dtmf_frames(697.0, 1209.0, 3) {
-            a_in.send(tone).unwrap();
-            b_in.send(frame(0)).unwrap();
+            a_in.send(tone.into()).unwrap();
+            b_in.send(frame(0).into()).unwrap();
             conf.tick_for_test();
             let _ = b_out.recv().unwrap();
         }
         // Tail ticks: A speaks normally but is still squelched.
         for i in 0..SQUELCH_TAIL_BLOCKS {
-            a_in.send(frame(6000)).unwrap();
-            b_in.send(frame(0)).unwrap();
+            a_in.send(frame(6000).into()).unwrap();
+            b_in.send(frame(0).into()).unwrap();
             conf.tick_for_test();
             let b_heard = b_out.recv().unwrap();
             assert!(
@@ -1337,8 +1357,8 @@ mod tests {
             );
         }
         // Tail expired: the relay resumes.
-        a_in.send(frame(6000)).unwrap();
-        b_in.send(frame(0)).unwrap();
+        a_in.send(frame(6000).into()).unwrap();
+        b_in.send(frame(0).into()).unwrap();
         conf.tick_for_test();
         let b_heard = b_out.recv().unwrap();
         assert!(
@@ -1359,8 +1379,8 @@ mod tests {
         let (a_in, _a_out, _a) = join(&conf);
         let (b_in, b_out, _b) = join(&conf);
         for tone in dtmf_frames(770.0, 1336.0, 3) {
-            a_in.send(tone).unwrap();
-            b_in.send(frame(0)).unwrap();
+            a_in.send(tone.into()).unwrap();
+            b_in.send(frame(0).into()).unwrap();
             conf.tick_for_test();
             let b_heard = b_out.recv().unwrap();
             assert!(
@@ -1384,8 +1404,8 @@ mod tests {
         let (a_in, _a_out, _a) = join(&conf);
         let (b_in, b_out, _b) = join(&conf);
         for _ in 0..5 {
-            a_in.send(frame(8000)).unwrap();
-            b_in.send(frame(0)).unwrap();
+            a_in.send(frame(8000).into()).unwrap();
+            b_in.send(frame(0).into()).unwrap();
             conf.tick_for_test();
             let b_heard = b_out.recv().unwrap();
             assert!(
@@ -1404,7 +1424,7 @@ mod tests {
         let (a_in, _a_out, _a) = join(&conf);
         let (_b_in, b_out, _b) = join(&conf);
         for _ in 0..10 {
-            a_in.send(frame(8000)).unwrap();
+            a_in.send(frame(8000).into()).unwrap();
         }
         let heard = b_out
             .recv_timeout(Duration::from_millis(500))

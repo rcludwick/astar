@@ -1174,7 +1174,7 @@ fn release(audio: &mut Audio, now: Instant) {
             audio.next_release = None;
             break;
         };
-        let _ = audio.bus.rx_frames.send(pcm.to_vec());
+        let _ = audio.bus.rx_frames.send(pcm.to_vec().into());
         audio.next_release = Some(due + FRAME_INTERVAL);
     }
 }
@@ -1216,7 +1216,7 @@ fn flush(audio: &mut Audio) {
 /// instead of inheriting a stale clock.
 fn drain_tail(audio: &mut Audio) {
     while let Some(pcm) = audio.decoded.pop_front() {
-        let _ = audio.bus.rx_frames.send(pcm.to_vec());
+        let _ = audio.bus.rx_frames.send(pcm.to_vec().into());
     }
     audio.next_release = None;
 }
@@ -1421,7 +1421,7 @@ mod tests {
     /// anywhere: the link owns no router and no device any more, and
     /// `CallAudio`'s fields are public, so the decoded PCM lands somewhere
     /// assertable.
-    fn test_audio() -> (Audio, Receiver<Vec<i16>>) {
+    fn test_audio() -> (Audio, Receiver<astar_audio::RxFrame>) {
         let (audio, rx, _tx) = test_audio_with_capture();
         (audio, rx)
     }
@@ -1429,8 +1429,8 @@ mod tests {
     /// [`test_audio`] with the capture end kept, for a test that has to
     /// deliver mic frames into the lane the way the router's own `MicLane`
     /// does.
-    fn test_audio_with_capture() -> (Audio, Receiver<Vec<i16>>, Sender<Vec<i16>>) {
-        let (rx_tx, rx_rx) = channel::<Vec<i16>>();
+    fn test_audio_with_capture() -> (Audio, Receiver<astar_audio::RxFrame>, Sender<Vec<i16>>) {
+        let (rx_tx, rx_rx) = channel::<astar_audio::RxFrame>();
         let (tx_tx, tx_rx) = channel::<Vec<i16>>();
         let call_audio = CallAudio {
             tx_frames: tx_rx,
@@ -1478,7 +1478,7 @@ mod tests {
         decode_frame(&frame_of(DataType::VDMode2), &mut audio, &shared);
         flush(&mut audio);
 
-        let played: Vec<Vec<i16>> = rx.try_iter().collect();
+        let played: Vec<Vec<i16>> = rx.try_iter().map(|f| f.pcm).collect();
         assert_eq!(
             played.len(),
             FRAMES_PER_PAYLOAD,
@@ -1566,7 +1566,7 @@ mod tests {
     /// timing probe below would be flaky.
     #[test]
     fn frames_are_released_one_per_frame_interval_after_priming() {
-        let (audio_rx_tx, rx) = channel::<Vec<i16>>();
+        let (audio_rx_tx, rx) = channel::<astar_audio::RxFrame>();
         let (_t, tx_rx) = channel::<Vec<i16>>();
         let mut audio = Audio {
             ambe: Box::new(FakeVocoder::new()),
@@ -2179,7 +2179,7 @@ mod tests {
     #[test]
     #[ignore = "timing probe, run explicitly: cargo test -p astar-console --features ysf -- --ignored delivery"]
     fn delivery_cadence_probe() {
-        let (rx_tx, rx_rx) = channel::<Vec<i16>>();
+        let (rx_tx, rx_rx) = channel::<astar_audio::RxFrame>();
         let (_tx_tx, tx_rx) = channel::<Vec<i16>>();
         let mut audio = Audio {
             ambe: Box::new(LatentVocoder {
