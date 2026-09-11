@@ -52,7 +52,7 @@ final class CallQualityLineTests: XCTestCase {
 
     func testAHealthyCallReadsAsFourNumbersAndNoAlarm() {
         XCTAssertEqual(
-            CallQualityLine.text(network: .allstar, quality: healthy),
+            CallQualityLine.text(connected: true, network: .allstar, quality: healthy),
             "jitter 12 ms · buffer 60 ms · lost 0 · late 0")
     }
 
@@ -62,7 +62,7 @@ final class CallQualityLineTests: XCTestCase {
         var q = healthy
         q.underruns = 3
         XCTAssertEqual(
-            CallQualityLine.text(network: .allstar, quality: q),
+            CallQualityLine.text(connected: true, network: .allstar, quality: q),
             "jitter 12 ms · buffer 60 ms · lost 0 · late 0 · underruns 3")
     }
 
@@ -72,7 +72,9 @@ final class CallQualityLineTests: XCTestCase {
         // the line says what is running rather than printing them.
         var q = healthy
         q.jitterBufferEnabled = false
-        XCTAssertEqual(CallQualityLine.text(network: .allstar, quality: q), "jitter buffer off")
+        XCTAssertEqual(
+            CallQualityLine.text(connected: true, network: .allstar, quality: q),
+            "jitter buffer off")
     }
 
     func testNothingAtAllOffAllStarLink() {
@@ -80,25 +82,44 @@ final class CallQualityLineTests: XCTestCase {
         // on every other network these numbers are flat zeros and the line
         // would be a lie of omission.
         for network in [Network.m17, .dstar, .ysf, .nxdn, .dmr, .hamlink] {
-            XCTAssertNil(CallQualityLine.text(network: network, quality: healthy), "\(network)")
+            XCTAssertNil(
+                CallQualityLine.text(connected: true, network: network, quality: healthy),
+                "\(network)")
         }
-        XCTAssertNil(CallQualityLine.text(network: nil, quality: healthy), "no call")
+        XCTAssertNil(
+            CallQualityLine.text(connected: true, network: nil, quality: healthy), "no call")
+    }
+
+    func testNothingUntilTheCallIsAnswered() {
+        // The same gate the Iced twin applies: a call still ringing has
+        // received no audio, so four zeros would read as a measurement rather
+        // than an absence. Both gates live in the formatter so the two
+        // clients cannot drift apart on when the line appears.
+        XCTAssertNil(CallQualityLine.text(connected: false, network: .allstar, quality: healthy))
+        XCTAssertNil(CallQualityLine.spoken(connected: false, network: .allstar, quality: healthy))
+        var off = healthy
+        off.jitterBufferEnabled = false
+        XCTAssertNil(
+            CallQualityLine.text(connected: false, network: .allstar, quality: off),
+            "not even the off notice before the call is up")
     }
 
     func testTheSpokenFormSpellsTheUnitsOut() {
         XCTAssertEqual(
-            CallQualityLine.spoken(network: .allstar, quality: healthy),
+            CallQualityLine.spoken(connected: true, network: .allstar, quality: healthy),
             "Network jitter 12 milliseconds, buffer depth 60 milliseconds,"
                 + " 0 frames lost, 0 frames late")
         var q = healthy
         q.underruns = 3
         XCTAssertEqual(
-            CallQualityLine.spoken(network: .allstar, quality: q),
+            CallQualityLine.spoken(connected: true, network: .allstar, quality: q),
             "Network jitter 12 milliseconds, buffer depth 60 milliseconds,"
                 + " 0 frames lost, 0 frames late, 3 underruns")
         q.jitterBufferEnabled = false
-        XCTAssertEqual(CallQualityLine.spoken(network: .allstar, quality: q), "Jitter buffer off")
-        XCTAssertNil(CallQualityLine.spoken(network: .m17, quality: healthy))
+        XCTAssertEqual(
+            CallQualityLine.spoken(connected: true, network: .allstar, quality: q),
+            "Jitter buffer off")
+        XCTAssertNil(CallQualityLine.spoken(connected: true, network: .m17, quality: healthy))
     }
 
     func testIdleQualityIsARestingBufferThatIsStillDeclaredOn() {

@@ -81,19 +81,25 @@ public struct RxQuality: Equatable {
 /// line — views format through this and nowhere else, so the Mac and the Iced
 /// client can be held to the same wording.
 ///
-/// AllStarLink only. The jitter buffer schedules against a sender's wire
-/// clock, and only the IAX2 path carries one: on M17, D-Star, YSF, NXDN and
-/// DMR the decoded frames go straight to the bus, so every number here would
-/// be a flat zero and the line would be a lie of omission.
+/// AllStarLink only, and only while a call is up. The jitter buffer schedules
+/// against a sender's wire clock, and only the IAX2 path carries one: on M17,
+/// D-Star, YSF, NXDN and DMR the decoded frames go straight to the bus, so
+/// every number here would be a flat zero and the line would be a lie of
+/// omission. A call still ringing has received no audio for the same reason,
+/// which is what `connected` is for — four zeros under the meters would read
+/// as a measurement rather than an absence.
+///
+/// Both gates live here rather than at the call site so this and the Iced
+/// client's `call_quality_line` stay one rule, not two that drift.
 public enum CallQualityLine {
     /// The line as it is drawn: `jitter 12 ms · buffer 60 ms · lost 0 · late 0`,
     /// with ` · underruns N` appended only when there are any — an underrun
     /// is the thing that went wrong, and a permanent "underruns 0" is one
     /// more number to read past before you find it.
     ///
-    /// `nil` when the call is not on AllStarLink (including no call at all).
-    public static func text(network: Network?, quality: RxQuality) -> String? {
-        guard network == .allstar else { return nil }
+    /// `nil` when there is no answered AllStarLink call to describe.
+    public static func text(connected: Bool, network: Network?, quality: RxQuality) -> String? {
+        guard connected, network == .allstar else { return nil }
         guard quality.jitterBufferEnabled else { return "jitter buffer off" }
         var line =
             "jitter \(quality.jitterMS) ms · buffer \(quality.bufferDepthMS) ms"
@@ -105,8 +111,8 @@ public enum CallQualityLine {
     /// The same facts with the words spelled out, for VoiceOver — "12 ms" read
     /// as "12 ms" is a unit abbreviation a screen reader has to guess at, and
     /// the interpuncts are read as nothing at all.
-    public static func spoken(network: Network?, quality: RxQuality) -> String? {
-        guard network == .allstar else { return nil }
+    public static func spoken(connected: Bool, network: Network?, quality: RxQuality) -> String? {
+        guard connected, network == .allstar else { return nil }
         guard quality.jitterBufferEnabled else { return "Jitter buffer off" }
         var line =
             "Network jitter \(quality.jitterMS) milliseconds,"
