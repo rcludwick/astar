@@ -2149,9 +2149,40 @@
                     active: session.ptt)
                 LevelMeter(
                     label: "RX", db: meters.rxDBHeld, tint: .green, active: session.receiving)
+                // The call-quality line (iax-rxjb): what the receive path is
+                // costing right now, directly under the RX meter it explains.
+                // AllStarLink only — the jitter buffer schedules against a
+                // sender's wire clock, and only IAX2 carries one, so on every
+                // other network these numbers would be flat zeros. The
+                // formatter decides; this only paints.
+                if let line = CallQualityLine.text(
+                    network: qualityNetwork, quality: meters.rxQuality)
+                {
+                    HStack(spacing: 0) {
+                        Text(line)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Spacer(minLength: 0)
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Call quality")
+                    .accessibilityValue(
+                        CallQualityLine.spoken(
+                            network: qualityNetwork, quality: meters.rxQuality) ?? "")
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
+        }
+
+        /// The network whose receive path the quality line describes, or `nil`
+        /// while there is nothing to describe. Gated on `.answered`, not on
+        /// merely having dialed: a call still ringing has received no audio,
+        /// and four zeros under the meters would read as a measurement.
+        private var qualityNetwork: Network? {
+            session.status == .answered ? session.activeCallNetwork : nil
         }
     }
 
