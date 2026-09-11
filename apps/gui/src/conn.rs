@@ -15,7 +15,7 @@
 
 use crate::dial_target::DialTarget;
 use crate::settings::AudioSettings;
-use crate::snapshot::{db_to_unit, Heard, Snapshot, Status};
+use crate::snapshot::{db_to_unit, Heard, RxQuality, Snapshot, Status};
 
 /// The seam the UI renders against. Object-safe so `Box<dyn Conn>` works.
 pub trait Conn {
@@ -486,6 +486,15 @@ impl Conn for DemoConn {
                 ..Snapshot::default()
             },
         };
+        // A healthy receive path rides the connected scenes (iax-rxjb) so the
+        // shots show the call-quality line rather than a row of zeros.
+        if snap.status == Status::Connected {
+            snap.rx = RxQuality {
+                jitter_ms: 12,
+                buffer_depth_ms: 60,
+                ..RxQuality::default()
+            };
+        }
         // A two-row "last heard" list rides the connected scenes (astar-heard)
         // so the shots show the real layout. Newest first, like the engine.
         if snap.status == Status::Connected {
@@ -861,6 +870,16 @@ impl Conn for RealConn {
         self.station.set_rx_compression(audio.rx_compression);
         self.station
             .set_rx_compression_level(audio.rx_compression_level);
+        // The RX jitter buffer (iax-rxjb). One setter for all three parts, and
+        // live: switching it off mid-call drains what it holds into the direct
+        // path, switching it on starts a fresh one. The window is repaired
+        // first — the engine would repair it anyway, and pushing the stored
+        // pair unrepaired would leave the UI showing a window that isn't
+        // running.
+        let (min_ms, max_ms) =
+            crate::settings::repair_rx_jitter(audio.rx_jitter_min_ms, audio.rx_jitter_max_ms, true);
+        self.station
+            .set_rx_jitter(audio.rx_jitter_buffer, min_ms, max_ms);
         // VOX threshold/hangtime and full duplex have no station API yet —
         // on the Mac they live in the app-side VOX gate / RX-mute logic
         // (AstarCore CallSession), which gui-rs grows in a later nugget. The
@@ -925,6 +944,17 @@ impl Conn for RealConn {
                     .collect()
             } else {
                 Vec::new()
+            },
+            // Receive-path health (iax-rxjb). The console state carries these
+            // at the top level, not per call, so there is nothing to pick.
+            rx: RxQuality {
+                jitter_buffer_enabled: cs.rx_jb_enabled,
+                jitter_ms: cs.rx_jitter_ms,
+                buffer_depth_ms: cs.rx_jb_depth_ms,
+                frames_lost: cs.rx_frames_lost,
+                frames_late: cs.rx_frames_late,
+                frames_ooo: cs.rx_frames_ooo,
+                underruns: cs.rx_underruns,
             },
         }
     }

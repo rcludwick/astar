@@ -126,6 +126,22 @@ pub struct AudioSettings {
     pub rx_compression: bool,
     /// RX/output compression strength (0…1), used when `rx_compression` is on.
     pub rx_compression_level: f32,
+    /// RX jitter buffer (iax-rxjb): whether received AllStarLink audio is
+    /// played out of the adaptive buffer that rides out network timing. ON by
+    /// default — without it any inter-arrival gap longer than one device
+    /// callback is an audible hole, which is the stutter it exists to fix.
+    /// `#[serde(default)]` on the struct means a file written before this
+    /// existed loads the whole `AudioSettings::default()` value for it, so an
+    /// old config comes back with the buffer ON, not off.
+    pub rx_jitter_buffer: bool,
+    /// Floor of the jitter buffer's adaptive depth, ms: the slack it keeps
+    /// over the jitter it measured. Asterisk `chan_iax2`'s `target_extra`,
+    /// default 40 — the node at the other end of an AllStarLink call IS
+    /// Asterisk.
+    pub rx_jitter_min_ms: u32,
+    /// Ceiling of the jitter buffer's adaptive depth, ms — Asterisk's
+    /// `max_jitterbuf`, default 200.
+    pub rx_jitter_max_ms: u32,
     /// Voice-activated PTT toggle.
     pub vox_enabled: bool,
     /// Listen-only (monitor) mode: hard-mutes all transmit.
@@ -144,6 +160,36 @@ pub struct AudioSettings {
     // the narrowband fallback in IAX2 negotiation. A stale `wideband` key in
     // an old file is ignored (serde skips unknown fields; no
     // deny_unknown_fields here).
+}
+
+/// The RX jitter buffer's depth bounds, ms (iax-rxjb) — the engine's own
+/// clamp, mirrored here so a control can never show a window the engine would
+/// not honour. Matches AstarCore's `RxJitterBounds`.
+pub const RX_JITTER_MIN_MS: u32 = 0;
+/// The ceiling of that window, ms.
+pub const RX_JITTER_MAX_MS: u32 = 500;
+/// What one step of the depth sliders moves, ms. The buffer schedules 20 ms
+/// frames, so anything finer is below its own resolution.
+pub const RX_JITTER_STEP_MS: u32 = 10;
+
+/// Repair a depth window: both bounds clamped, and a window whose bounds have
+/// crossed put back in order by moving the bound the operator is NOT dragging
+/// — pushing the floor past the ceiling lifts the ceiling, pulling the ceiling
+/// under the floor drops the floor. Pinning the dragged bound instead would
+/// make the control fight the drag. `moving_min` says which one is being
+/// dragged; `true` is also the engine's own rule, so it is what a stored
+/// window is repaired with on load.
+#[must_use]
+pub fn repair_rx_jitter(min_ms: u32, max_ms: u32, moving_min: bool) -> (u32, u32) {
+    let lo = min_ms.clamp(RX_JITTER_MIN_MS, RX_JITTER_MAX_MS);
+    let hi = max_ms.clamp(RX_JITTER_MIN_MS, RX_JITTER_MAX_MS);
+    if lo <= hi {
+        (lo, hi)
+    } else if moving_min {
+        (lo, lo)
+    } else {
+        (hi, hi)
+    }
 }
 
 /// The built-in "None" setup's id — mirrors `SetupController.noneID`. Always
@@ -390,6 +436,9 @@ impl Default for AudioSettings {
             noise_reduction: false,
             rx_compression: false,
             rx_compression_level: 0.90,
+            rx_jitter_buffer: true,
+            rx_jitter_min_ms: 40,
+            rx_jitter_max_ms: 200,
             vox_enabled: false,
             tx_disabled: false,
             full_duplex: false,
@@ -661,6 +710,9 @@ mod tests {
                 noise_reduction: true,
                 rx_compression: true,
                 rx_compression_level: 0.65,
+                rx_jitter_buffer: false,
+                rx_jitter_min_ms: 80,
+                rx_jitter_max_ms: 320,
                 vox_enabled: true,
                 tx_disabled: true,
                 full_duplex: true,
@@ -814,6 +866,67 @@ mod tests {
         s.audio.vox_hangtime_ms = 1450;
         let parsed = parse(&to_toml(&s)).expect("round trip parses");
         assert_eq!(parsed.audio, s.audio);
+    }
+
+    #[test]
+    fn rx_jitter_buffer_defaults_on_at_40_to_200() {
+        // ON by default, and Asterisk chan_iax2's own window — the node at
+        // the other end of an AllStarLink call IS Asterisk. A file written
+        // before the buffer existed must come back ON, not off: the
+        // container-level `#[serde(default)]` fills a missing field from
+        // `AudioSettings::default()`, not from `bool::default()`.
+        let d = AudioSettings::default();
+        assert!(d.rx_jitter_buffer);
+        assert_eq!(d.rx_jitter_min_ms, 40);
+        assert_eq!(d.rx_jitter_max_ms, 200);
+
+        let parsed = parse("[audio]\ninput_gain = 0.5\n").expect("pre-jitter doc");
+        assert!(parsed.audio.rx_jitter_buffer);
+        assert_eq!(parsed.audio.rx_jitter_min_ms, 40);
+        assert_eq!(parsed.audio.rx_jitter_max_ms, 200);
+    }
+
+    #[test]
+    fn rx_jitter_buffer_round_trips() {
+        let mut s = Settings::default();
+        s.audio.rx_jitter_buffer = false;
+        s.audio.rx_jitter_min_ms = 80;
+        s.audio.rx_jitter_max_ms = 320;
+        let parsed = parse(&to_toml(&s)).expect("round trip parses");
+        assert!(
+            !parsed.audio.rx_jitter_buffer,
+            "an OFF that was chosen survives"
+        );
+        assert_eq!(parsed.audio.rx_jitter_min_ms, 80);
+        assert_eq!(parsed.audio.rx_jitter_max_ms, 320);
+    }
+
+    #[test]
+    fn the_jitter_window_is_clamped_and_the_idle_bound_gives_way() {
+        // The engine's clamp, mirrored: 0…500, and a crossed window repaired
+        // by moving the bound that is NOT being dragged — pinning the dragged
+        // one instead would make the control fight the drag.
+        assert_eq!(
+            repair_rx_jitter(40, 200, true),
+            (40, 200),
+            "ordered is left alone"
+        );
+        assert_eq!(
+            repair_rx_jitter(300, 200, true),
+            (300, 300),
+            "the ceiling gives way"
+        );
+        assert_eq!(
+            repair_rx_jitter(300, 200, false),
+            (200, 200),
+            "the floor gives way"
+        );
+        assert_eq!(
+            repair_rx_jitter(9_000, 7_000, true),
+            (500, 500),
+            "clamped first"
+        );
+        assert_eq!(repair_rx_jitter(0, 501, false), (0, 500));
     }
 
     #[test]

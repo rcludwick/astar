@@ -19,7 +19,8 @@ use crate::m17_dial::parse_m17_dial;
 use crate::network::{Network, NetworkCaps};
 use crate::poll;
 use crate::settings::{
-    AudioSettings, MemStore, Settings, SettingsStore, Setup, TomlStore, NONE_SETUP_ID,
+    repair_rx_jitter, AudioSettings, MemStore, Settings, SettingsStore, Setup, TomlStore,
+    NONE_SETUP_ID,
 };
 use crate::snapshot::{Snapshot, Status};
 use crate::tray;
@@ -314,6 +315,13 @@ pub enum Message {
     RxCompression(bool),
     /// "Strength" (RX compression level, 0…1) dragged (Speaker card).
     RxCompressionLevel(f32),
+    /// "Jitter buffer" toggled (Speaker card, iax-rxjb): whether received
+    /// AllStarLink audio is played out of the adaptive buffer at all.
+    RxJitterEnabled(bool),
+    /// "Min" (jitter-buffer depth floor, 0…500 ms) dragged.
+    RxJitterMin(u32),
+    /// "Max" (jitter-buffer depth ceiling, 0…500 ms) dragged.
+    RxJitterMax(u32),
     /// "Audio Level" (VOX threshold, −60…0 dBFS) dragged.
     VoxThreshold(f32),
     /// "Hang Timeout" (VOX hangtime, 100…1500 ms) dragged.
@@ -1221,6 +1229,30 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             state.apply_audio();
             Task::none()
         }
+        // The RX jitter buffer (iax-rxjb): shared across networks, like RX
+        // compression above. Crossing the two bounds carries the bound that
+        // is NOT being dragged along, mirroring the engine's own repair, so
+        // the sliders can never show a window the engine would not honour.
+        Message::RxJitterEnabled(on) => {
+            state.settings.audio.rx_jitter_buffer = on;
+            state.apply_audio();
+            state.persist_settings();
+            Task::none()
+        }
+        Message::RxJitterMin(ms) => {
+            let (lo, hi) = repair_rx_jitter(ms, state.settings.audio.rx_jitter_max_ms, true);
+            state.settings.audio.rx_jitter_min_ms = lo;
+            state.settings.audio.rx_jitter_max_ms = hi;
+            state.apply_audio();
+            Task::none()
+        }
+        Message::RxJitterMax(ms) => {
+            let (lo, hi) = repair_rx_jitter(state.settings.audio.rx_jitter_min_ms, ms, false);
+            state.settings.audio.rx_jitter_min_ms = lo;
+            state.settings.audio.rx_jitter_max_ms = hi;
+            state.apply_audio();
+            Task::none()
+        }
         Message::VoxThreshold(dbfs) => {
             state.settings.audio.vox_threshold_dbfs = dbfs;
             state.apply_audio();
@@ -1741,6 +1773,61 @@ mod tests {
         let _ = update(&mut s, Message::SaveAudio);
         let saved = s.store.load().expect("store readable");
         assert_eq!(saved.audio.rx_compression_level, 0.42, "release persists");
+    }
+
+    #[test]
+    fn rx_jitter_toggle_applies_live_and_persists_immediately() {
+        // Same toggle contract as RX compression: a switch flip is a decision,
+        // not a drag, so it reaches both the conn and the disk at once.
+        let mut s = demo_state(DemoState::Idle);
+        assert!(s.conn.audio().rx_jitter_buffer, "on by default");
+
+        let _ = update(&mut s, Message::RxJitterEnabled(false));
+
+        assert!(!s.conn.audio().rx_jitter_buffer, "applies live");
+        let saved = s.store.load().expect("store readable");
+        assert!(
+            !saved.audio.rx_jitter_buffer,
+            "toggle writes through on flip"
+        );
+    }
+
+    #[test]
+    fn rx_jitter_bounds_apply_live_but_persist_on_release() {
+        let mut s = demo_state(DemoState::Idle);
+        let _ = update(&mut s, Message::RxJitterMin(80));
+        let _ = update(&mut s, Message::RxJitterMax(320));
+
+        assert_eq!(s.conn.audio().rx_jitter_min_ms, 80, "drag applies live");
+        assert_eq!(s.conn.audio().rx_jitter_max_ms, 320);
+        let saved = s.store.load().expect("store readable");
+        assert_eq!(
+            saved.audio.rx_jitter_min_ms, 40,
+            "disk untouched until release"
+        );
+
+        let _ = update(&mut s, Message::SaveAudio);
+        let saved = s.store.load().expect("store readable");
+        assert_eq!(saved.audio.rx_jitter_min_ms, 80, "release persists");
+        assert_eq!(saved.audio.rx_jitter_max_ms, 320);
+    }
+
+    #[test]
+    fn a_jitter_bound_dragged_past_the_other_carries_it_along() {
+        // The engine repairs a crossed window rather than refusing it; the UI
+        // does the same repair first, so the sliders never show a window that
+        // isn't running. The bound being dragged wins.
+        let mut s = demo_state(DemoState::Idle);
+        let _ = update(&mut s, Message::RxJitterMin(300));
+        assert_eq!(s.settings.audio.rx_jitter_min_ms, 300);
+        assert_eq!(
+            s.settings.audio.rx_jitter_max_ms, 300,
+            "the ceiling gives way"
+        );
+
+        let _ = update(&mut s, Message::RxJitterMax(50));
+        assert_eq!(s.settings.audio.rx_jitter_max_ms, 50);
+        assert_eq!(s.settings.audio.rx_jitter_min_ms, 50, "the floor gives way");
     }
 
     #[test]
