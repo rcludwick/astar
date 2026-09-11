@@ -23,8 +23,9 @@ native front-end over it rather than a shared web shell.
 
     astar is beta and moves quickly. AllStarLink is the primary target and takes
     the most testing. M17 needs nothing installed — Codec 2 is linked into the
-    app as of `0.1.4beta`. D-Star works, but only with a hardware vocoder
-    dongle attached — see [Digital voice](macos/hardware.md#digital-voice).
+    app as of `0.1.4beta`. D-Star and System Fusion work, but only with a
+    hardware vocoder dongle attached — see
+    [Digital voice](macos/hardware.md#digital-voice).
     Other protocols are in the tree at various stages and are not claimed as
     working.
 

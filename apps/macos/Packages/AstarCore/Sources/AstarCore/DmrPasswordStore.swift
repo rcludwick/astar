@@ -55,8 +55,15 @@ extension DmrPasswordStore {
 public final class KeychainDmrPasswordStore: DmrPasswordStore {
     private let item: KeychainItem
 
-    public init(service: String = "com.aj7hr.astar", account: String = "dmr-passwords") {
-        self.item = KeychainItem(service: service, account: account)
+    public init(
+        service: String = KeychainService.current, account: String = "dmr-passwords",
+        legacyService: String? = KeychainService.legacy
+    ) {
+        self.item = KeychainItem(service: service, account: account, legacyService: legacyService)
+    }
+
+    init(item: KeychainItem) {
+        self.item = item
     }
 
     private func load() -> [String: String] {

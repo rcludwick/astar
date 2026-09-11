@@ -2500,8 +2500,16 @@ final class CallSessionTests: XCTestCase {
     /// Integration smoke over the REAL Station (not the fake): construct via the
     /// live factory, poll, and confirm it reflects the idle resting state. Proves
     /// the Station→CallSnapshot adapter and the binding link end to end.
+    ///
+    /// Both stores are in-memory on purpose (astar-kcprompt): the factory's
+    /// defaults read the login Keychain, and a unit test doing that raises a
+    /// password prompt on every run — and parks the whole suite when the screen
+    /// is locked and the prompt cannot be drawn. The station under test is the
+    /// same either way; only where the (absent) credentials come from differs.
     func testLiveSessionReflectsRealStationIdle() throws {
-        let session = CallSession.live()
+        let session = CallSession.live(
+            store: InMemoryCredentialStore(),
+            dmrPasswords: InMemoryDmrPasswordStore())
         session.poll()
         XCTAssertEqual(session.status, .idle, "a freshly constructed station has no call")
     }
