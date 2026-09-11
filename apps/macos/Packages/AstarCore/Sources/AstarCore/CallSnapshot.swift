@@ -24,6 +24,33 @@ public struct CallSnapshot: Equatable {
     /// negotiating (astar-eb6c). `.slin16` = wideband is live. Defaults `nil`
     /// so pre-existing fixtures (and `NullStation`) need no change.
     public var negotiatedFormat: VoiceFormat?
+    /// Cumulative RX underruns on the active call's output bus (iax-rxjb):
+    /// device callbacks that got no audio at all while somebody was still
+    /// talking. The number that grows while received audio stutters.
+    /// Defaults 0 so pre-existing fixtures (and `NullStation`) need no change.
+    public var rxUnderruns: UInt64
+    /// Estimated network jitter on the active call's receive path, ms.
+    public var rxJitterMS: UInt32
+    /// How much received audio the RX jitter buffer is holding back, ms.
+    public var rxJitterBufferDepthMS: UInt32
+    /// Frames the RX jitter buffer expected and did not play — "frames that
+    /// did not reach the speaker", not a packet-loss count.
+    public var rxFramesLost: UInt64
+    /// Frames that arrived after their play time and were thrown away.
+    public var rxFramesLate: UInt64
+    /// Frames that arrived out of timestamp order (reordered in place, not
+    /// lost). Carried for completeness — nothing renders it yet.
+    public var rxFramesOutOfOrder: UInt64
+    /// Whether the RX jitter buffer is running. The EFFECTIVE state, read
+    /// back from the engine, so a client renders what is happening rather
+    /// than what it last asked for. Defaults `true`, the engine's default.
+    public var rxJitterBufferEnabled: Bool
+    /// Floor of the RX jitter buffer's adaptive depth, ms — effective and
+    /// clamped, not the requested value.
+    public var rxJitterBufferMinMS: UInt32
+    /// Ceiling of the RX jitter buffer's adaptive depth, ms — effective and
+    /// clamped.
+    public var rxJitterBufferMaxMS: UInt32
     /// Which mic noise-reduction chain is running, or would run, as a short
     /// line — `"Neural (48 kHz)"`, `"Filter + gate (device 44.1 kHz)"`,
     /// `"Off"`, suffixed "when you key" while it is a prediction. Empty when
@@ -88,6 +115,12 @@ public struct CallSnapshot: Equatable {
         negotiatedFormat: VoiceFormat? = nil,
         denoiseSummary: String = "",
         denoiseChain: DenoiseChain = .notCapturing,
+        rxUnderruns: UInt64 = 0, rxJitterMS: UInt32 = 0,
+        rxJitterBufferDepthMS: UInt32 = 0,
+        rxFramesLost: UInt64 = 0, rxFramesLate: UInt64 = 0,
+        rxFramesOutOfOrder: UInt64 = 0,
+        rxJitterBufferEnabled: Bool = true,
+        rxJitterBufferMinMS: UInt32 = 40, rxJitterBufferMaxMS: UInt32 = 200,
         dtmfPlayed: Int = 0, dtmfTotal: Int = 0,
         m17Available: Bool = false, m17Active: Bool = false,
         dstarAvailable: Bool = false, dstarActive: Bool = false,
@@ -105,6 +138,15 @@ public struct CallSnapshot: Equatable {
         self.negotiatedFormat = negotiatedFormat
         self.denoiseSummary = denoiseSummary
         self.denoiseChain = denoiseChain
+        self.rxUnderruns = rxUnderruns
+        self.rxJitterMS = rxJitterMS
+        self.rxJitterBufferDepthMS = rxJitterBufferDepthMS
+        self.rxFramesLost = rxFramesLost
+        self.rxFramesLate = rxFramesLate
+        self.rxFramesOutOfOrder = rxFramesOutOfOrder
+        self.rxJitterBufferEnabled = rxJitterBufferEnabled
+        self.rxJitterBufferMinMS = rxJitterBufferMinMS
+        self.rxJitterBufferMaxMS = rxJitterBufferMaxMS
         self.dtmfPlayed = dtmfPlayed
         self.dtmfTotal = dtmfTotal
         self.m17Available = m17Available
@@ -117,6 +159,18 @@ public struct CallSnapshot: Equatable {
         self.nxdnActive = nxdnActive
         self.dmrAvailable = dmrAvailable
         self.dmrActive = dmrActive
+    }
+
+    /// The receive-path health the call-quality line reads, lifted out of the
+    /// snapshot so the formatter never sees the rest of it.
+    public var rxQuality: RxQuality {
+        RxQuality(
+            jitterBufferEnabled: rxJitterBufferEnabled,
+            jitterMS: rxJitterMS,
+            bufferDepthMS: rxJitterBufferDepthMS,
+            framesLost: rxFramesLost,
+            framesLate: rxFramesLate,
+            underruns: rxUnderruns)
     }
 
     /// The idle resting state: no call, meters at the floor.
