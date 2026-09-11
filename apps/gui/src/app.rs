@@ -405,6 +405,20 @@ impl State {
             Settings::default()
         });
 
+        // Repair the stored jitter window before anything reads it (mirrors
+        // the Mac's `applyAudioSettings`). A hand-edited astar.toml can carry
+        // a floor above its ceiling, or bounds outside 0…500; the engine would
+        // repair them on the way in and run the repaired pair, leaving the
+        // sliders showing a window that is not the one running. `true` is the
+        // engine's own rule — raise the ceiling to meet the floor.
+        let (jitter_min, jitter_max) = repair_rx_jitter(
+            settings.audio.rx_jitter_min_ms,
+            settings.audio.rx_jitter_max_ms,
+            true,
+        );
+        settings.audio.rx_jitter_min_ms = jitter_min;
+        settings.audio.rx_jitter_max_ms = jitter_max;
+
         // The codec policy is always PreferSlin16 (astar-e542) and pins at
         // station construction; the persisted devices/gains ride in through
         // the later set_audio push (astar-efba, mirroring `CallSession.live`).
@@ -1810,6 +1824,42 @@ mod tests {
         let saved = s.store.load().expect("store readable");
         assert_eq!(saved.audio.rx_jitter_min_ms, 80, "release persists");
         assert_eq!(saved.audio.rx_jitter_max_ms, 320);
+    }
+
+    #[test]
+    fn a_crossed_jitter_window_in_the_file_is_repaired_on_load() {
+        // A hand-edited settings.toml with the floor above the ceiling, and
+        // a ceiling past the engine's 500 ms clamp. The engine would repair
+        // both on the way in and run the repaired pair; without repairing at
+        // load the sliders would sit at 400/100 while the buffer ran 400/400,
+        // and the first thing the user touched would write the lie back.
+        let store = MemStore::with_doc(
+            "schema_version = 1\n\n             [audio]\n             rx_jitter_min_ms = 400\n             rx_jitter_max_ms = 100\n",
+        );
+        let (s, _) = State::boot_with(Mode::Demo(DemoState::Idle), Box::new(store));
+
+        assert_eq!(s.settings.audio.rx_jitter_min_ms, 400);
+        assert_eq!(
+            s.settings.audio.rx_jitter_max_ms, 400,
+            "the sliders show the window that is actually running"
+        );
+        assert_eq!(
+            s.conn.audio().rx_jitter_max_ms,
+            400,
+            "and the conn seam holds the repaired pair, not what it was handed"
+        );
+    }
+
+    #[test]
+    fn out_of_range_jitter_bounds_in_the_file_are_clamped_on_load() {
+        let store = MemStore::with_doc(
+            "schema_version = 1\n\n             [audio]\n             rx_jitter_min_ms = 0\n             rx_jitter_max_ms = 9000\n",
+        );
+        let (s, _) = State::boot_with(Mode::Demo(DemoState::Idle), Box::new(store));
+
+        assert_eq!(s.settings.audio.rx_jitter_min_ms, 0);
+        assert_eq!(s.settings.audio.rx_jitter_max_ms, 500);
+        assert_eq!(s.conn.audio().rx_jitter_max_ms, 500);
     }
 
     #[test]

@@ -884,7 +884,15 @@ impl Conn for RealConn {
         // on the Mac they live in the app-side VOX gate / RX-mute logic
         // (AstarCore CallSession), which gui-rs grows in a later nugget. The
         // values persist and ride this seam so that nugget only adds the gate.
-        self.audio = audio.clone();
+        //
+        // What is held back is the REPAIRED window, not what was handed in: a
+        // caller that reads `audio()` back must see the pair the engine is
+        // actually running, or the UI and the buffer disagree.
+        self.audio = AudioSettings {
+            rx_jitter_min_ms: min_ms,
+            rx_jitter_max_ms: max_ms,
+            ..audio.clone()
+        };
     }
 
     fn audio(&self) -> AudioSettings {

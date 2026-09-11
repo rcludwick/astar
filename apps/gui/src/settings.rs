@@ -627,6 +627,18 @@ pub struct MemStore {
     doc: Option<String>,
 }
 
+impl MemStore {
+    /// Seed the store with literal TOML, so a test can boot on a file it
+    /// wrote by hand — the shape a user's `settings.toml` can actually be in,
+    /// including shapes `to_toml` would never produce.
+    #[must_use]
+    pub fn with_doc(doc: &str) -> Self {
+        Self {
+            doc: Some(doc.to_string()),
+        }
+    }
+}
+
 impl SettingsStore for MemStore {
     fn load(&self) -> Result<Settings, SettingsError> {
         match &self.doc {
