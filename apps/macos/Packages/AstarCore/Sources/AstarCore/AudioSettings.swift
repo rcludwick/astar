@@ -41,6 +41,20 @@ public struct AudioSettings: Equatable {
     /// RX/output compression strength (0…1), passed to the engine when
     /// `rxCompression` is on. Default 0.90 matches the TX compressor's default.
     public var rxCompressionLevel: Float
+    /// RX jitter buffer (iax-rxjb): whether received AllStarLink audio is
+    /// played out of the adaptive buffer that rides out network timing at
+    /// all. On by default — without it any inter-arrival gap longer than one
+    /// device callback is an audible hole, which is the stutter this exists
+    /// to fix, so a new user must not have to find the switch.
+    public var rxJitterBuffer: Bool
+    /// Floor of the RX jitter buffer's adaptive depth, ms: the slack it keeps
+    /// over the jitter it has measured. Asterisk `chan_iax2`'s `target_extra`,
+    /// and its default of 40 — the node at the other end of an AllStarLink
+    /// call is Asterisk. Higher buys fewer holes with more latency.
+    public var rxJitterMinMS: Int
+    /// Ceiling of the RX jitter buffer's adaptive depth, ms: the hard cap the
+    /// depth may not grow past. Asterisk's `max_jitterbuf`, default 200.
+    public var rxJitterMaxMS: Int
     /// Voice-activated PTT toggle.
     public var voxEnabled: Bool
     /// Listen-only (monitor) mode: hard-mutes all transmit. Handy for just
@@ -78,6 +92,7 @@ public struct AudioSettings: Equatable {
         txTrim: Float = 1.0,
         noiseReduction: Bool = false,
         rxCompression: Bool = false, rxCompressionLevel: Float = 0.90,
+        rxJitterBuffer: Bool = true, rxJitterMinMS: Int = 40, rxJitterMaxMS: Int = 200,
         voxEnabled: Bool = false, txDisabled: Bool = false,
         fullDuplex: Bool = false, voxThresholdDBFS: Float = -40,
         voxHangtimeMS: Int = 500, micProfileID: String? = nil
@@ -93,6 +108,9 @@ public struct AudioSettings: Equatable {
         self.noiseReduction = noiseReduction
         self.rxCompression = rxCompression
         self.rxCompressionLevel = rxCompressionLevel
+        self.rxJitterBuffer = rxJitterBuffer
+        self.rxJitterMinMS = rxJitterMinMS
+        self.rxJitterMaxMS = rxJitterMaxMS
         self.voxEnabled = voxEnabled
         self.txDisabled = txDisabled
         self.fullDuplex = fullDuplex
@@ -122,6 +140,9 @@ public final class UserDefaultsAudioSettingsStore: AudioSettingsStore {
         static let noiseReduction = "audio.noiseReduction"
         static let rxCompression = "audio.rxCompression"
         static let rxCompressionLevel = "audio.rxCompressionLevel"
+        static let rxJitterBuffer = "audio.rxJitterBuffer"
+        static let rxJitterMinMS = "audio.rxJitterMinMS"
+        static let rxJitterMaxMS = "audio.rxJitterMaxMS"
         static let voxEnabled = "audio.voxEnabled"
         static let txDisabled = "audio.txDisabled"
         static let fullDuplex = "audio.fullDuplex"
@@ -157,6 +178,15 @@ public final class UserDefaultsAudioSettingsStore: AudioSettingsStore {
             rxCompression: defaults.bool(forKey: Key.rxCompression),
             rxCompressionLevel: defaults.object(forKey: Key.rxCompressionLevel) != nil
                 ? defaults.float(forKey: Key.rxCompressionLevel) : 0.90,
+            // Absent means "never set", and this one defaults ON — so it can't
+            // go through `defaults.bool(forKey:)`, which reads a missing key
+            // as false and would silently ship the buffer disabled.
+            rxJitterBuffer: defaults.object(forKey: Key.rxJitterBuffer) != nil
+                ? defaults.bool(forKey: Key.rxJitterBuffer) : true,
+            rxJitterMinMS: defaults.object(forKey: Key.rxJitterMinMS) != nil
+                ? defaults.integer(forKey: Key.rxJitterMinMS) : 40,
+            rxJitterMaxMS: defaults.object(forKey: Key.rxJitterMaxMS) != nil
+                ? defaults.integer(forKey: Key.rxJitterMaxMS) : 200,
             voxEnabled: defaults.bool(forKey: Key.voxEnabled),
             txDisabled: defaults.bool(forKey: Key.txDisabled),
             fullDuplex: defaults.bool(forKey: Key.fullDuplex),
@@ -180,6 +210,9 @@ public final class UserDefaultsAudioSettingsStore: AudioSettingsStore {
         defaults.set(settings.noiseReduction, forKey: Key.noiseReduction)
         defaults.set(settings.rxCompression, forKey: Key.rxCompression)
         defaults.set(settings.rxCompressionLevel, forKey: Key.rxCompressionLevel)
+        defaults.set(settings.rxJitterBuffer, forKey: Key.rxJitterBuffer)
+        defaults.set(settings.rxJitterMinMS, forKey: Key.rxJitterMinMS)
+        defaults.set(settings.rxJitterMaxMS, forKey: Key.rxJitterMaxMS)
         defaults.set(settings.voxEnabled, forKey: Key.voxEnabled)
         defaults.set(settings.txDisabled, forKey: Key.txDisabled)
         defaults.set(settings.fullDuplex, forKey: Key.fullDuplex)

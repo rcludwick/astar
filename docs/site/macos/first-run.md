@@ -123,6 +123,37 @@ Talk normally into the mic and watch the **Audio Level** bar.
     MIDI Setup, that is the headset's own USB descriptor not exposing a master
     control — normal, harmless, and unrelated to astar. Set levels in astar.
 
+### Jitter buffer — leave it on
+
+**Jitter buffer** is on by default, and for almost everyone that is the end of
+it. Audio arrives from the network in 20 ms pieces that do not arrive evenly
+spaced; the buffer holds a small cushion of them back so the speaker always has
+the next piece ready. Without it, every gap in the network's timing is an
+audible hole — the choppiness people describe as "it was stuttering until I
+disconnected and reconnected".
+
+The cushion costs latency, which is what the two sliders under the switch
+control. They are the depth the buffer may adapt between, in milliseconds:
+
+* **Min** (default 40) is the slack it keeps over the jitter it has measured —
+  the floor it will not go below.
+* **Max** (default 200) is the ceiling. It will not hold back more than this no
+  matter how bad the path gets.
+
+Those defaults are Asterisk's, deliberately: the node at the other end of an
+AllStarLink call is Asterisk, so matching its buffer makes astar sound the way
+operators already expect. **Raise Max** — 300, 400 — when audio is still choppy
+on a path you cannot fix: a satellite link, hotel wifi, a distant node. **Lower
+Min** toward 0 when the path is clean and you would rather have the
+conversation feel immediate; you will hear the difference in how quickly
+somebody's first syllable arrives. Turning the buffer off entirely is a
+diagnostic, not a setting to live on.
+
+While you are connected, the line under the meters tells you what it is
+actually doing — `jitter 12 ms · buffer 60 ms · lost 0 · late 0`. A growing
+`underruns` count appears on the end when the speaker ran dry mid-transmission,
+which is the number to watch if you are raising **Max** to chase choppy audio.
+
 ### Full duplex — headphones only
 
 **Full duplex** lets you hear the channel while you are transmitting, which is

@@ -222,6 +222,59 @@
                                 .frame(width: 40, alignment: .trailing)
                         }
                     }
+                    // The RX jitter buffer (iax-rxjb). It belongs on the
+                    // Speaker card because it is the last thing that happens
+                    // to received audio before it is played, and it is the
+                    // control you reach for when the channel sounds choppy —
+                    // the same complaint that sends people to Vol and RX
+                    // compression.
+                    switchRow("Jitter buffer", isOn: rxJitterBufferBinding)
+                        .padding(.top, 8)
+                    Text("Smooths out network timing. Deeper is steadier; shallower is quicker.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    // The depth window, only where it does something. Green
+                    // like Vol — this is the speaker path — and stepped in
+                    // 10 ms because the buffer schedules 20 ms frames, so
+                    // anything finer is below its own resolution. Crossing
+                    // the two carries the other bound along (CallSession
+                    // repairs the window, mirroring the engine), so the
+                    // sliders can never show a range the engine refuses.
+                    if session.rxJitterBuffer {
+                        HStack(spacing: 8) {
+                            sublabel("Min")
+                            Slider(
+                                value: rxJitterMinBinding,
+                                in: jitterRange, step: jitterStep
+                            )
+                            .tint(.green)
+                            .accessibilityLabel("Jitter buffer minimum depth")
+                            .accessibilityValue(
+                                AccessibilityValueFormatter.milliseconds(
+                                    Double(session.rxJitterMinMS)))
+                            Text("\(session.rxJitterMinMS) ms")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .frame(width: 48, alignment: .trailing)
+                        }
+                        HStack(spacing: 8) {
+                            sublabel("Max")
+                            Slider(
+                                value: rxJitterMaxBinding,
+                                in: jitterRange, step: jitterStep
+                            )
+                            .tint(.green)
+                            .accessibilityLabel("Jitter buffer maximum depth")
+                            .accessibilityValue(
+                                AccessibilityValueFormatter.milliseconds(
+                                    Double(session.rxJitterMaxMS)))
+                            Text("\(session.rxJitterMaxMS) ms")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .frame(width: 48, alignment: .trailing)
+                        }
+                    }
                 }
 
                 groupCard("VOX") {
@@ -739,6 +792,32 @@
             Binding(
                 get: { Double(session.rxCompressionLevel) },
                 set: { session.setRxCompressionLevel(Float($0)) })
+        }
+
+        /// The jitter window's slider bounds and step, straight from the
+        /// engine's own clamp — one source, so the control and the engine
+        /// cannot disagree about what is settable.
+        private var jitterRange: ClosedRange<Double> {
+            Double(RxJitterBounds.range.lowerBound)...Double(RxJitterBounds.range.upperBound)
+        }
+        private var jitterStep: Double { Double(RxJitterBounds.step) }
+
+        private var rxJitterBufferBinding: Binding<Bool> {
+            Binding(
+                get: { session.rxJitterBuffer },
+                set: { session.setRxJitterBuffer($0) })
+        }
+
+        private var rxJitterMinBinding: Binding<Double> {
+            Binding(
+                get: { Double(session.rxJitterMinMS) },
+                set: { session.setRxJitterMinMS(Int($0)) })
+        }
+
+        private var rxJitterMaxBinding: Binding<Double> {
+            Binding(
+                get: { Double(session.rxJitterMaxMS) },
+                set: { session.setRxJitterMaxMS(Int($0)) })
         }
 
         private var voxThresholdBinding: Binding<Double> {

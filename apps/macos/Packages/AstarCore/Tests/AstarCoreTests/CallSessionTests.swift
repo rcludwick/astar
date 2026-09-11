@@ -67,6 +67,8 @@ final class FakeStation: StationDriving {
     private(set) var noiseReductionCalls: [Bool] = []
     private(set) var rxCompressionCalls: [Bool] = []
     private(set) var rxCompressionLevelCalls: [Float] = []
+    /// Every `setRxJitter` the session pushed, in order (iax-rxjb).
+    private(set) var rxJitterCalls: [(enabled: Bool, minMs: UInt32, maxMs: UInt32)] = []
     var spectrumToReturn: [Float] = []
     var txSpectrumToReturn: [Float] = []
     var rxSpectrumToReturn: [Float] = []
@@ -154,6 +156,9 @@ final class FakeStation: StationDriving {
     func setDenoiseStrength(_ level: Float) throws { denoiseStrengthCalls.append(level) }
     func setRxCompression(_ on: Bool) throws { rxCompressionCalls.append(on) }
     func setRxCompressionLevel(_ level: Float) throws { rxCompressionLevelCalls.append(level) }
+    func setRxJitter(enabled: Bool, minMs: UInt32, maxMs: UInt32) throws {
+        rxJitterCalls.append((enabled, minMs, maxMs))
+    }
     func monitorStart(input: String?) throws {
         monitorStartCount += 1
         monitorStartInputs.append(input)
@@ -337,6 +342,7 @@ private struct ThrowingStation: StationDriving {
     func setDenoiseStrength(_ level: Float) throws { throw Boom() }
     func setRxCompression(_ on: Bool) throws { throw Boom() }
     func setRxCompressionLevel(_ level: Float) throws { throw Boom() }
+    func setRxJitter(enabled: Bool, minMs: UInt32, maxMs: UInt32) throws { throw Boom() }
     func monitorStart(input: String?) throws { throw Boom() }
     func monitorStop() throws { throw Boom() }
     func micSpectrum() throws -> [Float] { throw Boom() }
@@ -2096,6 +2102,108 @@ final class CallSessionTests: XCTestCase {
         XCTAssertTrue(session.compression)
         XCTAssertTrue(session.noiseReduction)
         XCTAssertTrue(session.voxEnabled)
+    }
+
+    // MARK: - RX jitter buffer (iax-rxjb)
+
+    func testApplyAudioSettingsPushesTheStoredJitterWindow() throws {
+        let fake = FakeStation()
+        let session = CallSession(station: fake)
+
+        session.applyAudioSettings(
+            AudioSettings(rxJitterBuffer: true, rxJitterMinMS: 60, rxJitterMaxMS: 300))
+
+        XCTAssertEqual(fake.rxJitterCalls.count, 1)
+        XCTAssertEqual(fake.rxJitterCalls.first?.enabled, true)
+        XCTAssertEqual(fake.rxJitterCalls.first?.minMs, 60)
+        XCTAssertEqual(fake.rxJitterCalls.first?.maxMs, 300)
+        XCTAssertTrue(session.rxJitterBuffer)
+        XCTAssertEqual(session.rxJitterMinMS, 60)
+        XCTAssertEqual(session.rxJitterMaxMS, 300)
+    }
+
+    func testApplyAudioSettingsRepairsAnUpsideDownStoredWindow() throws {
+        // A hand-edited preferences domain (or an imported .astarconfig) can
+        // carry a floor above its ceiling. The engine's rule is to raise the
+        // ceiling — repaired, never refused — and the app must push and
+        // publish the repaired pair, not the stored one.
+        let fake = FakeStation()
+        let session = CallSession(station: fake)
+
+        session.applyAudioSettings(
+            AudioSettings(rxJitterBuffer: true, rxJitterMinMS: 400, rxJitterMaxMS: 100))
+
+        XCTAssertEqual(fake.rxJitterCalls.first?.minMs, 400)
+        XCTAssertEqual(fake.rxJitterCalls.first?.maxMs, 400)
+        XCTAssertEqual(session.rxJitterMaxMS, 400)
+    }
+
+    func testJitterBufferToggleHitsTheStationAndPersists() throws {
+        let fake = FakeStation()
+        let store = MemoryAudioStore()
+        let session = CallSession(station: fake, audioStore: store)
+
+        session.setRxJitterBuffer(false)
+
+        XCTAssertEqual(fake.rxJitterCalls.last?.enabled, false, "setRxJitter hits the station")
+        XCTAssertFalse(session.rxJitterBuffer, "and publishes the flag")
+        XCTAssertFalse(store.settings.rxJitterBuffer, "and persists it")
+        // Turning it off must not lose the window it was running.
+        XCTAssertEqual(store.settings.rxJitterMinMS, 40)
+        XCTAssertEqual(store.settings.rxJitterMaxMS, 200)
+    }
+
+    func testRaisingTheFloorPastTheCeilingCarriesTheCeilingWithIt() throws {
+        let fake = FakeStation()
+        let store = MemoryAudioStore()
+        let session = CallSession(station: fake, audioStore: store)
+
+        session.setRxJitterMinMS(300)
+
+        XCTAssertEqual(session.rxJitterMinMS, 300)
+        XCTAssertEqual(session.rxJitterMaxMS, 300, "the ceiling gives way, the drag is not refused")
+        XCTAssertEqual(fake.rxJitterCalls.last?.minMs, 300)
+        XCTAssertEqual(fake.rxJitterCalls.last?.maxMs, 300)
+        XCTAssertEqual(store.settings.rxJitterMaxMS, 300, "and the repaired pair is what persists")
+    }
+
+    func testLoweringTheCeilingUnderTheFloorCarriesTheFloorWithIt() throws {
+        let fake = FakeStation()
+        let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+
+        session.setRxJitterMaxMS(20)
+
+        XCTAssertEqual(session.rxJitterMaxMS, 20)
+        XCTAssertEqual(session.rxJitterMinMS, 20)
+    }
+
+    func testJitterBoundsAreClampedToTheEnginesRange() throws {
+        let fake = FakeStation()
+        let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+
+        session.setRxJitterMaxMS(9_000)
+        XCTAssertEqual(session.rxJitterMaxMS, 500, "the engine clamps at 500 ms; so does the UI")
+        session.setRxJitterMinMS(-40)
+        XCTAssertEqual(session.rxJitterMinMS, 0)
+    }
+
+    func testPollPublishesTheReceivePathHealth() throws {
+        let fake = FakeStation()
+        fake.snapshotToReturn = CallSnapshot(
+            status: .answered, ptt: false, remotePTT: true,
+            txDB: -60, rxDB: -12, rttMS: 31,
+            rxUnderruns: 2, rxJitterMS: 14, rxJitterBufferDepthMS: 62,
+            rxFramesLost: 5, rxFramesLate: 1, rxFramesOutOfOrder: 3)
+        let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+
+        session.poll()
+
+        XCTAssertEqual(session.meters.rxQuality.jitterMS, 14)
+        XCTAssertEqual(session.meters.rxQuality.bufferDepthMS, 62)
+        XCTAssertEqual(session.meters.rxQuality.framesLost, 5)
+        XCTAssertEqual(session.meters.rxQuality.framesLate, 1)
+        XCTAssertEqual(session.meters.rxQuality.underruns, 2)
+        XCTAssertTrue(session.meters.rxQuality.jitterBufferEnabled)
     }
 
     // MARK: - VOX (CallSession integration)

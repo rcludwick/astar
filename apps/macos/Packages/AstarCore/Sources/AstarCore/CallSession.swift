@@ -290,6 +290,19 @@ public final class CallSession: ObservableObject {
     /// RX/output compression strength (0…1) applied when `rxCompression` is
     /// on. Default 0.90. Persisted via the audio store.
     @Published public private(set) var rxCompressionLevel: Float = 0.90
+    /// RX jitter buffer (iax-rxjb): received AllStarLink audio is played out
+    /// of the adaptive buffer that rides out network timing. ON by default —
+    /// without it any inter-arrival gap longer than one device callback is an
+    /// audible hole. Shared across networks like the RX compressor, though
+    /// only the IAX2 path carries the sender clock it schedules against.
+    /// Persisted via the audio store.
+    @Published public private(set) var rxJitterBuffer = true
+    /// Floor of the RX jitter buffer's adaptive depth, ms (Asterisk's
+    /// `target_extra`, default 40). Persisted via the audio store.
+    @Published public private(set) var rxJitterMinMS = 40
+    /// Ceiling of the RX jitter buffer's adaptive depth, ms (Asterisk's
+    /// `max_jitterbuf`, default 200). Persisted via the audio store.
+    @Published public private(set) var rxJitterMaxMS = 200
     /// Voice-activated PTT: when on, `poll()` keys/unkeys from the mic level
     /// (see `VoxGate`). Persisted via the audio store.
     @Published public private(set) var voxEnabled = false
@@ -977,6 +990,11 @@ public final class CallSession: ObservableObject {
                 txDBHeld: txPeak.push(snap.txDB, now: meterNow),
                 rxDBHeld: rxPeak.push(snap.rxDB, now: meterNow),
                 rttMS: snap.rttMS)
+            // Receive-path health (iax-rxjb) — the call-quality line's
+            // numbers. Published on change through the same leaf the meters
+            // use, so a moving jitter estimate redraws one caption and not
+            // the popover.
+            meters.update(quality: snap.rxQuality)
 
             // Half-duplex RX suppression (astar-eaab). When NOT full-duplex and
             // the local transmit is keyed, hard-mute RX so the operator doesn't
@@ -2351,6 +2369,44 @@ public final class CallSession: ObservableObject {
         persistAudio { $0.rxCompressionLevel = level }
     }
 
+    /// Toggle the RX jitter buffer (iax-rxjb): publish, push to the station,
+    /// and persist. Live — switching it off mid-call drains what it holds
+    /// into the direct path, switching it on starts a fresh buffer.
+    public func setRxJitterBuffer(_ on: Bool) {
+        rxJitterBuffer = on
+        applyRxJitter(enabled: on, min: rxJitterMinMS, max: rxJitterMaxMS)
+    }
+
+    /// Set the jitter buffer's depth FLOOR, ms. A floor pushed past the
+    /// ceiling lifts the ceiling with it rather than being refused — the
+    /// engine's own repair, applied here so the control never shows a window
+    /// the engine would not honour.
+    public func setRxJitterMinMS(_ ms: Int) {
+        let window = RxJitterBounds.repaired(min: ms, max: rxJitterMaxMS, movingMin: true)
+        applyRxJitter(enabled: rxJitterBuffer, min: window.min, max: window.max)
+    }
+
+    /// Set the jitter buffer's depth CEILING, ms. A ceiling pulled under the
+    /// floor drags the floor down with it.
+    public func setRxJitterMaxMS(_ ms: Int) {
+        let window = RxJitterBounds.repaired(min: rxJitterMinMS, max: ms, movingMin: false)
+        applyRxJitter(enabled: rxJitterBuffer, min: window.min, max: window.max)
+    }
+
+    /// One place that publishes the repaired window, pushes the whole
+    /// three-part config to the station (the engine has one setter, not
+    /// three) and persists it.
+    private func applyRxJitter(enabled: Bool, min lo: Int, max hi: Int) {
+        if rxJitterMinMS != lo { rxJitterMinMS = lo }
+        if rxJitterMaxMS != hi { rxJitterMaxMS = hi }
+        try? station.setRxJitter(enabled: enabled, minMs: UInt32(lo), maxMs: UInt32(hi))
+        persistAudio {
+            $0.rxJitterBuffer = enabled
+            $0.rxJitterMinMS = lo
+            $0.rxJitterMaxMS = hi
+        }
+    }
+
     // MARK: - M17 TX-processing override (astar-5d8e)
 
     /// Toggle the M17 override's noise reduction: publish, persist, and — if
@@ -2883,6 +2939,18 @@ public final class CallSession: ObservableObject {
         try? station.setNoiseReduction(settings.noiseReduction)
         try? station.setRxCompression(settings.rxCompression)
         try? station.setRxCompressionLevel(settings.rxCompressionLevel)
+        // Repair the stored window before it is pushed or published: a
+        // hand-edited preferences domain (or an imported `.astarconfig`) can
+        // carry a floor above its ceiling, and `movingMin: true` is the
+        // engine's own rule — raise the ceiling to meet the floor.
+        let jitter = RxJitterBounds.repaired(
+            min: settings.rxJitterMinMS, max: settings.rxJitterMaxMS, movingMin: true)
+        try? station.setRxJitter(
+            enabled: settings.rxJitterBuffer,
+            minMs: UInt32(jitter.min), maxMs: UInt32(jitter.max))
+        rxJitterBuffer = settings.rxJitterBuffer
+        rxJitterMinMS = jitter.min
+        rxJitterMaxMS = jitter.max
         compression = settings.compression
         compressionLevel = settings.compressionLevel
         txTrim = settings.txTrim

@@ -166,6 +166,37 @@ pub(super) fn heard_lines(rows: &[Heard]) -> Vec<String> {
         .collect()
 }
 
+/// The call-quality line that sits under the VU bars (iax-rxjb): what the
+/// receive path is costing right now.
+///
+/// AllStarLink only, and only while connected. The jitter buffer schedules
+/// against a sender's wire clock and only the IAX2 path carries one, so on
+/// every other network these numbers would be flat zeros and the line would
+/// be a lie of omission. The wording is AstarCore's `CallQualityLine`
+/// verbatim — the two clients must not disagree about what a call is doing.
+///
+/// `underruns` is appended only when there are some: it is the alarm, not a
+/// statistic, and a permanent "underruns 0" is one more number to read past
+/// before you find the one that matters.
+#[must_use]
+pub(super) fn call_quality_line(snap: &Snapshot, network: Network) -> Option<String> {
+    if snap.status != Status::Connected || network != Network::Allstar {
+        return None;
+    }
+    let rx = &snap.rx;
+    if !rx.jitter_buffer_enabled {
+        return Some("jitter buffer off".to_string());
+    }
+    let mut line = format!(
+        "jitter {} ms · buffer {} ms · lost {} · late {}",
+        rx.jitter_ms, rx.buffer_depth_ms, rx.frames_lost, rx.frames_late
+    );
+    if rx.underruns > 0 {
+        line.push_str(&format!(" · underruns {}", rx.underruns));
+    }
+    Some(line)
+}
+
 /// How long ago a station was heard, in the shortest honest unit — the same
 /// table as the Mac's `HeardAge` so both clients read identically. Integer
 /// division throughout: 90 s is "1 min", not "1.5 min".
@@ -200,8 +231,68 @@ pub(super) fn badge_capsule(label: &'static str, wideband: bool) -> Element<'sta
 
 #[cfg(test)]
 mod tests {
-    use super::{age_label, heard_lines};
-    use crate::snapshot::Heard;
+    use super::{age_label, call_quality_line, heard_lines};
+    use crate::network::Network;
+    use crate::snapshot::{Heard, RxQuality, Snapshot, Status};
+
+    /// A connected call with a healthy receive path.
+    fn healthy() -> Snapshot {
+        Snapshot {
+            status: Status::Connected,
+            rx: RxQuality {
+                jitter_ms: 12,
+                buffer_depth_ms: 60,
+                ..RxQuality::default()
+            },
+            ..Snapshot::default()
+        }
+    }
+
+    #[test]
+    fn a_healthy_call_reads_as_four_numbers_and_no_alarm() {
+        assert_eq!(
+            call_quality_line(&healthy(), Network::Allstar).as_deref(),
+            Some("jitter 12 ms · buffer 60 ms · lost 0 · late 0")
+        );
+    }
+
+    #[test]
+    fn underruns_append_only_when_there_are_some() {
+        let mut snap = healthy();
+        snap.rx.underruns = 3;
+        assert_eq!(
+            call_quality_line(&snap, Network::Allstar).as_deref(),
+            Some("jitter 12 ms · buffer 60 ms · lost 0 · late 0 · underruns 3")
+        );
+    }
+
+    #[test]
+    fn a_buffer_that_is_off_says_so_instead_of_showing_zeros() {
+        // With the buffer off every number above means something different,
+        // so the line says what is running rather than printing them.
+        let mut snap = healthy();
+        snap.rx.jitter_buffer_enabled = false;
+        assert_eq!(
+            call_quality_line(&snap, Network::Allstar).as_deref(),
+            Some("jitter buffer off")
+        );
+    }
+
+    #[test]
+    fn nothing_at_all_off_allstarlink_or_while_idle() {
+        assert_eq!(call_quality_line(&healthy(), Network::M17), None);
+        assert_eq!(call_quality_line(&healthy(), Network::Hamlink), None);
+        let mut idle = healthy();
+        idle.status = Status::Disconnected;
+        assert_eq!(call_quality_line(&idle, Network::Allstar), None);
+        let mut dialing = healthy();
+        dialing.status = Status::Connecting;
+        assert_eq!(
+            call_quality_line(&dialing, Network::Allstar),
+            None,
+            "a call still ringing has received no audio; four zeros would read as a measurement"
+        );
+    }
 
     fn heard(callsign: &str, age_ms: u64) -> Heard {
         Heard {
