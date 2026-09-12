@@ -33,7 +33,7 @@
 
                 if setups.managedSetups.isEmpty {
                     Text(
-                        "No other configs yet. Click + to add one, then expand it to set hardware, devices, and audio."
+                        "No other configs yet. Add one with the + above and fill in hardware, devices, and audio."
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -63,19 +63,14 @@
                 HStack {
                     Text("Saved configs")
                     Spacer(minLength: 8)
-                    Button {
+                    AddButton(help: "Add a new config") {
                         let new = setups.addNew()
                         // The row has to mount before it can be scrolled to; the
                         // list rebuilds on the next pass.
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                             withAnimation { scroll.scrollTo(new.id, anchor: .center) }
                         }
-                    } label: {
-                        Image(systemName: "plus")
                     }
-                    .buttonStyle(.borderless)
-                    .help("Add a new config")
-                    .accessibilityLabel("Add a new config")
                 }
             }
         }
@@ -394,14 +389,14 @@
                 // this config uses, and "System Default" (a nil `inputDevice`) is
                 // a deliberate answer here — seeding it from the active profile
                 // would analyze a mic this config never opens.
-                Button {
+                //
+                // Its own VoiceOver label, distinct from Mic Profiles' and Quick
+                // settings' plain "Add a mic profile": this one seeds the config's
+                // OWN device rather than the active profile's, so it is not the
+                // same action under a shared label.
+                AddButton(help: "Add a mic profile for this config") {
                     micAnalyzer.startNew(input: setup.inputDevice, seedsFromProfile: false)
-                } label: {
-                    Image(systemName: "plus")
                 }
-                .buttonStyle(.borderless)
-                .help("Add a mic profile")
-                .accessibilityLabel("Add a mic profile")
                 if let id = setup.micProfileID {
                     Button(role: .destructive) {
                         session.deleteMicProfile(id: id)

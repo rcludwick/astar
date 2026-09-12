@@ -50,6 +50,9 @@
         /// Owns the mic analyzer's model, so the pane keeps its picker + profile
         /// name across a trip back to the call card.
         @EnvironmentObject private var micAnalyzer: MicAnalyzerController
+        /// So the settings pane can clear a stranded `focusNewID` on the way
+        /// out — see `devicesPane`'s `onDisappear`.
+        @EnvironmentObject private var setups: SetupController
         /// The devices this rig is actually using, so the warning below can be
         /// limited to a clash that affects them (astar-9d41). Same keys
         /// `AudioSettings` persists, read-only here.
@@ -366,6 +369,13 @@
                     .environment(\.defaultMinListRowHeight, 4)
                 }
             }
+            // `focusNewID` is claimed only by the new card's own `onAppear`
+            // (see `ConfigCard`) — if that row never mounts before Settings is
+            // left (closed right after "+", or the row never scrolled into
+            // view), the flag strands. Left set, the NEXT time that same card
+            // appears it would spontaneously re-expand and steal the keyboard,
+            // long after "new" stopped being true.
+            .onDisappear { setups.focusNewID = nil }
         }
 
         /// The reflector directory as a pane of this window (astar-5a41),
@@ -419,15 +429,10 @@
                     // instead of backing out and re-entering the pane per mic.
                     // `seedsFromProfile: false`: the mic on screen is a deliberate
                     // choice already, not a gap to fill from the active profile.
-                    Button {
+                    AddButton(help: "Add a mic profile") {
                         micAnalyzer.startNew(
                             input: micAnalyzer.vm.selectedInput, seedsFromProfile: false)
-                    } label: {
-                        Image(systemName: "plus")
                     }
-                    .buttonStyle(.borderless)
-                    .help("Add a mic profile")
-                    .accessibilityLabel("Add a mic profile")
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)

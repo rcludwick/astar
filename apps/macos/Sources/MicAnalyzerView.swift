@@ -100,13 +100,11 @@
             .onChange(of: vm.nameFocusPending) { _ in claimNameFocus() }
         }
 
-        /// Move focus to the name field if a "+" asked for it, and mark the ask
-        /// handled. The guard is what stops `onChange` from re-entering when this
-        /// same method just cleared the flag it's observing.
+        /// Move focus to the name field if a "+" asked for it. The claim itself
+        /// (read-and-clear) lives on the model — this is just the one place that
+        /// turns a claimed request into an actual focus change.
         private func claimNameFocus() {
-            guard vm.nameFocusPending else { return }
-            nameFocused = true
-            vm.nameFocusPending = false
+            if vm.consumeNameFocus() { nameFocused = true }
         }
 
         /// The absolute level a bin has to exceed to be notched. Sits directly

@@ -16,10 +16,12 @@
         var body: some View {
             Section {
                 if session.micProfiles.isEmpty {
-                    Text("No mic profiles yet. Click + to open the analyzer and characterize one.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .listRowSeparator(.hidden)
+                    Text(
+                        "No mic profiles yet. Add one with the + above and characterize it in the analyzer."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .listRowSeparator(.hidden)
                 } else {
                     ForEach(session.micProfiles) { profile in
                         MicProfileRow(profile: profile)
@@ -31,14 +33,9 @@
                 HStack {
                     Text("Mic Profiles")
                     Spacer(minLength: 8)
-                    Button {
+                    AddButton(help: "Add a mic profile") {
                         micAnalyzer.startNew(input: nil)
-                    } label: {
-                        Image(systemName: "plus")
                     }
-                    .buttonStyle(.borderless)
-                    .help("Add a mic profile")
-                    .accessibilityLabel("Add a mic profile")
                 }
             }
         }

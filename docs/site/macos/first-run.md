@@ -216,10 +216,10 @@ in an export; it stays in the Keychain, so the account is the one thing you
 enter again. There is still no "put my config on a network drive and sync it"
 option.
 
-**Mic profiles.** *Analyze…* in Quick settings characterizes a microphone —
-measuring its noise floor and notching out whine and hum — and saves the result
-as a named profile you can pick per config. Worth doing once for each mic you
-use regularly.
+**Mic profiles.** The **+** next to Mic Profile in Quick settings characterizes
+a microphone — measuring its noise floor and notching out whine and hum — and
+saves the result as a named profile you can pick per config. Worth doing once
+for each mic you use regularly.
 
 **Configs.** A config bundles a device pair, gains, and a mic profile under a
 name. **System Default** is the built-in one you start on. Save your headset
