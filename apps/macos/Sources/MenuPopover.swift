@@ -334,33 +334,37 @@
                 Divider()
                 // A List (not a ScrollView) so Saved configs get native drag-to-
                 // reorder via .onMove. Account is its own section on top.
-                List {
-                    // Who you are comes before what you own: the callsign and
-                    // radio ID identify the operator, everything below is
-                    // equipment (astar-c9d2).
-                    StationIdentityView()
-                    Section("Account") {
-                        CredentialsView()
-                            .listRowSeparator(.hidden)
+                // ScrollViewReader wraps it so Saved configs' + can scroll a
+                // freshly created card into view.
+                ScrollViewReader { proxy in
+                    List {
+                        // Who you are comes before what you own: the callsign and
+                        // radio ID identify the operator, everything below is
+                        // equipment (astar-c9d2).
+                        StationIdentityView()
+                        Section("Account") {
+                            CredentialsView()
+                                .listRowSeparator(.hidden)
+                        }
+                        // Below the account, not beside the callsign: a DMR ID is
+                        // one network's credential, and that network is not
+                        // dialable yet (astar-a7c5).
+                        DmrSettingsView()
+                        // Its own section, not a second field in DMR's: NXDN ids
+                        // are 16-bit and a registered DMR ID does not fit in one,
+                        // so they are two numbers, not one shown twice.
+                        NxdnSettingsView()
+                        SetupsView(scroll: proxy)
+                        FavoritesSettingsView(directoryRevision: $directoryRevision)
+                        MicProfilesView()
+                        ReflectorSettingsView()
+                        SpectrumSettingsView()
+                        ConfigTransferView(directoryRevision: $directoryRevision)
                     }
-                    // Below the account, not beside the callsign: a DMR ID is
-                    // one network's credential, and that network is not
-                    // dialable yet (astar-a7c5).
-                    DmrSettingsView()
-                    // Its own section, not a second field in DMR's: NXDN ids
-                    // are 16-bit and a registered DMR ID does not fit in one,
-                    // so they are two numbers, not one shown twice.
-                    NxdnSettingsView()
-                    SetupsView()
-                    FavoritesSettingsView(directoryRevision: $directoryRevision)
-                    MicProfilesView()
-                    ReflectorSettingsView()
-                    SpectrumSettingsView()
-                    ConfigTransferView(directoryRevision: $directoryRevision)
+                    .listStyle(.inset)
+                    .scrollContentBackground(.hidden)  // let the window's blur show through
+                    .environment(\.defaultMinListRowHeight, 4)
                 }
-                .listStyle(.inset)
-                .scrollContentBackground(.hidden)  // let the window's blur show through
-                .environment(\.defaultMinListRowHeight, 4)
             }
         }
 
