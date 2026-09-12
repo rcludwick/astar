@@ -26,7 +26,7 @@
         /// (The earlier relative slider's key, `micAnalyzer.peakMarginDb`, is
         /// deliberately abandoned — not migrated, it meant a different thing.)
         @AppStorage("micAnalyzer.thresholdDbfs") private var storedThreshold: Double = -60
-        /// Driven by `vm.nameFocusRequests` — every "+" entry point asks for
+        /// Claimed from `vm.nameFocusPending` — every "+" entry point asks for
         /// focus here, since the field lives in the view and the model can't
         /// reach into it directly.
         @FocusState private var nameFocused: Bool
@@ -89,12 +89,24 @@
                     vm.selectedInput = nil
                 }
                 vm.start(input: vm.selectedInput)
+                // Catches a "+" pressed from OUTSIDE the pane: `startNew` sets
+                // the flag and then shows the pane in the same call, so the view
+                // is born with it already true and never sees an `onChange`.
+                claimNameFocus()
             }
             .onDisappear { vm.stop() }
-            // Every "+" entry point bumps this to land the keyboard in the name
-            // field — it's a counter rather than a Bool so two presses in a row
-            // (e.g. Save, then + again) both move focus.
-            .onChange(of: vm.nameFocusRequests) { _ in nameFocused = true }
+            // Catches a "+" pressed from INSIDE the pane (the analyzer header's
+            // own "+"): the view is already alive, so this is the one that fires.
+            .onChange(of: vm.nameFocusPending) { _ in claimNameFocus() }
+        }
+
+        /// Move focus to the name field if a "+" asked for it, and mark the ask
+        /// handled. The guard is what stops `onChange` from re-entering when this
+        /// same method just cleared the flag it's observing.
+        private func claimNameFocus() {
+            guard vm.nameFocusPending else { return }
+            nameFocused = true
+            vm.nameFocusPending = false
         }
 
         /// The absolute level a bin has to exceed to be notched. Sits directly

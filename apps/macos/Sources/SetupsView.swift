@@ -394,10 +394,14 @@
                 // this config uses, and "System Default" (a nil `inputDevice`) is
                 // a deliberate answer here — seeding it from the active profile
                 // would analyze a mic this config never opens.
-                Button("Analyze…") {
-                    micAnalyzer.open(input: setup.inputDevice, seedsFromProfile: false)
+                Button {
+                    micAnalyzer.startNew(input: setup.inputDevice, seedsFromProfile: false)
+                } label: {
+                    Image(systemName: "plus")
                 }
-                .buttonStyle(.link)
+                .buttonStyle(.borderless)
+                .help("Add a mic profile")
+                .accessibilityLabel("Add a mic profile")
                 if let id = setup.micProfileID {
                     Button(role: .destructive) {
                         session.deleteMicProfile(id: id)

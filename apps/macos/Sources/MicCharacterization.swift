@@ -40,11 +40,14 @@
         private static let scanLoHz = 100.0, scanHiHz = 3800.0
         /// User-entered label for the profile being saved, e.g. "fake icom".
         @Published var profileName = ""
-        /// Bumped to ask the view to move keyboard focus to the name field. A
-        /// counter, not a Bool: two "+" presses in a row must both move the
-        /// keyboard, and a Bool already `true` wouldn't change and so wouldn't
-        /// notify the view's `onChange` the second time.
-        @Published private(set) var nameFocusRequests = 0
+        /// Set to ask the view to move keyboard focus to the name field, and
+        /// claimed (cleared) by the view once it has. A consumed flag rather than
+        /// a `.onChange`-only signal: `startNew` sets this and then shows the
+        /// pane, which can mount the view synchronously in the same call — the
+        /// view is BORN with the flag already true, so `.onChange` alone would
+        /// never see it change. `.onAppear` claiming it too is what catches that
+        /// case; mirrors `SetupController.focusNewID`.
+        @Published var nameFocusPending = false
         /// True while a stay-silent capture is in progress (drives the spinner).
         @Published private(set) var analyzing = false
         @Published private(set) var lastError: String?
@@ -232,7 +235,7 @@
 
         /// Ask the view to move keyboard focus to the name field — used by every
         /// "+" entry point, since the field itself lives in `MicAnalyzerView`.
-        func requestNameFocus() { nameFocusRequests &+= 1 }
+        func requestNameFocus() { nameFocusPending = true }
 
         /// Abort an in-progress capture and discard any unsaved result.
         func cancel() {

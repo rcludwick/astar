@@ -7,8 +7,8 @@
     import SwiftUI
 
     /// Settings section listing the saved **Mic Profiles** — each renameable +
-    /// deletable, showing the frequencies it filters — with the Mic Analyzer launcher
-    /// underneath. Rendered inside the Settings `List`, below Saved configs.
+    /// deletable, showing the frequencies it filters — with a header "+" to start
+    /// a new one. Rendered inside the Settings `List`, below Saved configs.
     struct MicProfilesView: View {
         @EnvironmentObject private var session: CallSession
         @EnvironmentObject private var micAnalyzer: MicAnalyzerController

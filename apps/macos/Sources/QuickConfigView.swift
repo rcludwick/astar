@@ -380,7 +380,7 @@
         // MARK: - Rows
 
         /// Mic profile picker: the built-in Default (no filter) plus every saved
-        /// profile. Selecting applies live; Analyze opens the characterizer; trash
+        /// profile. Selecting applies live; "+" starts a new profile; trash
         /// deletes the selected profile.
         private var micProfileRow: some View {
             HStack(spacing: 8) {
