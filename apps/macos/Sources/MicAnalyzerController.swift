@@ -58,11 +58,7 @@
         /// Settings (Mic Profiles, a saved config) and from Quick settings on the
         /// call card, so Back has to return to whichever one opened it.
         func open(input: String?, seedsFromProfile: Bool = true) {
-            let seed =
-                seedsFromProfile
-                ? MicAnalyzerSeed.input(
-                    explicit: input, stored: UserDefaultsAudioSettingsStore().load().input)
-                : input
+            let seed = resolveSeed(input: input, seedsFromProfile: seedsFromProfile)
             // Clear on a device change, here rather than in the view: the analyzer
             // is a pane now, so the view is destroyed between visits and its
             // `.onChange(of: vm.selectedInput)` — which used to do this while the
@@ -74,6 +70,31 @@
             }
             vm.selectedInput = seed
             navigation?.show(.micAnalyzer)
+        }
+
+        /// Start a NEW mic profile: drop any unsaved result, name and "Saved"
+        /// confirmation, put the keyboard in the name field, and show the pane.
+        ///
+        /// Distinct from `open(input:)`, which preserves an in-progress
+        /// characterization when you come back to the same mic — "+" is a promise
+        /// of a blank sheet, so it clears unconditionally.
+        func startNew(input: String?, seedsFromProfile: Bool = true) {
+            vm.selectedInput = resolveSeed(input: input, seedsFromProfile: seedsFromProfile)
+            vm.clear()
+            vm.requestNameFocus()
+            // `show` already no-ops when the analyzer pane is up (preserving
+            // whatever Back target got us here), which is what makes it safe to
+            // call this from the "+" inside the pane itself.
+            navigation?.show(.micAnalyzer)
+        }
+
+        /// Same fill-in `open` and `startNew` both use: the caller's explicit
+        /// device, or (when it's allowed to guess) the active profile's mic.
+        private func resolveSeed(input: String?, seedsFromProfile: Bool) -> String? {
+            seedsFromProfile
+                ? MicAnalyzerSeed.input(
+                    explicit: input, stored: UserDefaultsAudioSettingsStore().load().input)
+                : input
         }
     }
 #endif

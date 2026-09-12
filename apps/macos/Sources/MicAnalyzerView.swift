@@ -26,6 +26,10 @@
         /// (The earlier relative slider's key, `micAnalyzer.peakMarginDb`, is
         /// deliberately abandoned — not migrated, it meant a different thing.)
         @AppStorage("micAnalyzer.thresholdDbfs") private var storedThreshold: Double = -60
+        /// Driven by `vm.nameFocusRequests` — every "+" entry point asks for
+        /// focus here, since the field lives in the view and the model can't
+        /// reach into it directly.
+        @FocusState private var nameFocused: Bool
 
         var body: some View {
             VStack(alignment: .leading, spacing: 12) {
@@ -52,6 +56,7 @@
                     TextField("e.g. fake icom", text: $vm.profileName)
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: 220)
+                        .focused($nameFocused)
                     Spacer(minLength: 0)
                 }
 
@@ -86,6 +91,10 @@
                 vm.start(input: vm.selectedInput)
             }
             .onDisappear { vm.stop() }
+            // Every "+" entry point bumps this to land the keyboard in the name
+            // field — it's a counter rather than a Bool so two presses in a row
+            // (e.g. Save, then + again) both move focus.
+            .onChange(of: vm.nameFocusRequests) { _ in nameFocused = true }
         }
 
         /// The absolute level a bin has to exceed to be notched. Sits directly

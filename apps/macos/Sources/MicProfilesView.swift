@@ -14,9 +14,9 @@
         @EnvironmentObject private var micAnalyzer: MicAnalyzerController
 
         var body: some View {
-            Section("Mic Profiles") {
+            Section {
                 if session.micProfiles.isEmpty {
-                    Text("No mic profiles yet. Open the analyzer to characterize a mic.")
+                    Text("No mic profiles yet. Click + to open the analyzer and characterize one.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .listRowSeparator(.hidden)
@@ -27,15 +27,19 @@
                             .listRowInsets(EdgeInsets(top: 4, leading: 6, bottom: 4, trailing: 6))
                     }
                 }
-
-                Button {
-                    micAnalyzer.open(input: nil)
-                } label: {
-                    Label("Open Mic Analyzer…", systemImage: "waveform")
+            } header: {
+                HStack {
+                    Text("Mic Profiles")
+                    Spacer(minLength: 8)
+                    Button {
+                        micAnalyzer.startNew(input: nil)
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Add a mic profile")
+                    .accessibilityLabel("Add a mic profile")
                 }
-                .buttonStyle(.borderless)
-                .font(.callout)
-                .listRowSeparator(.hidden)
             }
         }
     }

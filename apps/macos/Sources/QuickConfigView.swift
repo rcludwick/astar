@@ -397,8 +397,16 @@
                     }
                 }
                 .labelsHidden()
-                Button("Analyze…") { micAnalyzer.open(input: selectedInput) }
-                    .buttonStyle(.link)
+                // It only ever created a new profile — Save never overwrites — so
+                // "+" is the honest label for what this button already did.
+                Button {
+                    micAnalyzer.startNew(input: selectedInput)
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.borderless)
+                .help("Add a mic profile")
+                .accessibilityLabel("Add a mic profile")
                 if let id = session.micProfileID {
                     Button(role: .destructive) {
                         session.deleteMicProfile(id: id)

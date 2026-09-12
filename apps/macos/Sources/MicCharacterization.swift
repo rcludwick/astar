@@ -40,6 +40,11 @@
         private static let scanLoHz = 100.0, scanHiHz = 3800.0
         /// User-entered label for the profile being saved, e.g. "fake icom".
         @Published var profileName = ""
+        /// Bumped to ask the view to move keyboard focus to the name field. A
+        /// counter, not a Bool: two "+" presses in a row must both move the
+        /// keyboard, and a Bool already `true` wouldn't change and so wouldn't
+        /// notify the view's `onChange` the second time.
+        @Published private(set) var nameFocusRequests = 0
         /// True while a stay-silent capture is in progress (drives the spinner).
         @Published private(set) var analyzing = false
         @Published private(set) var lastError: String?
@@ -224,6 +229,10 @@
             cancel()
             profileName = ""
         }
+
+        /// Ask the view to move keyboard focus to the name field — used by every
+        /// "+" entry point, since the field itself lives in `MicAnalyzerView`.
+        func requestNameFocus() { nameFocusRequests &+= 1 }
 
         /// Abort an in-progress capture and discard any unsaved result.
         func cancel() {

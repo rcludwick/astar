@@ -415,6 +415,19 @@
                     .keyboardShortcut("[", modifiers: .command)  // ⌘[ to go back
                     Text("Mic Analyzer").font(.headline)
                     Spacer()
+                    // Lets an operator characterize several mics in one visit
+                    // instead of backing out and re-entering the pane per mic.
+                    // `seedsFromProfile: false`: the mic on screen is a deliberate
+                    // choice already, not a gap to fill from the active profile.
+                    Button {
+                        micAnalyzer.startNew(
+                            input: micAnalyzer.vm.selectedInput, seedsFromProfile: false)
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Add a mic profile")
+                    .accessibilityLabel("Add a mic profile")
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
