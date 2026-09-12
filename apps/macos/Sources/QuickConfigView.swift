@@ -98,7 +98,8 @@
                             + "codec. Use a direct microphone to send true wideband audio."
                     )
                     .padding(.bottom, 8)
-                    gainSlider("Mic Level", tint: .red, range: 0...4, value: inputGainBinding) { gain in
+                    gainSlider("Mic Level", tint: .red, range: 0...4, value: inputGainBinding) {
+                        gain in
                         if !m17Context {
                             try? session.setInputGain(Float(gain))
                             persistGains()
