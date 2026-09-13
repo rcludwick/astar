@@ -235,6 +235,15 @@ public protocol StationDriving {
     /// on the live output bus.
     func setRxCompressionLevel(_ level: Float) throws
 
+    /// Configure the RX jitter buffer (iax-rxjb): whether received audio is
+    /// played out of the adaptive buffer at all, and the window
+    /// (`minMs`...`maxMs`, ms) its depth may live in. Mirrors `Station`'s
+    /// method 1:1 — both bounds clamped to `0...500` and a `maxMs` below
+    /// `minMs` raised to meet it, so a setting is repaired, never refused.
+    /// Takes effect immediately, mid-call. Read the effective values back
+    /// from `CallSnapshot`'s `rxJitterBuffer*` fields.
+    func setRxJitter(enabled: Bool, minMs: UInt32, maxMs: UInt32) throws
+
     // Mic characterization (engine FFI, vendored in AstarStation). Monitor opens the
     // mic with no call; spectrum is poll-only (~20 Hz); characterize returns opaque
     // JSON; setMicProfile applies it (or clears with nil).

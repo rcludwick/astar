@@ -193,7 +193,7 @@ fn slin16_parrot_echoes_then_hangs_up() {
         mgr.poll_announcements();
 
         while let Ok(frame) = raw.rx_frames.try_recv() {
-            if !saw_echo && frame.iter().any(|&s| s.abs() >= 8990) {
+            if !saw_echo && frame.pcm.iter().any(|&s| s.abs() >= 8990) {
                 saw_echo = true;
             }
         }

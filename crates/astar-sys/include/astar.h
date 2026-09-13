@@ -525,6 +525,57 @@ typedef struct {
    */
   uint64_t tx_capture_overruns;
   /**
+   * Cumulative RX underruns on the active call's output bus (iax-rxjb):
+   * device callbacks that got no audio at all while somebody was still
+   * talking. The receive-side counterpart of `tx_capture_overruns` — the
+   * number that grows while received audio stutters. `0` when idle. A plain
+   * `u64` health counter, credential-free.
+   */
+  uint64_t rx_underruns;
+  /**
+   * Estimated network jitter on the active call's receive path, ms
+   * (iax-rxjb). `0` when idle, or with the jitter buffer switched off.
+   */
+  unsigned int rx_jitter_ms;
+  /**
+   * Current RX jitter-buffer depth in ms (iax-rxjb): how much received
+   * audio is being held back to ride out the network. `0` when the buffer
+   * isn't running.
+   */
+  unsigned int rx_jb_depth_ms;
+  /**
+   * `jitterbuf.c`'s own `frames_lost`: frames the RX jitter buffer expected
+   * and did not play (iax-rxjb). Usually an interpolation over a frame that
+   * never arrived, but it also counts one the buffer chose to skip to
+   * shrink an over-deep cushion, and a late arrival gives one back.
+   * `0` when idle.
+   */
+  uint64_t rx_frames_lost;
+  /**
+   * Frames that arrived after their play time and were thrown away
+   * (iax-rxjb). `0` when idle.
+   */
+  uint64_t rx_frames_late;
+  /**
+   * Frames that arrived out of timestamp order (iax-rxjb). `0` when idle.
+   */
+  uint64_t rx_frames_ooo;
+  /**
+   * `true` while the RX jitter buffer is running (iax-rxjb). Reported so a
+   * client renders what the engine is doing, not what it last asked for.
+   */
+  bool rx_jb_enabled;
+  /**
+   * Floor of the RX jitter buffer's adaptive depth in ms — the effective,
+   * clamped value (iax-rxjb).
+   */
+  unsigned int rx_jb_min_ms;
+  /**
+   * Ceiling of the RX jitter buffer's adaptive depth in ms — the effective,
+   * clamped value (iax-rxjb).
+   */
+  unsigned int rx_jb_max_ms;
+  /**
    * Which mic noise-reduction chain is live (`IaxDenoiseChain`). A plain
    * enum, credential-free.
    */
@@ -1023,6 +1074,25 @@ int iax_station_set_rx_compression(IaxStation *st, bool on);
  * [`IAX_OK`], [`IAX_ERR_NULL`] (NULL `st`), or [`IAX_ERR_PANIC`].
  */
 int iax_station_set_rx_compression_level(IaxStation *st, float level);
+
+/**
+ * Configure the RX jitter buffer (iax-rxjb): whether received audio is played
+ * out of the adaptive buffer at all, and the window (`min_ms`..=`max_ms`) its
+ * depth may live in.
+ *
+ * The defaults are Asterisk `chan_iax2`'s — enabled, `min_ms` 40, `max_ms`
+ * 200 — because the node at the other end of an `AllStarLink` call is Asterisk.
+ * A larger `min_ms` buys fewer holes with more latency. Both bounds are
+ * clamped to `0..=500` ms and a `max_ms` below `min_ms` is raised to meet it:
+ * a setting is repaired, never refused. Takes effect immediately, mid-call,
+ * with no reconnect; read the effective values back from `IaxState`'s
+ * `rx_jb_enabled` / `rx_jb_min_ms` / `rx_jb_max_ms`. Returns [`IAX_OK`],
+ * [`IAX_ERR_NULL`] (NULL `st`), or [`IAX_ERR_PANIC`].
+ */
+int iax_station_set_rx_jitter(IaxStation *st,
+                              bool enabled,
+                              unsigned int min_ms,
+                              unsigned int max_ms);
 
 /**
  * Toggle mic voice compression on the live/next call. Takes effect immediately

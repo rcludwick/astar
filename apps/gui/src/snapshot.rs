@@ -73,6 +73,52 @@ pub struct Snapshot {
     /// engine's log lives in the digital session, so every row belongs to the
     /// network that is up.
     pub heard: Vec<Heard>,
+    /// The receive path's health, behind the call-quality line (iax-rxjb).
+    /// Meaningful on AllStarLink only — the jitter buffer schedules against a
+    /// sender's wire clock, and only IAX2 carries one.
+    pub rx: RxQuality,
+}
+
+/// The receive path's health, as the call-quality line reads it (iax-rxjb).
+/// Mirrors AstarCore's `RxQuality` field for field, so the two clients can be
+/// held to the same wording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RxQuality {
+    /// Whether the jitter buffer is actually running — read back from the
+    /// engine, so the line says what is happening rather than what was last
+    /// asked for.
+    pub jitter_buffer_enabled: bool,
+    /// Measured network jitter, ms.
+    pub jitter_ms: u32,
+    /// How much received audio the buffer is holding back, ms — the latency
+    /// being paid for the smoothing.
+    pub buffer_depth_ms: u32,
+    /// Frames the buffer expected and did not play. "Frames that did not
+    /// reach the speaker", not a packet-loss count.
+    pub frames_lost: u64,
+    /// Frames that arrived after their play time and were thrown away.
+    pub frames_late: u64,
+    /// Frames that arrived out of timestamp order (reordered in place, not
+    /// lost). Carried for completeness — nothing renders it yet.
+    pub frames_ooo: u64,
+    /// Device callbacks that got no audio at all while somebody was still
+    /// talking. The alarm, not a statistic.
+    pub underruns: u64,
+}
+
+impl Default for RxQuality {
+    /// No call: the buffer's declared state, every counter at rest.
+    fn default() -> Self {
+        Self {
+            jitter_buffer_enabled: true,
+            jitter_ms: 0,
+            buffer_depth_ms: 0,
+            frames_lost: 0,
+            frames_late: 0,
+            frames_ooo: 0,
+            underruns: 0,
+        }
+    }
 }
 
 /// One row of the "last heard" list: a callsign and how long ago it was heard.
@@ -159,6 +205,7 @@ impl Default for Snapshot {
             dtmf_played: 0,
             dtmf_total: 0,
             heard: Vec::new(),
+            rx: RxQuality::default(),
         }
     }
 }
@@ -288,6 +335,16 @@ mod tests {
         // AllStar and idle carry none: the engine's log is the digital
         // session's, and the live seam only reads it while one is up.
         assert!(Snapshot::default().heard.is_empty());
+    }
+
+    #[test]
+    fn an_idle_snapshot_has_a_resting_buffer_that_is_still_declared_on() {
+        // The buffer is on by default and stays declared on while idle: the
+        // line renders "off" only when the engine actually says so.
+        let rx = Snapshot::default().rx;
+        assert!(rx.jitter_buffer_enabled);
+        assert_eq!(rx.jitter_ms, 0);
+        assert_eq!(rx.underruns, 0);
     }
 
     #[test]

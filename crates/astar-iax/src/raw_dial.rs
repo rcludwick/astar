@@ -30,8 +30,9 @@ pub struct RawDial {
     pub events: Receiver<CallEvent>,
     /// Send 20 ms PCM (i16) frames here to transmit them on the call.
     pub tx_frames: TxFrames,
-    /// Decoded inbound PCM (i16) frames arrive here.
-    pub rx_frames: Receiver<Vec<i16>>,
+    /// Decoded inbound PCM frames arrive here, each stamped with the sender's
+    /// wire clock when the source has one (iax-rxjb).
+    pub rx_frames: Receiver<astar_audio::RxFrame>,
 }
 
 /// A sender for outbound PCM frames that wakes the call's run-loop on every

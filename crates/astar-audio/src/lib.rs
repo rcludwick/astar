@@ -72,7 +72,10 @@ pub use dynamics::{Compressor, CompressorParams, NoiseGate, NoiseGateParams};
 pub use error::AudioError;
 pub use filter::{Biquad, HumFilter};
 pub use meter::{peak, peak_to_dbfs};
-pub use mixer::{MixCallId, Mixer};
+pub use mixer::{
+    IAX_JITTER_CONFIG, MixCallId, Mixer, MixerClock, RxClock, RxFrame, RxJitterCells,
+    RxJitterConfig, RxJitterSettings,
+};
 pub use monitor::MicMonitor;
 #[cfg(any(test, feature = "test-backend"))]
 pub use null_backend::NullBackend;

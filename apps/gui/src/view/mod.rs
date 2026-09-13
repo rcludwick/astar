@@ -95,9 +95,10 @@ pub fn view<'a>(
         content = content.push(favorites::section(&favorites, network));
     }
 
-    content = content
-        .push(meters::indicators(snap))
-        .push(meters::vu_bars(snap));
+    content = content.push(meters::indicators(snap)).push(meters::vu_bars(
+        snap,
+        status::call_quality_line(snap, network.selected),
+    ));
 
     // Dialpad sits right above Quick settings, like the Mac popover — an
     // AllStar-only concern for now (astar-9b3e): hidden entirely for

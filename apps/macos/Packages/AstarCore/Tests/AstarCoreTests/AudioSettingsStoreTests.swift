@@ -130,6 +130,49 @@ final class AudioSettingsStoreTests: XCTestCase {
         XCTAssertEqual(loaded.rxCompressionLevel, 0.90)
     }
 
+    // MARK: - RX jitter buffer (iax-rxjb)
+
+    func testRxJitterBufferDefaultsOnAt40To200() {
+        // ON by default, and Asterisk chan_iax2's own window — the node at
+        // the other end of an AllStarLink call IS Asterisk. A new user must
+        // not have to find the switch to stop the stutter it fixes.
+        XCTAssertTrue(AudioSettings().rxJitterBuffer)
+        XCTAssertEqual(AudioSettings().rxJitterMinMS, 40)
+        XCTAssertEqual(AudioSettings().rxJitterMaxMS, 200)
+        let store = UserDefaultsAudioSettingsStore(freshDefaults())
+        let s = store.load()
+        XCTAssertTrue(s.rxJitterBuffer)
+        XCTAssertEqual(s.rxJitterMinMS, 40)
+        XCTAssertEqual(s.rxJitterMaxMS, 200)
+    }
+
+    func testRxJitterBufferRoundTrips() {
+        let store = UserDefaultsAudioSettingsStore(freshDefaults())
+        var s = AudioSettings()
+        s.rxJitterBuffer = false
+        s.rxJitterMinMS = 80
+        s.rxJitterMaxMS = 320
+        store.save(s)
+        let loaded = store.load()
+        XCTAssertFalse(loaded.rxJitterBuffer, "an OFF that was chosen survives a reload")
+        XCTAssertEqual(loaded.rxJitterMinMS, 80)
+        XCTAssertEqual(loaded.rxJitterMaxMS, 320)
+    }
+
+    func testPreJitterBufferSavedSettingsLoadDefaults() {
+        // A save from before the jitter buffer existed: other audio keys
+        // present, none of the three new ones. This is the case a plain
+        // `defaults.bool(forKey:)` would get WRONG — absent reads as false,
+        // and the default here is true.
+        let defaults = freshDefaults()
+        defaults.set(Float(0.8), forKey: "audio.inputGain")
+        defaults.set(true, forKey: "audio.compression")
+        let loaded = UserDefaultsAudioSettingsStore(defaults).load()
+        XCTAssertTrue(loaded.rxJitterBuffer)
+        XCTAssertEqual(loaded.rxJitterMinMS, 40)
+        XCTAssertEqual(loaded.rxJitterMaxMS, 200)
+    }
+
     func testCodecPolicyStringIsAlwaysPreferSlin16() {
         // Wideband is always on (astar-e542): there is no toggle, and the codec
         // policy is unconditionally prefer_slin16 — nodes without allow=slin16

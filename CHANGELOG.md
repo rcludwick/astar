@@ -13,6 +13,48 @@ pre-release to the patch number, which sorts wrongly: `0.1.10beta` is newer
 than `0.1.9beta` and a string comparison says the opposite. Shipped versions
 are left as they were spelled.
 
+## 0.1.15-beta — 2026-09-12
+
+Received AllStarLink audio gets a jitter buffer, and the "+" that adds a
+config or a mic profile is one visible button everywhere it belongs.
+
+### Added
+
+- **The jitter buffer is a setting, on both clients.** Quick settings →
+  Speaker gains a **Jitter buffer** switch and the depth window it may adapt
+  between — **Min** (40 ms) and **Max** (200 ms), Asterisk's own numbers. On
+  by default, live mid-call, saved and exported with the rest of the audio
+  settings. No config-version bump: a reader that predates the keys reads the
+  defaults.
+
+- **A call-quality line under the meters.** On AllStarLink:
+  `jitter 12 ms · buffer 60 ms · lost 0 · late 0`, with `· underruns N`
+  appended only when there are some — that one is the alarm, not a statistic.
+  Those figures are in the snapshot, the C header and both bindings too.
+
+### Changed
+
+- **Adding a saved config is one obvious button, and the new config is
+  there.** The label wedged above the list is now a **+** on the Saved configs
+  header. The config it makes arrives expanded, scrolled into view, with its
+  name selected so you type over it — and the config you are running stays
+  the one you are running.
+
+- **A + starts a new mic profile everywhere one can start.** Mic Profiles,
+  Quick settings' mic row, a saved config's mic row and the analyzer's own
+  header all carry it, and it opens a blank sheet with the keyboard already
+  in the name field. "Open Mic Analyzer…" and both "Analyze…" links are gone:
+  three names for one action.
+
+### Fixed
+
+- **AllStarLink audio no longer stutters when the network does.** Received
+  voice went straight from the wire to the speaker, so a packet more than
+  about 10 ms late played as a hole and a call that started choppy stayed
+  choppy. The receive path now runs an adaptive buffer on the playback clock,
+  absorbing late and reordered packets and interpolating the odd lost one.
+  Off by a switch if you want the old path.
+
 ## 0.1.14-beta — 2026-09-10
 
 One fix, reported on GitHub the day the public repo opened.

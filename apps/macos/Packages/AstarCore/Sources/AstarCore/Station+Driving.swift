@@ -18,6 +18,13 @@ extension Station: StationDriving {
             negotiatedFormat: s.negotiatedFormat,
             denoiseSummary: s.denoiseSummary,
             denoiseChain: s.denoiseChain,
+            rxUnderruns: s.rxUnderruns, rxJitterMS: s.rxJitterMS,
+            rxJitterBufferDepthMS: s.rxJitterBufferDepthMS,
+            rxFramesLost: s.rxFramesLost, rxFramesLate: s.rxFramesLate,
+            rxFramesOutOfOrder: s.rxFramesOutOfOrder,
+            rxJitterBufferEnabled: s.rxJitterBufferEnabled,
+            rxJitterBufferMinMS: s.rxJitterBufferMinMS,
+            rxJitterBufferMaxMS: s.rxJitterBufferMaxMS,
             dtmfPlayed: s.dtmfPlayed, dtmfTotal: s.dtmfTotal,
             m17Available: s.m17Available, m17Active: s.m17Active,
             dstarAvailable: s.dstarAvailable, dstarActive: s.dstarActive,
@@ -122,6 +129,7 @@ public struct NullStation: StationDriving {
     public func setDenoiseStrength(_ level: Float) throws {}
     public func setRxCompression(_ on: Bool) throws {}
     public func setRxCompressionLevel(_ level: Float) throws {}
+    public func setRxJitter(enabled: Bool, minMs: UInt32, maxMs: UInt32) throws {}
     public func setSpectrumDecay(dbPerSecond: Float) throws {}
     public func monitorStart(input: String?) throws {}
     public func monitorStop() throws {}

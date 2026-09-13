@@ -105,6 +105,11 @@ impl EdgeAudio {
         }
     }
 
+    /// The bus (decoded-PCM) sample rate this edge resamples to.
+    pub(crate) fn bus_rate(&self) -> u32 {
+        self.bus_rate
+    }
+
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub(crate) fn encode(&mut self, format: VoiceFormat, pcm: &[i16]) -> Vec<u8> {
         let wire_rate = format.sample_rate().unwrap_or(self.bus_rate);

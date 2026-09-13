@@ -29,6 +29,11 @@ public final class CallMeters: ObservableObject {
     @Published public private(set) var inputDB: Float = -60
     /// Round-trip time to the peer, when the call has measured one.
     @Published public private(set) var rttMS: Int?
+    /// The receive path's health, behind the call-quality line (iax-rxjb).
+    /// One `Equatable` value rather than six fields so the line re-renders on
+    /// a real change and not once per poll — the same publish-on-change rule
+    /// the levels above follow.
+    @Published public private(set) var rxQuality: RxQuality = .idle
 
     /// Raw, unquantized instantaneous levels for consumers that redraw on their
     /// own clock — the level graph's `TimelineView` reads these each tick
@@ -59,5 +64,10 @@ public final class CallMeters: ObservableObject {
         if self.txDBHeld != txHeld { self.txDBHeld = txHeld }
         if self.rxDBHeld != rxHeld { self.rxDBHeld = rxHeld }
         if self.rttMS != rttMS { self.rttMS = rttMS }
+    }
+
+    /// Advance the receive-path health from one poll tick.
+    func update(quality: RxQuality) {
+        if rxQuality != quality { rxQuality = quality }
     }
 }

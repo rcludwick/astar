@@ -51,7 +51,9 @@ final class KeychainItemTests: XCTestCase {
     func testTheServiceNameIsAstarsAndNotACallsign() {
         XCTAssertEqual(KeychainService.current, "com.astar.app")
         XCTAssertFalse(KeychainService.current.lowercased().contains("aj7hr"))
-        XCTAssertEqual(KeychainService.legacy, "com.aj7hr.astar", "the name items were filed under before 0.1.14-beta")
+        XCTAssertEqual(
+            KeychainService.legacy, "com.aj7hr.astar",
+            "the name items were filed under before 0.1.14-beta")
     }
 
     func testAnItemUnderTheCurrentServiceIsReadWithoutTouchingTheLegacyOne() {
@@ -68,8 +70,10 @@ final class KeychainItemTests: XCTestCase {
         let backend = FakeKeychainBackend()
         backend.items[.init(service: KeychainService.legacy, account: account)] = blob
 
-        XCTAssertEqual(item(backend).read(), blob, "the data comes back on the very read that moves it")
-        XCTAssertEqual(backend.items[.init(service: KeychainService.current, account: account)], blob)
+        XCTAssertEqual(
+            item(backend).read(), blob, "the data comes back on the very read that moves it")
+        XCTAssertEqual(
+            backend.items[.init(service: KeychainService.current, account: account)], blob)
         XCTAssertNil(
             backend.items[.init(service: KeychainService.legacy, account: account)],
             "the old name is gone from Keychain Access, not left as a duplicate")
@@ -87,7 +91,9 @@ final class KeychainItemTests: XCTestCase {
         backend.items[.init(service: KeychainService.legacy, account: account)] = blob
         backend.writeFails = true
 
-        XCTAssertEqual(item(backend).read(), blob, "a Keychain that refuses the write must not lose the account")
+        XCTAssertEqual(
+            item(backend).read(), blob,
+            "a Keychain that refuses the write must not lose the account")
         XCTAssertEqual(
             backend.items[.init(service: KeychainService.legacy, account: account)], blob,
             "the legacy item is only deleted once the copy is known to be written")
@@ -106,13 +112,15 @@ final class KeychainItemTests: XCTestCase {
         backend.items[.init(service: KeychainService.legacy, account: account)] = blob
 
         try item(backend).delete()
-        XCTAssertTrue(backend.items.isEmpty, "clearing the account must not leave a copy under the old name")
+        XCTAssertTrue(
+            backend.items.isEmpty, "clearing the account must not leave a copy under the old name")
     }
 
     func testWithoutALegacyServiceOnlyTheCurrentNameIsConsulted() {
         let backend = FakeKeychainBackend()
         backend.items[.init(service: KeychainService.legacy, account: account)] = blob
-        let plain = KeychainItem(service: KeychainService.current, account: account, backend: backend)
+        let plain = KeychainItem(
+            service: KeychainService.current, account: account, backend: backend)
 
         XCTAssertNil(plain.read())
     }

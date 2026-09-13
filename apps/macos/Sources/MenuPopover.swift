@@ -50,6 +50,9 @@
         /// Owns the mic analyzer's model, so the pane keeps its picker + profile
         /// name across a trip back to the call card.
         @EnvironmentObject private var micAnalyzer: MicAnalyzerController
+        /// So the settings pane can clear a stranded `focusNewID` on the way
+        /// out — see `devicesPane`'s `onDisappear`.
+        @EnvironmentObject private var setups: SetupController
         /// The devices this rig is actually using, so the warning below can be
         /// limited to a clash that affects them (astar-9d41). Same keys
         /// `AudioSettings` persists, read-only here.
@@ -334,34 +337,45 @@
                 Divider()
                 // A List (not a ScrollView) so Saved configs get native drag-to-
                 // reorder via .onMove. Account is its own section on top.
-                List {
-                    // Who you are comes before what you own: the callsign and
-                    // radio ID identify the operator, everything below is
-                    // equipment (astar-c9d2).
-                    StationIdentityView()
-                    Section("Account") {
-                        CredentialsView()
-                            .listRowSeparator(.hidden)
+                // ScrollViewReader wraps it so Saved configs' + can scroll a
+                // freshly created card into view.
+                ScrollViewReader { proxy in
+                    List {
+                        // Who you are comes before what you own: the callsign and
+                        // radio ID identify the operator, everything below is
+                        // equipment (astar-c9d2).
+                        StationIdentityView()
+                        Section("Account") {
+                            CredentialsView()
+                                .listRowSeparator(.hidden)
+                        }
+                        // Below the account, not beside the callsign: a DMR ID is
+                        // one network's credential, and that network is not
+                        // dialable yet (astar-a7c5).
+                        DmrSettingsView()
+                        // Its own section, not a second field in DMR's: NXDN ids
+                        // are 16-bit and a registered DMR ID does not fit in one,
+                        // so they are two numbers, not one shown twice.
+                        NxdnSettingsView()
+                        SetupsView(scroll: proxy)
+                        FavoritesSettingsView(directoryRevision: $directoryRevision)
+                        MicProfilesView()
+                        ReflectorSettingsView()
+                        SpectrumSettingsView()
+                        ConfigTransferView(directoryRevision: $directoryRevision)
                     }
-                    // Below the account, not beside the callsign: a DMR ID is
-                    // one network's credential, and that network is not
-                    // dialable yet (astar-a7c5).
-                    DmrSettingsView()
-                    // Its own section, not a second field in DMR's: NXDN ids
-                    // are 16-bit and a registered DMR ID does not fit in one,
-                    // so they are two numbers, not one shown twice.
-                    NxdnSettingsView()
-                    SetupsView()
-                    FavoritesSettingsView(directoryRevision: $directoryRevision)
-                    MicProfilesView()
-                    ReflectorSettingsView()
-                    SpectrumSettingsView()
-                    ConfigTransferView(directoryRevision: $directoryRevision)
+                    .listStyle(.inset)
+                    .scrollContentBackground(.hidden)  // let the window's blur show through
+                    .environment(\.defaultMinListRowHeight, 4)
                 }
-                .listStyle(.inset)
-                .scrollContentBackground(.hidden)  // let the window's blur show through
-                .environment(\.defaultMinListRowHeight, 4)
             }
+            // `focusNewID` is claimed only by the new card's own `onAppear`
+            // (see `ConfigCard`) — if that row never mounts before Settings is
+            // left (closed right after "+", or the row never scrolled into
+            // view), the flag strands. Left set, the NEXT time that same card
+            // appears it would spontaneously re-expand and steal the keyboard,
+            // long after "new" stopped being true.
+            .onDisappear { setups.focusNewID = nil }
         }
 
         /// The reflector directory as a pane of this window (astar-5a41),
@@ -411,6 +425,14 @@
                     .keyboardShortcut("[", modifiers: .command)  // ⌘[ to go back
                     Text("Mic Analyzer").font(.headline)
                     Spacer()
+                    // Lets an operator characterize several mics in one visit
+                    // instead of backing out and re-entering the pane per mic.
+                    // `seedsFromProfile: false`: the mic on screen is a deliberate
+                    // choice already, not a gap to fill from the active profile.
+                    AddButton(help: "Add a mic profile") {
+                        micAnalyzer.startNew(
+                            input: micAnalyzer.vm.selectedInput, seedsFromProfile: false)
+                    }
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
@@ -2149,10 +2171,60 @@
                     active: session.ptt)
                 LevelMeter(
                     label: "RX", db: meters.rxDBHeld, tint: .green, active: session.receiving)
+                // The call-quality line (iax-rxjb): what the receive path is
+                // costing right now, directly under the RX meter it explains.
+                // AllStarLink only, and only once answered — the formatter
+                // owns both gates, shared with the Iced client's twin; this
+                // only paints.
+                //
+                // It WRAPS, and deliberately does not truncate. At the
+                // window's 310 pt content minimum this caption has about
+                // 247 pt to spend (10 pt of scroll padding and 14 pt of pane
+                // padding each side, plus a legacy scroller). Measured in the
+                // caption's own monospaced-digit face, the healthy line
+                // ("jitter 12 ms · buffer 60 ms · lost 0 · late 0") is about
+                // 199-215 pt and fits; append " · underruns 3" and it is
+                // 266-289 pt, and a call with real counters
+                // ("lost 1234 · late 567 · underruns 89") is over 317 pt.
+                //
+                // So the overflow case is exactly the case that matters, and
+                // TAIL truncation eats it worst-first: the underrun count is
+                // the one fact worth putting on screen at all, and it is last.
+                // Truncation can also cut a figure mid-digit — "lost 1234"
+                // clipped to "lost 12…" is a WRONG NUMBER, the same trap the
+                // RTT readout above documents at length.
+                //
+                // Unlike RTT, this caption owns its whole row: no fixedSize
+                // neighbour can squeeze it into a vertical strip of single
+                // characters, so wrapping is available and costs nothing but
+                // a second line — and vertical space is cheap here, the card
+                // sits in a ScrollView.
+                if let line = CallQualityLine.text(
+                    connected: isAnswered, network: session.activeCallNetwork,
+                    quality: meters.rxQuality)
+                {
+                    Text(line)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("Call quality")
+                        .accessibilityValue(
+                            CallQualityLine.spoken(
+                                connected: isAnswered, network: session.activeCallNetwork,
+                                quality: meters.rxQuality) ?? "")
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
         }
+
+        /// Whether a call is actually up. The quality line is gated on this,
+        /// not on merely having dialed: a call still ringing has received no
+        /// audio, and four zeros under the meters would read as a measurement.
+        private var isAnswered: Bool { session.status == .answered }
     }
 
     private struct LevelMeter: View {

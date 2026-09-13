@@ -273,6 +273,39 @@ pub struct IaxState {
     /// suspect for choppy TX; `0` when monitor-only. A plain `u64` health
     /// counter, credential-free.
     pub tx_capture_overruns: u64,
+    /// Cumulative RX underruns on the active call's output bus (iax-rxjb):
+    /// device callbacks that got no audio at all while somebody was still
+    /// talking. The receive-side counterpart of `tx_capture_overruns` — the
+    /// number that grows while received audio stutters. `0` when idle. A plain
+    /// `u64` health counter, credential-free.
+    pub rx_underruns: u64,
+    /// Estimated network jitter on the active call's receive path, ms
+    /// (iax-rxjb). `0` when idle, or with the jitter buffer switched off.
+    pub rx_jitter_ms: c_uint,
+    /// Current RX jitter-buffer depth in ms (iax-rxjb): how much received
+    /// audio is being held back to ride out the network. `0` when the buffer
+    /// isn't running.
+    pub rx_jb_depth_ms: c_uint,
+    /// `jitterbuf.c`'s own `frames_lost`: frames the RX jitter buffer expected
+    /// and did not play (iax-rxjb). Usually an interpolation over a frame that
+    /// never arrived, but it also counts one the buffer chose to skip to
+    /// shrink an over-deep cushion, and a late arrival gives one back.
+    /// `0` when idle.
+    pub rx_frames_lost: u64,
+    /// Frames that arrived after their play time and were thrown away
+    /// (iax-rxjb). `0` when idle.
+    pub rx_frames_late: u64,
+    /// Frames that arrived out of timestamp order (iax-rxjb). `0` when idle.
+    pub rx_frames_ooo: u64,
+    /// `true` while the RX jitter buffer is running (iax-rxjb). Reported so a
+    /// client renders what the engine is doing, not what it last asked for.
+    pub rx_jb_enabled: bool,
+    /// Floor of the RX jitter buffer's adaptive depth in ms — the effective,
+    /// clamped value (iax-rxjb).
+    pub rx_jb_min_ms: c_uint,
+    /// Ceiling of the RX jitter buffer's adaptive depth in ms — the effective,
+    /// clamped value (iax-rxjb).
+    pub rx_jb_max_ms: c_uint,
     /// Which mic noise-reduction chain is live (`IaxDenoiseChain`). A plain
     /// enum, credential-free.
     pub denoise_chain: IaxDenoiseChain,
@@ -561,6 +594,15 @@ fn fill_state(s: &astar_station::ConsoleState) -> IaxState {
         mode: mode_to_ffi(s.mode),
         tx_reanchors: s.tx_reanchors,
         tx_capture_overruns: s.tx_capture_overruns,
+        rx_underruns: s.rx_underruns,
+        rx_jitter_ms: s.rx_jitter_ms,
+        rx_jb_depth_ms: s.rx_jb_depth_ms,
+        rx_frames_lost: s.rx_frames_lost,
+        rx_frames_late: s.rx_frames_late,
+        rx_frames_ooo: s.rx_frames_ooo,
+        rx_jb_enabled: s.rx_jb_enabled,
+        rx_jb_min_ms: s.rx_jb_min_ms,
+        rx_jb_max_ms: s.rx_jb_max_ms,
         denoise_chain: match s.denoise_status.chain {
             astar_station::DenoiseChain::Off => IaxDenoiseChain::Off,
             astar_station::DenoiseChain::Neural => IaxDenoiseChain::Neural,
@@ -1422,6 +1464,36 @@ pub unsafe extern "C" fn iax_station_set_rx_compression_level(
     let station = unsafe { &*st };
     catch_unwind(AssertUnwindSafe(|| {
         station.inner.set_rx_compression_level(level);
+        IAX_OK
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Configure the RX jitter buffer (iax-rxjb): whether received audio is played
+/// out of the adaptive buffer at all, and the window (`min_ms`..=`max_ms`) its
+/// depth may live in.
+///
+/// The defaults are Asterisk `chan_iax2`'s — enabled, `min_ms` 40, `max_ms`
+/// 200 — because the node at the other end of an `AllStarLink` call is Asterisk.
+/// A larger `min_ms` buys fewer holes with more latency. Both bounds are
+/// clamped to `0..=500` ms and a `max_ms` below `min_ms` is raised to meet it:
+/// a setting is repaired, never refused. Takes effect immediately, mid-call,
+/// with no reconnect; read the effective values back from `IaxState`'s
+/// `rx_jb_enabled` / `rx_jb_min_ms` / `rx_jb_max_ms`. Returns [`IAX_OK`],
+/// [`IAX_ERR_NULL`] (NULL `st`), or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_set_rx_jitter(
+    st: *mut IaxStation,
+    enabled: bool,
+    min_ms: c_uint,
+    max_ms: c_uint,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        station.inner.set_rx_jitter(enabled, min_ms, max_ms);
         IAX_OK
     }))
     .unwrap_or(IAX_ERR_PANIC)

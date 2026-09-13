@@ -91,6 +91,17 @@ def test_new_snapshot_idle_ptt_event_free() -> None:
         # TX health counters start at zero on a fresh station (iax-9e55).
         assert snap.tx_reanchors == 0
         assert snap.tx_capture_overruns == 0
+        # iax-rxjb: RX health counters start at zero; the jitter buffer
+        # reports Asterisk chan_iax2's defaults.
+        assert snap.rx_underruns == 0
+        assert snap.rx_jitter_ms == 0
+        assert snap.rx_jb_depth_ms == 0
+        assert snap.rx_frames_lost == 0
+        assert snap.rx_frames_late == 0
+        assert snap.rx_frames_ooo == 0
+        assert snap.rx_jb_enabled
+        assert snap.rx_jb_min_ms == 40
+        assert snap.rx_jb_max_ms == 200
         # No DTMF sequence is playing on a fresh station (iax-4b7a). These two
         # read as garbage the moment the struct mirror drifts, so they double as
         # a layout canary.

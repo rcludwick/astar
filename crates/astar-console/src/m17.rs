@@ -809,8 +809,10 @@ fn decode_and_forward(codec: &mut dyn Codec2Voice, pkt: &StreamPacket, call_audi
     bits_b.copy_from_slice(&pkt.payload[8..16]);
     let pcm_a = codec.decode(&bits_a);
     let pcm_b = codec.decode(&bits_b);
-    let _ = call_audio.rx_frames.send(pcm_a.to_vec());
-    let _ = call_audio.rx_frames.send(pcm_b.to_vec());
+    // Codec 2 frames arrive decoded on the protocol's own tick and carry no
+    // sender clock, so they play straight through (iax-rxjb).
+    let _ = call_audio.rx_frames.send(pcm_a.to_vec().into());
+    let _ = call_audio.rx_frames.send(pcm_b.to_vec().into());
 }
 
 /// Build and send one voice-stream packet. `a`/`b` are the two 160-sample
@@ -883,9 +885,9 @@ mod tests {
     /// for "the mic lane already queued this") and the `Receiver` half of
     /// `rx_frames` (unused by the TX-side tests below, but part of the real
     /// struct).
-    fn fake_call_audio() -> (CallAudio, Sender<Vec<i16>>, Receiver<Vec<i16>>) {
+    fn fake_call_audio() -> (CallAudio, Sender<Vec<i16>>, Receiver<astar_audio::RxFrame>) {
         let (tx_tx, tx_rx) = channel::<Vec<i16>>();
-        let (rx_tx, rx_rx) = channel::<Vec<i16>>();
+        let (rx_tx, rx_rx) = channel::<astar_audio::RxFrame>();
         let call_audio = CallAudio {
             tx_frames: tx_rx,
             rx_frames: rx_tx,

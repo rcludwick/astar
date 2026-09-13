@@ -7,19 +7,21 @@
     import SwiftUI
 
     /// Settings section listing the saved **Mic Profiles** — each renameable +
-    /// deletable, showing the frequencies it filters — with the Mic Analyzer launcher
-    /// underneath. Rendered inside the Settings `List`, below Saved configs.
+    /// deletable, showing the frequencies it filters — with a header "+" to start
+    /// a new one. Rendered inside the Settings `List`, below Saved configs.
     struct MicProfilesView: View {
         @EnvironmentObject private var session: CallSession
         @EnvironmentObject private var micAnalyzer: MicAnalyzerController
 
         var body: some View {
-            Section("Mic Profiles") {
+            Section {
                 if session.micProfiles.isEmpty {
-                    Text("No mic profiles yet. Open the analyzer to characterize a mic.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .listRowSeparator(.hidden)
+                    Text(
+                        "No mic profiles yet. Add one with the + above and characterize it in the analyzer."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .listRowSeparator(.hidden)
                 } else {
                     ForEach(session.micProfiles) { profile in
                         MicProfileRow(profile: profile)
@@ -27,15 +29,14 @@
                             .listRowInsets(EdgeInsets(top: 4, leading: 6, bottom: 4, trailing: 6))
                     }
                 }
-
-                Button {
-                    micAnalyzer.open(input: nil)
-                } label: {
-                    Label("Open Mic Analyzer…", systemImage: "waveform")
+            } header: {
+                HStack {
+                    Text("Mic Profiles")
+                    Spacer(minLength: 8)
+                    AddButton(help: "Add a mic profile") {
+                        micAnalyzer.startNew(input: nil)
+                    }
                 }
-                .buttonStyle(.borderless)
-                .font(.callout)
-                .listRowSeparator(.hidden)
             }
         }
     }

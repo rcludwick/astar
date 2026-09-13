@@ -186,14 +186,40 @@ impl Drop for Bridge {
     }
 }
 
+/// What a bridged frame carries. A digital-voice session and a mic lane both
+/// send bare `Vec<i16>`; the output bus's end of the lane is an
+/// [`astar_audio::RxFrame`]. None of these codecs has a sender clock — their
+/// frames arrive decoded, one per protocol tick — so the bridge only ever
+/// needs the samples (iax-rxjb).
+trait BridgedPcm {
+    fn samples(&self) -> &[i16];
+}
+
+impl BridgedPcm for Vec<i16> {
+    fn samples(&self) -> &[i16] {
+        self
+    }
+}
+
+impl BridgedPcm for astar_audio::RxFrame {
+    fn samples(&self) -> &[i16] {
+        &self.pcm
+    }
+}
+
 /// Convert every frame from `rx` and forward it to `tx` until either end
 /// disconnects or `stop` is set.
-fn pump(rx: &Receiver<Vec<i16>>, tx: &Sender<Vec<i16>>, mut bridge: RateBridge, stop: &AtomicBool) {
+fn pump<I: BridgedPcm, O: From<Vec<i16>>>(
+    rx: &Receiver<I>,
+    tx: &Sender<O>,
+    mut bridge: RateBridge,
+    stop: &AtomicBool,
+) {
     while !stop.load(Ordering::Relaxed) {
         match rx.recv_timeout(POLL) {
             Ok(frame) => {
-                if let Some(out) = bridge.convert(&frame)
-                    && tx.send(out).is_err()
+                if let Some(out) = bridge.convert(frame.samples())
+                    && tx.send(O::from(out)).is_err()
                 {
                     return;
                 }
@@ -217,7 +243,7 @@ fn spawn_bridge(bus: CallAudio, bus_rate: u32) -> Result<(CallAudio, Bridge), Au
 
     // RX: the session decodes 8 kHz frames and sends them here; they reach
     // the bus upsampled.
-    let (sess_rx_tx, sess_rx_rx) = channel::<Vec<i16>>();
+    let (sess_rx_tx, sess_rx_rx) = channel::<astar_audio::RxFrame>();
     let up = RateBridge::new(SESSION_RATE, bus_rate)?;
     let stop_up = Arc::clone(&stop);
     let rx_thread = std::thread::Builder::new()
@@ -454,10 +480,10 @@ mod tests {
 
     fn bus_pair() -> (
         CallAudio,
-        Receiver<Vec<i16>>, // what the bridge pushes at the bus rate
-        Sender<Vec<i16>>,   // what the mic lane would push at the bus rate
+        Receiver<astar_audio::RxFrame>, // what the bridge pushes at the bus rate
+        Sender<Vec<i16>>,               // what the mic lane would push at the bus rate
     ) {
-        let (to_bus, from_bridge) = channel::<Vec<i16>>();
+        let (to_bus, from_bridge) = channel::<astar_audio::RxFrame>();
         let (to_bridge, from_mic) = channel::<Vec<i16>>();
         (
             CallAudio {
@@ -489,15 +515,21 @@ mod tests {
         // RX: the session decodes 8 kHz, the bus must receive 16 kHz.
         let up_in = sine(SESSION_RATE, TONE_HZ, 160 * FRAMES);
         for f in up_in.chunks(160) {
-            sess.rx_frames.send(f.to_vec()).expect("session -> bridge");
+            sess.rx_frames
+                .send(f.to_vec().into())
+                .expect("session -> bridge");
         }
         let mut up_out = Vec::new();
         for i in 0..FRAMES {
             let f = from_bridge
                 .recv_timeout(Duration::from_secs(2))
                 .unwrap_or_else(|e| panic!("bus frame {i}: {e}"));
-            assert_eq!(f.len(), 320, "bus frame {i} must be one 20 ms 16 kHz frame");
-            up_out.extend_from_slice(&f);
+            assert_eq!(
+                f.pcm.len(),
+                320,
+                "bus frame {i} must be one 20 ms 16 kHz frame"
+            );
+            up_out.extend_from_slice(&f.pcm);
         }
         let want_up = zero_crossings(&up_in[160 * WARMUP..]);
         let got_up = zero_crossings(&up_out[320 * WARMUP..]);

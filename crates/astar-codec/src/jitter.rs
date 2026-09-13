@@ -223,6 +223,21 @@ impl<T> JitterBuf<T> {
         self.reset_internal();
     }
 
+    /// Hand back every queued frame in timestamp order and reset the buffer,
+    /// keeping the configuration.
+    ///
+    /// The queued frames have not been played yet, so a caller switching the
+    /// buffer off mid-stream must get them out — exactly once, in order —
+    /// rather than dropping the audio on the floor. Everything [`reset`]
+    /// resets is reset here too.
+    ///
+    /// [`reset`]: JitterBuf::reset
+    pub fn drain(&mut self) -> Vec<Frame<T>> {
+        let queued: Vec<Frame<T>> = self.frames.drain(..).collect();
+        self.reset_internal();
+        queued
+    }
+
     fn reset_internal(&mut self) {
         let saved = self.conf;
         self.info = JitterStats::default();

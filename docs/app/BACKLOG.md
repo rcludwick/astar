@@ -12,7 +12,7 @@ inline. All 129 issues (107 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (39)
+## Open items (40)
 
 ### astar-guidv — the Iced client has no digital voice at all
 *P2 medium · feature · labels: gui, cross-platform, dstar, ysf, cx:8*
@@ -534,3 +534,21 @@ The honest fix for both: have the monitor/characterize path return the
 detector's own per-bin floor and, for a capture, its per-bin levels in
 `bin_dbfs` units, and draw those; then the background line is the detector's
 and the markers can be drawn from the same numbers the decision used.
+
+### astar-micorphan — a saved config's mic-profile "+" saves to the library, not to that config
+
+*P3 low · bug · labels: macos, ui, cx:2*
+
+`MicCharacterization.save(now:)` always calls `session.saveMicProfile` +
+`session.setMicProfileSelection` — it writes the new profile into the library
+and applies it to the LIVE session, never into whichever `Setup` triggered the
+characterization. That has been true since mic profiles existed; harmless
+while the only way in was a same-meaning `Analyze…` link that didn't imply
+"for this config." Since the mic-profile "+" work put a "+" directly on
+`ConfigCard.micProfileRow`'s own Profile picker (`SetupsView.swift`), though,
+it now reads as "add one to THIS config" — and pressing it silently applies
+the new profile live while leaving that config's own `micProfileID` wherever
+it already was. Fixing it means either teaching `save` which `Setup` (if any)
+initiated the characterization, or having the config-row "+" follow up with
+its own `micProfileID` edit once `save` returns. Not fixed here — flagged to
+the owner separately.

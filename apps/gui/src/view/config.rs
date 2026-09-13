@@ -16,7 +16,10 @@ use iced::{Alignment, Background, Border, Color, Element, Fill};
 use super::devices::{device_picker, menu_style, picker_style};
 use super::{surface, tip_style};
 use crate::app::Message;
-use crate::settings::{AudioSettings, M17AudioOverrides, Setup, NONE_SETUP_ID};
+use crate::settings::{
+    AudioSettings, M17AudioOverrides, Setup, NONE_SETUP_ID, RX_JITTER_MAX_MS, RX_JITTER_MIN_MS,
+    RX_JITTER_STEP_MS,
+};
 use crate::theme;
 
 /// Everything the panel renders, borrowed from app state.
@@ -53,6 +56,10 @@ pub struct QuickConfig<'a> {
 /// Width of the fixed label column, so sliders/pickers align across cards
 /// (the Mac's `labelWidth` — sized for "Hang Timeout").
 const LABEL_W: f32 = 110.0;
+
+/// The Mac's jitter-buffer caption, verbatim.
+const JITTER_CAPTION: &str =
+    "Smooths out network timing. Deeper is steadier; shallower is quicker.";
 
 /// The Mac's TX Gain help text, verbatim.
 const TX_GAIN_TIP: &str =
@@ -394,6 +401,49 @@ fn speaker_card<'a>(config: &QuickConfig<'a>) -> Element<'a, Message> {
             .style(slider_style(theme::ACCENT)),
             percent(audio.rx_compression_level),
         ));
+    }
+
+    // The RX jitter buffer (iax-rxjb). It belongs on the Speaker card because
+    // it is the last thing that happens to received audio before it is
+    // played, and it is the control you reach for when the channel sounds
+    // choppy — the same complaint that sends people to Vol and RX compression.
+    rows = rows
+        .push(toggle_row(
+            "Jitter buffer",
+            audio.rx_jitter_buffer,
+            Message::RxJitterEnabled,
+        ))
+        .push(text(JITTER_CAPTION).size(13).color(theme::MUTED));
+
+    // The depth window, only where it does something. Green like Vol — this
+    // is the speaker path — and stepped in 10 ms because the buffer schedules
+    // 20 ms frames, so anything finer is below its own resolution.
+    if audio.rx_jitter_buffer {
+        rows = rows
+            .push(sub_slider_row(
+                "Min",
+                slider(
+                    RX_JITTER_MIN_MS..=RX_JITTER_MAX_MS,
+                    audio.rx_jitter_min_ms,
+                    Message::RxJitterMin,
+                )
+                .step(RX_JITTER_STEP_MS)
+                .on_release(Message::SaveAudio)
+                .style(slider_style(theme::RX)),
+                ms_label(audio.rx_jitter_min_ms),
+            ))
+            .push(sub_slider_row(
+                "Max",
+                slider(
+                    RX_JITTER_MIN_MS..=RX_JITTER_MAX_MS,
+                    audio.rx_jitter_max_ms,
+                    Message::RxJitterMax,
+                )
+                .step(RX_JITTER_STEP_MS)
+                .on_release(Message::SaveAudio)
+                .style(slider_style(theme::RX)),
+                ms_label(audio.rx_jitter_max_ms),
+            ));
     }
 
     card("Speaker", rows)

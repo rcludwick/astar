@@ -27,6 +27,9 @@
         @Published private(set) var lastError: String?
         /// The config applied automatically at launch (★ in the cards); nil = none.
         @Published private(set) var defaultID: String?
+        /// The config just created by +, which its card claims once to open itself
+        /// and take the keyboard.
+        @Published var focusNewID: String?
 
         let registry = HardwareProfileRegistry()
 
@@ -162,6 +165,7 @@
             )
             store.save(setup)
             refresh()
+            focusNewID = setup.id
             return setup
         }
 

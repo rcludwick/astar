@@ -48,15 +48,23 @@ fn indicator(label: &str, accent: Color, lit: bool) -> Element<'static, Message>
 
 /// The two VU bars (TX then RX), each labelled, with a percent readout.
 /// TX brightens while keyed, RX while receiving (mirrors the Mac popover).
-pub fn vu_bars(snap: &Snapshot) -> Element<'_, Message> {
-    surface(
-        column![
-            vu_row("TX", theme::TX, snap.tx_level, snap.transmitting),
-            vu_row("RX", theme::RX, snap.rx_level, snap.receiving),
-        ]
-        .spacing(14),
-    )
-    .into()
+///
+/// `quality` is the call-quality line (iax-rxjb), already formatted by
+/// [`super::status::call_quality_line`] — `None` when there is nothing to
+/// say. It sits directly under the RX bar it explains, exactly where the Mac
+/// popover puts it.
+pub fn vu_bars(snap: &Snapshot, quality: Option<String>) -> Element<'_, Message> {
+    let mut rows = column![
+        vu_row("TX", theme::TX, snap.tx_level, snap.transmitting),
+        vu_row("RX", theme::RX, snap.rx_level, snap.receiving),
+    ]
+    .spacing(14);
+
+    if let Some(line) = quality {
+        rows = rows.push(text(line).size(13).color(theme::MUTED));
+    }
+
+    surface(rows).into()
 }
 
 /// The bar's fill as a whole-number percent label — derived from the SAME

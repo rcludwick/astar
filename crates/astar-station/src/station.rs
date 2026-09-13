@@ -2410,6 +2410,29 @@ impl Station {
         self.session.lock().unwrap().set_rx_compression_level(level);
     }
 
+    /// Configure the RX jitter buffer (iax-rxjb): whether received audio is
+    /// played out of the adaptive buffer at all, and the window
+    /// (`min_ms`..=`max_ms`) its depth may live in.
+    ///
+    /// The defaults are Asterisk `chan_iax2`'s — on, 40 ms of slack over
+    /// measured jitter, a 200 ms ceiling — because the node at the other end
+    /// of an `AllStarLink` call is Asterisk. Bigger `min_ms` = more latency,
+    /// fewer holes. Both bounds are clamped to `0..=500` ms and a `max_ms`
+    /// under `min_ms` is raised to meet it: a setting is repaired, never
+    /// refused. Takes effect immediately, mid-call, with no reconnect;
+    /// `snapshot()` reports the effective values as `rx_jb_enabled` /
+    /// `rx_jb_min_ms` / `rx_jb_max_ms`.
+    pub fn set_rx_jitter(&self, enabled: bool, min_ms: u32, max_ms: u32) {
+        self.session
+            .lock()
+            .unwrap()
+            .set_rx_jitter(astar_audio::RxJitterConfig {
+                enabled,
+                min_ms,
+                max_ms,
+            });
+    }
+
     /// Toggle mic noise reduction (denoise) on the live/next call (WT/console
     /// path). Takes effect immediately on an active call's capture lane.
     pub fn set_noise_reduction(&self, on: bool) {

@@ -22,6 +22,7 @@ mod raw_dial;
 pub mod registration;
 pub mod routing_config;
 mod runtime;
+mod rx_clock;
 pub mod trace;
 mod transport;
 

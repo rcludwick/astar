@@ -1090,14 +1090,25 @@ OPEN: does CpalBackend expose gain/AGC today? If not, scope the backend addition
 **Design:** Populate the inspect harness Network tab with live call/network quality stats from the iax library. Currently the harness shows TX/RX level meters and call phase, but not transport quality.
 
 SCOPE — surface (read-only) per active call:
-- jitter buffer depth / target, jitter estimate
-- packet loss (rx/tx), out-of-order count, dropped/late frames
+- ~~jitter buffer depth / target, jitter estimate~~ — **done (iax-rxjb)**: the
+  RX path has an adaptive jitter buffer on the mixer lane, and the snapshot
+  carries `rx_jb_depth_ms`, `rx_jitter_ms`, `rx_frames_lost`,
+  `rx_frames_late`, `rx_frames_ooo` and a cumulative `rx_underruns`, plus the
+  effective config (`rx_jb_enabled` / `rx_jb_min_ms` / `rx_jb_max_ms`). All the
+  way through the C ABI, Swift and Python. See `docs/design/rx-jitter-buffer.md`.
+- packet loss (rx/tx), out-of-order count, dropped/late frames — the RX half is
+  covered by the counters above; the TX half is still open
 - round-trip time / ping
 - frames sent/received, bytes
-SOURCE: whatever astar-iax-core exposes (or needs to expose) as a stats snapshot — verify the available fields first; some may need plumbing from the core session into Station::snapshot.
+SOURCE: the receive-side stats come off the mixer lane's jitter buffer
+(`astar-audio`), not the core session — verify what remains against
+`Call::snapshot` before adding a second source of truth.
 UI: Network tab table, polled or via SSE alongside the existing meters.
 
-PREREQ/OPEN: audit astar-iax-core for an existing netstats struct; if absent, add a stats accessor on the session and thread it through Station. May depend on core work.
+PREREQ/OPEN: the remaining fields (TX loss, RTT, frame/byte totals) still need
+an audit of astar-iax-core for an existing netstats struct; if absent, add a
+stats accessor on the session and thread it through Station. What is left here
+is the harness UI plus those TX-side numbers.
 
 ### iax-21c8 — astar-sys: C-ABI compatibility shim for astar drop-in
 *P2 medium · feature · labels: api, cx:5, ffi, migration*
