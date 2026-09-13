@@ -2,19 +2,19 @@
   "api_version": "v1",
   "attribution": "Reflector data provided by DVRef \u2014 https://dvref.com/\nXLX reflector data from the XLX registry maintained by Luc Engelmann, LX1IQ (http://xlxapi.rlx.lu/).\nStandalone XRF reflector data from the Pi-Star DExtra host file (http://www.pistar.uk/downloads/DExtra_Hosts.txt).\nREF and DCS reflector names from the Pi-Star DPlus and DCS host files (http://www.pistar.uk/downloads/).",
   "client_refresh_days": 7,
-  "count": 3431,
-  "generated": "2026-09-10",
+  "count": 3483,
+  "generated": "2026-09-12",
   "license": "CC BY 4.0",
   "license_url": "https://creativecommons.org/licenses/by/4.0/",
   "modifications": "Reformatted from the upstream source into hamcall-db's common reflector JSON schema. Field names and structure differ from upstream. Email addresses have been removed from the free-text fields (name, sponsor, description) and replaced with '[email removed]'; values are otherwise unmodified.",
   "networks": {
-    "dmr": 185,
-    "dstar": 947,
+    "dmr": 184,
+    "dstar": 946,
     "m17": 107,
-    "nxdn": 300,
-    "p25": 320,
-    "urf": 99,
-    "ysf": 1473
+    "nxdn": 317,
+    "p25": 333,
+    "urf": 103,
+    "ysf": 1493
   },
   "reflectors": [
     {
@@ -592,7 +592,8 @@
       "network": "dmr",
       "source": "dvref",
       "sponsor": "DRCC Team",
-      "system": "china-homebrew-dmr-bridge"
+      "system": "china-homebrew-dmr-bridge",
+      "talkgroups": "reflectors/dmr/china-homebrew-dmr-bridge/talkgroups.json"
     },
     {
       "country": "GB",
@@ -614,7 +615,8 @@
       "network": "dmr",
       "source": "dvref",
       "sponsor": "CQ-UK WORLDWIDE",
-      "system": "cq-uk-dmr-master"
+      "system": "cq-uk-dmr-master",
+      "talkgroups": "reflectors/dmr/cq-uk-dmr-master/talkgroups.json"
     },
     {
       "country": "SE",
@@ -625,7 +627,8 @@
       "network": "dmr",
       "source": "dvref",
       "sponsor": "CQ Zone! - Member of ( HELLAS Zone Net )",
-      "system": "cq-zone"
+      "system": "cq-zone",
+      "talkgroups": "reflectors/dmr/cq-zone/talkgroups.json"
     },
     {
       "country": "US",
@@ -646,7 +649,8 @@
       "network": "dmr",
       "source": "dvref",
       "sponsor": "CRHRC",
-      "system": "crhrc"
+      "system": "crhrc",
+      "talkgroups": "reflectors/dmr/crhrc/talkgroups.json"
     },
     {
       "country": "US",
@@ -667,7 +671,8 @@
       "network": "dmr",
       "source": "dvref",
       "sponsor": "CRHRC",
-      "system": "crhrc"
+      "system": "crhrc",
+      "talkgroups": "reflectors/dmr/crhrc/talkgroups.json"
     },
     {
       "country": "GB",
@@ -688,7 +693,8 @@
       "network": "dmr",
       "source": "dvref",
       "sponsor": "CumbriaCQ",
-      "system": "cumbriacq-dmr-master"
+      "system": "cumbriacq-dmr-master",
+      "talkgroups": "reflectors/dmr/cumbriacq-dmr-master/talkgroups.json"
     },
     {
       "country": "GB",
@@ -709,7 +715,8 @@
       "network": "dmr",
       "source": "dvref",
       "sponsor": "CUMBRIA CQ",
-      "system": "cumbriacqcom"
+      "system": "cumbriacqcom",
+      "talkgroups": "reflectors/dmr/cumbriacqcom/talkgroups.json"
     },
     {
       "country": "AU",
@@ -731,7 +738,8 @@
       "network": "dmr",
       "source": "dvref",
       "sponsor": "VK2WAY, VK3JED, VK5ZSH, ZL2RO",
-      "system": "digital-voice-down-under-dvdu"
+      "system": "digital-voice-down-under-dvdu",
+      "talkgroups": "reflectors/dmr/digital-voice-down-under-dvdu/talkgroups.json"
     },
     {
       "country": "NZ",
@@ -753,7 +761,8 @@
       "network": "dmr",
       "source": "dvref",
       "sponsor": "VK2WAY, VK3JED, VK5ZSH, ZL2RO",
-      "system": "digital-voice-down-under-dvdu"
+      "system": "digital-voice-down-under-dvdu",
+      "talkgroups": "reflectors/dmr/digital-voice-down-under-dvdu/talkgroups.json"
     },
     {
       "country": "AU",
@@ -775,7 +784,8 @@
       "network": "dmr",
       "source": "dvref",
       "sponsor": "VK2WAY, VK3JED, VK5ZSH, ZL2RO",
-      "system": "digital-voice-down-under-dvdu"
+      "system": "digital-voice-down-under-dvdu",
+      "talkgroups": "reflectors/dmr/digital-voice-down-under-dvdu/talkgroups.json"
     },
     {
       "country": "GR",
@@ -797,7 +807,8 @@
       "network": "dmr",
       "source": "dvref",
       "sponsor": "sv2snh.gr",
-      "system": "digital-voice-greece"
+      "system": "digital-voice-greece",
+      "talkgroups": "reflectors/dmr/digital-voice-greece/talkgroups.json"
     },
     {
       "country": "US",
@@ -1881,7 +1892,7 @@
     },
     {
       "country": "FR",
-      "dashboard": "http://ctb2.ysf-france.fr:8080/",
+      "dashboard": "http://ctb1.ysf-france.fr:8086/",
       "description": "<p>Serveur HBlink4 F1PTL</p>\r\n<p>TG20800 Interco avec YSF-France (YSF/DMR)</p>\r\n<p>TG20841 Interco avec YSF-DPT41 (YSF/DMR)</p>\r\n<p>TG20862 interco avec YSF-TG20862 (YSF/DMR)</p>\r\n<p>TG20892 interco OpenAI (YSF/DMR)</p>",
       "dial": {
         "host": "hb4.ysf-france.fr",
@@ -2419,48 +2430,6 @@
       },
       "id": "ipsc3-server-ipsc3-freedmr-uk-62031",
       "name": "ipsc3-freedmr-uk 62031",
-      "network": "dmr",
-      "source": "dvref",
-      "sponsor": "Matt Perkins",
-      "system": "ipsc3"
-    },
-    {
-      "country": "GB",
-      "dashboard": "http://wiki.ipsc3.net",
-      "dial": {
-        "host": "uk.ipsc3.net",
-        "kind": "mmdvm",
-        "port": 55555,
-        "requires": [
-          "dmr_id",
-          "password"
-        ],
-        "system": "ipsc3",
-        "talkgroups_url": "https://dvref.com/api/v2/dmr/networks/ipsc3/talkgroups/"
-      },
-      "id": "ipsc3-server-ipsc3-uk-55555",
-      "name": "ipsc3-uk 55555",
-      "network": "dmr",
-      "source": "dvref",
-      "sponsor": "Matt Perkins",
-      "system": "ipsc3"
-    },
-    {
-      "country": "GB",
-      "dashboard": "http://wiki.ipsc3.net",
-      "dial": {
-        "host": "uk.ipsc3.net",
-        "kind": "mmdvm",
-        "port": 62031,
-        "requires": [
-          "dmr_id",
-          "password"
-        ],
-        "system": "ipsc3",
-        "talkgroups_url": "https://dvref.com/api/v2/dmr/networks/ipsc3/talkgroups/"
-      },
-      "id": "ipsc3-server-ipsc3-uk-62031",
-      "name": "ipsc3-uk 62031",
       "network": "dmr",
       "source": "dvref",
       "sponsor": "Matt Perkins",
@@ -3270,8 +3239,29 @@
       "name": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131",
       "network": "dmr",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131",
+      "sponsor": "YM2KB / TA2BBE",
       "system": "turk-amator-dijital-ag"
+    },
+    {
+      "country": "TR",
+      "dashboard": "http://ptt.pistar.com.tr/",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "mmdvm",
+        "port": 62031,
+        "requires": [
+          "dmr_id",
+          "password"
+        ],
+        "system": "turk-dmr",
+        "talkgroups_url": "https://dvref.com/api/v2/dmr/networks/turk-dmr/talkgroups/"
+      },
+      "id": "turk-dmr-server-turk-dmr",
+      "name": "T\u00fcrk DMR",
+      "network": "dmr",
+      "source": "dvref",
+      "sponsor": "YM2KB / TA2BBE",
+      "system": "turk-dmr"
     },
     {
       "country": "TR",
@@ -3292,7 +3282,7 @@
       "name": "Turk Preppers DMR Network",
       "network": "dmr",
       "source": "dvref",
-      "sponsor": "T\u00fcrkiye Digital Group",
+      "sponsor": "YM2KB / TA2BBE",
       "system": "turkiye-dmr"
     },
     {
@@ -3314,7 +3304,7 @@
       "name": "T\u00fcrkiye DMR",
       "network": "dmr",
       "source": "dvref",
-      "sponsor": "T\u00fcrkiye Digital Group",
+      "sponsor": "YM2KB / TA2BBE",
       "system": "turkiye-dmr"
     },
     {
@@ -3924,13 +3914,13 @@
       "aliases": [
         "XRF00B",
         "REF00B",
-        "REF00C",
+        "REF297",
         "DCS00B",
-        "DCS00C"
+        "DCS297"
       ],
-      "country": "japan",
+      "country": "Hiroshima Japan",
       "dashboard": "http://xlx00b.mydns.jp",
-      "description": "kachimaru Reflector",
+      "description": "Kachimaru Reflector",
       "dial": {
         "callsign": "XRF00B",
         "host": "223.223.44.243",
@@ -3939,28 +3929,6 @@
       },
       "id": "XLX00B",
       "name": "XLX00B",
-      "network": "dstar",
-      "source": "xlx"
-    },
-    {
-      "aliases": [
-        "XRF00C",
-        "REF00B",
-        "REF00C",
-        "DCS00B",
-        "DCS00C"
-      ],
-      "country": "Japan",
-      "dashboard": "http://xlx00c.mydns.jp",
-      "description": "XLX00C Multiprotocol Reflector by JE4YRU, info: [email removed]",
-      "dial": {
-        "callsign": "XRF00C",
-        "host": "223.223.44.243",
-        "kind": "dextra",
-        "port": 30001
-      },
-      "id": "XLX00C",
-      "name": "XLX00C",
       "network": "dstar",
       "source": "xlx"
     },
@@ -7586,8 +7554,8 @@
         "DCS208"
       ],
       "country": "France",
-      "dashboard": "http://urf208.f5kav.fr",
-      "description": "French Multimode Reflector, brought to you by F5KAV Club",
+      "dashboard": "http://xlx208.f5kav.fr",
+      "description": "French D-Star XLX Multiprotocol Reflector and Smart Group Server, brought to you by F5KAV",
       "dial": {
         "callsign": "XRF208",
         "host": "213.186.34.50",
@@ -8049,7 +8017,7 @@
       "description": "Multiprotocol Reflector D-STAR G3 - BM TG 22232",
       "dial": {
         "callsign": "XRF232",
-        "host": "82.59.234.147",
+        "host": "82.58.58.12",
         "kind": "dextra",
         "port": 30001
       },
@@ -9042,7 +9010,7 @@
       "description": "XLX288 / YSF IT-URF288 #22250",
       "dial": {
         "callsign": "XRF288",
-        "host": "79.21.29.205",
+        "host": "79.36.137.99",
         "kind": "dextra",
         "port": 30001
       },
@@ -9148,6 +9116,28 @@
       },
       "id": "XLX296",
       "name": "XLX296",
+      "network": "dstar",
+      "source": "xlx"
+    },
+    {
+      "aliases": [
+        "XRF297",
+        "REF00B",
+        "REF297",
+        "DCS00B",
+        "DCS297"
+      ],
+      "country": "Hiroshima Japan",
+      "dashboard": "http://xlx00b.mydns.jp",
+      "description": "Kachimaru Reflector",
+      "dial": {
+        "callsign": "XRF297",
+        "host": "223.223.44.243",
+        "kind": "dextra",
+        "port": 30001
+      },
+      "id": "XLX297",
+      "name": "XLX297",
       "network": "dstar",
       "source": "xlx"
     },
@@ -9719,7 +9709,7 @@
       "description": "Hosted by 7N1MPI in Nasushiobara City,Tochigi",
       "dial": {
         "callsign": "XRF329",
-        "host": "125.202.138.7",
+        "host": "114.185.197.167",
         "kind": "dextra",
         "port": 30001
       },
@@ -10504,26 +10494,6 @@
       },
       "id": "XLX380",
       "name": "XLX380",
-      "network": "dstar",
-      "source": "xlx"
-    },
-    {
-      "aliases": [
-        "XRF381",
-        "REF381",
-        "DCS381"
-      ],
-      "country": "United States",
-      "dashboard": "http://xlx.trianglenc.net/",
-      "description": "Triangle NC XLX381 D-Star Reflector Modules:A=TAC A, B=TAC B, C=TriangleNC, D=Truck-N-Travel",
-      "dial": {
-        "callsign": "XRF381",
-        "host": "74.91.114.100",
-        "kind": "dextra",
-        "port": 30001
-      },
-      "id": "XLX381",
-      "name": "XLX381",
       "network": "dstar",
       "source": "xlx"
     },
@@ -12990,8 +12960,8 @@
         "DCS535"
       ],
       "country": "Thailand",
-      "dashboard": "http://hs9awo.com",
-      "description": "XLX535 Multiprotocol Reflector by HS9AWO, info: [email removed]",
+      "dashboard": "http://203.159.93.71",
+      "description": "Built by PATTANI Team",
       "dial": {
         "callsign": "XRF535",
         "host": "203.159.93.71",
@@ -14062,26 +14032,6 @@
     },
     {
       "aliases": [
-        "XRF641",
-        "REF641",
-        "DCS641"
-      ],
-      "country": "United States",
-      "dashboard": "http://node64189.ddns.net:18080",
-      "description": "KE7WIL Personal D-Star Reflector - XLX641",
-      "dial": {
-        "callsign": "XRF641",
-        "host": "72.222.219.41",
-        "kind": "dextra",
-        "port": 30001
-      },
-      "id": "XLX641",
-      "name": "XLX641",
-      "network": "dstar",
-      "source": "xlx"
-    },
-    {
-      "aliases": [
         "XRF642",
         "REF642",
         "DCS642"
@@ -14151,7 +14101,7 @@
       "description": "XLX647 : REF647, DMR TG52007, YSF 55191, M17-647 Operate by HS5BLO",
       "dial": {
         "callsign": "XRF647",
-        "host": "58.8.190.80",
+        "host": "124.120.172.117",
         "kind": "dextra",
         "port": 30001
       },
@@ -14531,7 +14481,7 @@
       "description": "XLX VoIP Reflector by JA9DIJ",
       "dial": {
         "callsign": "XRF680",
-        "host": "153.130.136.236",
+        "host": "153.221.245.190",
         "kind": "dextra",
         "port": 30001
       },
@@ -15815,6 +15765,26 @@
     },
     {
       "aliases": [
+        "XRF776",
+        "REF776",
+        "DCS776"
+      ],
+      "country": "Japan",
+      "dashboard": "http://xrf776.mydns.jp/index.php",
+      "description": "Sairama Kawaguchi Reflector",
+      "dial": {
+        "callsign": "XRF776",
+        "host": "61.27.174.176",
+        "kind": "dextra",
+        "port": 30001
+      },
+      "id": "XLX776",
+      "name": "XLX776",
+      "network": "dstar",
+      "source": "xlx"
+    },
+    {
+      "aliases": [
         "REF777",
         "DCS777"
       ],
@@ -16133,26 +16103,6 @@
     },
     {
       "aliases": [
-        "XRF808",
-        "REF808",
-        "DCS808"
-      ],
-      "country": "Thailand",
-      "dashboard": "http://xlx808.hs6twi.com",
-      "description": "XLX808",
-      "dial": {
-        "callsign": "XRF808",
-        "host": "44.27.26.162",
-        "kind": "dextra",
-        "port": 30001
-      },
-      "id": "XLX808",
-      "name": "XLX808",
-      "network": "dstar",
-      "source": "xlx"
-    },
-    {
-      "aliases": [
         "XRF810",
         "REF810",
         "DCS810"
@@ -16379,7 +16329,7 @@
       ],
       "country": "USA",
       "dashboard": "https://kd2qqv.ddns.net",
-      "description": "XLX823 DMR YSF D-STAR NXDN XReflector [email removed]",
+      "description": "XLX823 Reflector System",
       "dial": {
         "callsign": "XRF823",
         "host": "24.104.209.133",
@@ -16813,26 +16763,6 @@
     },
     {
       "aliases": [
-        "XRF859",
-        "REF859",
-        "DCS859"
-      ],
-      "country": "USA",
-      "dashboard": "http://n4jes.ddns.net",
-      "description": "Gateway Repeater Group, Mount Sterling, Kentucky",
-      "dial": {
-        "callsign": "XRF859",
-        "host": "71.150.187.242",
-        "kind": "dextra",
-        "port": 30001
-      },
-      "id": "XLX859",
-      "name": "XLX859",
-      "network": "dstar",
-      "source": "xlx"
-    },
-    {
-      "aliases": [
         "XRF860",
         "REF860",
         "DCS860"
@@ -16882,7 +16812,7 @@
       "description": "Gruppo Dstar Agrigento",
       "dial": {
         "callsign": "XRF862",
-        "host": "195.231.118.80",
+        "host": "195.231.117.61",
         "kind": "dextra",
         "port": 30001
       },
@@ -17132,6 +17062,26 @@
     },
     {
       "aliases": [
+        "XRF896",
+        "REF896",
+        "DCS896"
+      ],
+      "country": "Japan",
+      "dashboard": "http://ambebaba.duckdns.org/",
+      "description": "XLX896 Kumamoto Japan - JE6NGR",
+      "dial": {
+        "callsign": "XRF896",
+        "host": "180.51.230.29",
+        "kind": "dextra",
+        "port": 30001
+      },
+      "id": "XLX896",
+      "name": "XLX896",
+      "network": "dstar",
+      "source": "xlx"
+    },
+    {
+      "aliases": [
         "REF897",
         "DCS897"
       ],
@@ -17265,6 +17215,26 @@
       },
       "id": "XLX905",
       "name": "XLX905",
+      "network": "dstar",
+      "source": "xlx"
+    },
+    {
+      "aliases": [
+        "XRF907",
+        "REF907",
+        "DCS907"
+      ],
+      "country": "SPAIN",
+      "dashboard": "http://xlx907.ddns.net/index.php",
+      "description": "XLX Hosted by EA4GAX",
+      "dial": {
+        "callsign": "XRF907",
+        "host": "79.148.151.114",
+        "kind": "dextra",
+        "port": 30001
+      },
+      "id": "XLX907",
+      "name": "XLX907",
       "network": "dstar",
       "source": "xlx"
     },
@@ -18965,26 +18935,6 @@
     },
     {
       "aliases": [
-        "XRFBUL",
-        "REFBUL",
-        "DCSBUL"
-      ],
-      "country": "Switzerland",
-      "dashboard": "http://xlxbul.net",
-      "description": "XLXBUL Multiprotocol Reflector by HB9HER, info: [email removed]",
-      "dial": {
-        "callsign": "XRFBUL",
-        "host": "109.203.45.102",
-        "kind": "dextra",
-        "port": 30001
-      },
-      "id": "XLXBUL",
-      "name": "XLXBUL",
-      "network": "dstar",
-      "source": "xlx"
-    },
-    {
-      "aliases": [
         "XRFCAN",
         "REFCAN",
         "DCSCAN"
@@ -20043,10 +19993,25 @@
     },
     {
       "aliases": [
-        "XRFMMG",
-        "REFMMG",
-        "DCSMMG"
+        "XRFMLB",
+        "REFMLB",
+        "DCSMLB"
       ],
+      "country": "USA",
+      "dashboard": "http://xlxmlb.n0oj.net:14685",
+      "description": "Merritt Island, FL USA",
+      "dial": {
+        "callsign": "XRFMLB",
+        "host": "144.129.188.190",
+        "kind": "dextra",
+        "port": 30001
+      },
+      "id": "XLXMLB",
+      "name": "XLXMLB",
+      "network": "dstar",
+      "source": "xlx"
+    },
+    {
       "country": "United States",
       "dashboard": "http://xlxmmg.nemmg.club",
       "description": "New England MultiMode Group",
@@ -20127,9 +20092,9 @@
         "REFNLD",
         "DCSNLD"
       ],
-      "country": "The Netherlands",
+      "country": "Netherlands",
       "dashboard": "http://dstarnld.pa7lim.nl",
-      "description": "Dutch Reflector by David PA7LIM",
+      "description": "Dutch DSTAR Central",
       "dial": {
         "callsign": "XRFNLD",
         "host": "90.145.156.214",
@@ -20247,7 +20212,7 @@
       ],
       "country": "Brazil",
       "dashboard": "http://dstarbrasil.com.br",
-      "description": "XLXPNY Multiprotocol Reflector by PU2PNY, info: [email removed]",
+      "description": "XLXPNY by PU2PNY - dstarbrasil.com.br",
       "dial": {
         "callsign": "XRFPNY",
         "host": "82.152.174.236",
@@ -21733,22 +21698,6 @@
       "source": "dextra"
     },
     {
-      "aliases": [
-        "REF311",
-        "DCS311"
-      ],
-      "dial": {
-        "callsign": "XRF311",
-        "host": "93.211.196.43",
-        "kind": "dextra",
-        "port": 30001
-      },
-      "id": "XRF311",
-      "name": "XRF311",
-      "network": "dstar",
-      "source": "dextra"
-    },
-    {
       "dial": {
         "callsign": "XRF321",
         "host": "104.21.57.126",
@@ -21811,7 +21760,7 @@
     {
       "dial": {
         "callsign": "XRF555",
-        "host": "178.107.232.205",
+        "host": "178.107.232.203",
         "kind": "dextra",
         "port": 30001
       },
@@ -22065,6 +22014,22 @@
       },
       "id": "XRF988",
       "name": "XRF988",
+      "network": "dstar",
+      "source": "dextra"
+    },
+    {
+      "aliases": [
+        "REFMMG",
+        "DCSMMG"
+      ],
+      "dial": {
+        "callsign": "XRFMMG",
+        "host": "172.56.198.157",
+        "kind": "dextra",
+        "port": 30001
+      },
+      "id": "XRFMMG",
+      "name": "XRFMMG",
       "network": "dstar",
       "source": "dextra"
     },
@@ -24578,10 +24543,10 @@
     {
       "country": "BR",
       "dashboard": "https://m17-digitalvoice.dns.army",
-      "description": "<p>REDE LINKADA SLB BRASIL</p>",
+      "description": "<p>* REDE LINKADA BRASIL</p>",
       "dial": {
         "callsign": "M17-SLB",
-        "host": "165.73.249.152",
+        "host": "155.117.46.188",
         "kind": "m17",
         "modules": [
           "A",
@@ -25154,6 +25119,20 @@
       "network": "nxdn",
       "source": "dvref",
       "sponsor": "IK3DNV"
+    },
+    {
+      "country": "NL",
+      "dashboard": "http://pd0poh.ddns.net",
+      "dial": {
+        "host": "87.212.135.150",
+        "kind": "nxdn",
+        "port": 41400
+      },
+      "id": "1224",
+      "name": "PI1DAF Almere",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "2The Experience"
     },
     {
       "country": "ES",
@@ -25895,6 +25874,20 @@
     },
     {
       "country": "IT",
+      "dashboard": "http://rudinet.giize.com/nxdn/",
+      "dial": {
+        "host": "rudinet.giize.com",
+        "kind": "nxdn",
+        "port": 41400
+      },
+      "id": "22232",
+      "name": "IT-XLX232 Multi-mode AMBE",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "IW3HWH"
+    },
+    {
+      "country": "IT",
       "dashboard": "http://nxdn.ddns.net",
       "dial": {
         "host": "nxdn.ddns.net",
@@ -26249,6 +26242,20 @@
     },
     {
       "country": "GB",
+      "dashboard": "https://www.qsos.uk",
+      "dial": {
+        "host": "77.68.126.26",
+        "kind": "nxdn",
+        "port": 41400
+      },
+      "id": "23450",
+      "name": "YorkshireNetUK",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "M0XYN"
+    },
+    {
+      "country": "GB",
       "dashboard": "https://nxdn2350.freestar.network",
       "dial": {
         "host": "nxdn2350.freestar.network",
@@ -26468,6 +26475,20 @@
       "name": "Smolensk Obl. Digital network",
       "network": "nxdn",
       "source": "dvref"
+    },
+    {
+      "country": "BY",
+      "dashboard": "https://xlx375.bfrr.by",
+      "dial": {
+        "host": "xlx375.bfrr.by",
+        "kind": "nxdn",
+        "port": 41400
+      },
+      "id": "25701",
+      "name": "BY MultiMode",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "EW1EM"
     },
     {
       "country": "PL",
@@ -26756,14 +26777,14 @@
       "name": "NXDN Turkiye Genel",
       "network": "nxdn",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KG"
     },
     {
       "country": "TR",
       "dashboard": "http://dmr.pistar.com.tr:28301/",
       "description": "<p>NXDN Adana Reflector - YM2KG</p>",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "nxdn",
         "port": 41401
       },
@@ -26771,14 +26792,14 @@
       "name": "NXDN Adana",
       "network": "nxdn",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KG"
     },
     {
       "country": "TR",
       "dashboard": "http://dmr.pistar.com.tr:28303/",
       "description": "<p>NXDN Afyon Reflector - YM2KG</p>",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "nxdn",
         "port": 41403
       },
@@ -26786,14 +26807,14 @@
       "name": "NXDN Afyon",
       "network": "nxdn",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KG"
     },
     {
       "country": "TR",
       "dashboard": "http://dmr.pistar.com.tr:28306/",
       "description": "<p>NXDN Ankara Reflector - YM2KG</p>",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "nxdn",
         "port": 41406
       },
@@ -26801,14 +26822,14 @@
       "name": "NXDN Ankara",
       "network": "nxdn",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KG"
     },
     {
       "country": "TR",
       "dashboard": "http://dmr.pistar.com.tr:28307/",
       "description": "<p>NXDN Antalya Reflector - YM2KG</p>",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "nxdn",
         "port": 41407
       },
@@ -26816,14 +26837,112 @@
       "name": "NXDN Antalya",
       "network": "nxdn",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KG"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK NXDN 09 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "nxdn",
+        "port": 41409
+      },
+      "id": "28609",
+      "name": "NXDN Aydin",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "YM2KG"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK NXDN 10 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "nxdn",
+        "port": 41410
+      },
+      "id": "28610",
+      "name": "NXDN Balikesir",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "YM2KG"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK NXDN 16 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "nxdn",
+        "port": 41416
+      },
+      "id": "28616",
+      "name": "NXDN Bursa",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "YM2KG"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK NXDN 17 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "nxdn",
+        "port": 41417
+      },
+      "id": "28617",
+      "name": "NXDN Canakkale",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "YM2KG"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK NXDN 20 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "nxdn",
+        "port": 41420
+      },
+      "id": "28620",
+      "name": "NXDN Denizli",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "YM2KG"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK NXDN 26 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "nxdn",
+        "port": 41426
+      },
+      "id": "28626",
+      "name": "NXDN Eskisehir",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "YM2KG"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK NXDN 33 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "nxdn",
+        "port": 41433
+      },
+      "id": "28633",
+      "name": "NXDN Mersin",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "YM2KG"
     },
     {
       "country": "TR",
       "dashboard": "http://dmr.pistar.com.tr:28334/",
       "description": "<p>NXDN Istanbul Reflector - YM2KG</p>",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "nxdn",
         "port": 41434
       },
@@ -26831,14 +26950,14 @@
       "name": "NXDN Istanbul",
       "network": "nxdn",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KG"
     },
     {
       "country": "TR",
       "dashboard": "http://dmr.pistar.com.tr:28335/",
       "description": "<p>NXDN Izmir Reflector - YM2KG</p>",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "nxdn",
         "port": 41435
       },
@@ -26846,14 +26965,56 @@
       "name": "NXDN Izmir",
       "network": "nxdn",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KG"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK NXDN 41 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "nxdn",
+        "port": 41441
+      },
+      "id": "28641",
+      "name": "NXDN Kocaeli",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "YM2KG"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK NXDN 42 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "nxdn",
+        "port": 41442
+      },
+      "id": "28642",
+      "name": "NXDN Konya",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "YM2KG"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK NXDN 44 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "nxdn",
+        "port": 41444
+      },
+      "id": "28644",
+      "name": "NXDN Malatya",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "YM2KG"
     },
     {
       "country": "TR",
       "dashboard": "http://dmr.pistar.com.tr:28348/",
       "description": "<p>NXDN Mugla Reflector - YM2KG</p>",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "nxdn",
         "port": 41448
       },
@@ -26861,14 +27022,28 @@
       "name": "NXDN Mugla",
       "network": "nxdn",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KG"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK NXDN 59 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "nxdn",
+        "port": 41459
+      },
+      "id": "28659",
+      "name": "NXDN Tekirdag",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "YM2KG"
     },
     {
       "country": "TR",
       "dashboard": "https://dmr.pistar.com.tr:28381",
-      "description": "<p>NXDN Duzce Reflector - YM2KG</p>",
+      "description": "TurkLINK NXDN 81 Reflektor Odasi",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "nxdn",
         "port": 41481
       },
@@ -26876,7 +27051,7 @@
       "name": "NXDN Duzce",
       "network": "nxdn",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KG"
     },
     {
       "country": "TR",
@@ -27479,6 +27654,20 @@
       "sponsor": "K6HP"
     },
     {
+      "country": "US",
+      "dashboard": "http://66492.ip.hamvoip.org",
+      "dial": {
+        "host": "66492.ip.hamvoip.org",
+        "kind": "nxdn",
+        "port": 41400
+      },
+      "id": "3241",
+      "name": "URF324",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "KQ4HPI"
+    },
+    {
       "country": "MX",
       "dashboard": "http://89.117.61.236",
       "description": "<p>NXDN-3341 TGIF</p>",
@@ -27593,19 +27782,6 @@
       "network": "nxdn",
       "source": "dvref",
       "sponsor": "KB2IDX"
-    },
-    {
-      "country": "BY",
-      "dial": {
-        "host": "xlx375.bfrr.by",
-        "kind": "nxdn",
-        "port": 41400
-      },
-      "id": "37500",
-      "name": "37500",
-      "network": "nxdn",
-      "source": "dvref",
-      "sponsor": "YL3IM"
     },
     {
       "country": "TH",
@@ -27829,6 +28005,21 @@
       "network": "nxdn",
       "source": "dvref",
       "sponsor": "JA2CCV"
+    },
+    {
+      "country": "JP",
+      "dashboard": "http://xrf298.mydns.jp:8070/",
+      "description": "<p>YSF-NAGOYA-2/TGIF TG-310 / WIRES-X 42314 / XLX298 Y /XLX098 H /M17-LIM L /PEANUT XLX561 P</p>",
+      "dial": {
+        "host": "122.133.239.109",
+        "kind": "nxdn",
+        "port": 41400
+      },
+      "id": "44155",
+      "name": "NXDN-NAGOYA",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "JF2ANH"
     },
     {
       "country": "KR",
@@ -28521,6 +28712,21 @@
       "sponsor": "KN4EWT"
     },
     {
+      "country": "NL",
+      "dashboard": "http://xlx.pd3rfr.nl",
+      "description": "<p>Experimental Reflector of PD3RFR</p>",
+      "dial": {
+        "host": "PD3RFR.myasustor.com",
+        "kind": "nxdn",
+        "port": 41400
+      },
+      "id": "700",
+      "name": "URF700",
+      "network": "nxdn",
+      "source": "dvref",
+      "sponsor": "PD3RFR"
+    },
+    {
       "country": "US",
       "dashboard": "https://707nxdn.kd0ioe.com",
       "description": "<p>Rural Minnesota 707 - linked to P25, YSF, DMR (via TGIF network)</p>",
@@ -28636,9 +28842,9 @@
     {
       "country": "BR",
       "dashboard": "https://pu4ron.dynv6.net/nxdn",
-      "description": "<p>7245&nbsp; Multiprotocolo - Super Link Brasil</p>",
+      "description": "<p>* 7245&nbsp; Multiprotocolo - Super Link Brasil</p>",
       "dial": {
-        "host": "165.73.249.152",
+        "host": "155.117.46.188",
         "kind": "nxdn",
         "port": 41400
       },
@@ -29947,7 +30153,7 @@
     },
     {
       "country": "US",
-      "dashboard": "http://137.184.68.241",
+      "dashboard": "http://137.184.68.241:4000",
       "dial": {
         "host": "137.184.68.241",
         "kind": "p25",
@@ -30448,6 +30654,20 @@
       "sponsor": "rn6ljt"
     },
     {
+      "country": "BY",
+      "dashboard": "https://xlx375.bfrr.by/p25",
+      "dial": {
+        "host": "xlx375.bfrr.by",
+        "kind": "p25",
+        "port": 41000
+      },
+      "id": "25701",
+      "name": "BY MultiMode",
+      "network": "p25",
+      "source": "dvref",
+      "sponsor": "EW1EM"
+    },
+    {
       "country": "PL",
       "dashboard": "http://80.211.195.50/",
       "description": "<p>Polski Reflektor P25</p>\r\n<div id=\"sconnect-is-installed\" style=\"display: none;\">2.14.0.0</div>\r\n<div id=\"sconnect-is-installed\" style=\"display: none;\">2.14.0.0</div>\r\n<div id=\"sconnect-is-installed\" style=\"display: none;\">2.14.0.0</div>\r\n<div id=\"sconnect-is-installed\" style=\"display: none;\">2.14.0.0</div>",
@@ -30604,10 +30824,10 @@
     },
     {
       "country": "TR",
-      "dashboard": "http://dmr.pistar.com.tr:28200",
+      "dashboard": "http://ptt.pistar.com.tr:28200",
       "description": "<p>P25 Turkiye Genel Reflector - YM2KT</p>",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "p25",
         "port": 41000
       },
@@ -30615,14 +30835,14 @@
       "name": "P25 Turkiye",
       "network": "p25",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KT"
     },
     {
       "country": "TR",
       "dashboard": "http://2861.adn.systems:28201",
       "description": "<p>P25 Adana Reflector - YM2KT</p>",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "p25",
         "port": 41001
       },
@@ -30630,14 +30850,14 @@
       "name": "P25 Adana",
       "network": "p25",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KT"
     },
     {
       "country": "TR",
       "dashboard": "http://dmr.pistar.com.tr:28203",
       "description": "<p>P25 Afyon Reflector - YM2KT</p>",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "p25",
         "port": 41003
       },
@@ -30645,14 +30865,14 @@
       "name": "P25 Afyon",
       "network": "p25",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KT"
     },
     {
       "country": "TR",
       "dashboard": "http://dmr.pistar.com.tr:28206",
       "description": "<p>P25 Ankara Reflector - YM2KT</p>",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "p25",
         "port": 41006
       },
@@ -30660,14 +30880,14 @@
       "name": "P25 Ankara",
       "network": "p25",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KT"
     },
     {
       "country": "TR",
       "dashboard": "http://dmr.pistar.com.tr:28207",
       "description": "<p>P25 Antalya Reflector - YM2KT</p>",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "p25",
         "port": 41007
       },
@@ -30675,14 +30895,112 @@
       "name": "P25 Antalya",
       "network": "p25",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KT"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK P25 09 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "p25",
+        "port": 41009
+      },
+      "id": "28609",
+      "name": "P25 Aydin",
+      "network": "p25",
+      "source": "dvref",
+      "sponsor": "YM2KT"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK P25 10 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "p25",
+        "port": 41010
+      },
+      "id": "28610",
+      "name": "P25 Balikesir",
+      "network": "p25",
+      "source": "dvref",
+      "sponsor": "YM2KT"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK P25 16 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "p25",
+        "port": 41016
+      },
+      "id": "28616",
+      "name": "P25 Bursa",
+      "network": "p25",
+      "source": "dvref",
+      "sponsor": "YM2KT"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK P25 17 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "p25",
+        "port": 41017
+      },
+      "id": "28617",
+      "name": "P25 Canakkale",
+      "network": "p25",
+      "source": "dvref",
+      "sponsor": "YM2KT"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK P25 20 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "p25",
+        "port": 41020
+      },
+      "id": "28620",
+      "name": "P25 Denizli",
+      "network": "p25",
+      "source": "dvref",
+      "sponsor": "YM2KT"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK P25 26 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "p25",
+        "port": 41026
+      },
+      "id": "28626",
+      "name": "P25 Eskisehir",
+      "network": "p25",
+      "source": "dvref",
+      "sponsor": "YM2KT"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK P25 33 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "p25",
+        "port": 41033
+      },
+      "id": "28633",
+      "name": "P25 Mersin",
+      "network": "p25",
+      "source": "dvref",
+      "sponsor": "YM2KT"
     },
     {
       "country": "TR",
       "dashboard": "http://dmr.pistar.com.tr:28234",
       "description": "<p>P25 Istanbul Reflector - YM2KT</p>",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "p25",
         "port": 41034
       },
@@ -30690,14 +31008,14 @@
       "name": "P25 Istanbul",
       "network": "p25",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KT"
     },
     {
       "country": "TR",
       "dashboard": "http://dmr.pistar.com.tr:28235",
       "description": "<p>P25 Izmir Reflector - YM2KT</p>",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "p25",
         "port": 41035
       },
@@ -30705,14 +31023,56 @@
       "name": "P25 Izmir",
       "network": "p25",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KT"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK P25 41 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "p25",
+        "port": 41041
+      },
+      "id": "28641",
+      "name": "P25 Kocaeli",
+      "network": "p25",
+      "source": "dvref",
+      "sponsor": "YM2KT"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK P25 42 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "p25",
+        "port": 41042
+      },
+      "id": "28642",
+      "name": "P25 Konya",
+      "network": "p25",
+      "source": "dvref",
+      "sponsor": "YM2KT"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK P25 44 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "p25",
+        "port": 41044
+      },
+      "id": "28644",
+      "name": "P25 Malatya",
+      "network": "p25",
+      "source": "dvref",
+      "sponsor": "YM2KT"
     },
     {
       "country": "TR",
       "dashboard": "http://2861.adn.systems:28248",
       "description": "<p>P25 Mugla Reflector - YM2KT</p>",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "p25",
         "port": 41048
       },
@@ -30720,7 +31080,35 @@
       "name": "P25 Mugla",
       "network": "p25",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KT"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK P25 59 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "p25",
+        "port": 41059
+      },
+      "id": "28659",
+      "name": "P25 Tekirdag",
+      "network": "p25",
+      "source": "dvref",
+      "sponsor": "YM2KT"
+    },
+    {
+      "country": "TR",
+      "description": "TurkLINK P25 81 Reflektor Odasi",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "p25",
+        "port": 41081
+      },
+      "id": "28681",
+      "name": "P25 Duzce",
+      "network": "p25",
+      "source": "dvref",
+      "sponsor": "YM2KT"
     },
     {
       "country": "AU",
@@ -31542,6 +31930,20 @@
       "sponsor": "KN4YDL"
     },
     {
+      "country": "US",
+      "dashboard": "http://66492.ip.hamvoip.org",
+      "dial": {
+        "host": "66492.ip.hamvoip.org",
+        "kind": "p25",
+        "port": 41000
+      },
+      "id": "3241",
+      "name": "URF324",
+      "network": "p25",
+      "source": "dvref",
+      "sponsor": "KQ4HPI"
+    },
+    {
       "country": "MX",
       "dashboard": "http://89.117.61.236",
       "description": "<p>P25-XE1JMB</p>",
@@ -31684,20 +32086,6 @@
       "network": "p25",
       "source": "dvref",
       "sponsor": "PennLink Group"
-    },
-    {
-      "country": "BY",
-      "dashboard": "https://xlx375.bfrr.by/p25/",
-      "dial": {
-        "host": "xlx375.bfrr.by",
-        "kind": "p25",
-        "port": 41000
-      },
-      "id": "37500",
-      "name": "37500",
-      "network": "p25",
-      "source": "dvref",
-      "sponsor": "YL3IM"
     },
     {
       "country": "TH",
@@ -33141,9 +33529,9 @@
     {
       "country": "BR",
       "dashboard": "https://pu4ron.dynv6.net/p25",
-      "description": "<p>7245 Multiprotocolo - Super Link Brasil</p>",
+      "description": "<p>* 7245 Multiprotocolo&nbsp;</p>",
       "dial": {
-        "host": "165.73.249.152",
+        "host": "155.117.46.188",
         "kind": "p25",
         "port": 41000
       },
@@ -33736,19 +34124,6 @@
       "sponsor": "Eastern-MI-Link"
     },
     {
-      "country": "IT",
-      "dashboard": "http://rudinet.giize.com",
-      "dial": {
-        "host": "rudinet.giize.com",
-        "kind": "urf"
-      },
-      "id": "003",
-      "name": "XRF232",
-      "network": "urf",
-      "source": "dvref",
-      "sponsor": "IW3HWH"
-    },
-    {
       "country": "ES",
       "dashboard": "https://ea8ee.c4fm.es/ref/",
       "dial": {
@@ -33821,6 +34196,23 @@
       "network": "urf",
       "source": "dvref",
       "sponsor": "PU2PNY"
+    },
+    {
+      "country": "IT",
+      "dashboard": "http://rudinet.giize.com",
+      "dial": {
+        "host": "rudinet.giize.com",
+        "kind": "urf",
+        "modules": [
+          "D",
+          "O"
+        ]
+      },
+      "id": "032",
+      "name": "XLX232",
+      "network": "urf",
+      "source": "dvref",
+      "sponsor": "IW3HWH"
     },
     {
       "country": "FR",
@@ -34492,6 +34884,19 @@
       "sponsor": "KQ4HPI"
     },
     {
+      "country": "US",
+      "dashboard": "http://66492.ip.hamvoip.org",
+      "dial": {
+        "host": "66492.ip.hamvoip.org",
+        "kind": "urf"
+      },
+      "id": "324",
+      "name": "Amerinet US",
+      "network": "urf",
+      "source": "dvref",
+      "sponsor": "KQ4HPI"
+    },
+    {
       "country": "PR",
       "dashboard": "http://wp4nnz.ddns.net/index.php",
       "description": "<p>dstar coamo</p>",
@@ -34636,6 +35041,22 @@
       "network": "urf",
       "source": "dvref",
       "sponsor": "DG1JP"
+    },
+    {
+      "country": "US",
+      "dashboard": "http://xlxnettalk.dyndns.org",
+      "dial": {
+        "host": "xlxnettalk.dyndns.org",
+        "kind": "urf",
+        "modules": [
+          "A"
+        ]
+      },
+      "id": "470",
+      "name": "XLX470",
+      "network": "urf",
+      "source": "dvref",
+      "sponsor": "K6HP"
     },
     {
       "country": "FR",
@@ -34790,6 +35211,25 @@
       "network": "urf",
       "source": "dvref",
       "sponsor": "Windy City Amateur Radio Society"
+    },
+    {
+      "country": "NL",
+      "dashboard": "http://xlx.pd3rfr.nl",
+      "description": "<p>Experimental Reflector of PD3RFR</p>",
+      "dial": {
+        "host": "PD3RFR.myasustor.com",
+        "kind": "urf",
+        "modules": [
+          "B",
+          "D",
+          "N"
+        ]
+      },
+      "id": "700",
+      "name": "XLX-Reflector of PD3RFR",
+      "network": "urf",
+      "source": "dvref",
+      "sponsor": "PD3RFR"
     },
     {
       "country": "US",
@@ -35428,6 +35868,22 @@
       "network": "urf",
       "source": "dvref",
       "sponsor": "SQ5AC"
+    },
+    {
+      "country": "US",
+      "description": "<p>URF-WIL is a multi-mode amateur-radio reflector supporting DMR/YSF/P25/NXDN/M17 with transcoding.</p>\r\n<p>The reflector is part of KE7WIL virtual AllStarLink node hub 641890.</p>",
+      "dial": {
+        "host": "node64189.ddns.net",
+        "kind": "urf",
+        "modules": [
+          "A"
+        ]
+      },
+      "id": "WIL",
+      "name": "URFWIL Multi-Mode Reflector",
+      "network": "urf",
+      "source": "dvref",
+      "sponsor": "KE7WIL"
     },
     {
       "country": "TR",
@@ -37204,10 +37660,10 @@
     },
     {
       "country": "TR",
-      "dashboard": "https://dmr.pistar.com.tr:28400",
+      "dashboard": "https://ptt.pistar.com.tr:28400",
       "description": "Turkiye Genel",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "ysf",
         "port": 42000
       },
@@ -40362,6 +40818,21 @@
       "source": "dvref"
     },
     {
+      "country": "JP",
+      "dashboard": "https://xlx00b.mydns.jp",
+      "description": "Kachimaru",
+      "dial": {
+        "host": "xlx00b.mydns.jp",
+        "kind": "ysf",
+        "port": 42000
+      },
+      "id": "07761",
+      "name": "XLX00B",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "JE4CDI"
+    },
+    {
       "country": "US",
       "description": "HighestPower",
       "dial": {
@@ -41718,6 +42189,21 @@
       "sponsor": "DVSPh"
     },
     {
+      "country": "US",
+      "dashboard": "http://xlxnettalk.dyndns.org",
+      "description": "URF470",
+      "dial": {
+        "host": "xlxnettalk.dyndns.org",
+        "kind": "ysf",
+        "port": 42000
+      },
+      "id": "14927",
+      "name": "URF470",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "K6HP"
+    },
+    {
       "country": "CH",
       "dashboard": "http://xlx115.hb9vd.ch",
       "description": "CH-VD-SWISS",
@@ -43056,6 +43542,21 @@
     },
     {
       "country": "ES",
+      "dashboard": "http://203.88.124.105/ea7/",
+      "description": "Distrito-7",
+      "dial": {
+        "host": "203.88.124.105",
+        "kind": "ysf",
+        "port": 42002
+      },
+      "id": "21417",
+      "name": "DISTRITO-7",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "xreflector"
+    },
+    {
+      "country": "ES",
       "dashboard": "https://ysf.ysf.es",
       "description": "TG-21418",
       "dial": {
@@ -43291,6 +43792,21 @@
       "network": "ysf",
       "source": "dvref",
       "sponsor": "UW0WU"
+    },
+    {
+      "country": "ES",
+      "dashboard": "https://murcia.ysf.es/",
+      "description": "MURCIA",
+      "dial": {
+        "host": "203.88.124.105",
+        "kind": "ysf",
+        "port": 42001
+      },
+      "id": "21491",
+      "name": "MURCIA",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "xreflector"
     },
     {
       "country": "US",
@@ -43679,16 +44195,16 @@
     {
       "country": "IT",
       "dashboard": "http://rudinet.giize.com",
-      "description": "YSF XLX232",
       "dial": {
         "host": "rudinet.giize.com",
         "kind": "ysf",
-        "port": 42000
+        "port": 42100
       },
       "id": "22232",
       "name": "XLX232",
       "network": "ysf",
-      "source": "dvref"
+      "source": "dvref",
+      "sponsor": "IW3HWH"
     },
     {
       "country": "IT",
@@ -44821,6 +45337,7 @@
     {
       "country": "LV",
       "dashboard": "https://xlx.ham.lv",
+      "description": "LV MultiMode",
       "dial": {
         "host": "24706.ham.lv",
         "kind": "ysf",
@@ -45019,6 +45536,21 @@
       "network": "ysf",
       "source": "dvref",
       "sponsor": "Home"
+    },
+    {
+      "country": "BY",
+      "dashboard": "https://xlx375.bfrr.by",
+      "description": "BY MultiMode",
+      "dial": {
+        "host": "xlx375.bfrr.by",
+        "kind": "ysf",
+        "port": 42000
+      },
+      "id": "25701",
+      "name": "MultiMode",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "EW1EM"
     },
     {
       "country": "RU",
@@ -45394,7 +45926,7 @@
       "dashboard": "https://ysf.hobby-room.app/",
       "description": "FM-Nuernberg",
       "dial": {
-        "host": "fm-ysf.dynv6.net",
+        "host": "fm07.dedyn.io",
         "kind": "ysf",
         "port": 42000
       },
@@ -45944,6 +46476,36 @@
       "sponsor": "radioclubcimebianche.it"
     },
     {
+      "country": "ES",
+      "dashboard": "https://sala-andalucia.es/2",
+      "description": "ORIGINAL",
+      "dial": {
+        "host": "sala-andalucia.es",
+        "kind": "ysf",
+        "port": 42350
+      },
+      "id": "28128",
+      "name": "SALAANDALUCIA",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "xreflector"
+    },
+    {
+      "country": "ES",
+      "dashboard": "https://sala-andalucia.es/2",
+      "description": "ORIGINAL",
+      "dial": {
+        "host": "sala-andalucia.es",
+        "kind": "ysf",
+        "port": 42356
+      },
+      "id": "28228",
+      "name": "SALA-ADALUCIA",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "xreflector"
+    },
+    {
       "country": "IT",
       "dashboard": "http://5.189.177.8:3020",
       "description": "ras sardegna",
@@ -46148,7 +46710,7 @@
       "dashboard": "http://dmr.pistar.com.tr:28401",
       "description": "YSF Adana",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "ysf",
         "port": 42001
       },
@@ -46156,14 +46718,14 @@
       "name": "YSF Adana",
       "network": "ysf",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KW"
     },
     {
       "country": "TR",
       "dashboard": "http://dmr.pistar.com.tr:28400",
       "description": "YSF Afyon",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "ysf",
         "port": 42003
       },
@@ -46171,14 +46733,14 @@
       "name": "YSF Afyon",
       "network": "ysf",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KW"
     },
     {
       "country": "TR",
       "dashboard": "http://dmr.pistar.com.tr:28406",
       "description": "YSF Ankara",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "ysf",
         "port": 42006
       },
@@ -46186,14 +46748,14 @@
       "name": "YSF Ankara",
       "network": "ysf",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KW"
     },
     {
       "country": "TR",
       "dashboard": "http://dmr.pistar.com.tr:28407",
       "description": "YSF Antalya",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "ysf",
         "port": 42007
       },
@@ -46201,14 +46763,112 @@
       "name": "YSF Antalya",
       "network": "ysf",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KW"
+    },
+    {
+      "country": "TR",
+      "description": "YSF Aydin",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "ysf",
+        "port": 42009
+      },
+      "id": "28609",
+      "name": "YSF Aydin",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "YM2KW"
+    },
+    {
+      "country": "TR",
+      "description": "YSF Balikesir",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "ysf",
+        "port": 42010
+      },
+      "id": "28610",
+      "name": "YSF Balikesir",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "YM2KW"
+    },
+    {
+      "country": "TR",
+      "description": "YSF Bursa",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "ysf",
+        "port": 42016
+      },
+      "id": "28616",
+      "name": "YSF Bursa",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "YM2KW"
+    },
+    {
+      "country": "TR",
+      "description": "YSF Canakkale",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "ysf",
+        "port": 42017
+      },
+      "id": "28617",
+      "name": "YSF Canakkale",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "YM2KW"
+    },
+    {
+      "country": "TR",
+      "description": "YSF Denizli",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "ysf",
+        "port": 42020
+      },
+      "id": "28620",
+      "name": "YSF Denizli",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "YM2KW"
+    },
+    {
+      "country": "TR",
+      "description": "YSF Eskisehir",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "ysf",
+        "port": 42026
+      },
+      "id": "28626",
+      "name": "YSF Eskisehir",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "YM2KW"
+    },
+    {
+      "country": "TR",
+      "description": "YSF Mersin",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "ysf",
+        "port": 42033
+      },
+      "id": "28633",
+      "name": "YSF Mersin",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "YM2KW"
     },
     {
       "country": "TR",
       "dashboard": "http://dmr.pistar.com.tr:28434",
       "description": "YSF Istanbul",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "ysf",
         "port": 42034
       },
@@ -46216,14 +46876,14 @@
       "name": "YSF Istanbul",
       "network": "ysf",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KW"
     },
     {
       "country": "TR",
       "dashboard": "http://dmr.pistar.com.tr:28435",
       "description": "YSF Izmir",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "ysf",
         "port": 42035
       },
@@ -46231,14 +46891,56 @@
       "name": "YSF Izmir",
       "network": "ysf",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KW"
+    },
+    {
+      "country": "TR",
+      "description": "YSF Kocaeli",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "ysf",
+        "port": 42041
+      },
+      "id": "28641",
+      "name": "YSF Kocaeli",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "YM2KW"
+    },
+    {
+      "country": "TR",
+      "description": "YSF Konya",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "ysf",
+        "port": 42042
+      },
+      "id": "28642",
+      "name": "YSF Konya",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "YM2KW"
+    },
+    {
+      "country": "TR",
+      "description": "YSF Malatya",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "ysf",
+        "port": 42044
+      },
+      "id": "28644",
+      "name": "YSF Malatya",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "YM2KW"
     },
     {
       "country": "TR",
       "dashboard": "http://dmr.pistar.com.tr:28448",
       "description": "YSF Mugla",
       "dial": {
-        "host": "dmr.pistar.com.tr",
+        "host": "ptt.pistar.com.tr",
         "kind": "ysf",
         "port": 42048
       },
@@ -46246,7 +46948,7 @@
       "name": "YSF Mugla",
       "network": "ysf",
       "source": "dvref",
-      "sponsor": "T\u00fcrk Amat\u00f6r Dijital A\u011f\u0131"
+      "sponsor": "YM2KW"
     },
     {
       "country": "US",
@@ -46291,6 +46993,20 @@
       "network": "ysf",
       "source": "dvref",
       "sponsor": "TA2KW"
+    },
+    {
+      "country": "TR",
+      "description": "YSF Duzce",
+      "dial": {
+        "host": "ptt.pistar.com.tr",
+        "kind": "ysf",
+        "port": 42081
+      },
+      "id": "28681",
+      "name": "YSF Duzce",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "YM2KW"
     },
     {
       "country": "US",
@@ -47639,6 +48355,21 @@
     },
     {
       "country": "US",
+      "dashboard": "http://66492.ip.hamvoip.org",
+      "description": "URF324",
+      "dial": {
+        "host": "66492.ip.hamvoip.org",
+        "kind": "ysf",
+        "port": 42000
+      },
+      "id": "32410",
+      "name": "URF324",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "KQ4HPI"
+    },
+    {
+      "country": "US",
       "dashboard": "http://ysf.kansascitywide.com/",
       "description": "KansasCityWide",
       "dial": {
@@ -48233,21 +48964,6 @@
       "network": "ysf",
       "source": "dvref",
       "sponsor": "Roaring Fork Amateur Radio Club"
-    },
-    {
-      "country": "BY",
-      "dashboard": "https://xlx375.bfrr.by",
-      "description": "BY MultiMode",
-      "dial": {
-        "host": "xlx375.bfrr.by",
-        "kind": "ysf",
-        "port": 42000
-      },
-      "id": "37500",
-      "name": "BY MultiMode",
-      "network": "ysf",
-      "source": "dvref",
-      "sponsor": "YL3IM"
     },
     {
       "country": "IT",
@@ -49467,7 +50183,6 @@
     },
     {
       "country": "US",
-      "dashboard": "http://windycity.duckdns.org:8080",
       "dial": {
         "host": "windycity.duckdns.org",
         "kind": "ysf",
@@ -49506,7 +50221,6 @@
     },
     {
       "country": "US",
-      "dashboard": "http://windycity.duckdns.org/index.php",
       "description": "windy_city",
       "dial": {
         "host": "windycity.duckdns.org",
@@ -50102,6 +50816,20 @@
       "network": "ysf",
       "source": "dvref",
       "sponsor": "VE2BQA"
+    },
+    {
+      "country": "BD",
+      "dashboard": "http://44.27.136.201/ysf",
+      "description": "47070",
+      "dial": {
+        "host": "44.27.136.201",
+        "kind": "ysf",
+        "port": 42000
+      },
+      "id": "47070",
+      "name": "S21ALT47070",
+      "network": "ysf",
+      "source": "dvref"
     },
     {
       "country": "CH",
@@ -50980,6 +51708,21 @@
       "network": "ysf",
       "source": "dvref",
       "sponsor": "DV1ZEJ"
+    },
+    {
+      "country": "GB",
+      "dashboard": "http://192.168.1.230",
+      "description": "GB-H1L8RE",
+      "dial": {
+        "host": "h1l8re.ddns.net",
+        "kind": "ysf",
+        "port": 42002
+      },
+      "id": "51866",
+      "name": "H1L8RE",
+      "network": "ysf",
+      "source": "dvref",
+      "sponsor": "G7NIR"
     },
     {
       "country": "PH",
@@ -54022,7 +54765,7 @@
         "port": 42002
       },
       "id": "73411",
-      "name": "RVR Red SRV",
+      "name": "RVR Red Serv",
       "network": "ysf",
       "source": "dvref",
       "sponsor": "YV4YY"
