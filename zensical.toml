@@ -91,6 +91,12 @@ nav = [
 [project.theme]
 language = "en"
 
+# Template overrides, layered over Zensical's bundled theme the way Material's
+# custom_dir works: a file here wins, everything else falls through. Kept out
+# of docs_dir (docs/site) so it is never mistaken for a page. Currently one
+# file — partials/header.html, which carries the Discord link in the title bar.
+custom_dir = "docs/overrides"
+
 # No Google Fonts request. astar.css then selects the native Apple system
 # stack (SF Pro / SF Mono) instead of Roboto.
 font = false
