@@ -50,6 +50,9 @@
         /// Owns the mic analyzer's model, so the pane keeps its picker + profile
         /// name across a trip back to the call card.
         @EnvironmentObject private var micAnalyzer: MicAnalyzerController
+        /// So the settings pane can clear a stranded `focusNewID` on the way
+        /// out — see `devicesPane`'s `onDisappear`.
+        @EnvironmentObject private var setups: SetupController
         /// The devices this rig is actually using, so the warning below can be
         /// limited to a clash that affects them (astar-9d41). Same keys
         /// `AudioSettings` persists, read-only here.
@@ -334,34 +337,45 @@
                 Divider()
                 // A List (not a ScrollView) so Saved configs get native drag-to-
                 // reorder via .onMove. Account is its own section on top.
-                List {
-                    // Who you are comes before what you own: the callsign and
-                    // radio ID identify the operator, everything below is
-                    // equipment (astar-c9d2).
-                    StationIdentityView()
-                    Section("Account") {
-                        CredentialsView()
-                            .listRowSeparator(.hidden)
+                // ScrollViewReader wraps it so Saved configs' + can scroll a
+                // freshly created card into view.
+                ScrollViewReader { proxy in
+                    List {
+                        // Who you are comes before what you own: the callsign and
+                        // radio ID identify the operator, everything below is
+                        // equipment (astar-c9d2).
+                        StationIdentityView()
+                        Section("Account") {
+                            CredentialsView()
+                                .listRowSeparator(.hidden)
+                        }
+                        // Below the account, not beside the callsign: a DMR ID is
+                        // one network's credential, and that network is not
+                        // dialable yet (astar-a7c5).
+                        DmrSettingsView()
+                        // Its own section, not a second field in DMR's: NXDN ids
+                        // are 16-bit and a registered DMR ID does not fit in one,
+                        // so they are two numbers, not one shown twice.
+                        NxdnSettingsView()
+                        SetupsView(scroll: proxy)
+                        FavoritesSettingsView(directoryRevision: $directoryRevision)
+                        MicProfilesView()
+                        ReflectorSettingsView()
+                        SpectrumSettingsView()
+                        ConfigTransferView(directoryRevision: $directoryRevision)
                     }
-                    // Below the account, not beside the callsign: a DMR ID is
-                    // one network's credential, and that network is not
-                    // dialable yet (astar-a7c5).
-                    DmrSettingsView()
-                    // Its own section, not a second field in DMR's: NXDN ids
-                    // are 16-bit and a registered DMR ID does not fit in one,
-                    // so they are two numbers, not one shown twice.
-                    NxdnSettingsView()
-                    SetupsView()
-                    FavoritesSettingsView(directoryRevision: $directoryRevision)
-                    MicProfilesView()
-                    ReflectorSettingsView()
-                    SpectrumSettingsView()
-                    ConfigTransferView(directoryRevision: $directoryRevision)
+                    .listStyle(.inset)
+                    .scrollContentBackground(.hidden)  // let the window's blur show through
+                    .environment(\.defaultMinListRowHeight, 4)
                 }
-                .listStyle(.inset)
-                .scrollContentBackground(.hidden)  // let the window's blur show through
-                .environment(\.defaultMinListRowHeight, 4)
             }
+            // `focusNewID` is claimed only by the new card's own `onAppear`
+            // (see `ConfigCard`) — if that row never mounts before Settings is
+            // left (closed right after "+", or the row never scrolled into
+            // view), the flag strands. Left set, the NEXT time that same card
+            // appears it would spontaneously re-expand and steal the keyboard,
+            // long after "new" stopped being true.
+            .onDisappear { setups.focusNewID = nil }
         }
 
         /// The reflector directory as a pane of this window (astar-5a41),
@@ -411,6 +425,14 @@
                     .keyboardShortcut("[", modifiers: .command)  // ⌘[ to go back
                     Text("Mic Analyzer").font(.headline)
                     Spacer()
+                    // Lets an operator characterize several mics in one visit
+                    // instead of backing out and re-entering the pane per mic.
+                    // `seedsFromProfile: false`: the mic on screen is a deliberate
+                    // choice already, not a gap to fill from the active profile.
+                    AddButton(help: "Add a mic profile") {
+                        micAnalyzer.startNew(
+                            input: micAnalyzer.vm.selectedInput, seedsFromProfile: false)
+                    }
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)

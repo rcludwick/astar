@@ -40,6 +40,16 @@
         private static let scanLoHz = 100.0, scanHiHz = 3800.0
         /// User-entered label for the profile being saved, e.g. "fake icom".
         @Published var profileName = ""
+        /// Set to ask the view to move keyboard focus to the name field. Claimed
+        /// (read and cleared) only through `consumeNameFocus()` — the view never
+        /// writes this directly, so the claim logic lives in one place instead of
+        /// being reimplemented at every call site (the iOS port included). A
+        /// consumed flag rather than a `.onChange`-only signal: `startNew` sets
+        /// this and then shows the pane, which can mount the view synchronously
+        /// in the same call — the view is BORN with the flag already true, so
+        /// `.onChange` alone would never see it change. Claiming from `.onAppear`
+        /// too is what catches that case; mirrors `SetupController.focusNewID`.
+        @Published private(set) var nameFocusPending = false
         /// True while a stay-silent capture is in progress (drives the spinner).
         @Published private(set) var analyzing = false
         @Published private(set) var lastError: String?
@@ -223,6 +233,19 @@
         func clear() {
             cancel()
             profileName = ""
+        }
+
+        /// Ask the view to move keyboard focus to the name field — used by every
+        /// "+" entry point, since the field itself lives in `MicAnalyzerView`.
+        func requestNameFocus() { nameFocusPending = true }
+
+        /// Claim a pending focus request: returns whether one was outstanding,
+        /// and clears it either way. The view calls this from both `.onAppear`
+        /// and `.onChange(of: nameFocusPending)` — the guard-and-clear lives
+        /// here so there is exactly one place that can get it wrong.
+        func consumeNameFocus() -> Bool {
+            defer { nameFocusPending = false }
+            return nameFocusPending
         }
 
         /// Abort an in-progress capture and discard any unsaved result.

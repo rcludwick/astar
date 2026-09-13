@@ -98,7 +98,8 @@
                             + "codec. Use a direct microphone to send true wideband audio."
                     )
                     .padding(.bottom, 8)
-                    gainSlider("Mic Level", tint: .red, range: 0...4, value: inputGainBinding) { gain in
+                    gainSlider("Mic Level", tint: .red, range: 0...4, value: inputGainBinding) {
+                        gain in
                         if !m17Context {
                             try? session.setInputGain(Float(gain))
                             persistGains()
@@ -379,7 +380,7 @@
         // MARK: - Rows
 
         /// Mic profile picker: the built-in Default (no filter) plus every saved
-        /// profile. Selecting applies live; Analyze opens the characterizer; trash
+        /// profile. Selecting applies live; "+" starts a new profile; trash
         /// deletes the selected profile.
         private var micProfileRow: some View {
             HStack(spacing: 8) {
@@ -396,8 +397,11 @@
                     }
                 }
                 .labelsHidden()
-                Button("Analyze…") { micAnalyzer.open(input: selectedInput) }
-                    .buttonStyle(.link)
+                // It only ever created a new profile — Save never overwrites — so
+                // "+" is the honest label for what this button already did.
+                AddButton(help: "Add a mic profile") {
+                    micAnalyzer.startNew(input: selectedInput)
+                }
                 if let id = session.micProfileID {
                     Button(role: .destructive) {
                         session.deleteMicProfile(id: id)

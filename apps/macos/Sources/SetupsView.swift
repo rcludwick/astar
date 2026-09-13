@@ -15,10 +15,14 @@
         // Reactive, hotplug-backed device list (no enumeration on appear).
         @EnvironmentObject private var deviceMonitor: AudioDeviceMonitor
 
+        /// The settings `List`'s own scroll proxy, so + can scroll a newly created
+        /// card into view instead of leaving it appended below the fold.
+        let scroll: ScrollViewProxy
+
         /// Rendered inside the Settings `List`, so `.onMove` gives a native macOS
         /// drag-to-reorder (proper move cursor — no copy "+").
         var body: some View {
-            Section("Saved configs") {
+            Section {
                 // The built-in System Default always sits at the top (astar-1f7d).
                 // It is a real, selectable config — not a hidden fallback — so a
                 // fresh install can see what it is running on and get back to a
@@ -27,18 +31,9 @@
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 4, leading: 6, bottom: 4, trailing: 6))
 
-                Button {
-                    setups.addNew()
-                } label: {
-                    Label("Add new config", systemImage: "plus.circle")
-                }
-                .buttonStyle(.borderless)
-                .font(.callout)
-                .listRowSeparator(.hidden)
-
                 if setups.managedSetups.isEmpty {
                     Text(
-                        "No other configs yet. Add one and expand it to set hardware, devices, and audio."
+                        "No other configs yet. Add one with the + above and fill in hardware, devices, and audio."
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -63,6 +58,19 @@
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                         .listRowSeparator(.hidden)
+                }
+            } header: {
+                HStack {
+                    Text("Saved configs")
+                    Spacer(minLength: 8)
+                    AddButton(help: "Add a new config") {
+                        let new = setups.addNew()
+                        // The row has to mount before it can be scrolled to; the
+                        // list rebuilds on the next pass.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                            withAnimation { scroll.scrollTo(new.id, anchor: .center) }
+                        }
+                    }
                 }
             }
         }
@@ -136,6 +144,7 @@
         @State private var inputGain = 0.90
         @State private var outputGain = 1.0
         @State private var voxThreshold = -40.0
+        @FocusState private var nameFocused: Bool
 
         private let audioStore = UserDefaultsAudioSettingsStore()
         private static let defaultLabel = "System Default"
@@ -161,6 +170,15 @@
                 inputGain = Double(setup.inputGain ?? 0.90)
                 outputGain = Double(setup.outputGain ?? 1.0)
                 voxThreshold = Double(setup.voxThreshold ?? -40)
+                if setups.focusNewID == setup.id {
+                    expanded = true
+                    // One hop: clearing a published flag (and moving focus) inside
+                    // the view-update pass mutates state SwiftUI is mid-read of.
+                    DispatchQueue.main.async {
+                        nameFocused = true
+                        setups.focusNewID = nil
+                    }
+                }
             }
             // astar-b167, audit F22: the serial PTT self-test's confirmation
             // (checkmark + green text, `serialSelfTest` above) is visual-only —
@@ -205,6 +223,7 @@
 
                 TextField("Name", text: nameBinding)
                     .textFieldStyle(.roundedBorder)
+                    .focused($nameFocused)
 
                 Button {
                     setups.setDefault(isDefault ? nil : setup.id)
@@ -265,7 +284,9 @@
                         .accessibilityLabel("Duplicate device names")
                 }
                 gainSlider("Mic", tint: .red, range: 0...4, value: $inputGain) { commitInputGain() }
-                gainSlider("Vol", tint: .green, range: 1...4, value: $outputGain) { commitOutputGain() }
+                gainSlider("Vol", tint: .green, range: 1...4, value: $outputGain) {
+                    commitOutputGain()
+                }
 
                 Toggle("Voice compression", isOn: compressionBinding)
                 Toggle("Noise reduction", isOn: noiseReductionBinding)
@@ -368,10 +389,14 @@
                 // this config uses, and "System Default" (a nil `inputDevice`) is
                 // a deliberate answer here — seeding it from the active profile
                 // would analyze a mic this config never opens.
-                Button("Analyze…") {
-                    micAnalyzer.open(input: setup.inputDevice, seedsFromProfile: false)
+                //
+                // Its own VoiceOver label, distinct from Mic Profiles' and Quick
+                // settings' plain "Add a mic profile": this one seeds the config's
+                // OWN device rather than the active profile's, so it is not the
+                // same action under a shared label.
+                AddButton(help: "Add a mic profile for this config") {
+                    micAnalyzer.startNew(input: setup.inputDevice, seedsFromProfile: false)
                 }
-                .buttonStyle(.link)
                 if let id = setup.micProfileID {
                     Button(role: .destructive) {
                         session.deleteMicProfile(id: id)

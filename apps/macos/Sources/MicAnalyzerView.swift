@@ -26,6 +26,10 @@
         /// (The earlier relative slider's key, `micAnalyzer.peakMarginDb`, is
         /// deliberately abandoned — not migrated, it meant a different thing.)
         @AppStorage("micAnalyzer.thresholdDbfs") private var storedThreshold: Double = -60
+        /// Claimed from `vm.nameFocusPending` — every "+" entry point asks for
+        /// focus here, since the field lives in the view and the model can't
+        /// reach into it directly.
+        @FocusState private var nameFocused: Bool
 
         var body: some View {
             VStack(alignment: .leading, spacing: 12) {
@@ -52,6 +56,7 @@
                     TextField("e.g. fake icom", text: $vm.profileName)
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: 220)
+                        .focused($nameFocused)
                     Spacer(minLength: 0)
                 }
 
@@ -84,8 +89,22 @@
                     vm.selectedInput = nil
                 }
                 vm.start(input: vm.selectedInput)
+                // Catches a "+" pressed from OUTSIDE the pane: `startNew` sets
+                // the flag and then shows the pane in the same call, so the view
+                // is born with it already true and never sees an `onChange`.
+                claimNameFocus()
             }
             .onDisappear { vm.stop() }
+            // Catches a "+" pressed from INSIDE the pane (the analyzer header's
+            // own "+"): the view is already alive, so this is the one that fires.
+            .onChange(of: vm.nameFocusPending) { _ in claimNameFocus() }
+        }
+
+        /// Move focus to the name field if a "+" asked for it. The claim itself
+        /// (read-and-clear) lives on the model — this is just the one place that
+        /// turns a claimed request into an actual focus change.
+        private func claimNameFocus() {
+            if vm.consumeNameFocus() { nameFocused = true }
         }
 
         /// The absolute level a bin has to exceed to be notched. Sits directly

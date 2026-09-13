@@ -33,9 +33,9 @@ noise-reduction** the user tunes per saved config (`Setup`) and live
 (`AudioSettings`) are unchanged — this feature is purely additive. (Two configs on
 the same mic can keep different gains while sharing one characterization.)
 
-The mic profile is **exposed** (status + Analyze link + Apply toggle) wherever a
-mic is chosen — simple settings and each saved config — and **created** in the
-Mic Analyzer, a pane of the main window.
+The mic profile is **exposed** (status + a "+" to start a new one + Apply
+toggle) wherever a mic is chosen — simple settings and each saved config — and
+**created** in the Mic Analyzer, a pane of the main window.
 
 ## 1. Data model (`AstarCore`)
 
@@ -132,8 +132,8 @@ Both surfaces show a compact, read-mostly row reflecting the **selected input
 device's** `MicProfile` (no data duplication):
 
 - **Simple settings (`QuickConfigView`)** — under the Mic gain row:
-  `Mic profile: ✓ characterized · [Analyze…] · Apply ⃝` (or
-  `⊘ not characterized · [Analyze…]`). "Analyze…" opens the Analyzer pane
+  `Mic profile: ✓ characterized · [+] · Apply ⃝` (or
+  `⊘ not characterized · [+]`). "+" opens the Analyzer pane on a blank profile,
   defaulted to the current input; the Apply toggle is the per-device `enabled`
   flag.
 - **Saved config card (`ConfigCard`, expanded)** — next to the Input picker, the
