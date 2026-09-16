@@ -12,7 +12,7 @@ inline. All 228 issues (164 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (106)
+## Open items (107)
 
 ### astar-uid — Audio devices need a stable identity, not their name
 *P2 medium · bug · labels: audio, macos, migration, cx:5*
@@ -1818,3 +1818,55 @@ the omission.
 `DenoiseStatus` in `state.rs` lacks `Serialize` under `--all-features`. CI
 never runs that combination, so it went unnoticed. Fix is one line in
 `crates/astar-console/Cargo.toml`.
+
+### astar-discord — A Discord voice channel as a bridge member of astar-server
+*P3 low · feature · labels: server, audio, discord, safety, cx:8*
+
+Bridge a Discord voice channel into a node: the channel hears the net, and —
+only while an operator arms it — the channel reaches the net. Designed
+2026-09-13, deferred; this entry is the design so it is not re-derived.
+
+**The attachment point is already there.** `Conference::add_member(rx, tx)`
+(`crates/astar-audio/src/conference.rs`) takes a pair of PCM channels — nothing
+about a member is IAX — and `set_member_relay(id, contributes, receives)` is
+exactly the arm gate: disarmed is `contributes: false, receives: true`, so
+Discord hears everything and reaches nothing. Mix-minus and
+`announce_to_member` need no change, which is why this is a `[discord]` section
+rather than a fourth `[bridge] mode`: a Discord bridge *plus* a local radio
+would otherwise need a mode name per pairing.
+
+**Shape:**
+
+* New `crates/astar-discord`, behind a `discord` feature **off by default** and
+  the only crate in the workspace that knows about tokio: it owns a runtime on
+  its own thread and speaks `std::sync::mpsc` to everything else. Inside,
+  songbird for the gateway / voice WS / AEAD / RTP; per-SSRC Opus decode at
+  48 kHz stereo; downmix to mono; `rubato` to the pipeline rate; 20 ms
+  `RxFrame`s out, the reverse in. Songbird sits behind a `VoiceLink` trait so
+  tests drive PCM fixtures and CI never touches Discord.
+* `[discord]` in `node.toml` — `guild_id`, `channel_id`, `arm_timeout_secs`,
+  `announce_speakers` — and **no token**: it arrives as `DISCORD_BOT_TOKEN` or
+  over `POST /secrets` under a `discord` username, the namespacing
+  `link:<node>` already uses.
+* `POST /discord {"action":"join"|"leave"|"arm"|"disarm"}`, mirroring
+  `/bridge`, with the armed state in `/status`, SSE and the TUI. There is no
+  `armed_at_start`; arming lapses after `arm_timeout_secs` without Discord
+  speech.
+* Identity reuses `[announce]`: periodic CW/TTS ID for the bridge, plus an
+  optional spoken display name on speaker change, never mid-over.
+* Refuses to contribute while `dstar_active`, following `key_refusal` in
+  `crates/astar-server/src/controller.rs`.
+
+**Two things that do not go away.** Discord has never documented voice
+*receive* — songbird implements it by reverse engineering, and it is the half
+this feature depends on, so it can break without notice; the `VoiceLink` trait
+keeps that blast radius in one crate. And relaying a voice channel onto a
+public radio network is disclosure-and-consent territory under Discord's
+developer policy as well as third-party-traffic rules: the bot description and
+channel topic have to say so, and the bridge should speak a notice into the
+channel when it joins.
+
+Licensing is clear: libopus is BSD-3-Clause (one row in
+`LICENSE-EXCEPTIONS.md` beside `nnnoiseless`), songbird/serenity/tokio are
+MIT/Apache, and a default-features build pulls none of it — pin that with a
+test the way `codec2` is pinned.

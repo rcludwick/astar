@@ -12,26 +12,30 @@
 </p>
 
 <p align="center">
-  <strong>0.1.13-beta</strong> (<a href="CHANGELOG.md">changelog</a>) · AGPL-3.0-only · macOS today, Windows and Linux in progress
+  <a href="https://github.com/rcludwick/astar/releases/latest"><strong>Latest release</strong></a> ·
+  <a href="CHANGELOG.md">changelog</a> · AGPL-3.0-only ·
+  macOS today, Windows and Linux in progress
 </p>
 
 <p align="center">
   <a href="https://rcludwick.github.io/astar/"><strong>Documentation</strong></a> ·
   <a href="https://rcludwick.github.io/astar/build/">Build from source</a> ·
   <a href="https://rcludwick.github.io/astar/macos/hardware/">Hardware</a> ·
-  <a href="https://rcludwick.github.io/astar/server/">astar-server</a>
+  <a href="https://rcludwick.github.io/astar/server/">astar-server</a> ·
+  <a href="https://discord.gg/zDz5R8rVAM">Discord</a>
 </p>
 
 ---
 
 astar dials nodes and reflectors as a client — audio, push-to-talk, DTMF, live
-meters and spectrum, a last-heard history, VOX, and a microphone analyzer that
-measures your mic's noise and writes a per-device profile (notches for hum and
-whine, RNNoise for the rest, or a pass-through when there is nothing to fix).
+meters and spectrum, a last-heard history, VOX, a jitter buffer that absorbs a
+lumpy network on receive, and a microphone analyzer that measures your mic's
+noise and writes a per-device profile (notches for hum and whine, RNNoise for
+the rest, or a pass-through when there is nothing to fix).
 It drives generic USB radio interfaces (serial PTT + USB audio; the AllScan
 UCI150 is the reference device) and also runs as an always-on node daemon.
 
-> ### Latest release — `0.1.13-beta`
+> ### Latest release
 >
 > A signed and notarized **`astar.dmg`** is on the
 > [releases page](https://github.com/rcludwick/astar/releases/latest). It opens
@@ -200,9 +204,8 @@ than silently linking some host-only fallback.
 After launch, look for the **rainbow asterisk** in the menu bar — and, unless you
 turn it off, an astar icon in the Dock. Left-click the asterisk opens the dial
 popover; `Show in Dock` in the right-click menu drops back to menu-bar-only. The
-running
-version (`0.1.13-beta`) is shown in the popover footer, so you can always tell
-what you are actually running.
+running version is shown in the popover footer, so you can always tell what you
+are actually running.
 
 ### A local .dmg
 
@@ -221,8 +224,8 @@ is built with. Nothing is hard-coded to one developer; see
 ### Cutting a release (maintainers)
 
 ```bash
-just release 0.1.14-beta    # bump, gates, signed + notarized dmg, tag, push origin
-just publish 0.1.14-beta    # push public, create the GitHub release — separate on purpose
+just release <version>    # bump, gates, signed + notarized dmg, tag, push origin
+just publish <version>    # push public, create the GitHub release — separate on purpose
 ```
 
 The first command bumps the version in all five of its homes, refreshes the
@@ -382,5 +385,9 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md). The short version: AGPL-3.0-only,
 `just ci` green before anything lands, and nothing goes on the air without a
 human deciding to key it.
 
-Questions, bug reports and on-air testing happen on
-[Discord](https://discord.gg/zDz5R8rVAM).
+## Community
+
+[**astar on Discord**](https://discord.gg/zDz5R8rVAM) — questions, bug reports
+before they are tickets, and on-air testing between people running the same
+beta. Hearing what broke on someone else's setup is how it stops being broken
+on yours.

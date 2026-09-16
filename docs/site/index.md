@@ -37,6 +37,7 @@ native front-end over it rather than a shared web shell.
 
 [Download for macOS](https://github.com/rcludwick/astar/releases/latest){ .md-button .md-button--primary }
 [Build it from source](build/index.md){ .md-button }
+[:fontawesome-brands-discord: Discord](https://discord.gg/zDz5R8rVAM){ .md-button }
 
 </div>
 <div class="astar-hero__shot" markdown>

@@ -236,9 +236,12 @@
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     // The depth window, only where it does something. Green
-                    // like Vol — this is the speaker path — and stepped in
-                    // 10 ms because the buffer schedules 20 ms frames, so
-                    // anything finer is below its own resolution. Crossing
+                    // like Vol — this is the speaker path — and rounded to
+                    // 10 ms in the bindings because the buffer schedules 20 ms
+                    // frames, so anything finer is below its own resolution.
+                    // Rounded there rather than stepped here: a stepped Slider
+                    // draws a tick per step, and seventeen ticks in a narrow
+                    // window collapse into a dotted smear. Crossing
                     // the two carries the other bound along (CallSession
                     // repairs the window, mirroring the engine), so the
                     // sliders can never show a range the engine refuses.
@@ -247,7 +250,7 @@
                             sublabel("Min")
                             Slider(
                                 value: rxJitterMinBinding,
-                                in: jitterRange, step: jitterStep
+                                in: jitterRange
                             )
                             .tint(.green)
                             .accessibilityLabel("Jitter buffer minimum depth")
@@ -263,7 +266,7 @@
                             sublabel("Max")
                             Slider(
                                 value: rxJitterMaxBinding,
-                                in: jitterRange, step: jitterStep
+                                in: jitterRange
                             )
                             .tint(.green)
                             .accessibilityLabel("Jitter buffer maximum depth")
@@ -815,13 +818,13 @@
         private var rxJitterMinBinding: Binding<Double> {
             Binding(
                 get: { Double(session.rxJitterMinMS) },
-                set: { session.setRxJitterMinMS(Int($0)) })
+                set: { session.setRxJitterMinMS(Int(($0 / jitterStep).rounded() * jitterStep)) })
         }
 
         private var rxJitterMaxBinding: Binding<Double> {
             Binding(
                 get: { Double(session.rxJitterMaxMS) },
-                set: { session.setRxJitterMaxMS(Int($0)) })
+                set: { session.setRxJitterMaxMS(Int(($0 / jitterStep).rounded() * jitterStep)) })
         }
 
         private var voxThresholdBinding: Binding<Double> {

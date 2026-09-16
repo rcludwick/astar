@@ -459,7 +459,11 @@
         /// all of these; they only set what a fresh window opens at.
         private var idealPaneWidth: CGFloat {
             switch navigation.pane {
-            case .call: return 330
+            // Wide enough for the regular six-segment network picker, so a fresh
+            // window opens on the full control rather than its folded forms.
+            // Measured on macOS 27: 440 still folds to the small control, 470
+            // shows the regular one.
+            case .call: return 470
             case .settings: return 390
             case .reflectors: return 390
             case .micAnalyzer: return 480
@@ -667,22 +671,40 @@
             .padding(.vertical, 10)
         }
 
+        /// The network picker in one of its two shapes; `connectControls` picks
+        /// whichever fits the row.
+        private func networkPicker<S: PickerStyle>(_ style: S) -> some View {
+            Picker("Network", selection: networkSelection) {
+                ForEach(availableNetworks, id: \.rawValue) { network in
+                    Label(network.displayName, systemImage: network.symbol)
+                        .tag(network.rawValue)
+                }
+            }
+            .pickerStyle(style)
+            .labelsHidden()
+            .accessibilityLabel("Network")
+        }
+
         private var connectControls: some View {
             VStack(alignment: .leading, spacing: 6) {
                 // Network picker (astar-9b3e): latent until a second network is
                 // available — hidden entirely today so the dial form is
                 // pixel-identical to pre-9b3e.
                 if availableNetworks.count > 1 {
-                    Picker("Network", selection: networkSelection) {
-                        ForEach(availableNetworks, id: \.rawValue) {
-                            network in
-                            Label(network.displayName, systemImage: network.symbol)
-                                .tag(network.rawValue)
-                        }
+                    // Six segments need about 390 pt on macOS 27 (its segmented
+                    // controls are roomier than 26's), which is more than the
+                    // window's 310 pt minimum — and the ScrollView this sits in
+                    // clips a row it cannot fit rather than pushing the window
+                    // wider, so a fixed control had both edges cut off. Fold
+                    // instead: the regular control where it fits, the small one
+                    // where that fits, and a popup below that. Every network
+                    // stays reachable at every width; only the presentation
+                    // changes.
+                    ViewThatFits(in: .horizontal) {
+                        networkPicker(.segmented)
+                        networkPicker(.segmented).controlSize(.small)
+                        networkPicker(.menu)
                     }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .accessibilityLabel("Network")
                 }
                 // M17 callsign prompt (astar-c2e5 Task 9): M17 sends this
                 // verbatim in every frame, so ask once, up front, only when

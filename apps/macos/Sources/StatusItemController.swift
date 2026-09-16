@@ -115,19 +115,26 @@
                     .environmentObject(navigation)
             )
             let w = NSWindow(contentViewController: hosting)
-            w.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+            w.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+            // One frosted surface from the top edge down: the content (and its
+            // VisualEffectView, which ignores the safe area) extends under the
+            // title bar, and the title bar draws nothing of its own over it.
+            // SwiftUI keeps the actual controls below the title bar via the
+            // safe area, so only the material reaches the top.
+            w.titlebarAppearsTransparent = true
             // Opt into native full-screen so the green button shows the standard
             // full-screen arrows (⤢) instead of the older "+" zoom glyph.
             w.collectionBehavior.insert(.fullScreenPrimary)
             w.title = "astar"
             w.isReleasedWhenClosed = false  // close just hides it
             w.contentMinSize = NSSize(width: 310, height: 450)
-            // Non-opaque so the SwiftUI VisualEffectView background can show the
-            // translucent/blurred desktop behind the content. The title bar keeps its
-            // normal (system-translucent) appearance — making it transparent too left
-            // a see-through strip, since the content material doesn't extend under it.
-            w.isOpaque = false
-            w.backgroundColor = .clear
+            // The window keeps its stock opaque background. The frosted look is the
+            // SwiftUI VisualEffectView behind the content: `.behindWindow` blending
+            // blurs the desktop through an opaque window just fine (Finder's sidebar
+            // is the same trick). This used to be a non-opaque window with a clear
+            // background, which was harmless until macOS 27: a title bar over a
+            // clear window background drew nothing at all there, leaving the
+            // traffic lights and title floating on the bare desktop.
             // Bumped key so the +10pt larger default takes effect once instead of
             // restoring the old saved frame.
             w.setFrameAutosaveName("astarMainWindow.v2")

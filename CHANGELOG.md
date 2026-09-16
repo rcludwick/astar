@@ -13,6 +13,42 @@ pre-release to the patch number, which sorts wrongly: `0.1.10beta` is newer
 than `0.1.9beta` and a string comparison says the opposite. Shipped versions
 are left as they were spelled.
 
+## 0.1.16-beta — 2026-09-15
+
+The macOS 27 release: the main window laid out again, and the frosted look
+reaches the top edge.
+
+### Changed
+
+- **The title bar is part of the frosted window.** The blurred material now
+  runs from the top edge down, with the traffic lights and title sitting on
+  it, instead of a separate strip above the content.
+
+- **The network picker folds instead of clipping.** Regular where it fits,
+  small where that fits, and a popup menu below that — every network stays
+  reachable at every window width. A fresh call window opens at 470 pt,
+  wide enough for the full control on macOS 27; a window you have already
+  sized stays the size you left it.
+
+- **The Discord invite is on the front page and in the site's title bar**,
+  and the README no longer carries version numbers that can go stale.
+
+### Fixed
+
+- **The title bar was completely transparent on macOS 27.** A titled window
+  with a clear background gets no title bar backdrop at all on 27 — the
+  traffic lights and title floated on the bare desktop. The window keeps its
+  stock background now; the blur never needed a clear one.
+
+- **The window's minimum width cut both edges off every row on macOS 27.**
+  Its roomier segmented controls pushed the six-network picker past the
+  310 pt minimum, and the scrolling pane centred and clipped the overflow.
+  See the folding picker above.
+
+- **The jitter buffer sliders drew a dotted smear in a narrow window.** Those
+  were tick marks, seventeen per slider. The sliders still land on 10 ms
+  steps; they just no longer draw them.
+
 ## 0.1.15-beta — 2026-09-12
 
 Received AllStarLink audio gets a jitter buffer, and the "+" that adds a
