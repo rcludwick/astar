@@ -1,0 +1,8 @@
+request: POST /unkey HTTP/1.1
+status: 500
+header: content-security-policy: default-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'
+header: content-type: application/json
+header: referrer-policy: no-referrer
+header: x-content-type-options: nosniff
+header: x-frame-options: DENY
+body: {"error":"no active call"}

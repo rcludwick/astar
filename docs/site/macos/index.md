@@ -32,8 +32,10 @@ Dock**. It takes effect immediately and persists across launches.
 
 The popover is the whole client. In broad strokes:
 
-* **Network picker** — AllStarLink or M17.
-* **Dial field** — a node number or an address, plus favorites and recents.
+* **Network picker** — AllStarLink, M17, EchoLink, and the digital-voice
+  networks when their dongle is attached.
+* **Dial field** — a node number, an address, a reflector or a callsign, plus
+  [favorites and recents](favorites.md) from every network.
 * **Connect / Disconnect**, with call state and round-trip time.
 * **Push to talk** — press-and-hold in the UI, a hardware operator key on a USB
   radio interface, or VOX. Also a *TX disabled — listening only* mode when you
@@ -43,7 +45,7 @@ The popover is the whole client. In broad strokes:
   time, codec, talk timer.
 * **Level meters and spectrum** for what you are sending and receiving.
 
-Settings adds the rest: your AllStarLink account, saved configs ("setups"),
+Settings adds the rest: your AllStarLink and EchoLink accounts, saved configs ("setups"),
 microphone profiles and characterization, serial PTT wiring, and device
 selection.
 
@@ -56,7 +58,8 @@ you are looking at.
 |---|---|
 | **AllStarLink (IAX2)** | The primary target. Dials nodes; speaks the `app_rpt` link-layer dialect on top of IAX2. |
 | **M17** | Native support, including reflectors. Transmits your callsign, so set it before you key. The app links Codec 2 in, so there is nothing to install; a system `libcodec2` is used in preference when one is present — see [Codec 2](../build/prerequisites.md#codec-2-only-for-m17). |
-| **D-Star** *(needs a dongle)* | XLX/XRF reflectors over DExtra. Voice is AMBE+2, which runs on a **hardware vocoder dongle** — there is no software alternative, so the network appears in the picker only while one is attached. See [Digital voice](hardware.md#digital-voice). |
+| **EchoLink** | Log in with your validated callsign, browse and search the station list, call a station, talk and chat. Voice is GSM 06.10, built in. See [EchoLink](echolink.md). |
+| **D-Star** *(needs a dongle)* | XLX/XRF reflectors over DExtra. Voice is AMBE+2, which runs on a **hardware vocoder dongle** — there is no software alternative, so the network appears in the picker only while one you have added in [Settings → Vocoders](vocoders.md) is attached. See [Digital voice](hardware.md#digital-voice). |
 
 ## Audio and PTT hardware
 

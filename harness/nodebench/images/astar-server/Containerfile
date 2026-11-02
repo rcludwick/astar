@@ -1,0 +1,34 @@
+# nodebench: astar-server built from this checkout for the pod's native
+# architecture (arm64 on the Mac podman VM, amd64 on the IONOS runner). No
+# cross-compiling and no qemu: amd64 rustc under qemu segfaults on the Mac VM.
+#
+# Build context is the REPO ROOT, with the ignore file next to this one:
+#   podman build -f harness/nodebench/images/astar-server/Containerfile \
+#     --ignorefile harness/nodebench/images/astar-server/Containerfile.ignore \
+#     -t localhost/nodebench-astar-server .
+FROM docker.io/library/rust:1-bookworm AS build
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libasound2-dev pkg-config \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+# rust-toolchain.toml says "stable"; the image's toolchain is used as is.
+RUN --mount=type=cache,id=nodebench-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=nodebench-cargo-target,target=/src/target \
+    set -eux; \
+    export RUSTUP_TOOLCHAIN="$(rustup show active-toolchain | cut -d' ' -f1)"; \
+    cargo build --release --locked -p astar-server; \
+    install -D target/release/astar-server /out/astar-server
+
+FROM docker.io/library/debian:12-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libasound2 ca-certificates curl procps \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/astar-server /usr/local/bin/astar-server
+COPY harness/nodebench/images/astar-server/node.toml harness/nodebench/images/astar-server/node-register.toml /etc/nodebench/
+RUN useradd --uid 1000 --create-home astar
+USER astar
+ENTRYPOINT ["/usr/local/bin/astar-server"]
+CMD ["serve", "--config", "/etc/nodebench/node.toml"]

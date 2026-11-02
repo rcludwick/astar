@@ -166,4 +166,38 @@ final class NetworkTests: XCTestCase {
         XCTAssertFalse(Network.dmr.showsDialpad)
         XCTAssertTrue(Network.dmr.isDigitalVoice, "a DMRD frame names who keyed up")
     }
+
+    // MARK: - EchoLink
+
+    /// EchoLink needs no hardware, so its segment is a build fact, and it is
+    /// appended last so every existing segment keeps its place.
+    func testEchoLinkAppearsOnlyWhenFlagged() {
+        XCTAssertEqual(Network.available(m17: false, echolink: true), [.allstar, .echolink])
+        XCTAssertFalse(Network.available(m17: true, dstar: true).contains(.echolink))
+        XCTAssertEqual(
+            Network.available(
+                m17: true, dstar: true, ysf: true, nxdn: true, dmr: true, echolink: true
+            ).last, .echolink)
+        XCTAssertEqual(Network.resolve("echolink", m17: false), .allstar)
+        XCTAssertEqual(Network.resolve("echolink", m17: false, echolink: true), .echolink)
+    }
+
+    /// A node number or a listed callsign, `-L`/`-R` suffixes and conference
+    /// stars included, and nothing that would make the text an address.
+    func testEchoLinkDialMetadata() {
+        XCTAssertEqual(Network.echolink.displayName, "EchoLink")
+        XCTAssertEqual(Network.echolink.badge, "ECHO")
+        XCTAssertEqual(Network.echolink.symbol, "person.2.wave.2")
+        XCTAssertEqual(Network.echolink.dialPlaceholder, "Callsign or node number")
+        for text in ["*ECHOTEST*", "KX7ABC-L", "9999"] {
+            XCTAssertTrue(
+                text.allSatisfy(Network.echolink.admitsDialCharacter), "\(text) is typeable")
+        }
+        XCTAssertFalse(Network.echolink.admitsDialCharacter(" "))
+        XCTAssertFalse(Network.echolink.admitsDialCharacter("/"))
+        XCTAssertFalse(Network.echolink.admitsDialCharacter("é"))
+        XCTAssertTrue(Network.echolink.isDigitalVoice, "the call names the far station")
+        XCTAssertFalse(Network.echolink.showsDialpad)
+        XCTAssertNil(Network.echolink.reflectorNetwork, "EchoLink is not in hamcall-db")
+    }
 }

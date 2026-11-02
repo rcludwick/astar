@@ -5,7 +5,7 @@
 //! "validate WT credentials WITHOUT placing a call" path used by astar's
 //! credentials Test button (astar-2fde).
 //!
-//! These drive the mint against a local `tiny_http` stub portal (via the
+//! These drive the mint against a local `astar-http` stub portal (via the
 //! `portal_base` config override), so no live network or real creds are needed.
 //! The stub plays both halves of the mint: the documented
 //! `POST /api/v2/auth-wt-legacy` the engine tries first, and — when that answers
@@ -16,6 +16,8 @@
 //! idle and `set_ptt` still reports `NotConnected` afterward).
 
 use astar_asl3::{Asl3Error, PortalCredentials};
+use astar_http::Response;
+use astar_http::testing::{Stub, serve};
 use astar_station::{CallStatus, Station, StationConfig, StationError};
 
 fn test_station(cfg: StationConfig) -> Station {
@@ -34,60 +36,43 @@ enum ApiStub {
     Gone,
 }
 
-/// Spawn a stub portal that plays the auth API and, behind it, the `AllStar`
+/// Start a stub portal that plays the auth API and, behind it, the `AllStar`
 /// login.php / webtransceiver.php flow. `good_node` is the node number the
 /// scrape will issue a token for; any other node (or a missing cookie) yields
-/// "Node not found". Returns the base URL. The stub serves exactly `requests`
-/// requests then exits.
-fn spawn_stub_portal(
-    api: ApiStub,
-    good_node: &'static str,
-    requests: usize,
-) -> (String, std::thread::JoinHandle<()>) {
-    let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub");
-    let base = format!("http://{}", server.server_addr());
-    let handle = std::thread::spawn(move || {
-        for _ in 0..requests {
-            let Ok(rq) = server.recv() else { return };
-            let url = rq.url().to_string();
-            if url.starts_with("/api/v2/auth-wt-legacy") {
-                let resp = match api {
-                    ApiStub::Token(t) => tiny_http::Response::from_string(format!(
-                        r#"{{"status":"OK","auth":1,"token":"{t}","msg":"ok"}}"#
-                    )),
-                    ApiStub::NoToken => tiny_http::Response::from_string(
-                        r#"{"status":"OK","auth":1,"token":"","msg":"ok"}"#.to_string(),
-                    ),
-                    ApiStub::Gone => tiny_http::Response::from_string("not found".to_string())
-                        .with_status_code(404),
-                };
-                let _ = rq.respond(resp);
-            } else if url.starts_with("/login.php") {
-                let cookie =
-                    |v: &[u8]| tiny_http::Header::from_bytes(&b"Set-Cookie"[..], v).unwrap();
-                let resp = tiny_http::Response::from_string("ok")
-                    .with_header(cookie(b"PHPSESSID=stub123; path=/"))
-                    .with_header(cookie(b"allstar_token=jwt-abc; path=/"));
-                let _ = rq.respond(resp);
-            } else {
-                let cookie_hdr = rq
-                    .headers()
-                    .iter()
-                    .find(|h| h.field.equiv("Cookie"))
-                    .map(|h| h.value.as_str().to_string())
-                    .unwrap_or_default();
-                let authed = cookie_hdr.contains("PHPSESSID=stub123");
-                let node_q = format!("node={good_node}");
-                let body = if authed && url.contains(&node_q) {
+/// "Node not found". It stops when the returned stub is dropped.
+fn spawn_stub_portal(api: ApiStub, good_node: &'static str) -> Stub {
+    serve(move |rq| {
+        let url = &rq.target;
+        if url.starts_with("/api/v2/auth-wt-legacy") {
+            match api {
+                ApiStub::Token(t) => Response::text(
+                    200,
+                    format!(r#"{{"status":"OK","auth":1,"token":"{t}","msg":"ok"}}"#),
+                ),
+                ApiStub::NoToken => {
+                    Response::text(200, r#"{"status":"OK","auth":1,"token":"","msg":"ok"}"#)
+                }
+                ApiStub::Gone => Response::text(404, "not found"),
+            }
+        } else if url.starts_with("/login.php") {
+            Response::text(200, "ok")
+                .header("Set-Cookie", "PHPSESSID=stub123; path=/")
+                .header("Set-Cookie", "allstar_token=jwt-abc; path=/")
+        } else {
+            let authed = rq
+                .header("Cookie")
+                .is_some_and(|c| c.contains("PHPSESSID=stub123"));
+            let node_q = format!("node={good_node}");
+            Response::text(
+                200,
+                if authed && url.contains(&node_q) {
                     r#"<param name="callingName" value="tok-abcdef"/>"#
                 } else {
                     "Node not found"
-                };
-                let _ = rq.respond(tiny_http::Response::from_string(body));
-            }
+                },
+            )
         }
-    });
-    (base, handle)
+    })
 }
 
 fn portal_cfg(base: String, node: &str) -> StationConfig {
@@ -104,10 +89,15 @@ fn portal_cfg(base: String, node: &str) -> StationConfig {
 
 #[test]
 fn test_mint_token_succeeds_against_stub_portal() {
-    let (base, handle) = spawn_stub_portal(ApiStub::Token("tok-api"), "77777", 1);
-    let s = test_station(portal_cfg(base, "77777"));
+    let stub = spawn_stub_portal(ApiStub::Token("tok-api"), "77777");
+    let s = test_station(portal_cfg(stub.url(), "77777"));
     s.test_mint_token().expect("mint succeeds");
-    handle.join().unwrap();
+    assert_eq!(
+        stub.requests().len(),
+        1,
+        "one API request only: an extra request means the mint fell back to the scrape: {:?}",
+        stub.requests()
+    );
 }
 
 /// No portal config at all → a clean Portal error (no panic, no call).
@@ -121,28 +111,26 @@ fn test_mint_token_without_portal_is_portal_error() {
 /// Bad password (no session cookie) maps to the `Login` category.
 #[test]
 fn test_mint_token_bad_password_maps_to_login() {
-    let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub");
-    let base = format!("http://{}", server.server_addr());
-    let handle = std::thread::spawn(move || {
-        if let Ok(rq) = server.recv() {
-            // The live API's refusal shape ⇒ Asl3Error::Login, and no fallback
-            // to the scrape (wrong credentials are wrong on both paths), so the
-            // stub serves exactly this one request.
-            let _ = rq.respond(
-                tiny_http::Response::from_string(
-                    r#"{"status":"ERR","auth":0,"token":"","msg":"login failed"}"#,
-                )
-                .with_status_code(401),
-            );
-        }
+    let stub = serve(|_| {
+        // The live API's refusal shape => Asl3Error::Login, and no fallback
+        // to the scrape (wrong credentials are wrong on both paths).
+        Response::text(
+            401,
+            r#"{"status":"ERR","auth":0,"token":"","msg":"login failed"}"#,
+        )
     });
-    let s = test_station(portal_cfg(base, "77777"));
+    let s = test_station(portal_cfg(stub.url(), "77777"));
     let err = s.test_mint_token().unwrap_err();
+    assert_eq!(
+        stub.requests().len(),
+        1,
+        "one API request only: an extra request means the mint fell back to the scrape: {:?}",
+        stub.requests()
+    );
     assert!(
         matches!(err, StationError::Portal(Asl3Error::Login)),
         "bad password should map to Login, got {err:?}"
     );
-    handle.join().unwrap();
 }
 
 /// Unknown node (login OK, but no token in the WT page) maps to `TokenNotFound`.
@@ -150,14 +138,19 @@ fn test_mint_token_bad_password_maps_to_login() {
 fn test_mint_token_unknown_node_maps_to_token_not_found() {
     // The API is absent, so the mint falls back to the scrape; the stub only
     // issues a token for 77777, and we ask for a node the account doesn't own.
-    let (base, handle) = spawn_stub_portal(ApiStub::Gone, "77777", 3);
-    let s = test_station(portal_cfg(base, "00000"));
+    let stub = spawn_stub_portal(ApiStub::Gone, "77777");
+    let s = test_station(portal_cfg(stub.url(), "00000"));
     let err = s.test_mint_token().unwrap_err();
+    assert_eq!(
+        stub.requests().len(),
+        3,
+        "API 404, login, page: exactly three requests: {:?}",
+        stub.requests()
+    );
     assert!(
         matches!(err, StationError::Portal(Asl3Error::TokenNotFound)),
         "unknown node should map to TokenNotFound, got {err:?}"
     );
-    handle.join().unwrap();
 }
 
 /// The API answered but issued no token, and the account has no node to fall
@@ -165,16 +158,21 @@ fn test_mint_token_unknown_node_maps_to_token_not_found() {
 /// IAX call is opened.
 #[test]
 fn test_mint_token_api_without_token_or_node_is_http_and_opens_no_call() {
-    let (base, handle) = spawn_stub_portal(ApiStub::NoToken, "77777", 1);
-    let s = test_station(portal_cfg(base, "")); // no node → no scrape fallback
+    let stub = spawn_stub_portal(ApiStub::NoToken, "77777");
+    let s = test_station(portal_cfg(stub.url(), "")); // no node → no scrape fallback
     let err = s.test_mint_token().unwrap_err();
+    assert_eq!(
+        stub.requests().len(),
+        1,
+        "one API request only: an extra request means the mint fell back to the scrape: {:?}",
+        stub.requests()
+    );
     assert!(
         matches!(err, StationError::Portal(Asl3Error::Http(_))),
         "an API with no token and no node should map to Http, got {err:?}"
     );
     assert!(matches!(s.snapshot().status, CallStatus::Idle));
     assert!(matches!(s.set_ptt(true), Err(StationError::NotConnected)));
-    handle.join().unwrap();
 }
 
 /// Network error (nothing listening) maps to the `Http` category.
@@ -197,15 +195,20 @@ fn test_mint_token_network_error_maps_to_http() {
 /// transmit still reports `NotConnected` after a successful mint.
 #[test]
 fn test_mint_token_opens_no_call() {
-    let (base, handle) = spawn_stub_portal(ApiStub::Token("tok-api"), "77777", 1);
-    let s = test_station(portal_cfg(base, "77777"));
+    let stub = spawn_stub_portal(ApiStub::Token("tok-api"), "77777");
+    let s = test_station(portal_cfg(stub.url(), "77777"));
     s.test_mint_token().expect("mint succeeds");
+    assert_eq!(
+        stub.requests().len(),
+        1,
+        "one API request only: an extra request means the mint fell back to the scrape: {:?}",
+        stub.requests()
+    );
     // No call was placed: status is Idle, and PTT is rejected (no active call).
     assert!(matches!(s.snapshot().status, CallStatus::Idle));
     assert!(matches!(s.set_ptt(true), Err(StationError::NotConnected)));
     s.disconnect(); // idempotent no-op
     assert!(matches!(s.snapshot().status, CallStatus::Idle));
-    handle.join().unwrap();
 }
 
 /// Secret-free invariant: neither the portal password nor the minted token
@@ -213,17 +216,13 @@ fn test_mint_token_opens_no_call() {
 #[test]
 fn test_mint_token_error_carries_no_secret() {
     let password = "super-secret-portal-pw";
-    let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub");
-    let base = format!("http://{}", server.server_addr());
-    let handle = std::thread::spawn(move || {
-        if let Ok(rq) = server.recv() {
-            let _ = rq.respond(
-                tiny_http::Response::from_string(
-                    r#"{"status":"ERR","auth":0,"token":"","msg":"login failed"}"#,
-                )
-                .with_status_code(401),
-            );
-        }
+    let stub = serve(|_| {
+        // The live API's refusal shape => Asl3Error::Login, and no fallback
+        // to the scrape (wrong credentials are wrong on both paths).
+        Response::text(
+            401,
+            r#"{"status":"ERR","auth":0,"token":"","msg":"login failed"}"#,
+        )
     });
     let cfg = StationConfig {
         portal: Some(PortalCredentials {
@@ -231,14 +230,19 @@ fn test_mint_token_error_carries_no_secret() {
             password: password.into(),
             node: "77777".into(),
         }),
-        portal_base: Some(base),
+        portal_base: Some(stub.url()),
         ..StationConfig::default()
     };
     let s = test_station(cfg);
     let err = s.test_mint_token().unwrap_err();
+    assert_eq!(
+        stub.requests().len(),
+        1,
+        "one API request only: an extra request means the mint fell back to the scrape: {:?}",
+        stub.requests()
+    );
     assert!(!err.to_string().contains(password));
     assert!(!format!("{err:?}").contains(password));
-    handle.join().unwrap();
 }
 
 /// LIVE end-to-end mint against the real `AllStarLink` portal — opt-in only,

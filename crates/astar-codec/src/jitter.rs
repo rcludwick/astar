@@ -126,7 +126,8 @@ pub struct JitterStats {
     pub jitter: i64,
     /// Estimated minimum one-way delay in ms.
     pub min: i64,
-    /// Current buffer depth target in ms.
+    /// The delay the buffer is currently scheduling against, in ms. On the
+    /// same axis as `min`: the audio actually held back is `current - min`.
     pub current: i64,
     /// Where we'd like the buffer depth to be (`jitter + min + target_extra`).
     pub target: i64,

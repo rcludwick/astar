@@ -73,6 +73,40 @@ final class StationTests: XCTestCase {
         }
     }
 
+    // MARK: Recording
+
+    func testRecordStateIsIdleOnANewStation() throws {
+        let st = try Station()
+        XCTAssertNoThrow(try st.recordStop(), "a stop while idle is a no-op")
+        let state = try st.recordState()
+        XCTAssertEqual(
+            state,
+            RecordState(
+                recording: false, elapsedMS: 0, files: [], droppedFrames: 0, error: nil,
+                layout: "stereo"))
+    }
+
+    func testRecordStartWhileIdleThrowsNotConnected() throws {
+        let st = try Station()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("astar-swift-record").path
+        XCTAssertThrowsError(
+            try st.recordStart(
+                directory: dir, layout: .stereo, frames: false, label: "AllStar 2000",
+                utcOffsetSeconds: 0)
+        ) { error in
+            // IAX_ERR_NOT_CONNECTED == -3
+            XCTAssertEqual((error as? StationError)?.code, -3)
+        }
+    }
+
+    func testRecordErrorCodeHasItsOwnText() {
+        // IAX_ERR_RECORD == -23
+        XCTAssertEqual(StationError.from(-23).text, "recording error")
+        XCTAssertEqual(RecordingLayout.twoMono.rawValue, 1)
+        XCTAssertEqual(RecordingLayout.mixed.rawValue, 2)
+    }
+
     func testSendDTMFWhileIdleThrowsNotConnected() throws {
         let st = try Station()
         // Valid DTMF keys — the full 16-key set, A-D included (iax-47ae) — with
@@ -399,6 +433,79 @@ final class StationTests: XCTestCase {
         XCTAssertThrowsError(
             try st.connectDStar(host: "127.0.0.1", module: "\u{00e9}", callsign: "N0CALL")
         )
+    }
+
+    // MARK: Vocoder trust
+    //
+    // Nothing here opens, or even enumerates, a serial port: an empty trust
+    // list refuses before the engine looks at the USB bus, and enrolment is
+    // exercised only through its decoder.
+
+    func testANewStationTrustsNoVocoder() throws {
+        let st = try Station()
+        XCTAssertEqual(try st.vocoderTrust(), [])
+    }
+
+    func testVocoderTrustComesFromConfigAndTheSetter() throws {
+        let st = try Station(config: StationConfig(vocoderSerials: ["TESTSER1", "TESTSER2"]))
+        XCTAssertEqual(try st.vocoderTrust(), ["TESTSER1", "TESTSER2"])
+        try st.setVocoderTrust(["TESTSER3"])
+        XCTAssertEqual(try st.vocoderTrust(), ["TESTSER3"])
+        try st.setVocoderTrust([])
+        XCTAssertEqual(try st.vocoderTrust(), [])
+    }
+
+    func testDStarConnectWithNoTrustedVocoderIsRefusedByName() throws {
+        let st = try Station()
+        XCTAssertThrowsError(
+            try st.connectDStar(host: "127.0.0.1", module: "A", callsign: "N0CALL")
+        ) { error in
+            let e = error as? StationError
+            XCTAssertEqual(e?.code, -19, "IAX_ERR_DSTAR")
+            XCTAssertTrue(
+                e?.detail.hasSuffix(Station.noTrustedVocoderMessage) ?? false,
+                "got \(String(describing: e?.detail))"
+            )
+        }
+    }
+
+    func testVocoderEnrolmentDecodesTheEngineJSON() throws {
+        let trusted = VocoderEnrolment.decode(
+            code: 0,
+            json: """
+                {"result":"trusted","trusted":true,"serial":"TESTSER1",\
+                "port":"/dev/cu.usbserial-TESTSER1","prodid":"AMBE3000R",\
+                "model":"DVstick 30 / ThumbDV-class","message":"Added."}
+                """)
+        XCTAssertTrue(trusted.isTrusted)
+        XCTAssertEqual(trusted.serial, "TESTSER1")
+        XCTAssertEqual(trusted.prodid, "AMBE3000R")
+        XCTAssertEqual(trusted.model, "DVstick 30 / ThumbDV-class")
+
+        let unsupported = VocoderEnrolment.decode(
+            code: 1,
+            json: """
+                {"result":"unsupported","trusted":false,"serial":"TESTSER3","port":"p",\
+                "prodid":"AMBE3003F","model":"DVstick 33 / AMBE-3003","message":"not supported yet"}
+                """)
+        XCTAssertEqual(unsupported.result, .unsupported)
+        XCTAssertFalse(unsupported.isTrusted)
+
+        let notFound = VocoderEnrolment.decode(
+            code: 5,
+            json: #"{"result":"not_found","trusted":false,"serial":"X","port":null,"prodid":null,"model":null,"message":"m"}"#
+        )
+        XCTAssertEqual(notFound.result, .notFound)
+        XCTAssertNil(notFound.port)
+    }
+
+    func testVocoderEnrolResultRawValuesMatchTheCABI() {
+        // IaxVocoderEnrol in astar.h: Trusted = 0 … NotCompiled = 6.
+        XCTAssertEqual(VocoderEnrolResult.trusted.rawValue, 0)
+        XCTAssertEqual(VocoderEnrolResult.unsupported.rawValue, 1)
+        XCTAssertEqual(VocoderEnrolResult.noAnswer.rawValue, 3)
+        XCTAssertEqual(VocoderEnrolResult.notFound.rawValue, 5)
+        XCTAssertEqual(VocoderEnrolResult.notCompiled.rawValue, 6)
     }
 
     func testM17StateDecodesTheEngineJSON() throws {

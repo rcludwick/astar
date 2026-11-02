@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn silence_decodes_to_nothing() {
         let mut decoder = DtmfDecoder::new(8000);
-        assert!(decoder.process(&[0_i16; 2000]).is_empty());
+        assert_eq!(decoder.process(&[0_i16; 2000]), [] as [char; 0]);
     }
 
     #[test]

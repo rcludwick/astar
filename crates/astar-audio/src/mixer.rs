@@ -278,7 +278,12 @@ impl Default for MixerClock {
 pub struct RxJitterCells {
     /// Estimated network jitter in ms (max-min over the delay history).
     pub jitter_ms: AtomicU32,
-    /// Current buffer depth in ms.
+    /// How much audio the buffer is holding back, in ms: `jitterbuf.c`'s
+    /// `current - min`, the figure `chan_iax2` reports as the buffer's delay.
+    /// Not `current` alone — that sits on the delay axis next to `min`, which
+    /// goes negative whenever transit gets quicker than the first frame's
+    /// (a slow first second, a sender clock a hair fast), and `current`
+    /// follows it below zero while the cushion never moves.
     pub depth_ms: AtomicU32,
     /// `jitterbuf.c`'s own `frames_lost`: frames the buffer expected and did
     /// not play. Usually an interpolation over a frame that never arrived, but
@@ -307,7 +312,7 @@ impl RxJitterCells {
         self.jitter_ms
             .store(clamp_u32(info.jitter), Ordering::Relaxed);
         self.depth_ms
-            .store(clamp_u32(info.current), Ordering::Relaxed);
+            .store(clamp_u32(info.current - info.min), Ordering::Relaxed);
         self.frames_lost
             .store(clamp_u64(info.frames_lost), Ordering::Relaxed);
         self.frames_late
@@ -1173,6 +1178,42 @@ mod tests {
             stats.depth_ms.load(Ordering::Relaxed) >= 120,
             "depth settled at or above the configured floor, got {}",
             stats.depth_ms.load(Ordering::Relaxed)
+        );
+    }
+
+    /// The depth the snapshot reports is the cushion the buffer is holding,
+    /// not `jitterbuf.c`'s `current`, which sits on the delay axis next to
+    /// `min` — the lowest transit delay seen, relative to the first frame's.
+    /// Nothing keeps `min` at zero: a connection whose first second was
+    /// slower than the rest (the ordinary case), or a sender clock running a
+    /// hair fast, pulls it negative, and `current` follows at the next
+    /// silence gap. The cushion is `current - min` the whole time.
+    ///
+    /// Here transit shrinks from 100 ms to nothing over the first second and
+    /// the sender keys in 5 s spurts with 2 s gaps, the way a node does. Once
+    /// the history window has forgotten the slow start, `current` is -60 and
+    /// a clamp of it reads 0 ms — with two 20 ms frames in hand.
+    #[test]
+    fn depth_is_the_cushion_not_the_delay_axis() {
+        let (clock, cell) = MixerClock::fake();
+        let settings = Arc::new(RxJitterSettings::new(RxJitterConfig::default()));
+        let mut mixer = Mixer::new().with_clock(clock).with_settings(settings);
+        let (tx, rx) = channel();
+        let id = mixer.add_call(rx);
+        let stats = mixer.jitter_cells(id).expect("lane present");
+        let mut out = [0.0_f32; 160];
+        for step in 0..1500_i64 {
+            let transit = (100 - 2 * step).max(0);
+            cell.store(step * 20 + transit, Ordering::Relaxed);
+            if step % 350 < 250 {
+                tx.send(timed(8000, step * 20)).unwrap();
+            }
+            mixer.read(&mut out);
+        }
+        let depth = stats.depth_ms.load(Ordering::Relaxed);
+        assert!(
+            (40..=200).contains(&depth),
+            "the buffer holds its 40 ms floor, within the 200 ms ceiling; reported {depth}"
         );
     }
 

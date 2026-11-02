@@ -1,0 +1,3 @@
+# astar patch (VENDORED.md): leave upstream code exactly as published;
+# `cargo fmt --all` would otherwise restyle it.
+disable_all_formatting = true

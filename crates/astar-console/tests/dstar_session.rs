@@ -324,7 +324,8 @@ fn dstar_session_tracks_the_talker_and_decodes_rx() {
     let (router, audio, mic) = route(Box::new(PullBackend {
         output_tap: Arc::clone(&output_tap),
     }));
-    let mut session = DstarSession::connect(cfg, audio).expect("dstar session connect");
+    let mut session = DstarSession::connect(cfg, audio, &astar_console::VocoderTrust::from_env())
+        .expect("dstar session connect");
 
     assert!(
         wait_until(|| session.state().link == LinkState::Linked, 2_000),
@@ -433,7 +434,8 @@ fn dstar_session_drains_a_short_stream_shorter_than_the_priming_window() {
     let (_router, audio, _mic) = route(Box::new(PullBackend {
         output_tap: Arc::clone(&output_tap),
     }));
-    let session = DstarSession::connect(cfg, audio).expect("dstar session connect");
+    let session = DstarSession::connect(cfg, audio, &astar_console::VocoderTrust::from_env())
+        .expect("dstar session connect");
 
     assert!(
         wait_until(|| session.state().link == LinkState::Linked, 2_000),

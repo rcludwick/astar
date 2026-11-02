@@ -80,8 +80,14 @@ fn clients_do_not_disable_the_defaults_they_inherit_m17_from() {
         ),
     ] {
         let line = dep_line(manifest, "astar-station");
+        // astar-server turns the defaults off so its static release can
+        // leave out `device-audio`, and asks for `m17` by name instead
+        // (beside `echolink`).
+        let m17_named = line
+            .split_once("features = [")
+            .is_some_and(|(_, list)| list.contains("\"m17\""));
         assert!(
-            !line.contains("default-features = false"),
+            !line.contains("default-features = false") || m17_named,
             "{who} disables astar-station's default features, which drops M17 \
              from a shipping artifact. If that is deliberate, add \
              `astar-station/m17` explicitly and update this test.\n  {line}"

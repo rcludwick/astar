@@ -53,6 +53,13 @@
         /// So the settings pane can clear a stranded `focusNewID` on the way
         /// out — see `devicesPane`'s `onDisappear`.
         @EnvironmentObject private var setups: SetupController
+        /// Settings → Vocoders' model: which AMBE sticks this Mac trusts. The
+        /// call card reads it only for the "add your vocoder" hint and the
+        /// connect error's way out.
+        @EnvironmentObject private var vocoders: VocoderSettings
+        /// The operator dismissed the "a vocoder may be plugged in" hint. A
+        /// convenience, remembered so it never nags after a "not now".
+        @AppStorage("ui.vocoderHintDismissed") private var vocoderHintDismissed = false
         /// The devices this rig is actually using, so the warning below can be
         /// limited to a clash that affects them (astar-9d41). Same keys
         /// `AudioSettings` persists, read-only here.
@@ -67,14 +74,14 @@
             Network.available(
                 m17: session.m17Available, dstar: session.dstarAvailable,
                 ysf: session.ysfAvailable, nxdn: session.nxdnAvailable,
-                dmr: session.dmrAvailable)
+                dmr: session.dmrAvailable, echolink: session.echolinkAvailable)
         }
 
         private var selectedNetwork: Network {
             Network.resolve(
                 networkRaw, m17: session.m17Available, dstar: session.dstarAvailable,
                 ysf: session.ysfAvailable, nxdn: session.nxdnAvailable,
-                dmr: session.dmrAvailable)
+                dmr: session.dmrAvailable, echolink: session.echolinkAvailable)
         }
 
         /// The network picker's binding, and the one place a network change
@@ -160,6 +167,7 @@
                 case .call: mainPane
                 case .settings: devicesPane
                 case .reflectors: reflectorsPane
+                case .echolinkStations: echolinkStationsPane
                 case .micAnalyzer: micAnalyzerPane
                 }
             }
@@ -176,6 +184,9 @@
             .onAppear {
                 installKeyMonitor()
                 applyPollState(for: navigation.pane)
+                // USB enumeration only, nothing opened: feeds the call card's
+                // "add your vocoder" hint.
+                vocoders.refresh()
             }
             // Popover closed → resume the app's baseline poll (AppDelegate keeps the
             // call live for the menu-bar tint / serial PTT). Don't fully stop it.
@@ -244,8 +255,30 @@
                                 meters
                                 levelsAndSpectrum
                                 callControls
+                                if let recordingError = session.recordingError {
+                                    // One line, under the controls it is about:
+                                    // a recording that could not start or
+                                    // stopped by itself (disk, folder).
+                                    Text(recordingError)
+                                        .font(.caption)
+                                        .foregroundStyle(.red)
+                                        .lineLimit(1)
+                                        .truncationMode(.tail)
+                                        .help(recordingError)
+                                        .padding(.horizontal, 14)
+                                        .padding(.bottom, 8)
+                                }
                             }
                             .mainCard()
+
+                            // The far station and the chat. Meters, PTT and
+                            // the time-out stay in the call card above.
+                            if session.activeCallNetwork == .echolink {
+                                EchoLinkCallPane(onDisconnect: disconnect)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 10)
+                                    .mainCard()
+                            }
                         } else {
                             connectControls.mainCard()
                         }
@@ -261,6 +294,21 @@
                                 // to fix, not a fault in the app.
                                 .foregroundStyle(.orange)
                                 .padding(.horizontal, 6)
+                            // Vocoder trust: the one connect failure with a
+                            // single obvious fix gets a button to it.
+                            if VocoderSetupPrompt.offersSettings(for: errorText) {
+                                Button {
+                                    navigation.showSettings(at: .vocoders)
+                                } label: {
+                                    Label("Open Vocoder Settings…", systemImage: "memorychip")
+                                }
+                                .controlSize(.small)
+                                .padding(.horizontal, 6)
+                            }
+                        }
+
+                        if !isInCall, vocoders.suggestsAdding, !vocoderHintDismissed {
+                            vocoderHint
                         }
 
                         // astar-9d41 — two devices reporting one name. Sits
@@ -349,6 +397,10 @@
                             CredentialsView()
                                 .listRowSeparator(.hidden)
                         }
+                        // The other network you log in to, beside the first:
+                        // the same callsign, password and auto-login the
+                        // EchoLink pane's form uses.
+                        EchoLinkSettingsView()
                         // Below the account, not beside the callsign: a DMR ID is
                         // one network's credential, and that network is not
                         // dialable yet (astar-a7c5).
@@ -357,16 +409,26 @@
                         // are 16-bit and a registered DMR ID does not fit in one,
                         // so they are two numbers, not one shown twice.
                         NxdnSettingsView()
+                        // Next to the network credentials it unlocks: D-Star,
+                        // Fusion, NXDN and DMR all need a trusted stick.
+                        VocoderSettingsView()
                         SetupsView(scroll: proxy)
                         FavoritesSettingsView(directoryRevision: $directoryRevision)
                         MicProfilesView()
                         ReflectorSettingsView()
                         SpectrumSettingsView()
+                        RecordingSettingsView()
                         ConfigTransferView(directoryRevision: $directoryRevision)
                     }
                     .listStyle(.inset)
                     .scrollContentBackground(.hidden)  // let the window's blur show through
                     .environment(\.defaultMinListRowHeight, 4)
+                    // "Open Vocoder Settings…" and friends: scroll to the
+                    // section they named, once, then forget it.
+                    .onAppear { scrollToSettingsAnchor(proxy) }
+                    .onChange(of: navigation.settingsAnchor) { _ in
+                        scrollToSettingsAnchor(proxy)
+                    }
                 }
             }
             // `focusNewID` is claimed only by the new card's own `onAppear`
@@ -376,6 +438,18 @@
             // appears it would spontaneously re-expand and steal the keyboard,
             // long after "new" stopped being true.
             .onDisappear { setups.focusNewID = nil }
+        }
+
+        /// Scroll Settings to the anchor something outside it asked for. On the
+        /// next turn, so the List has laid its rows out first.
+        private func scrollToSettingsAnchor(_ proxy: ScrollViewProxy) {
+            guard let anchor = navigation.settingsAnchor else { return }
+            DispatchQueue.main.async {
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    proxy.scrollTo(anchor, anchor: .top)
+                }
+                navigation.settingsAnchor = nil
+            }
         }
 
         /// The reflector directory as a pane of this window (astar-5a41),
@@ -405,6 +479,22 @@
                     node = text
                 }
             )
+        }
+
+        /// The EchoLink station list as a pane of this window, entered from
+        /// the dial row's magnifying glass the way the reflector directory
+        /// is. Choosing a station fills the dial field and returns; Connect is
+        /// still the dial row's, a deliberate second action.
+        private var echolinkStationsPane: some View {
+            EchoLinkStationsPane(
+                onBack: { navigation.goBack() },
+                onChoose: { text in
+                    // The pane is only reachable with EchoLink selected, but
+                    // say so anyway: the field's text means nothing elsewhere.
+                    networkRaw = Network.echolink.rawValue
+                    node = text
+                },
+                onOpenSettings: { navigation.showSettings(at: .echolink) })
         }
 
         /// The mic analyzer, with the same header chrome as Settings — a Back
@@ -466,6 +556,7 @@
             case .call: return 470
             case .settings: return 390
             case .reflectors: return 390
+            case .echolinkStations: return 420
             case .micAnalyzer: return 480
             }
         }
@@ -475,6 +566,7 @@
             case .call: return 550
             case .settings: return 670
             case .reflectors: return 620
+            case .echolinkStations: return 620
             case .micAnalyzer: return 560
             }
         }
@@ -741,16 +833,13 @@
                         // per-network (astar-9b3e); AllStar's rule is identical
                         // to the pre-9b3e behavior verbatim.
                         .onChange(of: node) { value in
-                            let filtered = value.filter { selectedNetwork.admitsDialCharacter($0) }
+                            let filtered = value.filter {
+                                selectedNetwork.admitsDialCharacter($0)
+                            }
                             if filtered != value { node = filtered }
                         }
-                        .help(
-                            "A node number dials through the AllStarLink registrar. "
-                                + "An IP or hostname (with optional :port, default 4569) "
-                                + "dials that address directly — for a node that isn’t "
-                                + "reachable at its published address (e.g. your own "
-                                + "node on localhost).")
-                    reflectorSearchButton
+                        .help(dialFieldHelp)
+                    searchButton
                     directoryMenu
                     favoriteToggle
                     Button(action: connect) {
@@ -794,6 +883,17 @@
                         .foregroundStyle(.secondary)
                         // Same fade/slide as the M17 callsign field above.
                         .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+                // EchoLink's login, in one line under the same dial row every
+                // network uses: the callsign and password live in Settings →
+                // EchoLink, and this offers only Log in / Log out with them.
+                if selectedNetwork == .echolink {
+                    EchoLinkLoginLine(onOpenSettings: { navigation.showSettings(at: .echolink) })
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    if let problem = session.echolinkDialProblem(node) {
+                        echolinkDialProblemLine(problem)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
                 }
                 // DMR's other credential. Said here, with Connect already off,
                 // rather than thrown on press: the operator cannot supply a
@@ -1132,17 +1232,68 @@
             session.connectedTargetLabel(for: node)
         }
 
+        /// The dial field's tooltip, for the network it is dialling on.
+        private var dialFieldHelp: String {
+            switch selectedNetwork {
+            case .echolink:
+                return
+                    "A callsign as the EchoLink station list shows it (KX7ABC-L, *ECHOTEST*), "
+                    + "or its node number. The magnifying glass browses the list."
+            default:
+                return
+                    "A node number dials through the AllStarLink registrar. "
+                    + "An IP or hostname (with optional :port, default 4569) "
+                    + "dials that address directly — for a node that isn’t "
+                    + "reachable at its published address (e.g. your own "
+                    + "node on localhost)."
+            }
+        }
+
+        /// Why the EchoLink text cannot be dialled, with the one thing that
+        /// might fix it: a fresh station list, for a station that logged in
+        /// after the one in hand.
+        private func echolinkDialProblemLine(_ problem: String) -> some View {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(problem)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 4)
+                Button(action: session.echolinkRefreshStations) {
+                    switch session.echolinkRefresh {
+                    case .refreshing: Text("Refreshing…")
+                    case .refreshed: Text("Refreshed")
+                    case .tooSoon: Text("Try again in a moment")
+                    case .idle: Text("Refresh List")
+                    }
+                }
+                .controlSize(.small)
+                .disabled(session.echolinkRefresh != .idle)
+                .help("Fetch a fresh station list from the EchoLink directory")
+            }
+        }
+
         /// Magnifying glass beside the dial field: opens the reflector search
-        /// pane (astar-refl-ui, astar-5a41).
+        /// pane (astar-refl-ui, astar-5a41), or on EchoLink the station
+        /// browser.
         ///
-        /// Shown only for a network that HAS a reflector directory. AllStar
+        /// Shown only for a network that HAS something to browse. AllStar
         /// nodes are not reflectors and never appear in this data, so offering
         /// to search it there would be an empty promise — the same reasoning
         /// that keeps the network picker itself hidden until a second network
         /// exists.
         @ViewBuilder
-        private var reflectorSearchButton: some View {
-            if selectedNetwork.reflectorNetwork != nil {
+        private var searchButton: some View {
+            if selectedNetwork == .echolink {
+                Button {
+                    navigation.pane = .echolinkStations
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                }
+                .buttonStyle(.borderless)
+                .help("Browse the EchoLink station list")
+                .accessibilityLabel("Browse the EchoLink station list")
+            } else if selectedNetwork.reflectorNetwork != nil {
                 Button {
                     navigation.pane = .reflectors
                 } label: {
@@ -1296,10 +1447,19 @@
             }
         }
 
-        /// Compact directory picker next to the node field: Favorites then Recents.
-        /// Selecting an entry **prefills** the node field (no auto-dial, per design).
+        /// Compact directory picker next to the node field: Favorites then
+        /// Recents, from EVERY network, on every network — a DMR favorite is
+        /// one pick away while AllStar is selected, and the reverse.
+        ///
+        /// Selecting an entry switches the picker to the entry's network and
+        /// **prefills** the dial field with its whole target (no auto-dial,
+        /// per design). Each row carries its network's symbol and name, since
+        /// the list mixes them. An entry whose network is not available right
+        /// now (D-Star with no vocoder attached, say) is listed but disabled:
+        /// filling the field with it would only strand its text on AllStar.
         private var directoryMenu: some View {
             _ = directoryRevision  // re-read the store when favorites change
+            _ = session.directoryChangeCount
             let favorites = session.directoryFavorites()
             let recents = session.directoryRecents()
             return Menu {
@@ -1309,35 +1469,20 @@
                 if !favorites.isEmpty {
                     Section("Favorites") {
                         ForEach(favorites) { entry in
-                            Button {
-                                // Auto-switch the picker to the favorite's network
-                                // (astar-9b3e) before prefilling — a no-op today
-                                // since every entry is `.allstar`.
-                                networkRaw = entry.network.rawValue
-                                node = entry.node
-                            } label: {
-                                Label("\(entry.label) — \(entry.node)", systemImage: "star.fill")
-                            }
+                            directoryMenuItem(entry, title: entry.label)
                         }
                     }
                 }
                 if !recents.isEmpty {
                     Section("Recents") {
                         ForEach(recents) { entry in
-                            Button {
-                                // Auto-switch the picker to the recent's network
-                                // (astar-9b3e), same as favorites, before prefilling.
-                                networkRaw = entry.network.rawValue
-                                node = entry.node
-                            } label: {
-                                // Resolve the node to a saved name (favorite/directory
-                                // label); fall back to the number for unnamed recents.
-                                // The resolver lets astar-6c65 add a callsign source.
-                                let name = session.name(forNode: entry.node)
-                                Label(
-                                    name.map { "\($0) — \(entry.node)" } ?? entry.node,
-                                    systemImage: "clock")
-                            }
+                            // Resolve the target to a saved name on its own
+                            // network; fall back to the target for unnamed
+                            // recents.
+                            directoryMenuItem(
+                                entry,
+                                title: session.name(forNode: entry.node, network: entry.network)
+                                    ?? entry.label)
                         }
                     }
                 }
@@ -1347,50 +1492,85 @@
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .help("Saved nodes — favorites and recents")
+            .help("Saved nodes — favorites and recents on every network")
             // astar-a9c3 F4: icon-only; `.help` is a hover tooltip, not the a11y
             // label — mirror it explicitly.
             .accessibilityLabel("Saved nodes — favorites and recents")
         }
 
-        /// Star toggle for the node currently in the field: on → opens an inline
-        /// editor to set the label and save a favorite; off (already a favorite) →
-        /// un-favorites it.
+        /// One saved-nodes row: the network's symbol, the name, the target
+        /// when it says something the name does not, and the network's name.
+        private func directoryMenuItem(_ entry: NodeEntry, title: String) -> some View {
+            let available = availableNetworks.contains(entry.network)
+            let target = entry.node.trimmingCharacters(in: .whitespaces)
+            let name = title.trimmingCharacters(in: .whitespaces)
+            var text = name.isEmpty || name == target ? target : "\(name) — \(target)"
+            text += " · \(entry.network.displayName)"
+            if !available { text += " (not available)" }
+            return Button {
+                // The network first, then the text: `networkRaw` directly,
+                // not `networkSelection`, so the switch does not clear the
+                // field it is about to fill.
+                networkRaw = entry.network.rawValue
+                node = entry.node
+            } label: {
+                Label(text, systemImage: entry.network.symbol)
+            }
+            .disabled(!available)
+            .accessibilityLabel(
+                "\(name.isEmpty ? target : name), \(entry.network.displayName)"
+                    + (available ? "" : ", not available"))
+        }
+
+        /// The target the dial row's star saves: the field's text, except on
+        /// EchoLink, where it is the station list's callsign for it — so
+        /// starring 9999 here and `*ECHOTEST*` in the station browser are the
+        /// same favorite.
+        private var favoriteTarget: String {
+            selectedNetwork == .echolink
+                ? session.echolinkCanonicalTarget(trimmedNode) : trimmedNode
+        }
+
+        /// Whether the field's target is a favorite on the selected network.
+        private var fieldIsFavorite: Bool {
+            _ = directoryRevision
+            _ = session.directoryChangeCount
+            guard !trimmedNode.isEmpty else { return false }
+            if selectedNetwork == .echolink { return session.isEchoLinkFavorite(trimmedNode) }
+            return session.isFavorite(node: trimmedNode, network: selectedNetwork)
+        }
+
+        /// Star toggle for the target currently in the field, on the selected
+        /// network: on → opens an inline editor to set the label and save a
+        /// favorite; off (already a favorite) → un-favorites it.
         private var favoriteToggle: some View {
             Button {
-                let n = trimmedNode
-                guard !n.isEmpty else { return }
-                if session.isFavorite(node: n) {
-                    session.removeFavorite(node: n)
+                guard !trimmedNode.isEmpty else { return }
+                if fieldIsFavorite {
+                    session.toggleFavorite(node: trimmedNode, network: selectedNetwork)
                     directoryRevision += 1
                 } else {
-                    favoriteLabel = n  // default the label to the node number
+                    favoriteLabel = favoriteTarget  // default the label to the target
                     showFavoriteEditor = true
                 }
             } label: {
-                let _ = directoryRevision  // re-evaluate star fill on edits
-                Image(systemName: session.isFavorite(node: trimmedNode) ? "star.fill" : "star")
-                    .foregroundStyle(
-                        session.isFavorite(node: trimmedNode) ? Color.yellow : Color.secondary)
+                Image(systemName: fieldIsFavorite ? "star.fill" : "star")
+                    .foregroundStyle(fieldIsFavorite ? Color.yellow : Color.secondary)
             }
             .buttonStyle(.plain)
             .disabled(trimmedNode.isEmpty)
-            .help(
-                session.isFavorite(node: trimmedNode) ? "Remove from favorites" : "Add to favorites"
-            )
+            .help(fieldIsFavorite ? "Remove from favorites" : "Add to favorites")
             // astar-a9c3 F4: icon-only (star/star.fill), state conveyed by fill +
             // color only otherwise — mirror the `.help` string as the label and
             // flag the "already a favorite" state with `.isSelected`.
-            .accessibilityLabel(
-                session.isFavorite(node: trimmedNode) ? "Remove from favorites" : "Add to favorites"
-            )
-            .accessibilityAddTraits(session.isFavorite(node: trimmedNode) ? .isSelected : [])
+            .accessibilityLabel(fieldIsFavorite ? "Remove from favorites" : "Add to favorites")
+            .accessibilityAddTraits(fieldIsFavorite ? .isSelected : [])
         }
 
         /// Inline editor popover: name the favorite (callsign or label) and save.
         private var favoriteEditor: some View {
             VStack(alignment: .leading, spacing: 8) {
-                Text("Save favorite for node \(trimmedNode)")
+                Text("Save \(selectedNetwork.displayName) favorite for \(favoriteTarget)")
                     .font(.callout.weight(.medium))
                 TextField("Label (callsign or name)", text: $favoriteLabel)
                     .textFieldStyle(.roundedBorder)
@@ -1408,20 +1588,48 @@
         }
 
         private func saveFavorite() {
-            let n = trimmedNode
-            guard !n.isEmpty else { return }
-            // Stamp the network the favorite is actually for (astar-c2e5 Task
-            // 9): while a call is active, that's the call's own network
-            // (`activeCallNetwork`) rather than whatever the picker currently
-            // shows — a `selectedNetwork` switch mid-call must not relabel an
-            // in-call favorite. Idle, there's no active call, so it falls back
-            // to the picker's current choice (the network the typed target is
-            // actually for).
+            guard !trimmedNode.isEmpty else { return }
+            // The star sits in the idle dial row, so the favorite is for the
+            // network the picker shows — the network the typed target is for.
             session.addFavorite(
-                node: n, label: favoriteLabel, network: session.activeCallNetwork ?? selectedNetwork
-            )
+                node: favoriteTarget, label: favoriteLabel, network: selectedNetwork)
             directoryRevision += 1
             showFavoriteEditor = false
+        }
+
+        /// "A vocoder may be plugged in": shown while nothing is trusted and a
+        /// vocoder-class USB device is attached — the case an upgrade from a
+        /// build that scanned every FTDI port lands in, where D-Star would
+        /// otherwise simply vanish from the picker. Dismissible, because the
+        /// device could just as well be a radio cable.
+        private var vocoderHint: some View {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "memorychip")
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Using a vocoder stick? Add it to use D-Star, Fusion, NXDN and DMR.")
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Add Vocoder…") { navigation.showSettings(at: .vocoders) }
+                        .controlSize(.small)
+                }
+                Spacer(minLength: 4)
+                Button {
+                    vocoderHintDismissed = true
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.caption2.weight(.semibold))
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("Don’t show this again")
+                .accessibilityLabel("Dismiss vocoder hint")
+            }
+            .padding(8)
+            .mainCard()
         }
 
         /// Collapsible "Quick settings" box under the dialing section: the simple
@@ -1611,19 +1819,13 @@
                 } else {
                     pttButton
                 }
-                // Match the PTT button's height exactly: same vertical padding and
-                // rounded-rect background rather than .bordered (whose default
-                // control height is shorter than the hold-to-talk button).
+                RecordButton()
+                // Every control in this row wears `callControlChrome`, which
+                // fixes one height for all of them (this button's natural one).
                 Button(role: .destructive, action: disconnect) {
                     Image(systemName: "phone.down.fill")
-                        .font(.callout.weight(.semibold))
-                        .padding(.vertical, 10)
                         .padding(.horizontal, 14)
-                        .background(
-                            Color.secondary.opacity(0.18),
-                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        )
-                        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .callControlChrome(fill: Color.secondary.opacity(0.18))
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.red)
@@ -1640,15 +1842,9 @@
         /// Only live once the call is answered.
         private var pttButton: some View {
             Text(keyed ? "ON AIR" : "Hold to Talk  (Space)")
-                .font(.callout.weight(.semibold))
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(
-                    keyed ? Color.red : Color.secondary.opacity(0.18),
-                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                )
+                .callControlChrome(fill: keyed ? Color.red : Color.secondary.opacity(0.18))
                 .foregroundStyle(keyed ? .white : .primary)
-                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .gesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { _ in setKeyed(true) }
@@ -1678,13 +1874,8 @@
         /// your voice, so there's nothing to hold — show live keyed state instead.
         private var voxIndicator: some View {
             Text(session.ptt ? "ON AIR (VOX)" : "VOX listening…")
-                .font(.callout.weight(.semibold))
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(
-                    session.ptt ? Color.red : Color.secondary.opacity(0.18),
-                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                )
+                .callControlChrome(fill: session.ptt ? Color.red : Color.secondary.opacity(0.18))
                 .foregroundStyle(session.ptt ? .white : .primary)
                 .animation(.easeOut(duration: 0.08), value: session.ptt)
                 // astar-a9c3 F1: a labeled read-only status element — no action,
@@ -1711,13 +1902,8 @@
                 "Receive only — astar can't transmit \(name) yet",
                 systemImage: "antenna.radiowaves.left.and.right"
             )
-            .font(.callout.weight(.semibold))
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 10)
-            .background(
-                Color.secondary.opacity(0.18),
-                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-            )
+            .callControlChrome(fill: Color.secondary.opacity(0.18))
             .foregroundStyle(.secondary)
             .accessibilityElement()
             .accessibilityLabel("Receive only, astar cannot transmit \(name) yet")
@@ -1727,13 +1913,8 @@
         /// obvious the radio can't transmit.
         private var listenOnlyIndicator: some View {
             Label("TX disabled — listening only", systemImage: "mic.slash")
-                .font(.callout.weight(.semibold))
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 10)
-                .background(
-                    Color.secondary.opacity(0.18),
-                    in: RoundedRectangle(cornerRadius: 8, style: .continuous)
-                )
+                .callControlChrome(fill: Color.secondary.opacity(0.18))
                 .foregroundStyle(.secondary)
                 // astar-a9c3 F1: labeled read-only status element, no action.
                 .accessibilityElement()
@@ -1978,6 +2159,13 @@
                 // showing) before dialing, so a dial started without leaving
                 // that field still uses what was typed (astar-c2e5 Task 9).
                 commitCallsignDraft()
+                dispatchConnect(node: trimmedNode, network: network, address: nil)
+            case .echolink:
+                // A station from the directory's list, by node number or
+                // callsign; `CallSession.echolinkTarget` is the question both
+                // the button and this guard ask. EchoLink dials with its own
+                // login callsign, so there is no callsign prompt to commit.
+                guard session.canDial(node, network: network) else { return }
                 dispatchConnect(node: trimmedNode, network: network, address: nil)
             }
         }
@@ -2358,6 +2546,10 @@
             )
             .environmentObject(AudioDeviceMonitor(session: previewSession))
             .environmentObject(previewNavigation)
+            .environmentObject(
+                VocoderSettings(
+                    store: UserDefaultsVocoderTrustStore(UserDefaults(suiteName: "astar.preview")!),
+                    enroller: NoVocoderEnroller()))
     }
 
     extension View {

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# astar — Copyright (c) 2026 Rob Ludwick.
+# SPDX-License-Identifier: AGPL-3.0-only
+# Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
+[ "${FAKE_UDP:-yes}" = yes ] && echo "UNCONN 0      0                  0.0.0.0:4569  0.0.0.0:*"
+echo "UNCONN 0      0               127.0.0.54:53    0.0.0.0:*"

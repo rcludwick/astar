@@ -1,7 +1,7 @@
 // astar — Copyright (c) 2026 Rob Ludwick.
 // SPDX-License-Identifier: AGPL-3.0-only
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
-//! Shared server state and the `tiny_http` accept loop (iax-dd42 Phase 2).
+//! Shared server state and the `astar-http` server (iax-dd42 Phase 2).
 
 use std::io;
 use std::net::SocketAddr;
@@ -17,7 +17,7 @@ use astar_console::{DtmfShared, DtmfTester, LocalParrot, ParrotShared};
 use astar_station::{Station, StationConfig, StationEvent};
 
 use crate::http::handle_request;
-use crate::sse::SseReader;
+use crate::sse::next_frame_json;
 
 /// Form defaults sourced from the environment (`.env` via `run-harness.sh`).
 /// Lets the operator preset the node/calling-node/name and keep the secret
@@ -195,11 +195,11 @@ impl ServerState {
     }
 }
 
-/// Run the blocking `tiny_http` accept loop until `state.stop` is set (by the
-/// `POST /shutdown` handler — au-ef39). Spawns a thread per request (SSE
-/// responses block their connection). If `bound_tx` is given, the actually-
-/// bound address is sent once the server is listening (for tests that bind an
-/// ephemeral `:0` port).
+/// Run the harness on `astar-http` until `state.stop` is set (by the
+/// `POST /shutdown` handler — au-ef39). One thread per connection (SSE
+/// responses hold theirs). If `bound_tx` is given, the actually-bound address
+/// is sent once the server is listening (for tests that bind an ephemeral
+/// `:0` port).
 ///
 /// # Errors
 /// Returns an error if the address cannot be bound.
@@ -208,24 +208,27 @@ pub fn serve(
     state: &Arc<ServerState>,
     bound_tx: Option<Sender<SocketAddr>>,
 ) -> io::Result<()> {
-    let server = tiny_http::Server::http(addr)
-        .map_err(|e| io::Error::new(io::ErrorKind::AddrInUse, e.to_string()))?;
+    let st = Arc::clone(state);
+    let server = astar_http::Server::bind_with(
+        &addr.to_string(),
+        astar_http::Limits::loopback(),
+        astar_http::ServerOptions {
+            name: "inspect",
+            ..astar_http::ServerOptions::default()
+        },
+        move |req| dispatch(req, &st),
+    )?;
     // Start the single consumer of `Station::next_event` (iax-64b6). Draining
     // the edge stream in exactly one place keeps the node answering inbound
     // calls regardless of how many (or zero) browsers are watching `/events`.
     spawn_node_event_pump(Arc::clone(state));
-    if let Some(tx) = bound_tx
-        && let Some(a) = server.server_addr().to_ip()
-    {
-        let _ = tx.send(a);
+    if let Some(tx) = bound_tx {
+        let _ = tx.send(server.local_addr());
     }
     while !state.stop.load(Ordering::Relaxed) {
-        // recv_timeout returns None on a 200 ms tick (no request); re-check stop.
-        if let Some(request) = server.recv_timeout(Duration::from_millis(200))? {
-            let st = Arc::clone(state);
-            std::thread::spawn(move || dispatch(request, &st));
-        }
+        std::thread::sleep(Duration::from_millis(200));
     }
+    server.stop();
     Ok(())
 }
 
@@ -233,7 +236,7 @@ pub fn serve(
 /// [`Station::next_event`] (an edge stream — each event returns once). It owns
 /// `next_event` and folds the discrete lifecycle edges into the shared
 /// [`NodeStatus`]; the SSE stream and any status route only READ that. Draining
-/// the edges here (not in `SseReader`) means multiple `/events` connections
+/// the edges here (not in the `/events` stream) means multiple `/events` connections
 /// never split events, and the node keeps answering inbound calls even with no
 /// browser attached. The loop exits when `state.stop` is set (au-ef39 shutdown).
 fn spawn_node_event_pump(state: Arc<ServerState>) {
@@ -275,42 +278,56 @@ fn spawn_node_event_pump(state: Arc<ServerState>) {
     });
 }
 
-fn dispatch(mut request: tiny_http::Request, state: &Arc<ServerState>) {
-    let method = request.method().as_str().to_string();
-    let url = request.url().to_string();
-    // Strip query string only for the SSE special-case check; the full URL
-    // (with query) is forwarded to handle_request so handlers can parse `since=`.
-    let path_no_query = url.split('?').next().unwrap_or(&url).to_string();
+fn dispatch(req: &mut astar_http::Request<'_>, state: &Arc<ServerState>) -> astar_http::Reply {
+    let method = req.method().to_string();
+    // The full target (with query) goes to handle_request so handlers can
+    // parse `since=`; only the SSE check looks at the bare path.
+    let url = req.target().to_string();
 
-    // SSE stream is a long-lived response handled specially. Use the generic
-    // `Response::new` so the body is a streaming `Read` (SseReader) with an
-    // unknown length (None) — the connection stays open until the client drops.
-    if method == "GET" && path_no_query == "/events" {
-        let reader = SseReader::new(Arc::clone(state));
-        let response = tiny_http::Response::new(
-            tiny_http::StatusCode(200),
-            vec![
-                header("Content-Type", "text/event-stream"),
-                header("Cache-Control", "no-cache"),
-            ],
-            reader,
-            None,
-            None,
-        );
-        let _ = request.respond(response);
-        return;
+    // SSE stream is a long-lived response: it holds the connection until the
+    // client leaves or the harness stops.
+    if method == "GET" && req.path() == "/events" {
+        let st = Arc::clone(state);
+        return astar_http::Reply::Stream {
+            class: astar_http::StreamClass::Counted,
+            run: Box::new(move |mut conn| {
+                if conn
+                    .write_head(
+                        200,
+                        &[
+                            ("Content-Type", "text/event-stream"),
+                            ("Cache-Control", "no-cache"),
+                        ],
+                    )
+                    .is_err()
+                    || conn.head_only()
+                {
+                    return;
+                }
+                let mut w = astar_http::sse::Writer::new(conn);
+                let mut last = astar_console::ConsoleState::default();
+                while !st.stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(33));
+                    if w.data(&next_frame_json(&st, &mut last)).is_err() {
+                        break;
+                    }
+                }
+            }),
+        };
     }
 
-    let mut body = Vec::new();
-    let _ = request.as_reader().read_to_end(&mut body);
-    // Pass the full URL (with query) so handle_request can parse `since=` etc.
+    let body = match req.body() {
+        Ok(b) => b.to_vec(),
+        Err(e) => {
+            return astar_http::Response::text(
+                e.status,
+                format!("{}\n", astar_http::reason(e.status)),
+            )
+            .into();
+        }
+    };
     let resp = handle_request(state, &method, &url, &body);
-    let response = tiny_http::Response::from_data(resp.body)
-        .with_status_code(resp.status)
-        .with_header(header("Content-Type", resp.content_type));
-    let _ = request.respond(response);
-}
-
-fn header(key: &str, value: &str) -> tiny_http::Header {
-    tiny_http::Header::from_bytes(key.as_bytes(), value.as_bytes()).expect("static header is valid")
+    astar_http::Response::new(resp.status)
+        .with_body(resp.content_type, resp.body)
+        .into()
 }

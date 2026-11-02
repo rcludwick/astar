@@ -1,16 +1,20 @@
 # astar-server configuration.
 #
-# SECRET-FREE FILE: no passwords or tokens go here. The registration secret is
-# supplied at runtime — see the [secrets] section at the bottom. Run with:
+# SECRET-FREE FILE: no passwords or tokens go here. Credentials live in
+# credentials.toml beside this file (mode 0600, written by the settings page
+# at http://127.0.0.1:8730/settings) — see the [secrets] section. Run with:
 #   astar-server serve --config node.toml
 #
-# Fill in the blank ("") / placeholder values below. Strings must be quoted.
+# Fill in the blank ("") / placeholder values below, or open the settings
+# page and let it edit this file in place. Strings must be quoted.
 
-# ─── codec_policy — codec negotiation (iax-31f7) ─────────────────────────────
-# ulaw_only (default) | allow_slin | prefer_slin
-# prefer_slin negotiates 16-bit linear audio (~128 kbps) with peers that
-# allow it (ASL3: `allow = slin`), falling back to ulaw.
-#codec_policy = "prefer_slin"
+# ─── codec_policy — codec negotiation (iax-31f7, iax-4348) ───────────────────
+# prefer_slin16 (default) | prefer_slin | allow_slin | ulaw_only
+# Omitted = prefer_slin16: 16 kHz wideband linear (~256 kbps) with peers that
+# ask for it, falling back to slin, then ulaw; a ulaw-only peer is still
+# answered in ulaw. Set ulaw_only to pin the pre-slin wire behaviour on a
+# bandwidth-constrained link.
+#codec_policy = "ulaw_only"
 
 # ─── [listener] — REQUIRED: this node's inbound IAX2 socket ──────────────────
 # NOTE: this bind is internet-reachable once UDP 4569 is forwarded, on a daemon
@@ -24,7 +28,8 @@ answer    = "auto"     # "auto"  (answer inbound automatically)  or  "manual"
 max_calls = 2      # max simultaneous inbound calls
 auth      = "required"     # "required" | "optional" | "off"  (auth for INBOUND callers)
                            #   "required": each caller is MD5-challenged against
-                           #   ALLSTAR_PEER_<NODE> (see [secrets] below); unknown
+                           #   its peer secret — a bare "<NODE>" key in credentials.toml,
+                           #   or ALLSTAR_PEER_<NODE> under source = "env"; unknown
                            #   usernames are rejected.
 
 # Inbound node allowlist. A caller whose node id is not on this list is rejected
@@ -42,27 +47,30 @@ include_local_radio = false      # add local mic as a source + local speaker as 
 
 # ─── [register] — register THIS node with AllStar's registrar ────────────────
 # Omit this whole section if you don't want to register. The node's PASSWORD is
-# NOT here — it comes from ALLSTAR_SECRET (see [secrets]).
+# NOT here — it is the `node` key in credentials.toml (see [secrets]).
 [register]
-peer    = "52.20.63.146:4569"       # register.allstarlink.org:4569
-                   #   take the host from your existing rpt.conf `register => <node>:<pw>@<HOST>` line
-                   #   (must be an IP:port today; resolve the host to IP if needed)
+peer    = "register.allstarlink.org:4569"   # host:port — a hostname or an IP. Resolved at startup;
+                   #   a hostname with several addresses gives registrar failover. Take the host
+                   #   from your existing rpt.conf `register => <node>:<pw>@<HOST>` line.
 node_id = "12345"       # your AllStarLink node number (this is ALSO the register username)
 
 # ─── [control] — REQUIRED: local HTTP + SSE control channel ──────────────────
 [control]
-bind = "127.0.0.1:8730"   # keep on loopback; this is where you POST commands/secrets
+bind = "127.0.0.1:8730"   # keep on loopback; this is where you POST commands and where /settings lives
 
-# ─── [secrets] — REQUIRED: where the runtime secret comes from ───────────────
-# This declares the SOURCE only. The password itself is never written in any file.
+# ─── [secrets] — REQUIRED: where the runtime credentials come from ───────────
+# This declares the SOURCE only. Nothing secret is ever written in THIS file.
 [secrets]
-source = "env"     # "env"     → daemon reads env vars  ALLSTAR_NODE  and  ALLSTAR_SECRET  at startup
+source = "file"    # "file"    → credentials.toml beside this file, mode 0600, written by the
+                   #             settings page: node (registration password), portal, discord,
+                   #             "link:<node>" dial secrets, and bare "<node>" inbound peer secrets.
+                   #             A file that group or others can read is NOT loaded (chmod 600).
+                   # "env"     → ALLSTAR_NODE / ALLSTAR_SECRET, ALLSTAR_PEER_<NODE>, ALLSTAR_LINK_<NODE>,
+                   #             DISCORD_BOT_TOKEN and the var named by [portal].credential_env, at startup
                    # "control" → POST it after startup:  curl -X POST http://127.0.0.1:8730/secrets \
                    #                                        -d '{"username":"<node>","secret":"<password>"}'
-#
-# For source = "env", before launching:
-#   export ALLSTAR_NODE=<your node number>     # must match [register].node_id
-#   export ALLSTAR_SECRET=<your node password>
+                   # "config"  → an inline `secret = "…"` here; for a privately mounted file only
+#file = "credentials.toml"   # optional: another path, relative to this file's directory
 
 
 # ─── OPTIONAL SECTIONS (uncomment + fill if/when you want them) ───────────────
@@ -93,6 +101,247 @@ source = "env"     # "env"     → daemon reads env vars  ALLSTAR_NODE  and  ALL
 # [announce.events.incoming_call]
 # enabled     = true
 # destination = "to_air"     # "to_air" or "to_monitor"
+
+# ─── [discord] — OPTIONAL: mirror this node's conference into a voice channel ─
+# [discord]
+# Listen-only: the channel hears the net and can never reach it. No key in
+# this section can change that — there is no `arm`, `transmit` or
+# `contributes` key, and the conference member the bridge enrolls is
+# registered non-contributing.
+#
+# The bot token is NOT configured here — set it on the settings page (the
+# Discord card at http://127.0.0.1:8730/settings#discord), which writes it to
+# credentials.toml; or DISCORD_BOT_TOKEN in the environment / POST /secrets
+# with username "discord" under the other [secrets] sources.
+#
+# INVITING THE BOT. No privileged gateway intents (leave Presence, Server
+# Members and Message Content OFF in the Developer Portal) and five
+# permissions — View Channel, Send Messages, Connect, Speak and Mute
+# Members:
+#
+#   https://discord.com/oauth2/authorize?client_id=<APP_ID>&scope=bot+applications.commands&permissions=7343104
+#
+#   * Send Messages posts the bridge's own state (connected / disconnected /
+#     failed, plus an hourly "still connected") and the PTT panel into the
+#     voice channel's built-in text chat.
+#   * Mute Members is how the one-open-mic rule is ENFORCED. Without it the
+#     bot says so in the channel and everyone is unmuted — the mic becomes a
+#     label rather than a rule.
+#
+# Re-authorizing a bot that is already in the server updates its managed
+# role in place; nothing has to be kicked and re-added. A bot invited with
+# the older permissions=3148800 must be re-authorized with the integer above
+# before muting works.
+#
+# WHAT THE BOT CAN READ. It requests no privileged gateway intent, so
+# Discord never sends it message content and it receives no message events
+# at all. The one thing it does read is message IDS: to keep its PTT panel
+# from scrolling out of sight it fetches, at most once a minute, the ids of
+# the newest 20 messages in the voice channel's own chat and checks whether
+# its panel is still among them. Ids are compared; no content, author or
+# attachment is read, stored or logged. That needs Read Message History,
+# which @everyone usually already grants — without it the check is skipped
+# once, logged once, and the panel simply is not re-posted.
+#
+# guild_id   = "123456789012345678"
+# channel_id = "123456789012345678"
+# join_at_start    = false
+# announce_on_join = true
+#
+# ── Slash commands, approvals and the mic ────────────────────────────────────
+# `approvers` is the master switch for the whole slash-command half. Discord
+# USER ids (right-click a user with Developer Mode on → Copy User ID).
+# Absent or empty ⇒ no commands are registered, nobody is muted, and the bot
+# is offline unless it is in the voice channel — exactly the behaviour this
+# section had before slash commands existed.
+#
+# Approvers are config, not state: they can never be revoked, banned or
+# demoted from inside Discord, and the admin page lists them read-only.
+# approvers = ["123456789012345678"]
+#
+# Taking `approvers` back out again stops the node REGISTERING the slash
+# commands; it never clears the ones a previous run registered. They stay in
+# the server's picker and answer "The application did not respond", because
+# nothing is listening for them. Clear them in Discord: Server Settings ->
+# Integrations -> the bot -> remove its commands, or remove the app from the
+# server and re-invite it.
+#
+# Where approvals (admins, approved, banned, pending, and who this node
+# server-muted) are written. Nothing in it is secret — user ids and the
+# display names last seen. In a container, mount a volume for it.
+#   * The parent DIRECTORY must exist: a missing one is a typo, and the node
+#     refuses to start rather than boot looking healthy and fail at the
+#     first approval.
+#   * A file that exists but does not parse is a STARTUP FAILURE by design.
+#     Treating it as "nobody is approved" would silently become "nobody is
+#     muted by us" with people still server-muted and nothing left that
+#     remembers why.
+#   * Absent ⇒ in memory only, and the MUTES cost more than the approvals.
+#     The node warns once at start-up. Everyone in the voice channel is
+#     server-muted (guild-wide) while the node runs, and with nothing on disk
+#     the record of who this node muted dies with the process: after a restart
+#     those members are still muted, the node reads that as a moderator's mute
+#     and leaves it alone, and a moderator has to unmute them by hand.
+# state_file = "/var/lib/astar/discord-approvals.json"
+#
+# One mic at a time, with two timers. Both are seconds; 0 turns either off.
+#   mic_timeout_secs — repeater-style hard time-out on the open mic.
+#                      Absent ⇒ 180.
+#   mic_silence_secs — stop talking for this long and the mic is released.
+#                      Absent ⇒ 5. Inferred from the TIMING of voice packets
+#                      in a mode that never decrypts or decodes them.
+# mic_timeout_secs = 180
+# mic_silence_secs = 5
+#
+# HONEST LIMITS — read these before turning approvers on.
+#   * A Discord server mute is GUILD-WIDE and sticky. Under this policy it
+#     is applied to everyone who ever joins the bridged channel, not just to
+#     people using the node.
+#   * Someone who is muted and then leaves voice entirely STAYS server-muted:
+#     Discord will not let a bot change the voice state of a member who is
+#     not in voice. The node lifts it the next time they appear in any voice
+#     channel while it is up — or a moderator can right-click them →
+#     Server Unmute.
+#   * Nothing is enforced while the node is down. Whoever held the mic keeps
+#     their unmute, and nobody who joins is muted.
+#   * There is a brief window between a join and the mute landing.
+#     These are why this bridge is listen-only and why a future armed bridge
+#     must gate audio at the node, not at the mute.
+#
+# ── The admin page ───────────────────────────────────────────────────────────
+# GET http://127.0.0.1:8730/discord/admin — approve, revoke, ban, unban,
+# add/remove admins, take the mic, and the master switch, with the same
+# rules and the same audit lines the slash commands produce.
+#
+# It lives on the [control] bind above, which is this node's root of trust —
+# the same port that can key a transmitter. NEVER bind that publicly. To
+# reach the page from another machine, tunnel it:
+#
+#   ssh -N -L 8730:127.0.0.1:8730 <user>@<node-host>
+#
+# and then open http://localhost:8730/discord/admin. Host is `localhost`,
+# which is the point: every route on this port carries a Host allow-list, so
+# a node bound to 0.0.0.0 and reached at its LAN address answers 403
+# everywhere. That is by design — the guard fails closed rather than trusting
+# the name a request arrived under, and the tunnel needs no exception.
+#
+# ── Reserved keys ────────────────────────────────────────────────────────────
+# `model` and `latency` are RESERVED: the section accepts them, and nothing
+# reads them. The unamblify post-filter they would configure does not exist
+# yet — astar-discord's only PostFilter is Bypass — so setting either changes
+# nothing audible. They stay accepted so a config written against a later
+# release is not rejected by `deny_unknown_fields`.
+# model = "/etc/iaxnode/unamblify.onnx"   # (reserved - not yet implemented)
+# latency = "ll5"                         # (reserved - not yet implemented)
+
+# ─── [m17] — OPTIONAL: listen to M17 reflectors, receive-only ──────────────
+# [m17]
+# Absent ⇒ M17 is off. An upgrade alone never lets anyone dial a reflector:
+# a dial presents the dialler's callsign to someone else's reflector, so the
+# operator opts in by adding this section.
+#
+# Receive-only: the node links to one reflector module as a monitor and
+# sends only the CONN / PONG / DISC control packets the protocol needs to
+# stay linked. No key here can change that — there is no `callsign`,
+# `transmit`, `ptt`, `contributes`, `arm`, `secret`, `token` or `password`
+# key, and `deny_unknown_fields` makes any of them a startup error.
+#
+# The callsign the reflector sees is the dialler's: the one they registered
+# with /register in Discord, or the `callsign` field of a POST /m17 body.
+#
+# enabled = true          # default true once the section exists
+# directory = "bundled"   # "bundled" = the dated hamcall-db snapshot compiled
+#                         # into astar-server (CC BY 4.0; /status shows its
+#                         # date), or an ABSOLUTE path to a JSON file of the
+#                         # same shape. Omit it to dial only the table below.
+#                         # A file that will not load is logged once and the
+#                         # node carries on with the table.
+# codec_dirs = ["/opt/astar/lib"]   # extra directories to find libcodec2 in.
+#                                   # It decides what code is loaded: read
+#                                   # once at start-up, absolute paths only,
+#                                   # never point it at a directory anyone
+#                                   # else can write.
+#
+# [m17.reflectors]        # overrides and private reflectors, checked first
+# "M17-XYZ" = "m17.example.net:17000"   # port defaults to 17000; no IPv6
+
+# ─── [vocoder] — OPTIONAL: trusted AMBE vocoder sticks (DVstick / ThumbDV) ──
+# [vocoder]
+# Absent or empty ⇒ this node opens no vocoder port, ever. The engine never
+# scans for one: a DVstick and a radio's CAT/PTT cable both enumerate as
+# FTDI 0403:6015, and opening a cable's tty raises DTR/RTS, which keys the
+# transmitter. So only the USB serial numbers listed here are opened.
+#
+# Add a stick with `astar-server vocoder add <serial> --config <this file>`:
+# it probes the stick (DTR/RTS held low, RESET + PRODID only) and writes the
+# serial here only if an AMBE-3000 answers. `astar-server vocoder list` shows
+# the candidates without opening anything. A serial typed in by hand is
+# trusted without that probe — check it is not a cable first.
+#
+# trusted_serials = ["TESTSER1"]   # USB serial numbers, exactly as listed
+
+# ─── [echolink] — OPTIONAL: call EchoLink stations into the conference ─────
+# [echolink]
+# Absent ⇒ the node never contacts EchoLink. Present ⇒ the node logs in to
+# EchoLink's directory at start-up (once the password is set) and an admin
+# can dial stations from /admin or POST /echolink. Calling out only: no
+# incoming EchoLink call is ever accepted. Nothing dials by itself.
+#
+# The callsign must end in -L (a simplex link) or -R (a repeater), and must
+# already be registered and validated with EchoLink in its own right.
+#
+# The password is NOT configured here. Set ASTAR_ECHOLINK_PASSWORD, add
+# "echolink:<CALLSIGN>" to credentials.toml, or POST /secrets with username
+# "echolink:<CALLSIGN>". EchoLink sends it unencrypted: use it nowhere else.
+#
+# EchoLink's access policy forbids linking it to VoIP systems people reach
+# directly from a computer, so this section refuses to load beside
+# [discord], beside [web] public_bind, and beside [stream] enabled = true.
+#
+# Network: TCP 5200 out and UDP 5198–5199 out, with their replies. Nothing is
+# forwarded in. One EchoLink login per public IP address.
+#
+# callsign = "N0CALL-L"
+# servers  = ["servers.echolink.org", "naeast.echolink.org", "nasouth.echolink.org", "backup.echolink.org"]   # the default
+# location = "Anytown, ST"   # shown beside the callsign in the directory
+
+# ─── [web] — OPTIONAL: the public, read-only listener page over HTTPS ───────
+# Absent (or no public_bind) ⇒ no public page; the [control] bind above stays
+# the only listener. The public bind runs a separate router: no admin route
+# is reachable from it. Certificates come from Let's Encrypt, built in.
+# [web]
+# public_bind = "0.0.0.0:443"
+# public_hostnames = ["{node}.example.net"]   # {node} = [register] node_id
+# acme_email = "you@example.net"              # optional expiry notices
+# acme_staging = false                        # true = Let's Encrypt staging CA
+# acme_challenge = "dns-01"                   # default: dns-01 with [web.dns]
+#
+# [web.dns]               # dynamic DNS + ACME DNS-01 through the provider API
+# provider = "porkbun"    # default; or cloudflare, desec, hetzner, ... (release build)
+# domain = "example.net"  # the zone registered at the provider
+# host = "{node}"         # default name {node}.<domain> when no public_hostnames
+# ddns = true             # keep A records pointed at this box's public IPv4
+# ddns_interval_secs = 300
+# ttl = 600
+# ip_source = "provider"  # Porkbun's /ping; other providers need an https URL
+#                         # answering with the public IPv4, e.g. "https://ip.example.org/"
+#
+# ─── [stream] — OPTIONAL: live link audio on the public page ───────────────
+# [stream]
+# enabled = true          # default false; never in parrot mode
+# max_listeners = 25      # both streams together, 1–200
+# mp3_kbps = 32           # 8/16/24/32/40/48/64
+# opus_kbps = 24          # 6–128
+#
+# ─── [recording] — OPTIONAL: record every transmission the node carries ──────
+# One FLAC per over, the whole conference mix (Discord included). Admin page
+# at /admin/recordings. See docs/site/server/recording.md.
+# [recording]
+# enabled = true                     # default false; never in parrot mode
+# dir = "/var/lib/astar/recordings"  # absolute path
+# max_bytes = "2 GB"                 # at least 100 MB; KB/MB/GB or KiB/MiB/GiB
+# max_age_days = 30                  # 1–3650
+# frames = true                      # also keep M17 codec frames for unamblify
 
 # ─── ACTIVE announcement config (iax-c4ea on-join greeting via piper/cori) ────
 [announce]

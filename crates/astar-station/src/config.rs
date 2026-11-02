@@ -169,6 +169,14 @@ pub struct StationConfig {
     ///   that field to anything else for an asymmetric inbound/outbound
     ///   policy; it is then honoured as given.
     pub codec_policy: CodecPolicy,
+    /// The USB serial numbers of the AMBE vocoder sticks this station may
+    /// open (vocoder trust, on-air safety). Default empty: no hardware
+    /// vocoder is opened — D-Star, YSF, NXDN and DMR connects are refused
+    /// with [`astar_codec::vocoder_trust::NO_TRUSTED_VOCODER`] — until the embedder
+    /// supplies enrolled serials here or via
+    /// [`crate::Station::set_vocoder_trust`]. Local machine data: never ship
+    /// a default list.
+    pub vocoder_trust: astar_codec::vocoder_trust::VocoderTrust,
 }
 
 impl Default for StationConfig {
@@ -182,6 +190,7 @@ impl Default for StationConfig {
             node: None,
             portal_base: None,
             codec_policy: CodecPolicy::default(),
+            vocoder_trust: astar_codec::vocoder_trust::VocoderTrust::default(),
         }
     }
 }

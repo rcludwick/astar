@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Sign in — astar node</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="auth.css">
+</head>
+<body>
+<div class="ambient ambient-a"></div>
+<div class="ambient ambient-b"></div>
+<div class="ambient ambient-c"></div>
+<main class="auth-narrow">
+  <section class="card auth-card" id="card" aria-labelledby="title">
+    <div>
+      <h1 id="title">Sign in</h1>
+      <p class="auth-host" id="host">astar node</p>
+    </div>
+
+    <div id="no-admin" hidden>
+      <p class="lead">This node has no admin yet, so there is nobody to sign in as.</p>
+      <p class="hint">On the node, make the first admin invite and open the link it prints:</p>
+      <p class="code-block">astar-server admin invite --role admin</p>
+      <p class="hint">In the container: <code>podman exec iaxnode astar-server admin invite --role admin</code></p>
+    </div>
+
+    <p class="banner warn" id="unavailable" hidden></p>
+
+    <div id="signin" hidden>
+      <div class="auth-form">
+        <button type="button" class="btn primary wide" id="passkey"><span class="glyph" aria-hidden="true">&#x1F511;&#xFE0E;</span>Sign in with a passkey</button>
+      </div>
+      <details class="advanced" id="more">
+        <summary>Use a security key or code</summary>
+        <form class="auth-form" id="name-form" autocomplete="on">
+          <label for="name">Your name or callsign</label>
+          <input id="name" name="username" autocomplete="username webauthn" autocapitalize="characters" spellcheck="false" required>
+          <div class="auth-row" id="key-row">
+            <button type="submit" class="btn" id="key">Use security key</button>
+            <label class="check"><input type="checkbox" id="nopin"> My key has no PIN</label>
+          </div>
+          <div class="divider">or a code from your authenticator app</div>
+          <div class="auth-row">
+            <input id="code" class="code" autocomplete="one-time-code" inputmode="numeric" maxlength="6" placeholder="123456" aria-label="Six-digit code">
+            <button type="button" class="btn" id="code-go">Sign in with code</button>
+          </div>
+        </form>
+      </details>
+    </div>
+
+    <p class="auth-msg err" id="msg" role="alert"></p>
+    <div id="after" hidden>
+      <p class="banner warn" id="after-text"></p>
+      <button type="button" class="btn primary wide" id="continue">Continue</button>
+    </div>
+
+    <div class="auth-foot">
+      <a href="/">&larr; Listen</a>
+      <span id="help">Passkeys come from your phone, computer or password manager.</span>
+    </div>
+  </section>
+</main>
+<script src="auth.js"></script>
+<script src="signin.js"></script>
+</body>
+</html>

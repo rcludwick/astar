@@ -90,6 +90,14 @@ IAX_ERR_MODE_MISMATCH = -12
 # are not mirrored here: they belong to entry points this binding does not
 # expose.
 IAX_ERR_DMR = -22
+# Recording failure: already recording, an unusable folder, or a disk short
+# of space. Mirrored so a caller can name it; this binding does not expose the
+# recording entry points.
+IAX_ERR_RECORD = -23
+# EchoLink failure: a login, call, chat or node-leg dial refused, or the
+# library built without EchoLink. Mirrored so a caller can name it; this
+# binding does not expose the EchoLink entry points.
+IAX_ERR_ECHOLINK = -24
 
 
 # --------------------------------------------------------------------------- #
@@ -259,6 +267,9 @@ class _IaxState(ctypes.Structure):
         ("nxdn_active", c_bool),  # an NXDN link is live (receive-only: never offer PTT)
         ("dmr_available", c_bool),  # dmr feature + a ThumbDV attached now (iax-d4f7)
         ("dmr_active", c_bool),  # a DMR link is live (receive-only: never offer PTT)
+        ("echolink_available", c_bool),  # this library was built with EchoLink
+        ("echolink_active", c_bool),  # an EchoLink call or node-leg station is up
+        ("echolink_logged_in", c_bool),  # logged in to the EchoLink directory
     ]
 
 
@@ -337,6 +348,9 @@ class Snapshot:
     nxdn_active: bool  # an NXDN link is currently live (receive-only: never key)
     dmr_available: bool  # dmr feature compiled in AND a ThumbDV attached now
     dmr_active: bool  # a DMR link is currently live (receive-only: never key)
+    echolink_available: bool  # this library was built with its echolink feature
+    echolink_active: bool  # an EchoLink call or node-leg station is up
+    echolink_logged_in: bool  # logged in to the EchoLink directory
 
 
 @dataclass(frozen=True)
@@ -1016,6 +1030,9 @@ class Station:
             nxdn_active=bool(out.nxdn_active),
             dmr_available=bool(out.dmr_available),
             dmr_active=bool(out.dmr_active),
+            echolink_available=bool(out.echolink_available),
+            echolink_active=bool(out.echolink_active),
+            echolink_logged_in=bool(out.echolink_logged_in),
         )
 
     def next_event(self) -> Event | None:

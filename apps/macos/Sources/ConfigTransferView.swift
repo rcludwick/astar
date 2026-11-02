@@ -121,7 +121,8 @@
                 }
 
                 Label(
-                    "Your AllStarLink username, node and password are never exported.",
+                    "Your AllStarLink username, node and password are never exported, "
+                        + "and nor are the vocoder sticks this Mac trusts.",
                     systemImage: "lock.fill"
                 )
                 .font(.caption2)

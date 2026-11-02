@@ -2,9 +2,16 @@
 resolver = "2"
 members = [
     "vendor/ambe-thumbdv",
+    # LAME (LGPL) for astar-server's opt-in /stream.mp3 — a licence island
+    # like ambe-thumbdv; see vendor/mp3lame-sys/VENDORED.md.
+    "vendor/mp3lame-sys",
+    "vendor/mp3lame-encoder",
     "crates/astar-iax-core",
+    "crates/astar-http",
     "crates/astar-codec",
+    "crates/astar-echolink",
     "crates/astar-audio",
+    "crates/astar-record",
     "crates/astar-iax",
     "crates/astar-sys",
     "crates/astar-conformance",
@@ -22,16 +29,24 @@ members = [
     "crates/astar-dstar",
     "crates/astar-ysf",
     "crates/astar-nxdn",
+    "crates/astar-discord",
+    "crates/astar-nodebench",
     "apps/gui",
 ]
 exclude = [
     # cargo-fuzz scaffold; built with nightly + libFuzzer, not part of the
     # stable workspace build.
     "fuzz",
+    # Vendored Codec 2 (LGPL-2.1-only AND MIT), kept byte-for-byte as
+    # upstream published it. Excluded rather than a member so `cargo fmt --all`
+    # and `cargo clippy --workspace -D warnings` never rewrite or judge someone
+    # else's code; it is still built as an ordinary path dependency when
+    # `codec2-static` asks for it. See vendor/codec2/VENDORED.md.
+    "vendor/codec2",
 ]
 
 [workspace.package]
-version = "0.1.16-beta"
+version = "0.1.18-beta"
 edition = "2024"
 # Real floor, verified against the committed Cargo.lock: apps/gui's graph pulls
 # font-types 1.89 (and iced/wgpu/image 1.88, zbus 1.87). The engine crates alone
@@ -54,9 +69,21 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
 [workspace.dependencies]
+# LGPL-3.0 wrapper over vendored LAME 3.100 (LGPL-2.0+). Only astar-server's
+# `stream-mp3` feature, which is never default, may depend on it.
+mp3lame-encoder = { path = "vendor/mp3lame-encoder", version = "0.2.5" }
 bitflags = "2"
+libc = "0.2"
 bytes = "1"
-codec2 = "0.3"
+miniz_oxide = "0.9"
+# Vendored at vendor/codec2 (LGPL-2.1-only AND MIT; see LICENSE-EXCEPTIONS.md
+# section 2). Only ever reached through astar-codec's opt-in `codec2-static`
+# feature; ci/guard-codec2-licensing.sh keeps it out of every default build.
+codec2 = { path = "vendor/codec2", version = "0.3.1" }
+# GSM 06.10 (astar-codec feature `gsm`). Exact pins: a bump is a new licence
+# audit (LICENSE-EXCEPTIONS.md §8).
+oxideav-gsm = "=0.0.10"
+oxideav-core = "=0.1.41"
 cpal = "0.18"
 libloading = "0.9"
 md-5 = "0.11"

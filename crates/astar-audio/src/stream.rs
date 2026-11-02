@@ -16,7 +16,10 @@
 //!
 //! The audio callback itself still runs on cpal's audio thread — we never
 //! touch the channel from inside the callback.
-
+// Without `device-audio` only the traits and the backend-neutral helpers
+// stay; the cpal plumbing they serve (control channel, timeouts, the
+// callback bodies) compiles but has no caller.
+#![cfg_attr(not(feature = "device-audio"), allow(dead_code, unused_imports))]
 // Audio code does lots of intentional numeric casts (sample format
 // conversion, frame-count math). These are sound for the value ranges
 // involved and the alternatives (try_from + panic / log) are noisier than
@@ -34,14 +37,20 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+#[cfg(feature = "device-audio")]
+use std::sync::mpsc::channel;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+#[cfg(feature = "device-audio")]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+#[cfg(feature = "device-audio")]
 use cpal::{BufferSize, SampleFormat, StreamConfig as CpalConfig};
 
-use crate::device::{DeviceId, DeviceInfo, Direction};
+use crate::device::DeviceInfo;
+#[cfg(feature = "device-audio")]
+use crate::device::{DeviceId, Direction};
 use crate::error::AudioError;
 use crate::meter::peak;
 use crate::resample::AntiAliasResampler;
@@ -210,6 +219,7 @@ fn join_before(handle: JoinHandle<()>, done: &Receiver<()>, timeout: Duration) -
     false
 }
 
+#[cfg(feature = "device-audio")]
 /// Concrete `StreamHandle` over a dedicated stream-owning thread.
 struct CpalStreamHandle {
     tx: Sender<(Ctl, CtlReply)>,
@@ -219,6 +229,7 @@ struct CpalStreamHandle {
     done: Receiver<()>,
 }
 
+#[cfg(feature = "device-audio")]
 impl CpalStreamHandle {
     fn send(&self, ctl: Ctl) -> Result<(), AudioError> {
         let (reply_tx, reply_rx) = channel::<Result<(), AudioError>>();
@@ -238,6 +249,7 @@ impl CpalStreamHandle {
     }
 }
 
+#[cfg(feature = "device-audio")]
 impl StreamHandle for CpalStreamHandle {
     fn stop(mut self: Box<Self>) {
         self.shutdown();
@@ -252,6 +264,7 @@ impl StreamHandle for CpalStreamHandle {
     }
 }
 
+#[cfg(feature = "device-audio")]
 impl Drop for CpalStreamHandle {
     fn drop(&mut self) {
         // A handle dropped without `stop` still has to tell the thread to
@@ -324,6 +337,7 @@ pub trait AudioBackend: Send + Sync {
     ) -> Result<Box<dyn StreamHandle>, AudioError>;
 }
 
+#[cfg(feature = "device-audio")]
 /// cpal-backed implementation of [`AudioBackend`].
 ///
 /// Constructed with [`CpalBackend::new`]; uses cpal's default host.
@@ -331,6 +345,7 @@ pub struct CpalBackend {
     host: cpal::Host,
 }
 
+#[cfg(feature = "device-audio")]
 impl CpalBackend {
     /// Build a backend using cpal's default host (`CoreAudio` on macOS,
     /// WASAPI on Windows, ALSA/`PipeWire` on Linux).
@@ -475,6 +490,7 @@ impl CaptureCapability {
     }
 }
 
+#[cfg(feature = "device-audio")]
 /// A device's human-readable name, or a placeholder when the host won't say.
 ///
 /// cpal 0.18 dropped `Device::name()` for `description()`, which returns a
@@ -493,12 +509,14 @@ fn device_name(dev: &cpal::Device) -> String {
         .map_or_else(|_| "<unknown>".to_string(), |d| d.name().to_string())
 }
 
+#[cfg(feature = "device-audio")]
 impl Default for CpalBackend {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "device-audio")]
 impl AudioBackend for CpalBackend {
     fn devices(&self) -> Result<Vec<DeviceInfo>, AudioError> {
         self.enumerate()
@@ -681,6 +699,7 @@ impl AudioBackend for CpalBackend {
     }
 }
 
+#[cfg(feature = "device-audio")]
 /// Spawn the input-stream owning thread and build the cpal stream on it.
 #[allow(clippy::too_many_arguments)]
 fn spawn_input_stream(
@@ -885,6 +904,7 @@ fn spawn_input_stream(
     }
 }
 
+#[cfg(feature = "device-audio")]
 /// Detects dropped capture buffers (overruns) by watching the gap between
 /// consecutive callbacks' capture timestamps (iax-5530). When the OS drops an
 /// input buffer under load, the next callback's capture instant jumps further
@@ -902,6 +922,7 @@ struct CaptureGapWatch {
     overruns: Arc<AtomicU64>,
 }
 
+#[cfg(feature = "device-audio")]
 impl CaptureGapWatch {
     fn new(rate: u32, overruns: Arc<AtomicU64>) -> Self {
         Self {
@@ -1008,6 +1029,7 @@ fn process_input(
     }
 }
 
+#[cfg(feature = "device-audio")]
 #[allow(clippy::too_many_arguments)]
 fn spawn_output_stream(
     dev: cpal::Device,
@@ -1292,9 +1314,11 @@ pub mod test_support_router {
     #[derive(Default)]
     struct Shared {
         sink: Option<Box<dyn InputSink>>,
+        source: Option<Box<dyn OutputSource>>,
     }
 
-    /// Test backend: returns `in:test`/`out:test` and stashes the opened sink.
+    /// Test backend: returns `in:test`/`out:test` and stashes the opened sink
+    /// and output source.
     pub struct NullBackend(Arc<Mutex<Shared>>);
 
     /// Cloneable control surface that survives the backend being moved into
@@ -1338,6 +1362,20 @@ pub mod test_support_router {
                 sink.write(samples, 0.0);
                 self.0.lock().unwrap().sink = Some(sink);
             }
+        }
+
+        /// Read `n` samples from the router's most-recently opened output
+        /// source, as the cpal playback callback would. Empty if none is open.
+        pub(crate) fn pull_output(&self, n: usize) -> Vec<f32> {
+            let mut g = self.0.lock().unwrap();
+            let Some(mut source) = g.source.take() else {
+                return Vec::new();
+            };
+            drop(g);
+            let mut out = vec![0.0_f32; n];
+            source.read(&mut out);
+            self.0.lock().unwrap().source = Some(source);
+            out
         }
     }
 
@@ -1389,8 +1427,9 @@ pub mod test_support_router {
             &self,
             _d: &DeviceInfo,
             _c: StreamConfig,
-            _s: Box<dyn OutputSource>,
+            source: Box<dyn OutputSource>,
         ) -> Result<Box<dyn StreamHandle>, AudioError> {
+            self.0.lock().unwrap().source = Some(source);
             Ok(Box::new(NullHandle))
         }
     }
@@ -1865,7 +1904,7 @@ mod tests {
         );
 
         // Each pair should hold the same mono sample.
-        for pair in out.chunks_exact(2) {
+        for pair in out.as_chunks::<2>().0 {
             assert_eq!(pair[0], pair[1]);
             assert!((pair[0] - 0.25).abs() < 1e-6);
         }

@@ -19,9 +19,20 @@
         case settings
         /// Browse and search the cached reflector directory.
         case reflectors
+        /// Browse and search the EchoLink station list, entered from the dial
+        /// card's magnifying glass while EchoLink is the selected network.
+        case echolinkStations
         /// Live mic spectrum + the stay-silent characterization that saves a
         /// mic profile.
         case micAnalyzer
+    }
+
+    /// A place inside the Settings pane that something outside it can send
+    /// the operator to — a connect error's "Open Vocoder Settings…", say.
+    enum SettingsAnchor: Hashable {
+        case vocoders
+        /// Settings → EchoLink: the callsign, password and login.
+        case echolink
     }
 
     /// Which pane the main window is showing (astar-1f7d).
@@ -61,6 +72,17 @@
         /// moved the window on (⌘, while the analyzer is up, say), the recorded
         /// pane no longer matches and Back falls back to `.call`.
         private var returnTarget: (onPane: AppPane, returnsTo: AppPane)?
+
+        /// Where Settings should scroll to when it next appears, if anywhere.
+        /// The Settings pane consumes it (sets it back to `nil`) once scrolled.
+        @Published var settingsAnchor: SettingsAnchor?
+
+        /// Open Settings scrolled to `anchor`. Back returns to wherever the
+        /// operator was, exactly as for any pane with more than one way in.
+        func showSettings(at anchor: SettingsAnchor) {
+            settingsAnchor = anchor
+            show(.settings)
+        }
 
         /// Show `pane`, remembering the pane on screen as where Back returns to.
         ///

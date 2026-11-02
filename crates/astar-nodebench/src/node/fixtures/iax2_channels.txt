@@ -1,0 +1,4 @@
+Channel               Peer                                      Username    ID (Lo/Rem)  Seq (Tx/Rx)  Lag      Jitter  JitBuf  Format  FirstMsg    LastMsg
+IAX2/1998-4321        127.0.0.1                                 1998        04321/00001  00012/00011  00001ms  -0001ms  0000ms  ulaw    Tx:NEW  Rx:LAGRP
+(None)                127.0.0.1                                 (None)      00077/00012  00003/00002  00000ms  0000ms  0000ms  slin16  Rx:NEW  Tx:PING
+2 active IAX channels

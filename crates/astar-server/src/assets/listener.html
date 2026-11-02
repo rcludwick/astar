@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>astar node</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/listener.css">
+<link rel="icon" href="data:,">
+</head>
+<body class="listener">
+<div class="ambient ambient-a"></div>
+<div class="ambient ambient-b"></div>
+<div class="ambient ambient-c"></div>
+<main class="lp">
+  <header class="lp-top">
+    <div class="lp-brand">
+      <div class="lp-logo" aria-hidden="true">✦</div>
+      <div>
+        <h1 id="node-name">astar node</h1>
+        <p class="subtitle" id="node-mode">connecting…</p>
+      </div>
+    </div>
+    <div class="lp-pills">
+      <span class="lp-pill" id="pill-online"><span class="lp-dot"></span><span id="online-text">Offline</span></span>
+      <span class="lp-pill" id="pill-listeners" hidden><span id="listener-count" class="num">0</span>&nbsp;listening</span>
+      <a class="lp-pill lp-admin" href="/admin">Admin</a>
+    </div>
+  </header>
+
+  <p class="banner warn" id="banner" hidden></p>
+
+  <div class="lp-grid">
+    <section class="card lp-hero" id="hero" aria-labelledby="talker-name">
+      <div class="lp-hero-row">
+        <div class="lp-talker idle" id="talker">
+          <button type="button" class="lp-play" id="play" aria-label="Listen live" aria-pressed="false" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true" class="icon-play"><path d="M7 4.5v15l12.5-7.5z"/></svg>
+            <svg viewBox="0 0 24 24" aria-hidden="true" class="icon-stop"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          </button>
+          <div class="lp-talker-text">
+            <div class="lp-call" id="talker-name">Quiet</div>
+            <div class="lp-meta" id="talker-meta">Nobody is talking</div>
+          </div>
+        </div>
+        <div class="lp-hero-pills">
+          <span class="lp-pill lp-live" id="pill-onair" hidden><span class="lp-dot"></span>On air</span>
+          <span class="lp-pill" id="pill-delay" hidden></span>
+        </div>
+      </div>
+      <div class="lp-player-row">
+        <p class="lp-player-status" id="player-status" role="status"></p>
+        <div class="lp-volume" id="volume-box" hidden>
+          <button type="button" class="lp-mute" id="mute" aria-label="Mute" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4z"/><path class="waves" d="M16 8.5a5 5 0 0 1 0 7M18.5 6a8.5 8.5 0 0 1 0 12"/></svg>
+          </button>
+          <input type="range" id="volume" min="0" max="100" value="80" aria-label="Volume">
+        </div>
+      </div>
+      <canvas id="spectrum" class="lp-spectrum" role="img" aria-label="Voice-band spectrum, 300 Hz to 3.4 kHz"></canvas>
+    </section>
+
+    <section class="card lp-history">
+      <div class="card-head"><h2>Level history</h2><span class="lp-unit">RX dBFS</span></div>
+      <canvas id="history" role="img" aria-label="Received level over the last two seconds"></canvas>
+    </section>
+
+    <section class="card lp-linked">
+      <div class="card-head"><h2>Linked</h2><span class="count" id="link-count">0</span></div>
+      <table class="lp-links"><tbody id="links-body"></tbody></table>
+      <p class="empty" id="links-empty">Not linked to anything</p>
+    </section>
+
+    <div class="lp-strip">
+      <section class="card">
+        <div class="card-head"><h2>Activity</h2></div>
+        <ul class="lp-feed" id="feed"></ul>
+        <p class="empty" id="feed-empty">Nothing yet</p>
+      </section>
+      <section class="card">
+        <div class="card-head"><h2>Today</h2><span class="lp-unit">UTC</span></div>
+        <div class="lp-stat"><span id="today-talk" class="num">0 m</span><small>talk time</small></div>
+        <p class="lp-muted"><span id="today-tx" class="num">0</span> transmissions · <span id="today-stations" class="num">0</span> stations</p>
+      </section>
+      <section class="card">
+        <div class="card-head"><h2>Listen elsewhere</h2></div>
+        <div class="lp-url-row">
+          <code class="lp-url" id="mp3-url">/stream.mp3</code>
+          <button type="button" class="btn" id="copy" aria-label="Copy the stream address">Copy</button>
+        </div>
+        <p class="lp-muted" id="mp3-note">Opens in VLC, a phone or a scanner app · about 6 s delay</p>
+      </section>
+    </div>
+  </div>
+  <p class="lp-foot">astar-server · read-only</p>
+</main>
+<p class="sr-only" id="live" aria-live="polite"></p>
+<audio id="mp3-audio" preload="none" hidden></audio>
+<script src="/listener.js"></script>
+</body>
+</html>

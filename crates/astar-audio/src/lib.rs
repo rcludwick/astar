@@ -86,7 +86,9 @@ pub use rnnoise::{
 pub use router::{AudioRouter, CallAudio, MicId, OutputId};
 pub use signal_report::{Grade, SignalReport, analyze_signal, render_report, signal_report_text};
 pub use spectrum::{SPECTRUM_BINS, SpectrumAnalyzer};
+#[cfg(feature = "device-audio")]
+pub use stream::CpalBackend;
 pub use stream::{
-    AudioBackend, CaptureCapability, CpalBackend, InputSink, OutputSource, PREFERRED_CAPTURE_RATE,
-    StreamConfig, StreamHandle,
+    AudioBackend, CaptureCapability, InputSink, OutputSource, PREFERRED_CAPTURE_RATE, StreamConfig,
+    StreamHandle,
 };

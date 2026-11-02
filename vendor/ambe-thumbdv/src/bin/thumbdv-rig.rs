@@ -5,7 +5,9 @@
 //!   enc <in.wav> <out.ambe> [--port PATH] — encode WAV to AMBE frames
 //!   dec <in.ambe> <out.wav> [--port PATH] — decode AMBE frames to WAV
 
-use ambe_thumbdv::{detect, DeviceError, SerialTransport, ThumbDv, FRAME_BYTES, FRAME_SAMPLES};
+use ambe_thumbdv::{
+    detect_trusted, DeviceError, SerialTransport, ThumbDv, FRAME_BYTES, FRAME_SAMPLES,
+};
 use std::f32;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -18,7 +20,11 @@ const USAGE: &str = "usage: thumbdv-rig COMMAND [ARGS]
 Commands:
   probe [--port PATH] [--baud N]      Detect device and print metadata + timing
   enc <in.wav> <out.ambe> [--port PATH]   Encode 8 kHz mono s16 WAV to AMBE frames
-  dec <in.ambe> <out.wav> [--port PATH]   Decode AMBE frames to 8 kHz mono s16 WAV";
+  dec <in.ambe> <out.wav> [--port PATH]   Decode AMBE frames to 8 kHz mono s16 WAV
+
+Only trusted sticks are opened: set ASTAR_VOCODER_SERIALS to a comma-separated
+list of enrolled USB serial numbers. --port narrows within that list; a path
+whose serial is not trusted is refused.";
 
 /// Parsed command line.
 enum Cmd {
@@ -110,15 +116,38 @@ fn parse_args(args: &[String]) -> Result<Cmd, String> {
     }
 }
 
+/// The trusted serials from `ASTAR_VOCODER_SERIALS` (comma-separated).
+fn trusted_serials() -> Vec<String> {
+    std::env::var("ASTAR_VOCODER_SERIALS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Connect to device and return (port, baud, device).
 /// Per ambe3000-protocol.md §8.1: connection helper for probe/enc/dec.
-/// If --port given, try given baud (or 460800/230400 fallback per §6);
-/// else call detect() (port from detect() is unavailable; see FIXME below).
+/// Only ports whose USB serial is in `ASTAR_VOCODER_SERIALS` are opened.
+/// If --port given, it must be one of those; try the given baud (or
+/// 460800/230400 fallback per §6). Else take the first trusted port.
 fn connect_device(
     port: Option<&str>,
     baud: Option<u32>,
 ) -> Result<(String, u32, ThumbDv<SerialTransport>), DeviceError> {
+    let trusted = trusted_serials();
+    let candidates = SerialTransport::candidate_ports_trusted(&trusted);
+    if candidates.is_empty() {
+        return Err(DeviceError::NoTrustedDevice);
+    }
     if let Some(p) = port {
+        if !candidates.iter().any(|c| c == p) {
+            return Err(DeviceError::WrongDevice(format!(
+                "{p} is not a trusted vocoder port (trusted: {})",
+                candidates.join(", ")
+            )));
+        }
         // Explicit port: try given baud or fallback to 460800 then 230400.
         let bauds = if let Some(b) = baud {
             vec![b]
@@ -138,17 +167,9 @@ fn connect_device(
         }
         Err(DeviceError::Timeout("failed to connect on explicit port"))
     } else {
-        // Auto-detect: detect() returns device but not the port/baud that succeeded.
-        // FIXME: device.rs detect() should return (port: String, baud: u32, device)
-        // to fully satisfy protocol doc §9 item 3 (VERIFY-HW).
-        let dev = detect()?;
-        let candidates = SerialTransport::candidate_ports();
-        let port_str = if candidates.is_empty() {
-            "<no candidates found>".to_string()
-        } else {
-            format!("<candidates: {}>", candidates.join(", "))
-        };
-        // Baud is unknown after auto-detect (tried 460800 then 230400 per §6).
+        let dev = detect_trusted(&trusted)?;
+        let port_str = format!("<trusted: {}>", candidates.join(", "));
+        // Baud is unknown after detection (tried 460800 then 230400 per §6).
         Ok((port_str, 0, dev))
     }
 }

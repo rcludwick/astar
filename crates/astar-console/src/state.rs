@@ -40,7 +40,8 @@ pub enum OperatingMode {
 // A plain poll/render DTO, not a control-flow state machine — the bools are
 // independently-meaningful UI flags (ptt/remote_ptt/m17_available/m17_active/
 // dstar_available/dstar_active/ysf_available/ysf_active/nxdn_available/
-// nxdn_active/dmr_available/dmr_active),
+// nxdn_active/dmr_available/dmr_active/echolink_available/echolink_active/
+// echolink_logged_in),
 // not a hidden enum in disguise.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq)]
@@ -220,6 +221,19 @@ pub struct ConsoleState {
     /// refuses remote keying while a digital-voice link holds the dongle,
     /// and must be able to read that without compiling the feature.
     pub dmr_active: bool,
+    /// `true` when this build carries `EchoLink` (the `echolink` feature).
+    /// `EchoLink` needs no hardware, so this is the build's answer alone.
+    pub echolink_available: bool,
+    /// `true` while the console's `EchoLink` call, or the node's `EchoLink`
+    /// leg, has at least one station connecting or connected.
+    ///
+    /// A call that has ended but not yet been disconnected does not count:
+    /// nobody is on the far end. Feature-INDEPENDENT for the same reason
+    /// [`Self::dmr_active`] is: `astar-server` refuses remote keying while
+    /// `EchoLink` is live, and reads this without compiling the feature.
+    pub echolink_active: bool,
+    /// `true` once the directory has accepted this station's login.
+    pub echolink_logged_in: bool,
 }
 
 impl Default for ConsoleState {
@@ -260,6 +274,9 @@ impl Default for ConsoleState {
             nxdn_active: false,
             dmr_available: false,
             dmr_active: false,
+            echolink_available: false,
+            echolink_active: false,
+            echolink_logged_in: false,
         }
     }
 }

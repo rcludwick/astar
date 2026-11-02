@@ -15,7 +15,8 @@
 # guard makes the promise checkable.
 #
 # Two directories are DELIBERATELY exempt because they are not ours to relabel:
-#   vendor/                                       ambe-thumbdv, MIT OR Apache-2.0
+#   vendor/                                       ambe-thumbdv, MIT OR Apache-2.0;
+#                                                 codec2, LGPL-2.1-only AND MIT
 #   harness/asterisk_parity/c_iaxclient/vendored/ the historical C libiax2, GPL/LGPL
 # Stamping an AGPL header on either would misstate someone else's terms — even
 # though Rob wrote ambe-thumbdv, it is permissively licensed on purpose.

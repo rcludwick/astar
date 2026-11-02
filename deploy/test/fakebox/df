@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# astar — Copyright (c) 2026 Rob Ludwick.
+# SPDX-License-Identifier: AGPL-3.0-only
+# Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
+echo "Filesystem     1024-blocks    Used Available Capacity Mounted on"
+echo "/dev/vda1         10113424 2435980   7206304      ${FAKE_DISK:-26}% /"

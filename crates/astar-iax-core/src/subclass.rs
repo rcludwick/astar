@@ -392,6 +392,7 @@ impl VoiceFormat {
     pub fn frame_bytes_20ms(self) -> Option<usize> {
         match self {
             Self::G711U | Self::G711A => Some(160),
+            Self::Gsm => Some(33),
             Self::Slin => Some(320),
             Self::Slin16 => Some(640),
             _ => None,
@@ -403,7 +404,7 @@ impl VoiceFormat {
     #[must_use]
     pub fn sample_rate(self) -> Option<u32> {
         match self {
-            Self::G711U | Self::G711A | Self::Slin => Some(8000),
+            Self::G711U | Self::G711A | Self::Slin | Self::Gsm => Some(8000),
             Self::Slin16 => Some(16000),
             _ => None,
         }
@@ -430,6 +431,12 @@ pub(crate) const MAX_SHIFT: u8 = 0x1f;
 /// mask that branch is unreachable, but the explicit check guards against
 /// future widening of the bit field.
 #[allow(clippy::cast_possible_truncation)]
+/// What [`parse_subclass_byte`] makes of the wire byte `0xff`. `chan_iax2`
+/// special-cases that byte as `-1` (`uncompress_subclass`), and sends
+/// `ast_indicate(chan, -1)`, "stop any indication", as a control frame with
+/// it. `app_rpt` does that right after ANSWER.
+pub const CONTROL_STOP_INDICATIONS: u32 = 1 << 31;
+
 pub(crate) fn parse_subclass_byte(b: u8) -> Result<u32, ParseError> {
     if b & SC_LOG == 0 {
         return Ok(u32::from(b));
@@ -556,7 +563,7 @@ mod tests {
         assert_eq!(VoiceFormat::G711A.frame_bytes_20ms(), Some(160));
         assert_eq!(VoiceFormat::Slin.frame_bytes_20ms(), Some(320));
         assert_eq!(VoiceFormat::Slin16.frame_bytes_20ms(), Some(640));
-        assert_eq!(VoiceFormat::Gsm.frame_bytes_20ms(), None);
+        assert_eq!(VoiceFormat::Gsm.frame_bytes_20ms(), Some(33));
     }
 
     #[test]
@@ -565,6 +572,6 @@ mod tests {
         assert_eq!(VoiceFormat::G711A.sample_rate(), Some(8000));
         assert_eq!(VoiceFormat::Slin.sample_rate(), Some(8000));
         assert_eq!(VoiceFormat::Slin16.sample_rate(), Some(16000));
-        assert_eq!(VoiceFormat::Gsm.sample_rate(), None);
+        assert_eq!(VoiceFormat::Gsm.sample_rate(), Some(8000));
     }
 }

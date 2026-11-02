@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Account — astar node</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="auth.css">
+</head>
+<body>
+<div class="ambient ambient-a"></div>
+<div class="ambient ambient-b"></div>
+<div class="ambient ambient-c"></div>
+<main>
+  <header class="card header">
+    <div>
+      <a class="back" href="/admin/" id="back">← node</a>
+      <h1 id="title">Account</h1>
+      <p class="subtitle" id="subtitle">your sign-in methods and sessions</p>
+    </div>
+    <div id="auth-chip"></div>
+  </header>
+
+  <p class="banner warn" id="host-banner" hidden></p>
+  <p class="banner warn" id="totp-nudge" hidden>You sign in with codes only. A passkey can't be phished and is quicker: add one below.</p>
+  <p class="auth-msg err" id="msg" role="alert"></p>
+
+  <section class="card" aria-labelledby="methods-h">
+    <div class="card-head"><h2 id="methods-h">Sign-in methods</h2><span class="count" id="method-count">0</span></div>
+    <div id="methods"></div>
+    <div class="adds">
+      <button type="button" class="btn" id="add-passkey">Add a passkey</button>
+      <button type="button" class="btn" id="add-key">Add a security key</button>
+      <label class="check"><input type="checkbox" id="nopin"> My key has no PIN</label>
+      <button type="button" class="btn" id="add-app">Add an authenticator app</button>
+      <button type="button" class="btn" id="reenrol">Set up another device or hostname</button>
+    </div>
+    <p class="hint" id="admin-app-note" hidden>On an admin account an authenticator app only confirms it's you; a passkey or security key signs you in, so your last one can't be removed.</p>
+    <div class="panel" id="app-panel" hidden>
+      <p class="hint">Scan this with your authenticator app, or type the key in. It is shown once.</p>
+      <div id="app-qr"></div>
+      <div class="auth-row"><span class="secret" id="app-secret"></span><button type="button" class="btn" id="app-copy">Copy key</button></div>
+      <form class="auth-form" id="app-form">
+        <label for="app-code">Then enter the code it shows</label>
+        <div class="auth-row">
+          <input id="app-code" class="code" autocomplete="one-time-code" inputmode="numeric" maxlength="6" placeholder="123456" required>
+          <button type="submit" class="btn primary" id="app-go">Add</button>
+          <button type="button" class="btn" id="app-cancel">Cancel</button>
+        </div>
+      </form>
+    </div>
+    <div class="panel" id="reenrol-panel" hidden></div>
+    <details class="advanced">
+      <summary>Manage passkeys in your browser</summary>
+      <p class="hint">Removing a passkey here removes this node's copy. Your device may still offer it; delete it there too:</p>
+      <ul class="hint">
+        <li>Safari and iPhone: Settings → Passwords (or the Passwords app), search for this node's name.</li>
+        <li>Chrome: Settings → Passwords and autofill → Google Password Manager.</li>
+        <li>Windows Hello: Settings → Accounts → Passkeys.</li>
+        <li>1Password, Bitwarden and other managers: search the vault for this node's name.</li>
+      </ul>
+    </details>
+  </section>
+
+  <section class="card" aria-labelledby="sessions-h">
+    <div class="card-head"><h2 id="sessions-h">Signed-in browsers</h2>
+      <button type="button" class="btn quiet-danger" id="others">Sign out everywhere else</button></div>
+    <ul class="people" id="sessions"></ul>
+  </section>
+</main>
+<script src="auth.js"></script>
+<script src="account.js"></script>
+</body>
+</html>

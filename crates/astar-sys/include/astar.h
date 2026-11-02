@@ -146,6 +146,23 @@
 #define IAX_ERR_DMR -22
 
 /**
+ * Recording error: already recording, the server's frame tap in use, a
+ * recordings folder that cannot be used, or a disk with less than 500 MB
+ * free. Read `iax_station_last_error` for which.
+ */
+#define IAX_ERR_RECORD -23
+
+/**
+ * `EchoLink` error: a login with an empty callsign, an empty password or no
+ * directory server; a call with an empty target, while not logged in, or to
+ * a station the directory does not list; an empty chat line; an empty node
+ * target or callsign; UDP ports that could not be opened; or the `echolink`
+ * feature not being compiled in. Read `iax_station_last_error` for which —
+ * it never carries the password.
+ */
+#define IAX_ERR_ECHOLINK -24
+
+/**
  * Number of log-spaced dBFS bins [`iax_station_mic_spectrum`] writes when
  * monitoring (iax-e73e). Size the `out` array to (at least) this; a larger
  * buffer is fine (the extra entries are left untouched). A literal here so
@@ -356,6 +373,44 @@ typedef enum {
    */
   IaxLinkEventKind_Keyed = 3,
 } IaxLinkEventKind;
+
+/**
+ * The outcome of [`astar_vocoder_enrol`]. Its value is the function's
+ * (non-negative) return code.
+ */
+typedef enum {
+  /**
+   * An `AMBE3000*` chip answered: add the serial to the trust list.
+   */
+  IaxVocoderEnrol_Trusted = 0,
+  /**
+   * An `AMBE3003*` chip (`DVstick` 33) answered: recognised, not supported
+   * yet. Do NOT add it.
+   */
+  IaxVocoderEnrol_Unsupported = 1,
+  /**
+   * Something answered with another PRODID. Refused.
+   */
+  IaxVocoderEnrol_WrongDevice = 2,
+  /**
+   * The port opened but nothing answered as a vocoder (timeout or
+   * garbage) — possibly a CAT cable. Refused.
+   */
+  IaxVocoderEnrol_NoAnswer = 3,
+  /**
+   * The port would not open, or its DTR/RTS could not be driven low.
+   * Refused; nothing was written.
+   */
+  IaxVocoderEnrol_OpenFailed = 4,
+  /**
+   * No vocoder-class USB device with that serial is attached.
+   */
+  IaxVocoderEnrol_NotFound = 5,
+  /**
+   * This library was built without hardware vocoder support.
+   */
+  IaxVocoderEnrol_NotCompiled = 6,
+} IaxVocoderEnrol;
 
 /**
  * Opaque station handle. Heap-allocated by [`iax_station_new`], freed by
@@ -703,6 +758,29 @@ typedef struct {
    * must read that without compiling the feature.
    */
   bool dmr_active;
+  /**
+   * `true` when this library was built with its `echolink` feature, so
+   * the `iax_station_echolink_*` calls do something. `EchoLink` needs no
+   * hardware, so nothing else goes into it.
+   */
+  bool echolink_available;
+  /**
+   * `true` while an `EchoLink` call is connecting or connected, or while
+   * any station is on the node's `EchoLink` leg — mutually exclusive with
+   * every other network (see [`iax_station_echolink_connect`]).
+   *
+   * Feature-INDEPENDENT, exactly as [`Self::dmr_active`] is: a reader
+   * that must know whether `EchoLink` holds the station can read it
+   * without compiling the feature.
+   */
+  bool echolink_active;
+  /**
+   * `true` while logged in to the `EchoLink` directory (see
+   * [`iax_station_echolink_login`]). A login still running or one that
+   * failed is `false`; [`iax_station_echolink_state`] says which.
+   * Feature-independent, like [`Self::echolink_active`].
+   */
+  bool echolink_logged_in;
 } IaxState;
 
 /**
@@ -1535,6 +1613,58 @@ int iax_station_m17_disconnect(IaxStation *st);
 int iax_station_m17_state(IaxStation *st, char *buf, uintptr_t len);
 
 /**
+ * Start recording the live call or digital session to `dir` (created if
+ * missing). `layout` is 0 stereo (receive left, transmit right), 1 two-mono
+ * (a receive file and a transmit file), or 2 mixed (one mono file). `frames`
+ * also writes codec-frame captures under `dir/captured/`. `label` is the
+ * `<network> <node or reflector>` part of the file name (e.g.
+ * `"AllStar 2000"`), and `utc_offset_secs` the operator's offset from UTC
+ * for the date and time in it.
+ *
+ * Returns [`IAX_OK`]; [`IAX_ERR_NULL`] (NULL `st`, `dir` or `label`);
+ * [`IAX_ERR_UTF8`] (`dir` or `label` not UTF-8); [`IAX_ERR_UNSUPPORTED`]
+ * (any other `layout`); [`IAX_ERR_NOT_CONNECTED`] (nothing live to record);
+ * [`IAX_ERR_RECORD`] (already recording, the folder cannot be used, or the
+ * disk is short of space — [`iax_station_last_error`] says which); or
+ * [`IAX_ERR_PANIC`].
+ *
+ * NOTE: this creates the folder and the first files; call it off any UI
+ * thread.
+ */
+int iax_station_record_start(IaxStation *st,
+                             const char *dir,
+                             int layout,
+                             bool frames,
+                             const char *label,
+                             int utc_offset_secs);
+
+/**
+ * Stop the recording, if one runs, and finish its files. Idempotent — a
+ * no-op while idle. The final state stays readable through
+ * [`iax_station_record_state_json`]. Returns [`IAX_OK`], [`IAX_ERR_NULL`],
+ * or [`IAX_ERR_PANIC`].
+ */
+int iax_station_record_stop(IaxStation *st);
+
+/**
+ * Write the recording state as JSON into the caller buffer `buf` of `len`
+ * bytes (NUL-terminated, truncate-safe; returns the byte length the full
+ * JSON needs, excluding the NUL, so a `len == 0` call is a sizing query).
+ *
+ * ```json
+ * {"recording":true,"elapsed_ms":42000,"files":["/x/2026-10-26 19-00-04 AllStar 2000.flac"],
+ *  "dropped_frames":0,"error":null,"layout":"stereo"}
+ * ```
+ *
+ * `layout` is `stereo`, `two-mono` or `mixed`. `error` says why a recording
+ * stopped by itself (low disk, folder gone), else `null`. After a stop the
+ * last recording's final state is reported; before any recording, the idle
+ * state. Always valid JSON. Returns [`IAX_ERR_NULL`] if `st` is NULL, or
+ * [`IAX_ERR_PANIC`].
+ */
+int iax_station_record_state_json(IaxStation *st, char *buf, uintptr_t len);
+
+/**
  * Set extra directories to search for a runtime `libcodec2`, ahead of the
  * hard-coded system paths (iax-f2b8 Task 4/5). `dirs` is a single
  * NUL-terminated string of `':'`-separated filesystem paths (e.g.
@@ -1545,6 +1675,62 @@ int iax_station_m17_state(IaxStation *st, char *buf, uintptr_t len);
  * [`IAX_ERR_PANIC`].
  */
 int iax_station_set_codec_dirs(IaxStation *st, const char *dirs);
+
+/**
+ * Replace the station's vocoder trust list: the USB serial numbers of the
+ * AMBE sticks later D-Star/YSF/NXDN/DMR connects may open, separated by
+ * commas, whitespace or newlines. NULL or empty trusts nothing, so every
+ * such connect fails with "No trusted vocoder — add one in Settings →
+ * Vocoders" (read it from [`iax_station_last_error`]) and nothing is
+ * opened. A live session keeps the stick it already has. Call it right
+ * after [`iax_station_new`] with the persisted list, and again after a
+ * successful enrol or a removal.
+ *
+ * Returns [`IAX_OK`], [`IAX_ERR_NULL`] (NULL `st`), [`IAX_ERR_UTF8`], or
+ * [`IAX_ERR_PANIC`].
+ */
+int iax_station_set_vocoder_trust(IaxStation *st, const char *serials);
+
+/**
+ * Write the station's current trust list, newline-joined, into `buf`
+ * (NUL-terminated, truncate-safe). Returns the bytes the full list needs
+ * (excluding the NUL), or a negative `IAX_ERR_*`. `len == 0` sizes it.
+ */
+int iax_station_vocoder_trust(IaxStation *st, char *buf, uintptr_t len);
+
+/**
+ * List the vocoder-class USB serial ports that could be enrolled, as a JSON
+ * array `[{"serial":"…","port":"/dev/cu.…"}, …]`, into `buf`
+ * (NUL-terminated, truncate-safe). **Enumeration only: no port is opened.**
+ * Ports with no USB serial number are omitted (they can never be trusted).
+ * Includes sticks already trusted; the caller marks those. Empty (`[]`)
+ * without hardware vocoder support.
+ *
+ * Returns the bytes the full JSON needs (excluding the NUL), or
+ * [`IAX_ERR_PANIC`]. Pass `len == 0` to size it.
+ */
+int astar_vocoder_list_candidates(char *buf, uintptr_t len);
+
+/**
+ * Enrol the stick with USB serial `serial`: open its port, drive DTR/RTS
+ * low before writing anything, send RESET + PRODID (bounded), close it, and
+ * classify the reply. **The only call that opens a port that is not yet
+ * trusted** — make it only from an explicit user action, after the user has
+ * confirmed the device is not a radio's CAT/PTT cable. It does not modify
+ * any trust list: on [`IaxVocoderEnrol::Trusted`] the caller persists the
+ * serial and calls [`iax_station_set_vocoder_trust`].
+ *
+ * Returns an [`IaxVocoderEnrol`] value (`>= 0`), or [`IAX_ERR_NULL`] (NULL
+ * `serial`), [`IAX_ERR_UTF8`], or [`IAX_ERR_PANIC`]. When `buf` is non-NULL
+ * and `len > 0`, also writes a JSON detail object (NUL-terminated,
+ * truncate-safe; 512 bytes is ample):
+ * `{"result":"trusted","trusted":true,"serial":"…","port":"…",
+ * "prodid":"AMBE3000R","model":"DVstick 30 / ThumbDV-class","message":"…"}`
+ * — `port`/`prodid`/`model` are `null` where they do not apply.
+ *
+ * Blocks for up to about two seconds: call it off any UI thread.
+ */
+int astar_vocoder_enrol(const char *serial, char *buf, uintptr_t len);
 
 /**
  * Connect to a D-Star `DExtra` reflector (iax-a9d4 built RX, iax-2f6b added
@@ -1869,6 +2055,179 @@ int iax_station_dmr_disconnect(IaxStation *st);
  * Returns [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
  */
 int iax_station_dmr_state(IaxStation *st, char *buf, uintptr_t len);
+
+/**
+ * Start logging in to the `EchoLink` directory as `callsign`.
+ *
+ * `servers` is a newline-separated list of directory servers, tried in turn
+ * (`IP`, `IP:port`, `name` or `name:port`; blank lines are skipped). This
+ * library names no server of its own: the caller supplies the list.
+ *
+ * Returns at once; the login runs on its own thread. Poll
+ * [`iax_station_echolink_state`] to see it finish or fail, and
+ * [`IaxState::echolink_logged_in`] for the flag alone. The location last
+ * given to [`iax_station_echolink_set_location`] goes out beside the
+ * callsign. A login already running is replaced.
+ *
+ * # The password
+ * `password` is copied out of the caller's buffer into an owned `String` at
+ * the top of this function and moved into the engine, which zeroes it when
+ * it is dropped. Nothing on the station, in a snapshot, in an error, in the
+ * state JSON or in a log ever holds it. The caller's own buffer is the
+ * caller's to scrub.
+ *
+ * All three strings are required (NULL/non-UTF-8 → [`IAX_ERR_NULL`] /
+ * [`IAX_ERR_UTF8`]; a NULL password is a caller bug, not an empty password).
+ * Returns [`IAX_OK`], [`IAX_ERR_ECHOLINK`] for an empty callsign, an empty
+ * password, no non-empty server, or the `echolink` feature not being
+ * compiled in (all checked before anything starts, so a running login
+ * stands), or [`IAX_ERR_PANIC`].
+ *
+ * In a build without this library's `echolink` feature, this and every
+ * other `EchoLink` action entry point returns [`IAX_ERR_ECHOLINK`] before
+ * reading any argument but `st`, with "echolink support not compiled in" in
+ * `iax_station_last_error` — so there a NULL string reports
+ * [`IAX_ERR_ECHOLINK`], not [`IAX_ERR_NULL`].
+ */
+int iax_station_echolink_login(IaxStation *st,
+                               const char *callsign,
+                               const char *password,
+                               const char *servers);
+
+/**
+ * Hang up any `EchoLink` call and every station on the node's `EchoLink`
+ * leg, then log off the directory. A no-op when not logged in.
+ *
+ * NOTE: the logoff waits on any directory exchange already in flight, so
+ * this can block for over a minute at worst. Call it off any UI thread.
+ * Returns [`IAX_OK`], [`IAX_ERR_NULL`], [`IAX_ERR_ECHOLINK`] when the
+ * `echolink` feature isn't compiled in, or [`IAX_ERR_PANIC`].
+ */
+int iax_station_echolink_logout(IaxStation *st);
+
+/**
+ * Call an `EchoLink` station, named by node number or callsign as the
+ * directory lists it, over the station's selected audio devices. Calling
+ * out is always a person's action; nothing calls this on its own.
+ *
+ * Returns as soon as the first SDES is out; the answer shows in
+ * [`iax_station_echolink_state`]'s `link` and in
+ * [`IaxState::echolink_active`].
+ *
+ * `target` is required (NULL/non-UTF-8 → [`IAX_ERR_NULL`] /
+ * [`IAX_ERR_UTF8`]). Returns [`IAX_OK`], [`IAX_ERR_ECHOLINK`] for an empty
+ * target, when not logged in, when no listed station matches, when the UDP
+ * ports cannot be opened, or when the feature isn't compiled in;
+ * [`IAX_ERR_ALREADY_CONNECTED`] while any other network, another `EchoLink`
+ * call or the node's `EchoLink` leg holds the station; [`IAX_ERR_AUDIO`]
+ * when the output device cannot be opened; or [`IAX_ERR_PANIC`].
+ */
+int iax_station_echolink_connect(IaxStation *st, const char *target);
+
+/**
+ * Hang up the `EchoLink` call, if any; the directory login stays up.
+ * Idempotent. Returns [`IAX_OK`], [`IAX_ERR_NULL`], [`IAX_ERR_ECHOLINK`]
+ * when the `echolink` feature isn't compiled in, or [`IAX_ERR_PANIC`].
+ */
+int iax_station_echolink_disconnect(IaxStation *st);
+
+/**
+ * Ask the `EchoLink` directory for a fresh station list now, rather than at
+ * the next 600 s refresh. The new list shows in
+ * [`iax_station_echolink_stations`] once it arrives.
+ *
+ * Returns `1` when a fresh list was asked for, and `0` ([`IAX_OK`]) when
+ * nothing was asked because the last list came less than 30 s ago: the
+ * caller says "try again in a moment". Otherwise [`IAX_ERR_NULL`],
+ * [`IAX_ERR_ECHOLINK`] when not logged in or when the `echolink` feature
+ * isn't compiled in, or [`IAX_ERR_PANIC`].
+ */
+int iax_station_echolink_refresh_list(IaxStation *st);
+
+/**
+ * Send one line of text chat to the station on the `EchoLink` call.
+ *
+ * `text` is required (NULL/non-UTF-8 → [`IAX_ERR_NULL`] / [`IAX_ERR_UTF8`]).
+ * Returns [`IAX_OK`], [`IAX_ERR_NOT_CONNECTED`] with no call in hand
+ * (checked first), [`IAX_ERR_ECHOLINK`] for an empty or all-blank line or
+ * when the feature isn't compiled in, or [`IAX_ERR_PANIC`].
+ */
+int iax_station_echolink_send_chat(IaxStation *st, const char *text);
+
+/**
+ * Set the location text other stations see beside the callsign. It may
+ * come before a login, which then carries it; while logged in it goes out
+ * with the next status refresh.
+ *
+ * `text` is required (NULL/non-UTF-8 → [`IAX_ERR_NULL`] / [`IAX_ERR_UTF8`]).
+ * Returns [`IAX_OK`], [`IAX_ERR_ECHOLINK`] when the `echolink` feature
+ * isn't compiled in, or [`IAX_ERR_PANIC`].
+ */
+int iax_station_echolink_set_location(IaxStation *st, const char *text);
+
+/**
+ * Write where the `EchoLink` login and call stand, as JSON, into the caller
+ * buffer `buf` of `len` bytes (NUL-terminated, truncate-safe; returns the
+ * byte length the full JSON needs, excluding the NUL, so a `len == 0` call
+ * is a sizing query).
+ *
+ * Logged in, with a call in hand:
+ *
+ * ```json
+ * {"login":"logged_in","retrying":false,"callsign":"KX7ABC","error":null,
+ *  "link":"connected","peer":"W1AW","node":1234,"ptt":false,
+ *  "receiving":true,"info":"Newington",
+ *  "chat":[{"from":"W1AW","text":"hi","mine":false}],"notice":null}
+ * ```
+ *
+ * `login` is one of `logged_out`/`logging_in`/`logged_in`/`failed`. A
+ * failed login carries its sentence in `error`, for the status line:
+ * `{"login":"failed","retrying":false,"callsign":"KX7ABC","error":"EchoLink
+ * said the password is wrong"}`. `error` is `null` otherwise. `retrying` is
+ * `true` while the login is backing off after no server answered and will
+ * try again by itself (`logging_in`, or `failed` with the "couldn't reach"
+ * sentence); it is `false` for a refusal, which only a new login can get
+ * past, and while logged in or out.
+ *
+ * The call fields (`link` through `chat`) are present only while a call is
+ * in hand. `link` is one of `connecting`/`connected`/`closed`. `ptt` is the
+ * key as the link applied it. `receiving` is true while the far end is
+ * talking. `info` is the far station's information text, `null` until it
+ * sends one. `chat` is the call's text chat, oldest first; `mine` marks a
+ * line this station sent. `notice` is a plain sentence saying why the link
+ * stopped transmitting on its own (the 10-minute transmit cap), `null`
+ * otherwise; the next over clears it.
+ *
+ * `peer`, `info` and every chat line come from the far station, so the
+ * document is built with `serde_json`: a quote or brace in them stays inside
+ * its string. There is no password field, and the login's never reaches
+ * here.
+ *
+ * Writes `{}` when logged out with no error, and always without the
+ * `echolink` feature. Returns [`IAX_ERR_NULL`] if `st` is NULL, or
+ * [`IAX_ERR_PANIC`].
+ */
+int iax_station_echolink_state(IaxStation *st, char *buf, uintptr_t len);
+
+/**
+ * Write the `EchoLink` directory's latest station list as a JSON array into
+ * the caller buffer `buf` of `len` bytes (same buffer contract as
+ * [`iax_station_echolink_state`]):
+ *
+ * ```json
+ * [{"call":"W1AW","description":"Newington","node":1234,
+ *   "kind":"user","status":"online"}]
+ * ```
+ *
+ * `kind` is one of `user`/`link`/`repeater`/`conference`; `status` is one of
+ * `online`/`busy`/`unknown`. No station's IP address is in it: the engine
+ * keeps those to itself.
+ *
+ * Writes `[]` when not logged in, before the first list arrives, and without
+ * the `echolink` feature. Returns [`IAX_ERR_NULL`] if `st` is NULL, or
+ * [`IAX_ERR_PANIC`].
+ */
+int iax_station_echolink_stations(IaxStation *st, char *buf, uintptr_t len);
 
 #ifdef __cplusplus
 }  // extern "C"

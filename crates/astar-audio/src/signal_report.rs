@@ -572,6 +572,6 @@ mod tests {
     fn empty_recording_reports_silence() {
         let r = analyze_signal(&[], 8000);
         assert!(r.underdriven);
-        assert!(r.tones.is_empty());
+        assert_eq!(r.tones, [] as [(f32, f32); 0]);
     }
 }

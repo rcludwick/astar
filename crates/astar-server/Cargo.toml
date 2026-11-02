@@ -8,7 +8,102 @@ repository.workspace = true
 authors.workspace = true
 description = "astar-server: the always-on AllStarLink node daemon (IAX2 inbound + local handset bridge)."
 
+[features]
+# `stream`: the live audio streams on the public page (the Opus encoder and
+# the WebSocket). Permissive licences only (the pure-Rust mousiki Opus codec,
+# MIT; tungstenite MIT/Apache), no C library, no cmake and no
+# async runtime, so it is on by default.
+default = ["stream", "device-audio"]
+# `device-audio`: real sound devices (cpal; ALSA on Linux) for `[audio]
+# backend = "cpal"`. On by default; the release build leaves it out, since a
+# node server runs `backend = "none"` and static musl cannot link libasound.
+device-audio = [
+    "astar-audio/device-audio",
+    "astar-iax/device-audio",
+    "astar-station/device-audio",
+]
+stream = ["dep:tungstenite", "dep:mousiki", "astar-http/ws"]
+# LICENSING: statically links LAME (LGPL-2.0+, through the LGPL-3.0
+# mp3lame-sys/-encoder crates vendored under vendor/) for /stream.mp3.
+# NOT default and it must never become one — ci/guard-codec2-licensing.sh
+# fails a default build that links it; LICENSE-EXCEPTIONS.md carries the
+# notice and the relink terms for the builds that turn it on.
+stream-mp3 = ["stream", "dep:mp3lame-encoder"]
+# `public-tls`: HTTPS on the public bind with certificates from a built-in,
+# synchronous ACME client (Let's Encrypt), plus the Porkbun DNS API for
+# dynamic DNS and DNS-01. Opt-in: it adds a TLS stack and an HTTP client to
+# a daemon that otherwise has neither. Every dependency is MIT, Apache-2.0,
+# ISC or BSD (ring: ISC-style and OpenSSL; checked with `cargo tree -e normal
+# --format '{p} {l}'`), and none of it is async: there is no tokio here, and
+# ci/guard-discord-feature.sh keeps it that way. Without the feature,
+# `[web] public_bind` serves plain HTTP and says so once at start-up.
+# What the shipped single static executable contains, named in one place
+# (`just server-release`, Task 14): both streams (LAME statically linked, LGPL —
+# see LICENSE-EXCEPTIONS.md), Codec 2 statically linked (LGPL, same), HTTPS
+# with ACME and every DNS provider (Porkbun, plus dns-update's via
+# `dns-providers`), and Discord. Deliberately NOT `device-audio`: a node
+# server runs `[audio] backend = "none"`, and static musl has no libasound.
+# Built with `--no-default-features --features release`.
+release = ["stream", "stream-mp3", "codec2-static", "public-tls", "discord", "auth", "dns-providers"]
+# `auth`: admin sign-in with passkeys, security keys and authenticator apps
+# (TOTP), on the public bind and the control port. Opt-in, like public-tls:
+# it brings webauthn-rs (MPL-2.0) and, through it, OpenSSL, built from source
+# (`vendored`, Apache-2.0) so the static musl release needs no system
+# library; perl and make are its only build requirements. Synchronous and
+# runtime-free, which ci/guard-discord-feature.sh checks. Without it the
+# control port is loopback-trusted as before and the public `/admin` says
+# the build has no sign-in. LICENSE-EXCEPTIONS.md carries both notices.
+auth = [
+    "dep:webauthn-rs",
+    "dep:openssl",
+    "dep:totp-rs",
+    "dep:qrcodegen",
+    "dep:sha2",
+    "dep:getrandom",
+    "dep:base64",
+    "dep:uuid",
+]
+# Test-only hooks (the `ASTAR_ACME_DIRECTORY` override, and the EchoLink
+# loopback-only guard: every EchoLink bind, connect, send and lookup refuses
+# a non-loopback address). Never in a release. The dns-update entry is a weak
+# dependency feature: on only when dns-update is.
+test-support = ["dns-update?/test_provider", "astar-station/echolink-loopback-only"]
+# `dns-providers`: every DNS provider dns-update supports (Cloudflare,
+# deSEC, Hetzner, ...), for [web.dns] provider = "<name>". Opt-in and in
+# `release`. dns-update is async, so it runs on ONE thread that owns a
+# current-thread tokio runtime (src/public/dns_update.rs), the way
+# astar-discord is contained; ci/guard-discord-feature.sh allows tokio in a
+# release build only through this and `discord`. Built with dns-update's
+# `ring` feature, which sends its reqwest through native-tls (OpenSSL, which
+# `auth` already vendors), so the musl release needs no aws-lc-rs or cmake.
+# Porkbun needs none of this: its client is built in (public-tls).
+dns-providers = ["public-tls", "dep:dns-update", "dep:tokio"]
+public-tls = [
+    "astar-http/tls",
+    "dep:rustls",
+    "dep:rustls-pki-types",
+    "dep:ureq",
+    "dep:rcgen",
+    "dep:ring",
+    "dep:base64",
+]
+discord = ["dep:astar-discord", "astar-discord/discord"]
+# LICENSING: statically links the LGPL-2.1 `codec2` crate into astar-server.
+# NOT default and it must never become one — see astar-codec/Cargo.toml and
+# LICENSE-EXCEPTIONS.md. The shipped container loads the distribution's
+# libcodec2 at run time instead (codec2-runtime, already on via astar-station's
+# default `m17` feature), so a plain build links no LGPL code.
+codec2-static = ["astar-station/codec2-static"]
+# `astar-server vocoder list|add`: enumerate and probe AMBE sticks for
+# `[vocoder] trusted_serials`. Pulls the vendored ThumbDV serial driver
+# (`astar-codec/ambe-hw`), which on Linux needs libudev, so it is NOT default:
+# the shipped container builds without it, and there `list` is empty and
+# `add` answers "no hardware vocoder support". It adds no transmit path —
+# nothing here enables D-Star (see the astar-station line below).
+vocoder = ["dep:astar-codec", "astar-codec/ambe-hw"]
+
 [dependencies]
+astar-discord = { path = "../astar-discord", version = "0.1.18-beta", optional = true }
 # SAFETY (iax-2f6b): default features only — deliberately NOT `dstar`.
 # This crate exposes remote PTT (`POST /key`, http.rs; a TUI keystroke),
 # which lands on `Station::set_ptt` and keys whatever network is live.
@@ -21,20 +116,113 @@ description = "astar-server: the always-on AllStarLink node daemon (IAX2 inbound
 # real guard is in the `NodeCommand::Key` handler (controller.rs): it refuses
 # whenever the snapshot reports `dstar_active`, whatever features are on.
 # Keep this line anyway — nothing here needs D-Star, so nothing here asks.
-astar-station = { path = "../astar-station" }
-astar-iax = { path = "../astar-iax", features = ["serde"] }
+astar-station = { path = "../astar-station", default-features = false, features = ["m17", "echolink"] }
+# Only for the `vocoder` feature above; see there.
+astar-codec = { path = "../astar-codec", version = "0.1.18-beta", optional = true }
+astar-iax = { path = "../astar-iax", default-features = false, features = ["serde"] }
 astar-wireguard = { path = "../astar-wireguard" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
-tiny_http = "0.12"
+# The credentials file and (later) node.toml are edited in place with
+# toml_edit. toml 1.1 matches apps/gui, and toml_edit 0.25 is already in the
+# lock (via proc-macro-crate); toml 0.8 would pull toml_edit 0.20 beside it.
+toml = "1.1"
+toml_edit = "0.25"
+# The public bind's server (and, after the control port moves, the control
+# port's): parsing, deadlines, caps, default headers, the TLS sniff, streams.
+astar-http = { path = "../astar-http", version = "0.1.18-beta" }
+# The node logger (`[recording]`): FLAC, the over splitter, the frame writer.
+astar-record = { path = "../astar-record", version = "0.1.18-beta" }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 ctrlc = { version = "3", features = ["termination"] }
-astar-audio = { path = "../astar-audio", features = ["test-backend"] }
+astar-audio = { path = "../astar-audio", default-features = false, features = ["test-backend"] }
+# The public page's WebSocket (`/stream.ws`). Sync, no runtime; only the
+# handshake helpers and the frame codec are used.
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"], optional = true }
+# Opus for the page player: mousiki, a pure-Rust port of the reference codec
+# (no libopus, no cmake). Used directly, not through opus2, whose mousiki and
+# libopus backends cannot coexist with the discord feature's opus2.
+mousiki = { version = "0.2", optional = true }
+mp3lame-encoder = { workspace = true, optional = true }
+# public-tls: the TLS server, the ACME and Porkbun HTTP client, the CSR, the
+# ACME account key's ES256 signatures, and JOSE's base64url.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"], optional = true }
+rustls-pki-types = { version = "1", features = ["std"], optional = true }
+ureq = { version = "3.4", default-features = false, features = ["rustls"], optional = true }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"], optional = true }
+ring = { version = "0.17", optional = true }
+base64 = { workspace = true, optional = true }
+# auth: WebAuthn ceremonies (no attestation CA lists, so no default
+# features; `conditional-ui` is the discoverable sign-in), OpenSSL vendored
+# for it, TOTP (RFC 6238; its `qr` feature is not used, it pulls `image`),
+# QR matrices drawn by the page, hashing, randomness and user ids.
+webauthn-rs = { version = "0.5", default-features = false, features = ["conditional-ui"], optional = true }
+openssl = { version = "0.10", features = ["vendored"], optional = true }
+totp-rs = { version = "6", features = ["otpauth"], optional = true }
+qrcodegen = { version = "1.8", optional = true }
+sha2 = { version = "0.11", optional = true }
+getrandom = { version = "0.4", optional = true }
+uuid = { version = "1", features = ["v4", "serde"], optional = true }
+# dns-providers: MIT OR Apache-2.0. `ring`, never the default aws-lc-rs.
+dns-update = { version = "0.5.9", default-features = false, features = ["ring"], optional = true }
+# The dns-update worker's runtime: current-thread, with timers for the
+# per-call timeout. Only ever reached through `dns-providers`.
+tokio = { version = "1.52", default-features = false, features = ["rt", "time"], optional = true }
 
 [dev-dependencies]
+# `testing::serve`: the Porkbun fake in the public tests; `tls`: the public
+# router's unit tests run over a real TLS connection, whatever the features.
+astar-http = { path = "../astar-http", version = "0.1.18-beta", features = ["testing", "tls"] }
+# A self-signed certificate and a TLS client for those tests.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 tempfile = "3"
+# Unpacks the node logger's download tarballs in its tests.
+tar = "=0.4.46"
+# Software authenticators for the auth tests: a passkey with user
+# verification and a security key without. No hardware is ever opened.
+# Dev-only, so the tokio it pulls is not in any `--edges normal` tree.
+webauthn-authenticator-rs = { version = "0.5", default-features = false, features = ["softpasskey", "softtoken"] }
+# It links OpenSSL in every test build, `auth` or not; vendored here too, so
+# no test build ever needs a system OpenSSL.
+openssl = { version = "0.10", features = ["vendored"] }
+# Self-reference, as astar-audio does, so every TEST build of this crate —
+# the binary the integration tests spawn included — has `test-support`: the
+# only way `ASTAR_ACME_DIRECTORY` is honoured, so a test that starts the real
+# server can never reach Let's Encrypt. Dev-only; no shipped build has it.
+astar-server = { path = ".", default-features = false, features = ["test-support"] }
+# Forces the LGPL codec2-static backend on for every TEST build of this crate,
+# as astar-station and astar-console already do, so the M17 controller tests
+# always have a decoder. Never part of any default feature set.
+astar-codec = { path = "../astar-codec", version = "0.1.18-beta", features = ["codec2-static"] }
+# Self-reference so the controller's Discord tests can install a
+# `Gateway::orphan()` — a gateway that spawns nothing and reaches no
+# network. `#[cfg(test)]` items do not cross a crate boundary, so the
+# constructor is behind astar-discord's `test-support` feature, which only
+# a test build ever enables (dev-dependencies are not in `cargo tree
+# --edges normal`, so ci/guard-discord-feature.sh is unaffected). Same
+# shape as astar-audio's `test-backend` above.
+astar-discord = { path = "../astar-discord", version = "0.1.18-beta", features = [
+    "test-support",
+] }
+# The in-process M17 reflector and packet codec, for the controller's M17
+# tests: every reflector those tests talk to is `astar_m17::Reflector` or a
+# raw recording socket on 127.0.0.1:0. Pure protocol code, no I/O of its own
+# beyond the sockets a test binds.
+astar-m17 = { path = "../astar-m17", version = "0.1.18-beta" }
+# The fake EchoLink directory and station, for the server's EchoLink tests.
+# Every one of them binds 127.0.0.1, and `test-support` turns on the
+# loopback-only guard, so no test build can reach a real EchoLink host.
+astar-echolink = { path = "../astar-echolink", version = "0.1.18-beta", features = ["loopback-fakes"] }
+# `EchoLinkNetwork`, so the controller's EchoLink tests can point the
+# station at the loopback fakes above. No default features: no sound
+# device, and the loopback-only guard on.
+astar-console = { path = "../astar-console", version = "0.1.18-beta", default-features = false, features = ["echolink-loopback-only"] }
+# nodebench's own control-port client (ureq 2 and its SSE reader), so the
+# control port's tests prove the bench still reads the event stream.
+astar-nodebench = { path = "../astar-nodebench", version = "0.1.18-beta" }
 
 [lints]
 workspace = true

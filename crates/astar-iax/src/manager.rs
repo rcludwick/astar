@@ -288,6 +288,20 @@ pub struct Manager {
     /// mode is active (iax-647d). `adopt` enrolls members here instead of the
     /// 1:1 mic route; `remove`/`hangup` un-enroll them.
     conference: Option<Conference>,
+    /// Members enrolled by [`Manager::add_source_member`] in the CURRENT
+    /// conference. Kept so [`Manager::announce_to_bridge_member`] can refuse
+    /// them and a holder can tell its member still exists. Cleared whenever the
+    /// conference is dropped, because member ids restart at 0 in a new one.
+    source_members: std::collections::HashSet<MemberId>,
+    /// Members enrolled by [`Manager::add_bridge_member`] in the CURRENT
+    /// conference, so a holder (the public stream tap, the Discord bridge)
+    /// can tell its member was dropped underneath it. Cleared with the
+    /// conference, for the same id-reuse reason as `source_members`.
+    bridge_members: std::collections::HashSet<MemberId>,
+    /// Members enrolled by [`Manager::add_peer_member`] in the CURRENT
+    /// conference, with each one's talk state. Cleared with the conference,
+    /// for the same id-reuse reason as `source_members`.
+    peer_members: HashMap<MemberId, PeerMemberState>,
     /// Station-level codec policy (iax-4348), default `CodecPolicy::default()`
     /// (`UlawOnly`, 8 kHz). Pins `config.sample_rate` (see `with_policy`) and is
     /// the policy internal (non-`dial`-caller) `DialSpec`s inherit; a `dial()`
@@ -336,6 +350,91 @@ struct InFlight {
     priority: u8,
 }
 
+/// The caller's ends of an external conference member's channel pair.
+///
+/// `to_conference` is the member's contribution channel and exists only so the
+/// pair is complete. The member is registered NON-contributing, and that is
+/// worth stating precisely rather than as "the mixer discards it", because the
+/// mixer does not:
+///
+/// * `contributes = false` keeps this member out of `total_relay`
+///   (`Conference::tick`), which is the sum every other member's TX and every
+///   outbound link is built from. That is the guarantee: nothing sent here
+///   reaches the air.
+/// * The member IS summed into `total_all`, which feeds only the local
+///   speaker bus. That bus is unreachable today because `ensure_conference`
+///   always passes `local_out: None` and `include_local_radio` has no
+///   consumer — see that function's doc comment.
+///
+/// So whoever eventually wires `include_local_radio` is wiring a path this
+/// audio is already in. The air-safety property rests on `contributes`; the
+/// silence of the speaker bus rests on `local_out` being `None`.
+pub struct BridgeMemberHandle {
+    /// The enrolled member, for `remove_bridge_member`.
+    pub id: astar_audio::MemberId,
+    /// Contribution channel. Inert: the member does not contribute.
+    pub to_conference: std::sync::mpsc::Sender<astar_audio::RxFrame>,
+    /// The mix this member hears — one 20 ms mono frame per tick.
+    pub from_conference: std::sync::mpsc::Receiver<Vec<i16>>,
+    /// Pipeline rate the frames are at (8000, or 16000 under slin16).
+    pub sample_rate: u32,
+}
+
+/// The caller's end of a contributing-only conference member — the mirror image
+/// of [`BridgeMemberHandle`], for a receive-only network leg (the M17 monitor)
+/// whose far audio must be heard by the net.
+///
+/// Frames sent on `to_conference` are summed into `total_relay`, so every other
+/// member and every outbound link hears them. The member is registered
+/// `receives = false`, and the mix `Sender` the conference holds for it has had
+/// its `Receiver` dropped inside [`Manager::add_source_member`]: there is no
+/// `from_conference` here, so nothing the conference produces — mix or private
+/// announcement — can reach whoever holds this handle. That absence is the
+/// safety property: a leg built on this handle has no audio to transmit.
+pub struct SourceMemberHandle {
+    /// The enrolled member, for `remove_source_member`.
+    pub id: astar_audio::MemberId,
+    /// Contribution channel: frames sent here are summed into the relay.
+    pub to_conference: std::sync::mpsc::Sender<astar_audio::RxFrame>,
+    /// Pipeline rate the frames must be at (8000, or 16000 under slin16).
+    pub sample_rate: u32,
+}
+
+/// The caller's ends of a conference member that both contributes and
+/// receives: a calling-out network leg (an `EchoLink` station dialled from
+/// astar-server's admin) that is a full participant in the net.
+///
+/// Frames sent on `to_conference` are summed into the relay, like a
+/// [`SourceMemberHandle`]'s. Unlike a [`BridgeMemberHandle`], the mix arrives
+/// on `from_conference` only during someone ELSE's over: the member is
+/// registered `receives = false`, and [`Manager::sync_link_keying`] opens its
+/// receive side only while another contributor is keyed (a non-link call, the
+/// far end of a link that relays onward, or another peer member). Its own key never opens
+/// it, and a talking peer member keys every transceive link, as a keyed handset
+/// does.
+pub struct PeerMemberHandle {
+    /// The enrolled member, for `remove_peer_member` and
+    /// `set_peer_member_keyed`.
+    pub id: astar_audio::MemberId,
+    /// Contribution channel: frames sent here are summed into the relay.
+    pub to_conference: std::sync::mpsc::Sender<astar_audio::RxFrame>,
+    /// The mix-minus this member hears, one 20 ms mono frame per tick, sent
+    /// only while another contributor is keyed.
+    pub from_conference: std::sync::mpsc::Receiver<Vec<i16>>,
+    /// Pipeline rate the frames are at (8000, or 16000 under slin16).
+    pub sample_rate: u32,
+}
+
+/// What the manager remembers about one peer member between pump ticks.
+#[derive(Debug, Clone, Copy, Default)]
+struct PeerMemberState {
+    /// The member is talking (set by [`Manager::set_peer_member_keyed`]).
+    keyed: bool,
+    /// The receive side as last handed to the conference, so
+    /// [`Manager::sync_link_keying`] touches the conference only on a change.
+    open: bool,
+}
+
 impl Manager {
     /// Construct a manager over `backend`. The router owns the open streams.
     #[must_use]
@@ -359,6 +458,9 @@ impl Manager {
             announce_q: HashMap::new(),
             bridge_config: BridgeConfig::default(),
             conference: None,
+            source_members: std::collections::HashSet::new(),
+            bridge_members: std::collections::HashSet::new(),
+            peer_members: HashMap::new(),
             station_policy: CodecPolicy::default(),
             parrot_pending_hangup: Vec::new(),
             net: Arc::new(crate::transport::OsNetStack),
@@ -527,6 +629,220 @@ impl Manager {
         self.conference.as_ref().map_or(0, Conference::member_count)
     }
 
+    /// Enroll an external, RECEIVE-ONLY member in the mix-minus conference —
+    /// the attachment point for a bridge that listens to the net without ever
+    /// reaching it (the Discord bridge). Starts the conference engine on first
+    /// use, exactly as a dialed call would.
+    ///
+    /// The member is registered `set_member_relay(id, false, true)`:
+    /// contributes nothing, receives everything. That is deliberate and is the
+    /// whole safety story for an external bridge — there is no argument by
+    /// which a caller can ask for a contributing member.
+    ///
+    /// Returns `None` unless the current topology runs the mix-minus engine in
+    /// its ordinary form. `Parrot` is refused even though it is technically a
+    /// conference: each member gets a private record/replay cycle there rather
+    /// than the mix, which is not what a listener wants.
+    pub fn add_bridge_member(&mut self) -> Option<BridgeMemberHandle> {
+        if !self.bridge_config.mode.is_conference()
+            || matches!(self.bridge_config.mode, BridgeMode::Parrot)
+        {
+            return None;
+        }
+        let sample_rate = self.pipeline_sample_rate();
+        let (to_conference, member_rx) = std::sync::mpsc::channel();
+        let (member_tx, from_conference) = std::sync::mpsc::channel();
+        let conf = self.ensure_conference();
+        let id = conf.add_member(member_rx, member_tx);
+        conf.set_member_relay(id, false, true);
+        self.bridge_members.insert(id);
+        Some(BridgeMemberHandle {
+            id,
+            to_conference,
+            from_conference,
+            sample_rate,
+        })
+    }
+
+    /// Withdraw a member enrolled by [`Manager::add_bridge_member`]. No-op when
+    /// no conference is running or the id is already gone.
+    pub fn remove_bridge_member(&mut self, id: astar_audio::MemberId) {
+        self.bridge_members.remove(&id);
+        if let Some(conf) = self.conference.as_ref() {
+            conf.remove_member(id);
+        }
+    }
+
+    /// Whether `id` was enrolled by [`Manager::add_bridge_member`] in the
+    /// current conference and not yet removed. The stream tap polls this to
+    /// learn that a Handset switch dropped its member, and re-enrols when a
+    /// conference returns.
+    #[must_use]
+    pub fn has_bridge_member(&self, id: astar_audio::MemberId) -> bool {
+        self.bridge_members.contains(&id)
+    }
+
+    /// Enroll an external, CONTRIBUTING-ONLY member in the mix-minus conference
+    /// — the attachment point for a receive-only network leg (the M17 monitor)
+    /// whose far audio the net should hear. Starts the conference engine on
+    /// first use, exactly as a dialed call would.
+    ///
+    /// The member is registered `set_member_relay(id, true, false)`: its audio
+    /// joins the relay sum, and it is sent nothing. The mix `Receiver` is
+    /// dropped before this function returns, so the tick's per-member send and
+    /// any private announcement land in a dead channel, which the tick ignores.
+    /// Like [`Manager::add_bridge_member`] this takes no arguments: no caller
+    /// can ask for a member that also receives.
+    ///
+    /// Returns `None` unless the current topology runs the mix-minus engine in
+    /// its ordinary form. `Parrot` is refused: each member gets a private
+    /// record/replay cycle there, so a reflector would be parroted to itself.
+    pub fn add_source_member(&mut self) -> Option<SourceMemberHandle> {
+        if !self.bridge_config.mode.is_conference()
+            || matches!(self.bridge_config.mode, BridgeMode::Parrot)
+        {
+            return None;
+        }
+        let sample_rate = self.pipeline_sample_rate();
+        let (to_conference, member_rx) = std::sync::mpsc::channel();
+        let (member_tx, mix_rx) = std::sync::mpsc::channel::<Vec<i16>>();
+        // Nothing the conference sends this member may reach its holder.
+        drop(mix_rx);
+        let conf = self.ensure_conference();
+        let id = conf.add_member(member_rx, member_tx);
+        conf.set_member_relay(id, true, false);
+        self.source_members.insert(id);
+        Some(SourceMemberHandle {
+            id,
+            to_conference,
+            sample_rate,
+        })
+    }
+
+    /// Withdraw a member enrolled by [`Manager::add_source_member`] and forget
+    /// its id.
+    ///
+    /// An id that `add_source_member` did not enroll in the CURRENT conference
+    /// (already removed, never a source member, or left over from a conference
+    /// Handset dropped) is ignored and the conference is not touched. Member ids
+    /// restart at 0 in a new conference, so a reaper holding a stale id would
+    /// otherwise withdraw whichever unrelated member (a Discord listener) now
+    /// carries that number.
+    pub fn remove_source_member(&mut self, id: astar_audio::MemberId) {
+        if self.source_members.remove(&id)
+            && let Some(conf) = self.conference.as_ref()
+        {
+            conf.remove_member(id);
+        }
+    }
+
+    /// Whether `id` was enrolled by [`Manager::add_source_member`] in the
+    /// current conference and not yet removed. A holder polls this to learn
+    /// that its member was dropped underneath it (a Handset switch), so it can
+    /// stop feeding a conference that no longer exists. Plain set membership is
+    /// enough: the Handset branch of `set_bridge_config` clears the set in the
+    /// same step that drops the conference.
+    #[must_use]
+    pub fn has_source_member(&self, id: astar_audio::MemberId) -> bool {
+        self.source_members.contains(&id)
+    }
+
+    /// Enroll an external member that both CONTRIBUTES and RECEIVES — the
+    /// attachment point for a calling-out network leg (an `EchoLink` station)
+    /// that is a full participant in the net. Starts the conference engine on
+    /// first use, exactly as a dialed call would.
+    ///
+    /// The member is registered `set_member_relay(id, true, false)`: its audio
+    /// joins the relay at once, and its receive side starts closed.
+    /// [`Manager::sync_link_keying`] opens it only while another contributor is
+    /// keyed, so the far station hears the net during an over and nothing in
+    /// between.
+    ///
+    /// Returns `None` unless the current topology runs the mix-minus engine in
+    /// its ordinary form; `Parrot` is refused for the same reason as in
+    /// [`Manager::add_source_member`].
+    pub fn add_peer_member(&mut self) -> Option<PeerMemberHandle> {
+        if !self.bridge_config.mode.is_conference()
+            || matches!(self.bridge_config.mode, BridgeMode::Parrot)
+        {
+            return None;
+        }
+        let sample_rate = self.pipeline_sample_rate();
+        let (to_conference, member_rx) = std::sync::mpsc::channel();
+        let (member_tx, from_conference) = std::sync::mpsc::channel();
+        let conf = self.ensure_conference();
+        let id = conf.add_member(member_rx, member_tx);
+        conf.set_member_relay(id, true, false);
+        self.peer_members.insert(id, PeerMemberState::default());
+        Some(PeerMemberHandle {
+            id,
+            to_conference,
+            from_conference,
+            sample_rate,
+        })
+    }
+
+    /// Withdraw a member enrolled by [`Manager::add_peer_member`] and forget
+    /// it. An id that is not a peer member of the CURRENT conference is
+    /// ignored, for the stale-id reason given on
+    /// [`Manager::remove_source_member`].
+    pub fn remove_peer_member(&mut self, id: astar_audio::MemberId) {
+        if self.peer_members.remove(&id).is_some()
+            && let Some(conf) = self.conference.as_ref()
+        {
+            conf.remove_member(id);
+        }
+    }
+
+    /// Whether `id` was enrolled by [`Manager::add_peer_member`] in the
+    /// current conference and not yet removed. A holder polls this to learn
+    /// that a Handset switch dropped its member.
+    #[must_use]
+    pub fn has_peer_member(&self, id: astar_audio::MemberId) -> bool {
+        self.peer_members.contains_key(&id)
+    }
+
+    /// Record whether a peer member is talking. Takes effect on the next
+    /// [`Manager::sync_link_keying`]: a talking peer keys every transceive
+    /// link and opens every OTHER peer member's receive side. An id that is
+    /// not a current peer member is ignored.
+    pub fn set_peer_member_keyed(&mut self, id: astar_audio::MemberId, keyed: bool) {
+        if let Some(state) = self.peer_members.get_mut(&id) {
+            state.keyed = keyed;
+        }
+    }
+
+    /// Open each peer member's receive side while any OTHER contributor is
+    /// keyed, and close it otherwise (part of [`Manager::sync_link_keying`]).
+    /// The contributors counted are a non-link call whose peer signalled PTT,
+    /// a link that relays onward (`Transceive` or `Monitor`, not `LocalMonitor`)
+    /// whose far end is keyed, and another peer member that is talking. The conference is touched only for a member whose state
+    /// changed.
+    fn sync_peer_receive(&mut self) {
+        if self.peer_members.is_empty() {
+            return;
+        }
+        let other_keyed = self.calls.iter().any(|(id, conn)| {
+            let counts = self.links.get(id).is_none_or(|l| l.mode.relays_onward());
+            counts
+                && conn
+                    .call
+                    .remote_keyed_handle()
+                    .load(std::sync::atomic::Ordering::Relaxed)
+        });
+        let keyed_peers = self.peer_members.values().filter(|p| p.keyed).count();
+        let Some(conf) = self.conference.as_ref() else {
+            return;
+        };
+        for (id, state) in &mut self.peer_members {
+            let open = other_keyed || keyed_peers > usize::from(state.keyed);
+            if open != state.open {
+                conf.set_member_relay(*id, true, open);
+                state.open = open;
+            }
+        }
+    }
+
     /// Build (or fetch) the live conference engine, starting its 20 ms mixing
     /// thread on first use. The `include_local_radio` wiring (local mic source +
     /// local speaker sink) is reserved: a future change hands the conference the
@@ -580,10 +896,26 @@ impl Manager {
             if !was_conf {
                 self.enroll_all_as_members();
             }
+            // Parrot gives each member a private record/replay cycle, which
+            // `add_peer_member` refuses, so a peer member does not survive a
+            // flip into it: it is withdrawn and forgotten.
+            if config.mode == BridgeMode::Parrot && !self.peer_members.is_empty() {
+                if let Some(conf) = self.conference.as_ref() {
+                    for id in self.peer_members.keys() {
+                        conf.remove_member(*id);
+                    }
+                }
+                self.peer_members.clear();
+            }
         } else if was_conf {
             // Handset: drain the conference and re-attach each call to its bus.
             self.drain_conference_to_buses()?;
             self.conference = None;
+            // Source and bridge member ids belonged to the dropped engine, and
+            // a new one restarts ids at 0.
+            self.source_members.clear();
+            self.bridge_members.clear();
+            self.peer_members.clear();
         }
         Ok(())
     }
@@ -1335,7 +1667,6 @@ impl Manager {
     /// - [`IaxError::NoActiveCall`] (reused) if `call` is not a conference member
     ///   (no member slot) or no conference engine is active.
     /// - [`IaxError::AnnounceUnavailable`] if the phrase cannot be resolved.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn announce_to_member(
         &mut self,
         call: CallId,
@@ -1348,6 +1679,52 @@ impl Manager {
             .ok_or(IaxError::NoActiveCall)?
             .member
             .ok_or(IaxError::NoActiveCall)?;
+        self.announce_onto_member_leg(member, req, lead)
+    }
+
+    /// Play a private announcement to a member enrolled by
+    /// [`Manager::add_bridge_member`] — the Discord bridge's join notice and
+    /// periodic ID.
+    ///
+    /// Unlike [`Manager::announce_to_member`] this takes the member id directly,
+    /// because a bridge member is enrolled straight against the [`Conference`]
+    /// and never appears in `self.calls`.
+    ///
+    /// It reaches that one member and nothing else: no mic lane is keyed, the
+    /// conference mix is untouched, and no other member hears it. That is what
+    /// makes it safe for a disclosure notice — there is no path to the air.
+    ///
+    /// # Errors
+    /// - [`IaxError::NotTransmitCapable`] if `member` is a source member
+    ///   ([`Manager::add_source_member`]): it has no receive path, and a
+    ///   receive-only network leg must never be handed audio it could send.
+    /// - [`IaxError::NotTransmitCapable`] if `member` is a peer member
+    ///   ([`Manager::add_peer_member`]): its leg is a station on another
+    ///   network, so an announcement there would go out over the air.
+    /// - [`IaxError::AnnounceUnavailable`] if the phrase cannot be resolved.
+    /// - [`IaxError::NoActiveCall`] if no conference engine is active.
+    pub fn announce_to_bridge_member(
+        &mut self,
+        member: astar_audio::MemberId,
+        req: crate::announce::AnnounceRequest,
+        lead: std::time::Duration,
+    ) -> Result<(), IaxError> {
+        if self.source_members.contains(&member) || self.peer_members.contains_key(&member) {
+            return Err(IaxError::NotTransmitCapable);
+        }
+        self.announce_onto_member_leg(member, req, lead)
+    }
+
+    /// Resolve `req` and queue it onto ONE conference member's leg. Shared by
+    /// [`Manager::announce_to_member`] (which finds the member from a `CallId`)
+    /// and [`Manager::announce_to_bridge_member`] (which is handed one directly).
+    #[allow(clippy::needless_pass_by_value)]
+    fn announce_onto_member_leg(
+        &mut self,
+        member: astar_audio::MemberId,
+        req: crate::announce::AnnounceRequest,
+        lead: std::time::Duration,
+    ) -> Result<(), IaxError> {
         let resolved = self
             .announce
             .resolve_request(&req, self.config.sample_rate)
@@ -1844,23 +2221,31 @@ impl Manager {
     /// While any non-link member is keyed (its peer signalled PTT), every
     /// transmit-capable link is keyed; when they all fall quiet the links
     /// unkey. Idempotent — the FSM coalesces unchanged PTT state, so calling
-    /// this every pump tick puts nothing extra on the wire. No-op when there
-    /// are no links.
+    /// this every pump tick puts nothing extra on the wire. A peer member
+    /// ([`Manager::add_peer_member`]) that is talking counts as a keyed
+    /// source.
     ///
-    /// Returns the number of links whose keyed state changed.
+    /// It first opens or closes each peer member's receive side (see
+    /// [`PeerMemberHandle`]), which happens even when there are no links;
+    /// beyond that it is a no-op when there are no links.
+    ///
+    /// Returns the number of links whose keyed state changed; peer members are
+    /// not counted.
     pub fn sync_link_keying(&mut self) -> usize {
+        self.sync_peer_receive();
         if self.links.is_empty() {
             return 0;
         }
         // Sources are pooled calls that are NOT links: conference members
-        // (handsets, inbound node legs) whose peer has signalled PTT.
+        // (handsets, inbound node legs) whose peer has signalled PTT — and
+        // peer members that are talking.
         let any_source_keyed = self.calls.iter().any(|(id, conn)| {
             !self.links.contains_key(id)
                 && conn
                     .call
                     .remote_keyed_handle()
                     .load(std::sync::atomic::Ordering::Relaxed)
-        });
+        }) || self.peer_members.values().any(|p| p.keyed);
         let targets: Vec<CallId> = self
             .links
             .values()
@@ -2513,7 +2898,7 @@ fn link_state_from(state: CallSnapshotState) -> LinkState {
 /// Map a [`CallMode`] to its secret-free snapshot variant.
 fn snapshot_mode(mode: &CallMode) -> CallSnapshotMode {
     match mode {
-        CallMode::Standard => CallSnapshotMode::Direct,
+        CallMode::Standard | CallMode::NodeLink { .. } => CallSnapshotMode::Direct,
         CallMode::WebTransceiver { .. } => CallSnapshotMode::WebTransceiver,
     }
 }
@@ -3656,6 +4041,368 @@ mod tests {
         assert_eq!(mgr.export().connections.len(), 1);
         assert_eq!(mgr.export().connections[0].id, ConnectionId::new("c1"));
     }
+
+    #[test]
+    fn bridge_member_receives_the_mix_and_contributes_nothing() {
+        let mut mgr = Manager::new(Box::new(astar_audio::NullBackend::new()));
+        mgr.set_bridge_config(BridgeConfig {
+            mode: BridgeMode::Bridge,
+            mix_minus: true,
+            include_local_radio: false,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let h = mgr
+            .add_bridge_member()
+            .expect("bridge mode enrolls a bridge member");
+        assert_eq!(h.sample_rate, mgr.pipeline_sample_rate());
+
+        // A second member to listen with. It receives the mix like any other.
+        let other = mgr.add_bridge_member().expect("a second member enrolls");
+        // A third, contributing member that talks (in silence), so `other` is
+        // sent the mix at all: a member nobody audible is talking to is sent
+        // nothing (nodebench finding 6), and the assertion below needs frames.
+        let talker = mgr
+            .add_source_member()
+            .expect("a contributing member enrolls");
+        assert_eq!(mgr.conference_member_count(), 3);
+
+        // The bridge member shouts. Because it is registered non-contributing,
+        // the other member must hear silence — this is the safety property, and
+        // asserting the relay flags instead would only restate the call above.
+        for _ in 0..10 {
+            h.to_conference
+                .send(astar_audio::RxFrame::from(vec![16000i16; 160]))
+                .unwrap();
+            talker
+                .to_conference
+                .send(astar_audio::RxFrame::from(vec![0i16; 160]))
+                .unwrap();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let heard: Vec<i16> = std::iter::from_fn(|| other.from_conference.try_recv().ok())
+            .flatten()
+            .collect();
+        // `all()` is `true` on an empty iterator, so without this the whole
+        // safety assertion below passes vacuously whenever the mixer thread
+        // does not happen to tick inside the sleep — on a loaded runner, the
+        // branch's primary safety test would prove nothing at all. A
+        // receiving member in bridge mode is sent a frame EVERY 20 ms tick
+        // (silence included; only parrot mode withholds idle frames), so an
+        // empty drain means the mixer never ran, not that the property holds.
+        // (Frames reach `other` here because `talker` delivers audio.)
+        assert!(
+            !heard.is_empty(),
+            "the mixer never ticked — the silence assertion below would be vacuous"
+        );
+        assert!(
+            heard.iter().all(|&s| s == 0),
+            "a non-contributing member must be inaudible to the conference, \
+             peak was {}",
+            heard.iter().map(|s| s.abs()).max().unwrap_or(0)
+        );
+        mgr.remove_bridge_member(other.id);
+        mgr.remove_source_member(talker.id);
+
+        mgr.remove_bridge_member(h.id);
+        assert_eq!(mgr.conference_member_count(), 0);
+    }
+
+    #[test]
+    fn bridge_member_is_refused_in_handset_and_parrot_modes() {
+        for mode in [BridgeMode::Handset, BridgeMode::Parrot] {
+            let mut mgr = Manager::new(Box::new(astar_audio::NullBackend::new()));
+            mgr.set_bridge_config(BridgeConfig {
+                mode,
+                mix_minus: true,
+                include_local_radio: false,
+                ..Default::default()
+            })
+            .unwrap();
+            assert!(
+                mgr.add_bridge_member().is_none(),
+                "{mode:?} must not accept a bridge member"
+            );
+        }
+    }
+
+    #[test]
+    fn bridge_member_announcement_reaches_only_that_member() {
+        // `AnnounceRequest::say(..)` (Phrase::Text) needs a live TTS engine;
+        // this environment has none (Piper disabled by default, no binary on
+        // PATH), and `Resolver`'s Text fallback is a no-op stub
+        // (`tts::fallback_slug` always returns `None`), so resolving it would
+        // yield `AnnounceUnavailable` and the test could not exercise the
+        // audible half at all. Use `Phrase::Pcm` instead — the same technique
+        // `announce_to_member_injects_on_that_members_leg_only` above already
+        // uses to exercise this exact per-member injection path without a TTS
+        // dependency. This keeps BOTH halves of the assertion meaningful: real
+        // non-zero PCM actually flows to the target, and the bystander check is
+        // not vacuous.
+        let mut mgr = Manager::new(Box::new(astar_audio::NullBackend::new()));
+        mgr.set_bridge_config(BridgeConfig {
+            mode: BridgeMode::Bridge,
+            mix_minus: true,
+            include_local_radio: false,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let target = mgr.add_bridge_member().expect("bridge mode enrolls");
+        let bystander = mgr.add_bridge_member().expect("a second member enrolls");
+
+        let pcm: std::sync::Arc<[i16]> = vec![8000_i16; 160].into();
+        let req = crate::announce::AnnounceRequest {
+            phrase: crate::announce::Phrase::Pcm(pcm),
+            destination: crate::announce::Destination::ToAir,
+            policy: crate::announce::AnnouncePolicy::Seize,
+            priority: 4,
+        };
+        mgr.announce_to_bridge_member(target.id, req, std::time::Duration::ZERO)
+            .expect("announcement is queued onto the member leg");
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let heard: Vec<i16> = std::iter::from_fn(|| target.from_conference.try_recv().ok())
+            .flatten()
+            .collect();
+        let bystander_heard: Vec<i16> =
+            std::iter::from_fn(|| bystander.from_conference.try_recv().ok())
+                .flatten()
+                .collect();
+
+        assert!(
+            heard.iter().any(|&s| s != 0),
+            "the targeted member must actually hear the announcement"
+        );
+        assert!(
+            bystander_heard.iter().all(|&s| s == 0),
+            "no other member may hear it — peak {}",
+            bystander_heard.iter().map(|s| s.abs()).max().unwrap_or(0)
+        );
+    }
+
+    /// A Bridge-mode manager at the library default 8 kHz, as the node daemon
+    /// runs it.
+    fn source_member_bridge_manager() -> Manager {
+        let mut mgr = Manager::new(Box::new(astar_audio::NullBackend::new()));
+        mgr.set_bridge_config(BridgeConfig {
+            mode: BridgeMode::Bridge,
+            mix_minus: true,
+            include_local_radio: false,
+            ..Default::default()
+        })
+        .unwrap();
+        mgr
+    }
+
+    /// A resolvable, TTS-free announcement (same technique as
+    /// `bridge_member_announcement_reaches_only_that_member`): `Phrase::Pcm`
+    /// always resolves, so an `Err` from `announce_to_bridge_member` can only
+    /// come from the source-member refusal.
+    fn source_member_pcm_request() -> crate::announce::AnnounceRequest {
+        let pcm: std::sync::Arc<[i16]> = vec![8000_i16; 160].into();
+        crate::announce::AnnounceRequest {
+            phrase: crate::announce::Phrase::Pcm(pcm),
+            destination: crate::announce::Destination::ToAir,
+            policy: crate::announce::AnnouncePolicy::Seize,
+            priority: 4,
+        }
+    }
+
+    #[test]
+    fn source_member_is_refused_in_handset_and_parrot_modes() {
+        for mode in [BridgeMode::Handset, BridgeMode::Parrot] {
+            let mut mgr = Manager::new(Box::new(astar_audio::NullBackend::new()));
+            mgr.set_bridge_config(BridgeConfig {
+                mode,
+                mix_minus: true,
+                include_local_radio: false,
+                ..Default::default()
+            })
+            .unwrap();
+            assert!(
+                mgr.add_source_member().is_none(),
+                "{mode:?} must not accept a source member"
+            );
+            assert_eq!(
+                mgr.conference_member_count(),
+                0,
+                "{mode:?}: a refused source member must not be enrolled"
+            );
+        }
+    }
+
+    #[test]
+    fn source_member_contributes_to_the_relay() {
+        let mut mgr = source_member_bridge_manager();
+        let src = mgr
+            .add_source_member()
+            .expect("bridge mode enrolls a source member");
+        assert_eq!(src.sample_rate, 8000);
+        assert!(mgr.has_source_member(src.id));
+
+        // A receive-only listener (the Discord shape) hears the relay. The
+        // source member's audio must be IN that relay: this is what makes the
+        // reflector audible to the net, and it is the property the relay flags
+        // exist to express. Asserting the flags directly would only restate
+        // the call under test.
+        let listener = mgr.add_bridge_member().expect("a listener enrolls");
+        assert_eq!(mgr.conference_member_count(), 2);
+        assert!(
+            !mgr.has_source_member(listener.id),
+            "a bridge member is not a source member"
+        );
+
+        let frame_len = usize::try_from(src.sample_rate / 50).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut frames_heard = 0_usize;
+        let mut peak = 0_i16;
+        while peak == 0 && std::time::Instant::now() < deadline {
+            // Keep the source fed so it never runs dry while we wait.
+            src.to_conference
+                .send(astar_audio::RxFrame::from(vec![16000_i16; frame_len]))
+                .unwrap();
+            if let Ok(frame) = listener
+                .from_conference
+                .recv_timeout(std::time::Duration::from_millis(20))
+            {
+                frames_heard += 1;
+                peak = peak.max(
+                    frame
+                        .iter()
+                        .copied()
+                        .map(i16::saturating_abs)
+                        .max()
+                        .unwrap_or(0),
+                );
+            }
+        }
+        // A receiving member in bridge mode is sent a frame every 20 ms tick,
+        // silence included, so zero frames means the mixer never ran and the
+        // peak assertion below would be meaningless.
+        assert!(
+            frames_heard > 0,
+            "the mixer never ticked — the contribution assertion would be vacuous"
+        );
+        assert!(
+            peak > 0,
+            "a source member's audio must reach the relay; {frames_heard} silent frames heard"
+        );
+
+        mgr.remove_bridge_member(listener.id);
+        mgr.remove_source_member(src.id);
+        assert_eq!(mgr.conference_member_count(), 0);
+    }
+
+    #[test]
+    fn source_member_refuses_announcements() {
+        let mut mgr = source_member_bridge_manager();
+        let src = mgr.add_source_member().expect("bridge mode enrolls");
+        let err = mgr
+            .announce_to_bridge_member(
+                src.id,
+                source_member_pcm_request(),
+                std::time::Duration::ZERO,
+            )
+            .expect_err("a source member has no path back out and must be refused");
+        assert!(
+            matches!(err, IaxError::NotTransmitCapable),
+            "expected NotTransmitCapable, got {err:?}"
+        );
+
+        // The refusal is keyed on source ids only: an ordinary bridge member in
+        // the same conference is still announced to.
+        let listener = mgr.add_bridge_member().expect("a listener enrolls");
+        mgr.announce_to_bridge_member(
+            listener.id,
+            source_member_pcm_request(),
+            std::time::Duration::ZERO,
+        )
+        .expect("a bridge member still takes announcements");
+    }
+
+    #[test]
+    fn remove_source_member_withdraws_it() {
+        let mut mgr = source_member_bridge_manager();
+        let listener = mgr.add_bridge_member().expect("a listener enrolls");
+        let src = mgr.add_source_member().expect("bridge mode enrolls");
+        assert_eq!(mgr.conference_member_count(), 2);
+
+        mgr.remove_source_member(src.id);
+        assert_eq!(mgr.conference_member_count(), 1);
+        assert!(!mgr.has_source_member(src.id));
+
+        // Idempotent: a second remove, a remove of a never-enrolled id, and a
+        // remove of a live NON-source member's id all leave the listener alone.
+        mgr.remove_source_member(src.id);
+        assert_eq!(mgr.conference_member_count(), 1);
+        mgr.remove_source_member(astar_audio::MemberId::from_raw(99));
+        assert_eq!(
+            mgr.conference_member_count(),
+            1,
+            "a never-enrolled id must not touch the conference"
+        );
+        mgr.remove_source_member(listener.id);
+        assert_eq!(
+            mgr.conference_member_count(),
+            1,
+            "remove_source_member must not withdraw a bridge member"
+        );
+        mgr.remove_bridge_member(listener.id);
+        assert_eq!(mgr.conference_member_count(), 0);
+    }
+
+    #[test]
+    fn handset_forgets_source_members() {
+        let mut mgr = source_member_bridge_manager();
+        let src = mgr.add_source_member().expect("bridge mode enrolls");
+        assert!(mgr.has_source_member(src.id));
+
+        mgr.set_bridge_config(BridgeConfig {
+            mode: BridgeMode::Handset,
+            mix_minus: true,
+            include_local_radio: false,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!mgr.conference_active());
+        assert!(!mgr.has_source_member(src.id));
+
+        // Back to Bridge: the new conference restarts its member ids at 0, so
+        // the first member enrolled now gets the SAME id the dead source member
+        // had. It is a Discord listener, not a source, and must be treated as
+        // one — a stale entry would refuse its announcements.
+        mgr.set_bridge_config(BridgeConfig {
+            mode: BridgeMode::Bridge,
+            mix_minus: true,
+            include_local_radio: false,
+            ..Default::default()
+        })
+        .unwrap();
+        let listener = mgr.add_bridge_member().expect("a listener enrolls");
+        assert_eq!(
+            listener.id, src.id,
+            "precondition: the new conference reuses the old id"
+        );
+        assert!(!mgr.has_source_member(listener.id));
+        mgr.announce_to_bridge_member(
+            listener.id,
+            source_member_pcm_request(),
+            std::time::Duration::ZERO,
+        )
+        .expect("a listener reusing a dead source member's id takes announcements");
+
+        // A reaper still holding the dead source id must not kick the listener
+        // that now owns the same number.
+        mgr.remove_source_member(src.id);
+        assert_eq!(
+            mgr.conference_member_count(),
+            1,
+            "a stale source id must not remove the listener that reused it"
+        );
+    }
 }
 
 /// Link-layer (iax-ad2e) integration tests. These live in the lib crate (not a
@@ -3800,6 +4547,369 @@ mod link_layer_tests {
         assert!(
             mgr.calls[&wt].member.is_some() && mgr.calls[&link].member.is_some(),
             "both legs are members; the link is excluded by link status, not membership"
+        );
+    }
+
+    /// A Bridge-mode manager at the library default 8 kHz, as the node daemon
+    /// runs it.
+    fn peer_bridge_manager() -> Manager {
+        let mut mgr = Manager::new(Box::new(astar_audio::NullBackend::new()));
+        mgr.set_bridge_config(BridgeConfig {
+            mode: BridgeMode::Bridge,
+            mix_minus: true,
+            include_local_radio: false,
+            ..Default::default()
+        })
+        .unwrap();
+        mgr
+    }
+
+    /// Feed `frames` 20 ms frames of a steady 8000-amplitude level on `tx`.
+    fn peer_send_tone(tx: &std::sync::mpsc::Sender<astar_audio::RxFrame>, frames: usize) {
+        for _ in 0..frames {
+            tx.send(vec![8000_i16; 160].into()).unwrap();
+        }
+    }
+
+    /// Feed `frames` frames of digital silence on `tx`.
+    fn peer_send_silence(tx: &std::sync::mpsc::Sender<astar_audio::RxFrame>, frames: usize) {
+        for _ in 0..frames {
+            tx.send(vec![0_i16; 160].into()).unwrap();
+        }
+    }
+
+    /// Whether a frame carrying audible level arrives on `rx` within `wait`.
+    fn peer_hears_tone(
+        rx: &std::sync::mpsc::Receiver<Vec<i16>>,
+        wait: std::time::Duration,
+    ) -> bool {
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match rx.recv_timeout(left) {
+                Ok(frame) if frame.iter().any(|&s| s.unsigned_abs() > 1000) => return true,
+                Ok(_) => {}
+                Err(_) => return false,
+            }
+        }
+    }
+
+    #[test]
+    fn peer_member_is_refused_without_a_conference() {
+        for mode in [BridgeMode::Handset, BridgeMode::Parrot] {
+            let mut mgr = Manager::new(Box::new(astar_audio::NullBackend::new()));
+            mgr.set_bridge_config(BridgeConfig {
+                mode,
+                mix_minus: true,
+                include_local_radio: false,
+                ..Default::default()
+            })
+            .unwrap();
+            assert!(
+                mgr.add_peer_member().is_none(),
+                "{mode:?} must not accept a peer member"
+            );
+            assert_eq!(
+                mgr.conference_member_count(),
+                0,
+                "{mode:?}: a refused peer member must not be enrolled"
+            );
+        }
+    }
+
+    #[test]
+    fn a_peer_member_hears_the_mix_minus_itself() {
+        let mut mgr = peer_bridge_manager();
+        let a = mgr.add_peer_member().expect("bridge mode enrolls");
+        let b = mgr.add_peer_member().expect("a second peer enrolls");
+        assert!(mgr.has_peer_member(a.id) && mgr.has_peer_member(b.id));
+
+        // A talks; B is quiet.
+        mgr.set_peer_member_keyed(a.id, true);
+        mgr.sync_link_keying();
+        peer_send_tone(&a.to_conference, 10);
+        peer_send_silence(&b.to_conference, 10);
+
+        assert!(
+            peer_hears_tone(&b.from_conference, std::time::Duration::from_millis(500)),
+            "B must hear A's over"
+        );
+        assert!(
+            !peer_hears_tone(&a.from_conference, std::time::Duration::from_millis(300)),
+            "A must not hear itself"
+        );
+    }
+
+    #[test]
+    fn a_peer_member_hears_nothing_while_the_net_is_quiet() {
+        let mut mgr = peer_bridge_manager();
+        let a = mgr.add_peer_member().expect("bridge mode enrolls");
+        // A bridge member's contribution is inert, so use a source member as
+        // an unkeyed contributor: its audio is in the relay, but nobody keyed.
+        let src = mgr.add_source_member().expect("a source enrolls");
+        mgr.sync_link_keying();
+        peer_send_tone(&src.to_conference, 10);
+        assert!(
+            a.from_conference
+                .recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "with no keyed source a peer member must be sent nothing"
+        );
+    }
+
+    #[test]
+    fn a_peer_member_hears_a_remote_keyed_link() {
+        use super::test_support::fake_inbound_call_wired;
+        let mut mgr = test_manager();
+        mgr.set_bridge_config(BridgeConfig {
+            mode: BridgeMode::Bridge,
+            mix_minus: true,
+            include_local_radio: false,
+            parrot: None,
+        })
+        .unwrap();
+        let out = OutputId::new("out:s");
+        let (link_call, link_rx_in, _link_tx_out) = fake_inbound_call_wired(CallId(0), "55553");
+        let link = mgr.adopt(link_call, &out).unwrap();
+        mgr.route(link, &MicId::new("in:a")).unwrap();
+        mgr.add_link(link, "55553", LinkMode::Transceive).unwrap();
+        let a = mgr.add_peer_member().expect("bridge mode enrolls");
+
+        // The linked node's far end keys up and talks.
+        mgr.calls[&link]
+            .call
+            .remote_keyed_handle()
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        mgr.sync_link_keying();
+        peer_send_tone(&link_rx_in, 10);
+        assert!(
+            peer_hears_tone(&a.from_conference, std::time::Duration::from_millis(500)),
+            "a peer member must hear a keyed transceive link"
+        );
+    }
+
+    /// A Bridge-mode manager with one link in `mode` to node 55553, enrolled
+    /// as a conference member. Returns the manager, the link's call id, and
+    /// the sender that plays the link's far-end audio into the conference.
+    fn peer_manager_with_link(
+        mode: LinkMode,
+    ) -> (
+        Manager,
+        CallId,
+        std::sync::mpsc::Sender<astar_audio::RxFrame>,
+    ) {
+        use super::test_support::fake_inbound_call_wired;
+        let mut mgr = test_manager();
+        mgr.set_bridge_config(BridgeConfig {
+            mode: BridgeMode::Bridge,
+            mix_minus: true,
+            include_local_radio: false,
+            parrot: None,
+        })
+        .unwrap();
+        let (link_call, link_rx_in, _link_tx_out) = fake_inbound_call_wired(CallId(0), "55553");
+        let link = mgr.adopt(link_call, &OutputId::new("out:s")).unwrap();
+        if mode == LinkMode::Transceive {
+            mgr.route(link, &MicId::new("in:a")).unwrap();
+        }
+        mgr.add_link(link, "55553", mode).unwrap();
+        (mgr, link, link_rx_in)
+    }
+
+    #[test]
+    fn a_peer_member_hears_a_remote_keyed_monitor_link() {
+        let (mut mgr, link, link_rx_in) = peer_manager_with_link(LinkMode::Monitor);
+        let a = mgr.add_peer_member().expect("bridge mode enrolls");
+        mgr.calls[&link]
+            .call
+            .remote_keyed_handle()
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        mgr.sync_link_keying();
+        peer_send_tone(&link_rx_in, 10);
+        assert!(
+            peer_hears_tone(&a.from_conference, std::time::Duration::from_millis(500)),
+            "a Monitor link relays onward, so its keyed far end opens a peer"
+        );
+    }
+
+    #[test]
+    fn a_peer_member_opened_by_a_link_does_not_hear_itself() {
+        // The link's key opens A's receive side; A then talks over silence
+        // from the link. Mix-minus must take A's own tone back out.
+        let (mut mgr, link, link_rx_in) = peer_manager_with_link(LinkMode::Transceive);
+        let a = mgr.add_peer_member().expect("bridge mode enrolls");
+        mgr.calls[&link]
+            .call
+            .remote_keyed_handle()
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        mgr.sync_link_keying();
+        let mut frames = 0;
+        for _ in 0..10 {
+            peer_send_tone(&a.to_conference, 1);
+            peer_send_silence(&link_rx_in, 1);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while let Ok(frame) = a
+            .from_conference
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+        {
+            frames += 1;
+            assert!(
+                frame.iter().all(|&s| s.unsigned_abs() <= 1000),
+                "A must not hear its own tone in the mix"
+            );
+        }
+        assert!(
+            frames > 0,
+            "precondition: the link's key opened A's receive side"
+        );
+    }
+
+    #[test]
+    fn peer_members_refuse_announcements() {
+        let mut mgr = peer_bridge_manager();
+        let a = mgr.add_peer_member().expect("bridge mode enrolls");
+        assert!(matches!(
+            mgr.announce_to_bridge_member(
+                a.id,
+                crate::announce::AnnounceRequest {
+                    phrase: crate::announce::Phrase::Pcm(vec![8000_i16; 160].into()),
+                    destination: crate::announce::Destination::ToAir,
+                    policy: crate::announce::AnnouncePolicy::Seize,
+                    priority: 4,
+                },
+                std::time::Duration::ZERO,
+            ),
+            Err(IaxError::NotTransmitCapable)
+        ));
+    }
+
+    #[test]
+    fn a_flip_to_parrot_forgets_peer_members() {
+        let mut mgr = peer_bridge_manager();
+        let a = mgr.add_peer_member().expect("bridge mode enrolls");
+        mgr.set_bridge_config(BridgeConfig {
+            mode: BridgeMode::Parrot,
+            mix_minus: true,
+            include_local_radio: false,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(mgr.conference_active(), "Parrot keeps the conference");
+        assert!(!mgr.has_peer_member(a.id));
+        assert_eq!(
+            mgr.conference_member_count(),
+            0,
+            "the peer member is withdrawn from the conference"
+        );
+    }
+
+    #[test]
+    fn a_peer_member_is_not_opened_by_its_own_key() {
+        let mut mgr = peer_bridge_manager();
+        let a = mgr.add_peer_member().expect("bridge mode enrolls");
+        // B contributes audio but is not keyed. Were A's gate opened by A's
+        // own key, A would hear B's audio.
+        let b = mgr.add_peer_member().expect("a second peer enrolls");
+        mgr.set_peer_member_keyed(a.id, true);
+        mgr.sync_link_keying();
+        peer_send_tone(&a.to_conference, 10);
+        peer_send_tone(&b.to_conference, 10);
+        assert!(
+            a.from_conference
+                .recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "a peer's own key must not open its receive side"
+        );
+    }
+
+    #[test]
+    fn a_talking_peer_member_keys_transceive_links() {
+        let mut mgr = test_manager();
+        mgr.set_bridge_config(BridgeConfig {
+            mode: BridgeMode::Bridge,
+            mix_minus: true,
+            include_local_radio: false,
+            parrot: None,
+        })
+        .unwrap();
+        let link = mgr
+            .adopt(
+                test_support::fake_inbound_call(CallId(2), "55553"),
+                &OutputId::new("out:s"),
+            )
+            .unwrap();
+        mgr.route(link, &MicId::new("in:a")).unwrap();
+        mgr.add_link(link, "55553", LinkMode::Transceive).unwrap();
+        let a = mgr.add_peer_member().expect("bridge mode enrolls");
+
+        assert_eq!(mgr.sync_link_keying(), 0, "an idle peer keys nothing");
+        assert!(!mgr.calls[&link].call.snapshot().keyed);
+
+        mgr.set_peer_member_keyed(a.id, true);
+        assert_eq!(
+            mgr.sync_link_keying(),
+            1,
+            "the link follows the talking peer"
+        );
+        assert!(
+            mgr.calls[&link].call.snapshot().keyed,
+            "a talking peer member must key a transceive link"
+        );
+
+        mgr.set_peer_member_keyed(a.id, false);
+        assert_eq!(mgr.sync_link_keying(), 1);
+        assert!(!mgr.calls[&link].call.snapshot().keyed);
+    }
+
+    #[test]
+    fn removing_a_peer_member_forgets_it() {
+        let mut mgr = peer_bridge_manager();
+        let a = mgr.add_peer_member().expect("bridge mode enrolls");
+        assert!(mgr.has_peer_member(a.id));
+        mgr.remove_peer_member(a.id);
+        assert!(!mgr.has_peer_member(a.id));
+        assert_eq!(mgr.conference_member_count(), 0);
+        let again = mgr.add_peer_member();
+        assert!(again.is_some(), "a fresh peer member still enrolls");
+    }
+
+    #[test]
+    fn handset_forgets_peer_members() {
+        let mut mgr = peer_bridge_manager();
+        let peer = mgr.add_peer_member().expect("bridge mode enrolls");
+        assert!(mgr.has_peer_member(peer.id));
+
+        mgr.set_bridge_config(BridgeConfig {
+            mode: BridgeMode::Handset,
+            mix_minus: true,
+            include_local_radio: false,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!mgr.conference_active());
+        assert!(!mgr.has_peer_member(peer.id));
+
+        // Back to Bridge: the new conference reuses id 0 for a listener, which
+        // a stale peer id must not remove.
+        mgr.set_bridge_config(BridgeConfig {
+            mode: BridgeMode::Bridge,
+            mix_minus: true,
+            include_local_radio: false,
+            ..Default::default()
+        })
+        .unwrap();
+        let listener = mgr.add_bridge_member().expect("a listener enrolls");
+        assert_eq!(
+            listener.id, peer.id,
+            "precondition: the new conference reuses the old id"
+        );
+        assert!(!mgr.has_peer_member(listener.id));
+        mgr.remove_peer_member(peer.id);
+        assert_eq!(
+            mgr.conference_member_count(),
+            1,
+            "a stale peer id must not remove the listener that reused it"
         );
     }
 
@@ -4060,7 +5170,10 @@ mod link_layer_tests {
         mgr.remove_link(call).unwrap();
 
         // Gone from roster, mic released...
-        assert!(mgr.link_roster().links.is_empty());
+        assert_eq!(
+            mgr.link_roster().links,
+            [] as [crate::link::LinkSnapshot; 0]
+        );
         assert!(mgr.routed_mic(call).is_none());
         // ...but the underlying call is still in the pool (caller hangs up
         // separately). Read liveness from the canonical Call::snapshot().
@@ -4155,7 +5268,10 @@ mod link_control_tests {
         assert_eq!(roster.links[0].mode, LinkMode::Monitor);
         // ...and disconnect_link tears it down by node# (hangs up + drops the link).
         mgr.disconnect_link(call).expect("disconnect");
-        assert!(mgr.link_roster().links.is_empty());
+        assert_eq!(
+            mgr.link_roster().links,
+            [] as [crate::link::LinkSnapshot; 0]
+        );
         assert_eq!(mgr.call_count(), 0, "disconnect_link hangs the call up");
     }
 

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Users & invites — astar node</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="auth.css">
+</head>
+<body>
+<div class="ambient ambient-a"></div>
+<div class="ambient ambient-b"></div>
+<div class="ambient ambient-c"></div>
+<main>
+  <header class="card header">
+    <div>
+      <a class="back" href="/admin/">← node</a>
+      <h1>Users &amp; invites</h1>
+      <p class="subtitle">who can sign in to this node, and how</p>
+    </div>
+    <div id="auth-chip"></div>
+  </header>
+
+  <p class="auth-msg err" id="msg" role="alert"></p>
+
+  <section class="card" aria-labelledby="users-h">
+    <div class="card-head"><h2 id="users-h">Users</h2><span class="count" id="user-count">0</span></div>
+    <ul class="people" id="users"></ul>
+  </section>
+
+  <section class="card" aria-labelledby="invites-h">
+    <div class="card-head"><h2 id="invites-h">Invites</h2><span class="count" id="invite-count">0</span></div>
+    <form class="auth-form" id="new-invite">
+      <div class="field">
+        <span class="field-label">Role</span>
+        <div class="field-control"><div class="seg" role="radiogroup" aria-label="Role" id="role">
+          <button type="button" role="radio" aria-checked="false" data-v="admin">Admin</button>
+          <button type="button" role="radio" aria-checked="true" data-v="viewer" class="on">Listener</button>
+        </div></div>
+      </div>
+      <p class="hint" id="role-note" hidden>An admin enrols a passkey or security key: authenticator-app codes can be guessed, so they sign in listeners only.</p>
+      <div class="field">
+        <label class="field-label" for="inv-name">Name <small>optional; they can change it</small></label>
+        <div class="field-control"><input id="inv-name" maxlength="32" autocapitalize="characters" spellcheck="false" placeholder="W1ABC"></div>
+      </div>
+      <div class="field">
+        <span class="field-label">Lasts</span>
+        <div class="field-control"><div class="seg" role="radiogroup" aria-label="Lifetime" id="life">
+          <button type="button" role="radio" aria-checked="false" data-v="1">1 hour</button>
+          <button type="button" role="radio" aria-checked="true" data-v="24" class="on">24 hours</button>
+          <button type="button" role="radio" aria-checked="false" data-v="168">7 days</button>
+        </div></div>
+      </div>
+      <div class="card-foot"><button type="submit" class="btn primary" id="make">New invite</button></div>
+    </form>
+    <div class="panel" id="made" hidden></div>
+    <ul class="people" id="invites"></ul>
+  </section>
+
+  <section class="card" aria-labelledby="audit-h">
+    <div class="card-head"><h2 id="audit-h">Activity</h2>
+      <input id="audit-filter" type="search" placeholder="Filter by user" aria-label="Filter activity by user" class="chip-input"></div>
+    <ul class="audit" id="audit"></ul>
+  </section>
+</main>
+<script src="auth.js"></script>
+<script src="users.js"></script>
+</body>
+</html>

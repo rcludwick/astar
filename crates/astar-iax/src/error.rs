@@ -38,6 +38,8 @@ pub enum IaxError {
     /// A Link was keyed but its mode (or lack of a routed mic) makes it
     /// non-transmit-capable: a Monitor/LocalMonitor link, or a Transceive link
     /// with no mic routed. Consistent with [`IaxError::NotRouted`] (iax-ad2e).
+    /// Also returned by `Manager::announce_to_bridge_member` for a
+    /// contributing-only source member, which has no receive path.
     NotTransmitCapable,
     /// An announcement could not be produced (resolution failed) or has no TX
     /// path (a to-air request on a monitor-only call).

@@ -59,15 +59,21 @@ public final class NameResolver {
 /// for the same number. Returns `nil` when the label is empty or just the number
 /// itself (an unnamed recent), so resolution falls through to the next source
 /// rather than echoing the bare number as a "name".
+///
+/// Scoped to one network (AllStar unless told otherwise): the directory holds
+/// every network's entries, and an EchoLink favorite for node 1234 must not
+/// name AllStar node 1234.
 public struct DirectoryNameSource: NameSource {
     private let store: NodeDirectoryStore
+    private let network: Network
 
-    public init(_ store: NodeDirectoryStore) {
+    public init(_ store: NodeDirectoryStore, network: Network = .allstar) {
         self.store = store
+        self.network = network
     }
 
     public func name(forNode node: String) -> String? {
-        let matches = store.all().filter { $0.node == node }
+        let matches = store.all().filter { $0.matches(target: node, network: network) }
         // Prefer a favorite (curated) over a bare recent.
         let entry = matches.first(where: { $0.favorite }) ?? matches.first
         guard let label = entry?.label.trimmingCharacters(in: .whitespaces),

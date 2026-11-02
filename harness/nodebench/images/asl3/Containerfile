@@ -1,0 +1,32 @@
+# nodebench: a stock AllStarLink 3 node (asl3-asterisk + app_rpt) for the bench.
+#
+# Debian 12 (bookworm) plus the official ASL3 apt repo, built for the native
+# architecture: arm64 on the Mac podman VM, amd64 on the IONOS runner. Only
+# asl3-asterisk is installed: no DAHDI, no dkms, no hardware drivers, no
+# asl3-update-nodelist (which would download the AllStar node list), no
+# allmon3. Configuration is files only (conf/), so a pass on this image means
+# astar-server works against real app_rpt.
+#
+#   podman build -t localhost/nodebench-asl3 harness/nodebench/images/asl3
+FROM docker.io/library/debian:12
+
+ARG DEBIAN_FRONTEND=noninteractive
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates curl procps; \
+    curl -fsSL -o /tmp/asl-apt-repos.deb \
+        https://repo.allstarlink.org/public/asl-apt-repos.deb12_all.deb; \
+    apt-get install -y /tmp/asl-apt-repos.deb; \
+    rm /tmp/asl-apt-repos.deb; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends asl3-asterisk; \
+    rm -rf /var/lib/apt/lists/*
+
+# The bench's config replaces the stock files outright.
+COPY conf/ /etc/asterisk/
+COPY entrypoint.sh /usr/local/bin/nodebench-asl3-entrypoint
+RUN set -eux; \
+    rm -f /etc/asterisk/iax.conf /etc/asterisk/custom/iax/*.conf; \
+    asterisk -V
+
+ENTRYPOINT ["/usr/local/bin/nodebench-asl3-entrypoint"]

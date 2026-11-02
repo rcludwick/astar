@@ -1,0 +1,9 @@
+request: GET / HTTP/1.1
+status: 200
+header: cache-control: no-cache
+header: content-security-policy: default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; media-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+header: content-type: text/html; charset=utf-8
+header: referrer-policy: no-referrer
+header: x-content-type-options: nosniff
+header: x-frame-options: DENY
+body-len: 4652 fnv1a64: 4d5ccc28d25dce3f

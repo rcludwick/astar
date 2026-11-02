@@ -47,11 +47,16 @@ fn template_parses_to_safe_defaults() {
 
     assert_eq!(cfg.control.bind, "127.0.0.1:8730");
 
-    assert_eq!(cfg.secrets.source, "config");
+    assert_eq!(cfg.secrets.source, "file");
     assert_eq!(
-        cfg.secrets.secret.as_deref(),
-        Some(""),
-        "template ships an empty (warn, not error) secret placeholder"
+        cfg.secrets.secret, None,
+        "the template has no inline secret slot at all — a fresh node never learns that shape"
+    );
+    assert_eq!(cfg.secrets.file, None);
+    assert_eq!(
+        cfg.credentials_path(std::path::Path::new("/etc/iaxnode/node.toml")),
+        std::path::PathBuf::from("/etc/iaxnode/credentials.toml"),
+        "the template's credentials live beside node.toml"
     );
 
     // Round-trip through the higher-level builders `main.rs` actually calls.
@@ -89,7 +94,7 @@ fn missing_path_generates_template_and_loads_it() {
     assert_eq!(cfg.listener.bind, "0.0.0.0:4569");
     assert!(cfg.register.is_none());
     assert_eq!(cfg.control.bind, "127.0.0.1:8730");
-    assert_eq!(cfg.secrets.source, "config");
+    assert_eq!(cfg.secrets.source, "file");
 }
 
 #[test]

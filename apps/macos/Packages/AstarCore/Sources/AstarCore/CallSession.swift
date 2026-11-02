@@ -159,6 +159,165 @@ public final class CallSession: ObservableObject {
     /// a connect hang is owed which round trip stalled.
     @Published public private(set) var dmrLink: DMRState.Link?
 
+    // MARK: EchoLink state (the logic is in CallSession+EchoLink.swift)
+
+    /// Whether the engine was built with EchoLink: mirrors the snapshot's
+    /// `echolinkAvailable` flag and gates the EchoLink picker segment
+    /// (`Network.available(m17:dstar:ysf:nxdn:dmr:echolink:)`). A build fact,
+    /// not a hardware one: EchoLink voice is GSM in software.
+    @Published public internal(set) var echolinkAvailable = false
+
+    /// Where the EchoLink directory login stands, from the engine's state.
+    /// `failed` covers both a final refusal and "no server answered, still
+    /// retrying"; ``echolinkLoginRefused`` says which.
+    @Published public internal(set) var echolinkLogin: EchoLinkLoginState = .loggedOut
+
+    /// The engine's sentence for a failed login, or `nil`. Never the
+    /// password: the engine has no field it could occupy.
+    @Published public internal(set) var echolinkLoginError: String?
+
+    /// `true` while the engine is backing off after no directory server
+    /// answered and will try again by itself — the state document's
+    /// `retrying`. See ``echolinkLoginRefused``.
+    @Published public internal(set) var echolinkLoginRetrying = false
+
+    /// One line saying where the login stands: "Logged in as KX7ABC", the
+    /// engine's last error, or what is in progress. Empty while logged out
+    /// with nothing to say.
+    @Published public internal(set) var echolinkStatusLine: String = ""
+
+    /// The directory's station list, refreshed while logged in. Empty
+    /// otherwise.
+    ///
+    /// **Attacker-controlled**: every callsign and description is whatever
+    /// that station's operator registered. Render as text, never as markup.
+    @Published public internal(set) var echolinkStations: [EchoLinkStationEntry] = []
+
+    /// Where the EchoLink call stands, or `nil` with no call in hand.
+    @Published public internal(set) var echolinkLink: EchoLinkLink?
+
+    /// The far station's callsign while a call is in hand. Comes from the far
+    /// station: render it as text.
+    @Published public internal(set) var echolinkPeer: String?
+
+    /// The far station's information text, or `nil` until it sends one.
+    /// Comes from the far station: render it as text.
+    @Published public internal(set) var echolinkInfo: String?
+
+    /// The call's text chat, oldest first. Cleared when the call ends.
+    /// Comes from the far station: render every line as text.
+    @Published public internal(set) var echolinkChat: [EchoLinkChatLine] = []
+
+    /// Why the engine stopped transmitting on its own, a plain sentence:
+    /// the 10-minute transmit cap ends an over that runs that long. `nil`
+    /// otherwise; the next over clears it, and so does the end of the call.
+    @Published public internal(set) var echolinkNotice: String?
+
+    /// Where an on-demand refresh of the station list stands, for the
+    /// pane's Refresh control. See ``echolinkRefreshStations()``.
+    @Published public internal(set) var echolinkRefresh: EchoLinkRefreshState = .idle
+
+    /// When a fresh station list was last asked for. For 15 s after, the
+    /// list is re-read every second rather than every
+    /// `echolinkStationsRefreshInterval`, so the new one shows promptly.
+    var echolinkRefreshAskedAt: Date?
+    /// Bumped by each refresh, so a stale reset of `echolinkRefresh` after
+    /// its few seconds on screen leaves a newer one alone.
+    var echolinkRefreshToken = 0
+
+    /// The far station, once it has talked on this call — what `lastHeard`
+    /// shows on EchoLink. **Last heard, not talking now**, like every other
+    /// network's talker field. Cleared when the call ends.
+    @Published public internal(set) var echolinkTalker: String?
+
+    /// The callsign to log in to EchoLink as, persisted under
+    /// `echolink.callsign`. Prefilled from the operator callsign when nothing
+    /// is saved yet. Not a secret.
+    @Published public var echolinkCallsign: String = "" {
+        didSet {
+            guard echolinkCallsign != oldValue else { return }
+            prefs.set(echolinkCallsign, forKey: Self.echolinkCallsignKey)
+        }
+    }
+
+    /// The location text other stations see beside the callsign, persisted
+    /// under `echolink.location`. Pushed to the engine on change (off the
+    /// main thread) and before every login.
+    @Published public var echolinkLocation: String = "" {
+        didSet {
+            guard echolinkLocation != oldValue else { return }
+            prefs.set(echolinkLocation, forKey: Self.echolinkLocationKey)
+            pushEchoLinkLocation()
+        }
+    }
+
+    /// "Log in automatically", persisted under `echolink.autoLogin`, for
+    /// ``echolinkCallsign``. **`false` until the operator ticks it**, and
+    /// only ever set while that callsign has a password saved: by a login by
+    /// hand once its password is saved, or by `setEchoLinkAutoLogin(_:)`.
+    /// Forgetting the password clears it. Read-only outside AstarCore for
+    /// that reason. Not exported:
+    /// `echolink.` is not one of `ConfigArchive`'s settings prefixes, so a
+    /// config handed to someone else cannot log them in.
+    @Published public internal(set) var echolinkAutoLogin: Bool = false {
+        didSet {
+            guard echolinkAutoLogin != oldValue else { return }
+            prefs.set(echolinkAutoLogin, forKey: Self.echolinkAutoLoginKey)
+        }
+    }
+
+    /// The form's Keychain sentence — "Couldn’t save to the Keychain." or
+    /// "Couldn’t remove it from the Keychain." — or `nil` when the last
+    /// Keychain write went through. Never carries the password.
+    @Published public internal(set) var echolinkKeychainMessage: String?
+
+    /// The login by hand waiting on its result, or `nil`. See
+    /// `EchoLinkPendingLogin`. Main thread only.
+    var echolinkPendingLogin: EchoLinkPendingLogin?
+
+    /// Which callsigns have an EchoLink password in the Keychain: keys only,
+    /// never a password. Read once by `refreshEchoLinkSavedCallsigns()` and
+    /// kept up to date by every save and removal, so asking "is one saved?"
+    /// on each keystroke never reaches the Keychain.
+    @Published public internal(set) var echolinkSavedCallsigns: Set<String> = []
+
+    /// Counts changes to the node directory (favorites and recents), so views
+    /// can follow a store that is not itself observable: a star toggled in
+    /// the EchoLink station browser shows on the dial row's star, and the
+    /// reverse. Bumped by every directory write that goes through the session.
+    @Published public private(set) var directoryChangeCount = 0
+
+    /// Counts logins started, so a login's late answer from the worker can
+    /// tell whether a newer one has replaced it. Main thread only.
+    var echolinkLoginToken = 0
+
+    /// Where EchoLink passwords are read from at login, or `nil` for a
+    /// session that was never given one. A STORE, never a value, for the
+    /// reason `dmrPasswords` is one.
+    let echolinkPasswords: EchoLinkCredentialStore?
+
+    /// Runs the blocking EchoLink calls (login, logout, chat, location) off
+    /// the main thread, in order. A serial queue in production; tests swap in
+    /// one that runs inline.
+    var echolinkWorker: (@escaping () -> Void) -> Void = { work in
+        CallSession.echolinkQueue.async(execute: work)
+    }
+    static let echolinkQueue = DispatchQueue(label: "astar.echolink", qos: .userInitiated)
+
+    /// How many EchoLink login/logout requests are queued or running. While
+    /// one is, `poll()` leaves the login fields alone, so the engine's
+    /// not-yet-updated state cannot flip the UI back. Main thread only.
+    var echolinkPendingRequests = 0
+    /// How many logouts are queued or running. A counter, not a flag, so the
+    /// first of two queued logouts finishing does not end "logging out"
+    /// while the second is still to run. Main thread only.
+    var echolinkLogoutsPending = 0
+    /// `true` while any logout is queued or running.
+    var echolinkLoggingOut: Bool { echolinkLogoutsPending > 0 }
+    /// When the station list was last read, or `nil` to read it on the next
+    /// poll. Main thread only.
+    var echolinkStationsReadAt: Date?
+
     /// Whether the operator has opted in to BrandMeister. **Persisted, and
     /// `false` until they say otherwise.**
     ///
@@ -266,6 +425,14 @@ public final class CallSession: ObservableObject {
     /// never set for a user-initiated `disconnect()`.
     @Published public private(set) var lastDialFailure: String?
 
+    /// The USB serials of the vocoder sticks this Mac trusts (Settings →
+    /// Vocoders), as last handed to the station. Read from
+    /// `UserDefaultsVocoderTrustStore` over this session's defaults at init;
+    /// changed only through `applyVocoderTrust(_:)`. Empty means the engine
+    /// opens no vocoder at all, which is what turns "D-Star is unavailable"
+    /// into "add a vocoder" in the connect refusal.
+    @Published public private(set) var vocoderSerials: [String]
+
     /// Mic voice compression (dynamics) is engaged. Mirrors the station; toggled
     /// from the dialing page. Persisted via the audio store.
     @Published public private(set) var compression = false
@@ -340,6 +507,81 @@ public final class CallSession: ObservableObject {
     /// disable the Connect button to prevent double-taps. Mutated on the main
     /// thread only (see `setConnecting`).
     @Published public private(set) var isConnecting = false
+
+    // MARK: - Recording
+
+    /// A recording is running (or a start has been asked for and not yet
+    /// refused). Main thread only.
+    @Published public private(set) var recording = false
+    /// How long the current recording has run, in whole seconds, as the
+    /// engine last reported it.
+    @Published public private(set) var recordingElapsedSeconds = 0
+    /// Why the last recording could not start, or stopped by itself (disk
+    /// low, folder gone). Cleared on the next start.
+    @Published public private(set) var recordingError: String?
+    /// How and where to record. Saved through the recording store on change.
+    @Published public var recordingSettings: RecordingSettings {
+        didSet {
+            if recordingSettings != oldValue { recordingStore.save(recordingSettings) }
+        }
+    }
+    private let recordingStore: RecordingSettingsStore
+    /// The clock behind the `recordState()` throttle (F25), injected so a
+    /// test can step it.
+    private let now: () -> Date
+    /// Set when a dial to a DIFFERENT network succeeds while recording (F10)
+    /// — see `applyRecordingRulesAfterDial` for the exact conditions:
+    /// the network and label to start a new file with once that connection
+    /// answers.
+    /// Every dial overwrites it; also cleared by `disconnect()`,
+    /// `toggleRecording()`, and a `.dialing → .hangup/.idle` edge.
+    /// `generation` is the dial that armed it: any newer dial attempt
+    /// bumps the generation at its claim, which kills the resume at once.
+    private var resumeRecordingOnAnswer: (network: Network, label: String, generation: Int)?
+    /// When `recordState()` was last read; `nil` reads on the next poll.
+    private var lastRecordStateRead: Date?
+    /// Starts and stops dispatched but not yet finished. The engine's state
+    /// is not read while one is pending: it would still describe the moment
+    /// before it.
+    private var recordingWorkInFlight = 0
+    /// Counts starts, so a refused start's late answer can tell whether a
+    /// newer start has since replaced it.
+    private var recordingStartToken = 0
+    /// The network the running recording belongs to (`nil` while none
+    /// runs) and the recording epoch: bumped by every start and by every stop
+    /// the operator or the engine chose (Stop, hang up, an engine stop with
+    /// a reason) — not by the stops a call ending or a dial forces. A dial
+    /// compares the epoch at its start with the one at its finish to learn
+    /// whether anyone changed their mind meanwhile. Behind a lock because
+    /// `claimDial` reads it on the dial's background worker, where a hop to
+    /// the main thread could wait on a main thread that waits on the dial.
+    private let recordingNetworkLock = NSLock()
+    private var _recordingNetwork: Network?
+    private var _recordingEpoch = 0
+    private var recordingSnapshot: (network: Network?, epoch: Int) {
+        recordingNetworkLock.lock()
+        defer { recordingNetworkLock.unlock() }
+        return (_recordingNetwork, _recordingEpoch)
+    }
+    private func setRecordingNetwork(_ network: Network?, bumpEpoch: Bool) {
+        recordingNetworkLock.lock()
+        _recordingNetwork = network
+        if bumpEpoch { _recordingEpoch += 1 }
+        recordingNetworkLock.unlock()
+    }
+    /// Consecutive `recordState()` reads that threw; a few in a row is
+    /// reported rather than swallowed.
+    private var recordStateFailures = 0
+    /// Runs a blocking `recordStart`/`recordStop`. A serial background queue
+    /// in the app, so the main thread never waits on a file or a join and
+    /// the two run in the order asked; tests swap in an inline runner.
+    var runRecordingWork: (@escaping () -> Void) -> Void
+
+    /// A runner that sends recording work to its own serial queue.
+    static func backgroundRecordingWork() -> (@escaping () -> Void) -> Void {
+        let queue = DispatchQueue(label: "astar.recording", qos: .userInitiated)
+        return { queue.async(execute: $0) }
+    }
 
     // MARK: - Dial generation + single-flight (astar-dialrace)
     //
@@ -432,7 +674,7 @@ public final class CallSession: ObservableObject {
     /// `ConnectError.dialInProgress`, touching nothing, if another dial is
     /// already in flight; otherwise marks one in flight and returns a fresh
     /// generation. Always pair with `releaseDial`.
-    private func claimDial() throws -> Int {
+    private func claimDial(for network: Network) throws -> Int {
         dialGenerationLock.lock()
         defer { dialGenerationLock.unlock() }
         guard !dialInFlight else {
@@ -440,7 +682,26 @@ public final class CallSession: ObservableObject {
         }
         dialInFlight = true
         _dialGeneration += 1
+        // What was recording as this dial began, read before the dial's own
+        // teardown of the previous call can end it.
+        recordingAtDialStart = recordingSnapshot
+        _dialNetworkInFlight = network
         return _dialGeneration
+    }
+
+    /// The recording running when the in-flight dial claimed its slot
+    /// (`nil` network: none). Written by `claimDial`, read by `releaseDial`,
+    /// both under `dialGenerationLock`; single-flight means one dial owns it.
+    private var recordingAtDialStart: (network: Network?, epoch: Int) = (nil, 0)
+    /// The network the in-flight dial is reaching, `nil` with none. An
+    /// answer the poll sees before the dial's completion has published
+    /// `activeCallNetwork` belongs to this network, so Always record names
+    /// the file after it. Under `dialGenerationLock`.
+    private var _dialNetworkInFlight: Network?
+    private var dialNetworkInFlight: Network? {
+        dialGenerationLock.lock()
+        defer { dialGenerationLock.unlock() }
+        return _dialNetworkInFlight
     }
 
     /// Release the in-flight claim and — atomically with respect to
@@ -449,17 +710,31 @@ public final class CallSession: ObservableObject {
     /// invalidated it while the engine call was in flight. Every dial
     /// completion (the success path AND the catch/error path) must funnel
     /// through this; see the block comment above for the full contract.
+    ///
+    /// `dialed` names what a SUCCESSFUL dial reached; failures leave it
+    /// `nil`. Either way a current dial applies the recording rules here,
+    /// inside the same main-thread critical section as its publish
+    /// (`applyRecordingRulesAfterDial`).
     @discardableResult
     private func releaseDial<T>(
-        generation: Int, onCurrent: () -> T, onStale: () -> T
+        generation: Int, dialed: (network: Network, node: String)? = nil,
+        onCurrent: () -> T, onStale: () -> T
     ) -> T {
         onMainSync {
+            dialGenerationLock.lock()
+            let atStart = recordingAtDialStart
+            dialGenerationLock.unlock()
             defer {
                 dialGenerationLock.lock()
                 dialInFlight = false
+                _dialNetworkInFlight = nil
                 dialGenerationLock.unlock()
             }
-            return isDialGenerationCurrent(generation) ? onCurrent() : onStale()
+            guard isDialGenerationCurrent(generation) else { return onStale() }
+            let result = onCurrent()
+            applyRecordingRulesAfterDial(
+                dialed: dialed, generation: generation, atStart: atStart)
+            return result
         }
     }
 
@@ -478,7 +753,7 @@ public final class CallSession: ObservableObject {
     /// GCD's main queue is strictly serial, so as long as both this and
     /// `disconnect()` funnel their critical section through here, whichever
     /// reaches the queue first runs to completion before the other starts.
-    private func onMainSync<T>(_ body: () throws -> T) rethrows -> T {
+    func onMainSync<T>(_ body: () throws -> T) rethrows -> T {
         if Thread.isMainThread {
             return try body()
         }
@@ -711,11 +986,19 @@ public final class CallSession: ObservableObject {
         micProfileStore: MicProfileStore = UserDefaultsMicProfileStore(),
         credentials: Credentials? = nil,
         dmrPasswords: DmrPasswordStore? = nil,
-        userDefaults: UserDefaults = .standard
+        echolinkPasswords: EchoLinkCredentialStore? = nil,
+        userDefaults: UserDefaults = .standard,
+        recordingStore: RecordingSettingsStore = UserDefaultsRecordingSettingsStore(),
+        now: @escaping () -> Date = Date.init
     ) {
         self.station = station
+        self.recordingStore = recordingStore
+        self.recordingSettings = recordingStore.load()
+        self.now = now
+        self.runRecordingWork = CallSession.backgroundRecordingWork()
         self.hasCredentials = hasCredentials
         self.dmrPasswords = dmrPasswords
+        self.echolinkPasswords = echolinkPasswords
         self.audioStore = audioStore
         self.directoryStore = directoryStore
         // Directory first; the online AllStarLink-DB source (astar-6c65) appends
@@ -742,6 +1025,26 @@ public final class CallSession: ObservableObject {
         // Absent reads as false, which is the only safe direction for a
         // consent: an unstamped domain has never been asked.
         self.brandmeisterConsent = userDefaults.bool(forKey: Self.brandmeisterConsentKey)
+        self.vocoderSerials = UserDefaultsVocoderTrustStore(userDefaults).serials()
+        // EchoLink's own callsign, falling back to the operator's when none is
+        // saved yet. Absent `autoLogin` reads false, the only safe direction.
+        let storedEchoLinkCallsign = userDefaults.string(forKey: Self.echolinkCallsignKey) ?? ""
+        self.echolinkCallsign =
+            storedEchoLinkCallsign.isEmpty ? m17Callsign : storedEchoLinkCallsign
+        self.echolinkLocation = userDefaults.string(forKey: Self.echolinkLocationKey) ?? ""
+        self.echolinkAutoLogin = userDefaults.bool(forKey: Self.echolinkAutoLoginKey)
+    }
+
+    /// Hand the station a new vocoder trust list (Settings → Vocoders added
+    /// or removed a stick). A live session keeps the stick it already opened;
+    /// the next connect sees the new list.
+    public func applyVocoderTrust(_ serials: [String]) {
+        vocoderSerials = serials
+        do {
+            try station.setVocoderTrust(serials)
+        } catch {
+            NSLog("[astar] setVocoderTrust failed: %@", String(describing: error))
+        }
     }
 
     /// Where the DMR master passwords are read from at connect time, or `nil`
@@ -807,6 +1110,12 @@ public final class CallSession: ObservableObject {
         // generic `.ready` test below would answer true for a master with no
         // room named, which is a Connect button that dials nothing.
         if network == .dmr { return (try? dmrTarget(raw)) != nil }
+        // EchoLink names a station in the directory's list, never a room, so
+        // it has its own question too — the same one `connect` asks. A
+        // well-shaped target the list does not have keeps Connect off; the
+        // dial row says why under the field (`echolinkDialProblem`) and
+        // offers a refresh, so the button is never off for no visible reason.
+        if network == .echolink { return (try? echolinkTarget(raw)) != nil }
         if let reflectorNetwork = network.reflectorNetwork {
             switch resolveReflector(raw, network: reflectorNetwork) {
             case .ready: return true
@@ -824,7 +1133,7 @@ public final class CallSession: ObservableObject {
         // stays off rather than dialling something that could never link.
         case .nxdn: return NXDNDial.parse(raw)?.talkgroup != nil
         // Unreachable — answered above, before the directory is consulted.
-        case .dmr: return false
+        case .dmr, .echolink: return false
         case .allstar, .hamlink: return DialTarget.parse(raw) != nil
         }
     }
@@ -853,6 +1162,9 @@ public final class CallSession: ObservableObject {
         stop()
         self.station = station
         self.hasCredentials = hasCredentials
+        // A rebuilt station is a new engine: give it the same trust list, so a
+        // credential save can never quietly forget the operator's sticks.
+        try? station.setVocoderTrust(vocoderSerials)
         if wasRunning { start() }
     }
 
@@ -976,6 +1288,9 @@ public final class CallSession: ObservableObject {
             } else if dmrLink != nil || dmrLastHeard != nil || dmrReceiving {
                 clearDMRState()
             }
+            // EchoLink has a login as well as a call, so its state is read
+            // while either is in hand — see `refreshEchoLink(snapshot:)`.
+            refreshEchoLink(snapshot: snap)
             // Fold the three per-network talkers into the one property the UI
             // reads. Done here, after every source has been advanced, so a
             // single poll can never publish a `lastHeard` from the network
@@ -1019,8 +1334,13 @@ public final class CallSession: ObservableObject {
                 recordedRecentForCall = true
                 // Stamp the network the call actually went out on (astar-c2e5)
                 // rather than always defaulting to AllStar.
-                directoryStore.recordRecent(
-                    node: node, label: node, network: activeCallNetwork ?? .allstar)
+                let network = activeCallNetwork ?? .allstar
+                // An EchoLink call is saved under the callsign the station
+                // list gives it, whichever of number or callsign was dialled,
+                // so the recent and a starred favorite are one entry.
+                let target = network == .echolink ? echolinkCanonicalTarget(node) : node
+                directoryStore.recordRecent(node: target, label: target, network: network)
+                directoryChanged()
             }
 
             // The complementary edge (astar-9f48): a dial went out (`.dialing`
@@ -1102,6 +1422,15 @@ public final class CallSession: ObservableObject {
                 setActiveCallNetwork(nil)
                 clearDMRState()
             }
+            // And for EchoLink — the far station hanging up, or the link
+            // timing out, never reaches `disconnect()`. The login stays up.
+            if activeCallNetwork == .echolink, snap.status == .hangup || snap.status == .idle,
+                lastPolledStatus != .hangup, lastPolledStatus != .idle
+            {
+                setActiveCallNetwork(nil)
+                clearEchoLinkCall()
+            }
+            advanceRecording(status: snap.status)
             lastPolledStatus = snap.status
             // "Receiving" = far end keyed (when the node reports it) OR live rx
             // audio activity (the reliable signal for most AllStar nodes). The
@@ -1230,6 +1559,11 @@ public final class CallSession: ObservableObject {
         /// dongle as ``dstarUnavailable``, and a separate case so the message
         /// can name the network the operator actually chose.
         case dmrUnavailable
+        /// An AMBE network was dialled while this Mac trusts no vocoder
+        /// stick. The engine would refuse too; saying so here lets the popover
+        /// offer the way out — Settings → Vocoders — instead of telling the
+        /// operator to plug in a stick that may well be plugged in already.
+        case noTrustedVocoder(Network)
         /// DMR was dialled with no radio ID configured. Its own case rather
         /// than ``missingRadioID`` — which is NXDN's — because the two are
         /// different numbers with different registrations, and a message that
@@ -1252,6 +1586,16 @@ public final class CallSession: ObservableObject {
         /// this build does not offer BrandMeister at all — so a typed address
         /// is the only way here.
         case brandmeisterNotConsented
+        /// EchoLink was dialled with no directory login. A call needs one:
+        /// the engine finds the station's address in the directory's list.
+        case echolinkNotLoggedIn
+        /// The text is not shaped like a node number or callsign at all.
+        /// Carries the text.
+        case echolinkUnknownStation(String)
+        /// The text is a node number or callsign, but the station list in
+        /// hand does not have it. The list may be up to ten minutes old, so
+        /// a fresh one has been asked for as this was thrown.
+        case echolinkNotListedYet(String)
 
         public var errorDescription: String? {
             switch self {
@@ -1310,6 +1654,8 @@ public final class CallSession: ObservableObject {
                 return
                     "DMR needs a ThumbDV vocoder dongle attached — "
                     + "astar has no software AMBE decoder."
+            case .noTrustedVocoder:
+                return Station.noTrustedVocoderMessage + "."
             case .missingDMRRadioID:
                 return "Enter your DMR radio ID in Settings to connect via DMR."
             case .dmrRadioIDOutOfRange:
@@ -1324,6 +1670,12 @@ public final class CallSession: ObservableObject {
                 return
                     "BrandMeister enforces its own access rules, and astar does not "
                     + "connect to it yet."
+            case .echolinkNotLoggedIn:
+                return "Log in to EchoLink to call a station."
+            case .echolinkUnknownStation(let target):
+                return "\(target) isn’t in the EchoLink station list."
+            case .echolinkNotListedYet:
+                return "Not in the station list yet — refreshing…"
             }
         }
     }
@@ -1373,6 +1725,8 @@ public final class CallSession: ObservableObject {
             try connectNXDN(target: node)
         case .dmr:
             try connectDMR(target: node)
+        case .echolink:
+            try connectEchoLink(target: node)
         }
     }
 
@@ -1438,7 +1792,7 @@ public final class CallSession: ObservableObject {
         // has passed — throws `.dialInProgress`, touching nothing, if
         // another dial is already in flight (single-flight; see
         // `claimDial()`'s doc comment).
-        let generation = try claimDial()
+        let generation = try claimDial(for: .m17)
         try? station.disconnect()
         setDialedNode(target)
         recordedRecentForCall = false  // new call → allow one recents record on .answered
@@ -1470,7 +1824,7 @@ public final class CallSession: ObservableObject {
         // show. Both the check and the writes below run atomically with
         // `disconnect()`'s own bump+teardown (`releaseDial` → `onMainSync`).
         releaseDial(
-            generation: generation,
+            generation: generation, dialed: (.m17, target),
             onCurrent: {
                 setActiveCallNetwork(.m17)
                 // The M17 TX-processing override goes live the instant the
@@ -1551,9 +1905,10 @@ public final class CallSession: ObservableObject {
             throw ConnectError.missingCallsign
         }
         guard dstarAvailable else {
+            if vocoderSerials.isEmpty { throw ConnectError.noTrustedVocoder(.dstar) }
             throw ConnectError.dstarUnavailable
         }
-        let generation = try claimDial()
+        let generation = try claimDial(for: .dstar)
         try? station.disconnect()
         setDialedNode(target)
         recordedRecentForCall = false
@@ -1573,7 +1928,7 @@ public final class CallSession: ObservableObject {
         }
         testPostEngineCallHook?()
         releaseDial(
-            generation: generation,
+            generation: generation, dialed: (.dstar, target),
             onCurrent: { setActiveCallNetwork(.dstar) },
             // A disconnect superseded us while the dongle was initialising:
             // the session we just established is nobody's. Tear it down.
@@ -1630,9 +1985,10 @@ public final class CallSession: ObservableObject {
             throw ConnectError.missingCallsign
         }
         guard ysfAvailable else {
+            if vocoderSerials.isEmpty { throw ConnectError.noTrustedVocoder(.ysf) }
             throw ConnectError.ysfUnavailable
         }
-        let generation = try claimDial()
+        let generation = try claimDial(for: .ysf)
         try? station.disconnect()
         setDialedNode(target)
         recordedRecentForCall = false
@@ -1651,7 +2007,7 @@ public final class CallSession: ObservableObject {
         }
         testPostEngineCallHook?()
         releaseDial(
-            generation: generation,
+            generation: generation, dialed: (.ysf, target),
             onCurrent: { setActiveCallNetwork(.ysf) },
             // A disconnect superseded us while the dongle was initialising:
             // the link we just made is nobody's. Tear it down.
@@ -1736,9 +2092,10 @@ public final class CallSession: ObservableObject {
         }
         let radioID = try nxdnRadioIDValue()
         guard nxdnAvailable else {
+            if vocoderSerials.isEmpty { throw ConnectError.noTrustedVocoder(.nxdn) }
             throw ConnectError.nxdnUnavailable
         }
-        let generation = try claimDial()
+        let generation = try claimDial(for: .nxdn)
         try? station.disconnect()
         setDialedNode(target)
         recordedRecentForCall = false
@@ -1758,7 +2115,7 @@ public final class CallSession: ObservableObject {
         }
         testPostEngineCallHook?()
         releaseDial(
-            generation: generation,
+            generation: generation, dialed: (.nxdn, target),
             onCurrent: { setActiveCallNetwork(.nxdn) },
             // A disconnect superseded us while the dongle was initialising:
             // the link we just made is nobody's. Tear it down.
@@ -1866,9 +2223,10 @@ public final class CallSession: ObservableObject {
             throw ConnectError.missingDMRPassword
         }
         guard dmrAvailable else {
+            if vocoderSerials.isEmpty { throw ConnectError.noTrustedVocoder(.dmr) }
             throw ConnectError.dmrUnavailable
         }
-        let generation = try claimDial()
+        let generation = try claimDial(for: .dmr)
         try? station.disconnect()
         setDialedNode(target)
         recordedRecentForCall = false
@@ -1889,12 +2247,91 @@ public final class CallSession: ObservableObject {
         }
         testPostEngineCallHook?()
         releaseDial(
-            generation: generation,
+            generation: generation, dialed: (.dmr, target),
             onCurrent: { setActiveCallNetwork(.dmr) },
             // A disconnect superseded us while the dongle was initialising or
             // the login was in flight: the link we just made is nobody's.
             onStale: {
                 try? station.dmrDisconnect()
+                try? station.disconnect()
+            })
+    }
+
+    /// The `.echolink` arm of `connect(node:network:)`.
+    ///
+    /// Structured exactly like `connectDMR` — validate before touching any
+    /// state, claim the single-flight dial slot, generation-gate every write
+    /// after the engine call — because the races are the same races. There is
+    /// no password here: the call rides the directory login, which holds the
+    /// only one.
+    ///
+    /// EchoLink transmits, so it uses the standard TX chain the way AllStar
+    /// does: a dial leaving an M17 call undoes M17's TX override first, and
+    /// the selected mic profile is applied.
+    ///
+    /// The engine call opens sockets and the output audio device before it
+    /// returns, so every caller runs this off the main thread. Calling is
+    /// always a person's action: nothing in the app calls this on its own.
+    private func connectEchoLink(target raw: String) throws {
+        let target: String
+        do {
+            target = try echolinkTarget(raw)
+        } catch ConnectError.echolinkNotListedYet(let missing) {
+            // A station that logged in after the list in hand: ask for a
+            // fresh one, so the next try can find it.
+            requestEchoLinkListRefresh(fromControl: false)
+            throw ConnectError.echolinkNotListedYet(missing)
+        }
+        let generation = try claimDial(for: .echolink)
+        let wasM17 = activeCallNetwork == .m17
+        if wasM17 {
+            restoreStandardTxProcessing()
+        }
+        try? station.disconnect()
+        setDialedNode(target)
+        recordedRecentForCall = false
+        dialAwaitingAnswer = false
+        setLastDialFailure(nil)
+        applyMicProfile(id: micProfileID)
+        do {
+            try station.echolinkConnect(target)
+        } catch {
+            testPostEngineCallHook?()
+            releaseDial(
+                generation: generation,
+                onCurrent: {
+                    if wasM17 { setActiveCallNetwork(nil) }
+                    setDialedNode(nil)
+                },
+                onStale: {})
+            throw error
+        }
+        testPostEngineCallHook?()
+        releaseDial(
+            generation: generation, dialed: (.echolink, target),
+            onCurrent: {
+                // A logout that landed while the call was being set up has
+                // already taken the call out of the UI, and the engine's
+                // logoff hangs it up. Publishing `.echolink` now would leave
+                // an active network with no call and no login behind it, so
+                // this counts as superseded too. Bumping the generation says
+                // so to the recording rules `releaseDial` runs next: any
+                // resume they arm for this dial is already stale, so no later
+                // answer can start a recording for a call that is gone.
+                if echolinkLoggingOut || echolinkLogin != .loggedIn {
+                    bumpDialGeneration()
+                    if wasM17 { setActiveCallNetwork(nil) }
+                    setDialedNode(nil)
+                    try? station.echolinkDisconnect()
+                    try? station.disconnect()
+                } else {
+                    setActiveCallNetwork(.echolink)
+                }
+            },
+            // A disconnect superseded us while the call was being set up: the
+            // call we just placed is nobody's.
+            onStale: {
+                try? station.echolinkDisconnect()
                 try? station.disconnect()
             })
     }
@@ -1939,7 +2376,7 @@ public final class CallSession: ObservableObject {
         // flight (single-flight; see `claimDial()`'s doc comment). Done
         // before `wasM17`/`restoreStandardTxProcessing()` below so a refused
         // dial never touches TX-processing state either.
-        let generation = try claimDial()
+        let generation = try claimDial(for: .allstar)
         // An AllStar dial starting undoes a still-live M17 TX override
         // (astar-5d8e) — covers both the network-aware `connect(node:network:)`
         // wrapper (which sets `activeCallNetwork` to `.allstar` only after this
@@ -2007,7 +2444,7 @@ public final class CallSession: ObservableObject {
         // comment above), so there's no out-of-band write left for a
         // disconnect to race against.
         releaseDial(
-            generation: generation,
+            generation: generation, dialed: (.allstar, node),
             onCurrent: {
                 if publishNetwork { setActiveCallNetwork(.allstar) }
             },
@@ -2113,6 +2550,8 @@ public final class CallSession: ObservableObject {
             // mid-dial regardless of whether one is in flight; only the
             // dial that claimed it ever releases it.
             bumpDialGeneration()
+            // A hangup finishes the file, and nothing resumes one after it.
+            endRecordingForHangup()
             // Drop the no-answer latch BEFORE the hangup reaches the station: the
             // poll loop must never see hangup/idle with the latch still armed for a
             // user-initiated disconnect (that would misreport "didn't answer").
@@ -2151,10 +2590,246 @@ public final class CallSession: ObservableObject {
                 try? station.dmrDisconnect()
                 clearDMRState()
             }
+            // Hanging up EchoLink ends the call and keeps the login.
+            if activeCallNetwork == .echolink {
+                try? station.echolinkDisconnect()
+                clearEchoLinkCall()
+            }
             try station.disconnect()
             setDialedNode(nil)
             setActiveCallNetwork(nil)
         }
+    }
+
+    // MARK: - Recording
+
+    /// Start recording the answered call, or stop the one running. With
+    /// nothing running it also cancels a pending network-change resume, so
+    /// Stop always means stop. Does nothing else while no call is answered.
+    /// Main thread (a UI action).
+    public func toggleRecording() {
+        if recording {
+            resumeRecordingOnAnswer = nil
+            stopRecording(chosen: true)
+        } else {
+            if resumeRecordingOnAnswer != nil {
+                resumeRecordingOnAnswer = nil
+                // An in-flight dial must not arm a resume either.
+                setRecordingNetwork(nil, bumpEpoch: true)
+            }
+            if status == .answered { startRecordingCurrentCall() }
+        }
+    }
+
+    /// Record the answered call, labelled `"AllStar 2000"`: the network and
+    /// the node or reflector, as dialed.
+    private func startRecordingCurrentCall() {
+        let network = dialNetworkInFlight ?? activeCallNetwork ?? .allstar
+        startRecording(network: network, label: "\(network.displayName) \(dialedNode ?? "")")
+    }
+
+    /// The recording rules for a finished dial, run by `releaseDial` inside
+    /// its main-thread critical section, after the dial's own publish.
+    ///
+    /// Every dial overwrites the resume: it is set only when a recording was
+    /// running as the dial began, nobody started or stopped one since (the
+    /// epoch is unchanged), the dial succeeded, and it reached a DIFFERENT
+    /// network (F10). In that same case the old recording is stopped here —
+    /// the dial's teardown of the previous call has already finished its
+    /// file engine-side. A recording started after the dial began (Always
+    /// record, on an answer that beat this) is a new epoch and is left alone.
+    private func applyRecordingRulesAfterDial(
+        dialed: (network: Network, node: String)?, generation: Int,
+        atStart: (network: Network?, epoch: Int)
+    ) {
+        resumeRecordingOnAnswer = nil
+        guard let previous = atStart.network,
+            recordingSnapshot.epoch == atStart.epoch
+        else { return }
+        stopRecording(chosen: false)
+        if let dialed, dialed.network != previous {
+            resumeRecordingOnAnswer = (
+                dialed.network, "\(dialed.network.displayName) \(dialed.node)", generation
+            )
+        }
+    }
+
+    /// The poll's recording step, run after the per-network teardown edges
+    /// and before `lastPolledStatus` advances.
+    private func advanceRecording(status current: IaxStatus) {
+        let previous = lastPolledStatus
+        if previous == .answered, current != .answered {
+            // The call ended under the recording — the far end hung up, the
+            // node dropped us. The engine finishes a file only on its own
+            // `disconnect()`, so this edge must stop it: one file per
+            // connection.
+            stopRecording(chosen: false)
+            endRecordingErrorForCall()
+        } else if previous == .dialing, current == .hangup || current == .idle {
+            // A dial that never answered: nothing to resume into.
+            resumeRecordingOnAnswer = nil
+        } else if current == .answered {
+            // The resume is used up either way, but only for the call its
+            // dial reached: a newer attempt since (or a disconnect, which
+            // also bumps) leaves it stale, and the answer then gets the same
+            // treatment as any other — Always record or nothing.
+            let resume = resumeRecordingOnAnswer
+            resumeRecordingOnAnswer = nil
+            if let resume, isDialGenerationCurrent(resume.generation) {
+                startRecording(network: resume.network, label: resume.label)
+            } else if previous != .answered, recordingSettings.alwaysRecord {
+                startRecordingCurrentCall()
+            }
+        }
+        pollRecordState()
+    }
+
+    /// Read the engine's recorder at most every 0.5 s while recording, and
+    /// publish only what changed. A recording the engine stopped by itself
+    /// ends here, with its reason.
+    private func pollRecordState() {
+        guard recording, recordingWorkInFlight == 0 else { return }
+        let t = now()
+        if let last = lastRecordStateRead, t.timeIntervalSince(last) < 0.5 { return }
+        lastRecordStateRead = t
+        let state: RecordState
+        do {
+            state = try station.recordState()
+        } catch {
+            recordStateFailures += 1
+            if recordStateFailures == Self.recordStateFailuresReported {
+                let reason = (error as? StationError)?.message ?? String(describing: error)
+                recordingError = Self.recordStateReadErrorPrefix + reason
+            }
+            return
+        }
+        recordStateFailures = 0
+        // Reads recovered: the "can't read" error no longer holds.
+        if recordingError?.hasPrefix(Self.recordStateReadErrorPrefix) == true {
+            recordingError = nil
+        }
+        if state.recording {
+            let seconds = Int(state.elapsedMS / 1000)
+            if recordingElapsedSeconds != seconds { recordingElapsedSeconds = seconds }
+        } else {
+            recording = false
+            // A stop with a reason is the engine's choice (disk low, folder
+            // gone) and cancels anything pending; one without is the end of
+            // the call the engine just tore down.
+            setRecordingNetwork(nil, bumpEpoch: state.error != nil)
+            if let error = state.error, recordingError != error { recordingError = error }
+        }
+    }
+
+    /// How many `recordState()` failures in a row before it is reported:
+    /// 1.5 s at the read rate, past a single hiccup.
+    static let recordStateFailuresReported = 3
+    private static let recordStateReadErrorPrefix = "Can’t read the recording’s state: "
+
+    /// Ask the engine to start recording, off the main thread. `recording`
+    /// turns on at once, so the button answers the click; a refusal turns it
+    /// back off with the engine's reason.
+    private func startRecording(network: Network, label: String) {
+        guard !recording else { return }
+        recording = true
+        setRecordingNetwork(network, bumpEpoch: true)
+        recordingStartToken &+= 1
+        let token = recordingStartToken
+        if recordingError != nil { recordingError = nil }
+        if recordingElapsedSeconds != 0 { recordingElapsedSeconds = 0 }
+        lastRecordStateRead = nil
+        recordStateFailures = 0
+        let settings = recordingSettings
+        let offset = Int32(clamping: TimeZone.current.secondsFromGMT())
+        let station = self.station
+        recordingWorkInFlight += 1
+        runRecordingWork { [weak self] in
+            var failure: String?
+            do {
+                try station.recordStart(
+                    directory: settings.folder.path, layout: settings.layout,
+                    frames: settings.saveCodecFrames, label: label, utcOffsetSeconds: offset)
+            } catch let error as StationError {
+                failure = error.message
+            } catch {
+                failure = String(describing: error)
+            }
+            Self.onMain {
+                guard let self else { return }
+                self.recordingWorkInFlight -= 1
+                // A refusal speaks only for the latest start: a stop and a
+                // fresh start queued behind it must not be undone by it.
+                if let failure, token == self.recordingStartToken {
+                    if self.recording { self.recording = false }
+                    self.setRecordingNetwork(nil, bumpEpoch: true)
+                    self.recordingError = failure
+                }
+            }
+        }
+    }
+
+    /// Stop the recording, if one runs, off the main thread. `chosen` says
+    /// the operator asked for it (Stop, hang up), which bumps the epoch so
+    /// an in-flight dial will not resume afterwards.
+    /// A hang-up the operator asked for: finish the file and drop any
+    /// pending resume, so nothing records after it. `disconnect()` runs this,
+    /// and so does an EchoLink logout, which ends the call without one.
+    func endRecordingForHangup() {
+        resumeRecordingOnAnswer = nil
+        stopRecording(chosen: true)
+        endRecordingErrorForCall()
+    }
+
+    private func stopRecording(chosen: Bool) {
+        guard recording else { return }
+        recording = false
+        setRecordingNetwork(nil, bumpEpoch: chosen)
+        let station = self.station
+        recordingWorkInFlight += 1
+        runRecordingWork { [weak self] in
+            try? station.recordStop()
+            Self.onMain { self?.recordingWorkInFlight -= 1 }
+        }
+    }
+
+    /// Finish the recording as the app quits, so its FLAC headers are
+    /// rewritten with the real length instead of being left as a stream the
+    /// next player has to guess at. The stop runs on the recording queue,
+    /// behind any start or stop already sent there, and the caller waits at
+    /// most `timeout` for it: a wedged recorder must not hold quit hostage.
+    ///
+    /// Returns `false` only when the wait ran out. Idle with nothing queued,
+    /// it returns at once without touching the station.
+    @discardableResult
+    public func finishRecordingBeforeQuit(timeout: TimeInterval = 3) -> Bool {
+        resumeRecordingOnAnswer = nil
+        guard recording || recordingWorkInFlight > 0 else { return true }
+        if recording {
+            recording = false
+            setRecordingNetwork(nil, bumpEpoch: true)
+        }
+        let done = DispatchSemaphore(value: 0)
+        let station = self.station
+        runRecordingWork {
+            try? station.recordStop()
+            done.signal()
+        }
+        return done.wait(timeout: .now() + timeout) == .success
+    }
+
+    /// The call is over, so its recording caption goes with it: clear
+    /// `recordingError`, and retire any start still queued, whose refusal
+    /// would otherwise raise the caption after the hang-up. Run on both
+    /// call-end paths — `disconnect()` and the poll's answered → ended edge —
+    /// for every network, as `clearDStarState` is for D-Star's fields.
+    private func endRecordingErrorForCall() {
+        recordingStartToken &+= 1
+        if recordingError != nil { recordingError = nil }
+    }
+
+    /// Run `body` on the main thread: now if already there, else soon.
+    private static func onMain(_ body: @escaping () -> Void) {
+        if Thread.isMainThread { body() } else { DispatchQueue.main.async(execute: body) }
     }
 
     /// Drop the last-heard D-Star fields. Called on every path a session can
@@ -2206,6 +2881,21 @@ public final class CallSession: ObservableObject {
         refreshLastHeard()
     }
 
+    /// Drop the EchoLink call's fields — the far station, its info text, the
+    /// chat and the talker — on every path a call can end by. The login and
+    /// the station list are not the call's, and stay. Publish-on-change, as
+    /// `poll()` calls it.
+    func clearEchoLinkCall() {
+        if echolinkLink != nil { echolinkLink = nil }
+        if echolinkPeer != nil { echolinkPeer = nil }
+        if echolinkInfo != nil { echolinkInfo = nil }
+        if !echolinkChat.isEmpty { echolinkChat = [] }
+        if echolinkTalker != nil { echolinkTalker = nil }
+        if echolinkNotice != nil { echolinkNotice = nil }
+        if !heardHistory.isEmpty { heardHistory = [] }
+        refreshLastHeard()
+    }
+
     /// Drop the last-heard M17 fields, for the same reason `clearDStarState`
     /// and `clearYSFState` exist: a callsign left on screen after the session
     /// is gone is a claim about the present that is no longer true.
@@ -2228,7 +2918,7 @@ public final class CallSession: ObservableObject {
     private func refreshHeardHistory(snapshot snap: CallSnapshot) {
         let linkIsLive =
             snap.m17Active || snap.dstarActive || snap.ysfActive || snap.nxdnActive
-            || snap.dmrActive
+            || snap.dmrActive || snap.echolinkActive
         guard linkIsLive, let network = activeCallNetwork?.rawValue else {
             if !heardHistory.isEmpty { heardHistory = [] }
             return
@@ -2255,7 +2945,7 @@ public final class CallSession: ObservableObject {
     /// Publish-on-change, like everything else `poll()` touches, and
     /// main-thread only: `poll()` runs on the main run loop's timer and the
     /// clear helpers are called from it.
-    private func refreshLastHeard() {
+    func refreshLastHeard() {
         let value: String?
         switch activeCallNetwork {
         case .dstar: value = dstarTalker
@@ -2263,6 +2953,7 @@ public final class CallSession: ObservableObject {
         case .m17: value = m17Talker
         case .nxdn: value = nxdnLastHeard
         case .dmr: value = dmrLastHeard
+        case .echolink: value = echolinkTalker
         case .allstar, .hamlink, nil: value = nil
         }
         if lastHeard != value { lastHeard = value }
@@ -2282,7 +2973,7 @@ public final class CallSession: ObservableObject {
     /// main thread — same reason as `setDialedNode`: `connect` runs on a
     /// background worker, and this mirrors `dialedNode`'s lifecycle exactly
     /// (set at dial dispatch, cleared at `disconnect()`).
-    private func setActiveCallNetwork(_ network: Network?) {
+    func setActiveCallNetwork(_ network: Network?) {
         if Thread.isMainThread {
             activeCallNetwork = network
             // `lastHeard` is derived from this, so it would otherwise show the
@@ -2725,10 +3416,12 @@ public final class CallSession: ObservableObject {
 
     // MARK: - Node directory (favorites + recents)
 
-    /// Favorited nodes, sorted by label — for the dialing-page directory picker.
+    /// Favorites from every network, sorted by label — for the dial row's
+    /// saved-nodes menu and Settings → Favorites.
     public func directoryFavorites() -> [NodeEntry] { directoryStore.favorites }
 
-    /// Recently-connected nodes, newest first (capped) — for the picker.
+    /// Recently-connected nodes on every network, newest first (capped) — for
+    /// the saved-nodes menu.
     public func directoryRecents() -> [NodeEntry] { directoryStore.recents }
 
     /// Every directory entry in storage order — favorites AND recents, curated
@@ -2738,15 +3431,33 @@ public final class CallSession: ObservableObject {
 
     /// Upsert one entry by id. For applying an imported directory, which has
     /// already been merged by `ConfigMerge.directory` — that is where the
-    /// node-number matching and id rebasing live, deliberately not here.
-    public func directoryUpsert(_ entry: NodeEntry) { directoryStore.upsert(entry) }
+    /// network-and-target matching and id rebasing live, deliberately not here.
+    public func directoryUpsert(_ entry: NodeEntry) {
+        directoryStore.upsert(entry)
+        directoryChanged()
+    }
 
-    /// Resolve a node number to a display name (saved favorite/directory label),
-    /// or `nil` when unknown — for showing names wherever a bare number appears.
-    /// Backed by a `NameResolver` so a second source (the online AllStarLink-DB
-    /// lookup, astar-6c65) can plug in later without touching call sites.
+    /// Tell observers the directory changed. On the main thread, where every
+    /// directory write happens.
+    private func directoryChanged() {
+        directoryChangeCount &+= 1
+    }
+
+    /// Resolve an AllStar node number to a display name (saved
+    /// favorite/directory label), or `nil` when unknown — for showing names
+    /// wherever a bare number appears. Backed by a `NameResolver` so a second
+    /// source (the online AllStarLink-DB lookup, astar-6c65) can plug in later
+    /// without touching call sites.
     public func name(forNode node: String) -> String? {
         nameResolver.name(forNode: node)
+    }
+
+    /// The saved name for `node` on `network`, or `nil` when unknown. AllStar
+    /// goes through the resolver above; every other network asks the
+    /// directory for that network's entry only.
+    public func name(forNode node: String, network: Network) -> String? {
+        if network == .allstar { return name(forNode: node) }
+        return DirectoryNameSource(directoryStore, network: network).name(forNode: node)
     }
 
     /// The display name for a node, falling back to the bare number when unknown.
@@ -2756,23 +3467,29 @@ public final class CallSession: ObservableObject {
 
     /// The connected-call header text for `node` — the saved name when known
     /// (e.g. "AJ7HR (77777)"), else "node 77777". `node` is whatever
-    /// `dialedNode` holds, which for an M17 call is the raw dial string
-    /// rather than an AllStar node number (the directory simply won't have a
-    /// name for it, so this falls back to "node <target>" the same way).
-    /// Shared by the status card (`MenuPopover`) and the accessibility
-    /// announcer's "Connected to …" text (astar-b167) so the two can never
-    /// format the same call differently.
+    /// `dialedNode` holds, which for a reflector call is the raw dial string
+    /// rather than an AllStar node number. The name is looked up on the
+    /// call's own network, so an EchoLink call never borrows an AllStar
+    /// favorite's label. Shared by the status card (`MenuPopover`) and the
+    /// accessibility announcer's "Connected to …" text (astar-b167) so the
+    /// two can never format the same call differently.
     public func connectedTargetLabel(for node: String) -> String {
-        if let name = nameResolver.name(forNode: node) {
+        let network = activeCallNetwork ?? .allstar
+        let target = network == .echolink ? echolinkCanonicalTarget(node) : node
+        // An EchoLink call dialled by number is named by its listed callsign
+        // when no favorite has a label for it.
+        let fallback = network == .echolink && target != node ? target : nil
+        if let name = name(forNode: target, network: network) ?? fallback {
             return "\(name) (\(node))"
         }
         return "node \(node)"
     }
 
-    /// The directory entry for a node number, or `nil` when not saved — for
-    /// resolving the per-node talk-timer override.
-    public func directoryEntry(forNode node: String) -> NodeEntry? {
-        directoryStore.all().first { $0.node == node }
+    /// The directory entry for `node` on `network`, or `nil` when not saved —
+    /// for resolving the per-node talk-timer override, and for the "already
+    /// saved" check in Settings.
+    public func directoryEntry(forNode node: String, network: Network = .allstar) -> NodeEntry? {
+        directoryStore.all().first { $0.matches(target: node, network: network) }
     }
 
     /// Set (or clear) the per-node talk-timer override on a favorite by id.
@@ -2786,6 +3503,7 @@ public final class CallSession: ObservableObject {
         entry.talkTimerEnabled = enabled
         entry.talkTimerSeconds = seconds
         directoryStore.upsert(entry)
+        directoryChanged()
     }
 
     /// The live talk-timer phase for the connected node, or `nil` when the dot
@@ -2799,7 +3517,13 @@ public final class CallSession: ObservableObject {
         defaultEnabled: Bool, defaultLimitSeconds: Int, now: Date = Date()
     ) -> TalkTimer.Phase? {
         guard ptt, let keyedSince, let node = dialedNode else { return nil }
-        let entry = directoryEntry(forNode: node)
+        // The per-node override belongs to the favorite for THIS call's
+        // network and target: the directory is keyed on both, so an EchoLink
+        // node number that happens to match an AllStar favorite never
+        // borrows its limit.
+        let network = activeCallNetwork ?? .allstar
+        let target = network == .echolink ? echolinkCanonicalTarget(node) : node
+        let entry = directoryEntry(forNode: target, network: network)
         guard
             let limit = TalkTimer.resolvedLimitSeconds(
                 entry: entry, defaultEnabled: defaultEnabled,
@@ -2809,17 +3533,18 @@ public final class CallSession: ObservableObject {
         return TalkTimer.phase(elapsed: elapsed, limit: TimeInterval(limit))
     }
 
-    /// Add (or update) a favorite from the Settings manager: a label + node.
-    /// Validates the node (non-empty digits) and dedupes **by node** — an existing
-    /// entry for that number is favorited and relabeled in place (preserving its
-    /// id/lastUsed) rather than duplicated. Returns `true` when saved.
+    /// Add (or update) an AllStar favorite from the Settings manager: a label
+    /// + node. Validates the node (non-empty digits) and dedupes **by node** —
+    /// an existing AllStar entry for that number is favorited and relabeled in
+    /// place (preserving its id/lastUsed) rather than duplicated. Returns
+    /// `true` when saved.
     @discardableResult
     public func directoryAddFavorite(node: String, label: String) -> Bool {
         let trimmedNode = node.trimmingCharacters(in: .whitespaces)
         guard !trimmedNode.isEmpty, trimmedNode.allSatisfy(\.isNumber) else {
             return false
         }
-        addFavorite(node: trimmedNode, label: label)
+        addFavorite(node: trimmedNode, label: label, network: .allstar)
         return true
     }
 
@@ -2832,61 +3557,84 @@ public final class CallSession: ObservableObject {
         else { return }
         entry.label = trimmed
         directoryStore.upsert(entry)
+        directoryChanged()
     }
 
-    /// Change a saved entry's dial target (node number or address) by id,
-    /// preserving everything else about it — label, favorite flag, lastUsed,
-    /// note, per-node talk-timer override, and the entry's own id (astar-6b83).
-    /// Before this, a node that changed number could only be deleted and
-    /// re-added, which threw away all of that curation.
+    /// Whether `target` is shaped like something the dial field could hold
+    /// on `network` — the check Settings → Favorites makes before it repoints
+    /// a saved entry.
     ///
-    /// Validated with `DialTarget.parse`, the SAME validator the dial field
-    /// uses, so anything you can save here is something you could have dialed —
-    /// node numbers, `*`/`#` command dials, and `host`/`host:port` addresses.
+    /// AllStar (and Hamlink) use `DialTarget.parse`, the SAME validator the
+    /// dial field uses, so node numbers, `*`/`#` command dials, and
+    /// `host`/`host:port` addresses all pass. Every other network takes any
+    /// non-empty text its dial field would admit character by character:
+    /// whether a reflector name or EchoLink callsign is real depends on a
+    /// directory that may not be loaded, and the dial row still asks that
+    /// question before Connect.
+    public static func isSavableTarget(_ target: String, network: Network) -> Bool {
+        let trimmed = target.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return false }
+        switch network {
+        case .allstar, .hamlink: return DialTarget.parse(trimmed) != nil
+        default: return trimmed.allSatisfy(network.admitsDialCharacter)
+        }
+    }
+
+    /// Change a saved entry's dial target by id, preserving everything else
+    /// about it — label, favorite flag, lastUsed, note, per-node talk-timer
+    /// override, network, and the entry's own id (astar-6b83). Before this, a
+    /// node that changed number could only be deleted and re-added, which
+    /// threw away all of that curation.
+    ///
+    /// Validated with `isSavableTarget` for the entry's own network.
     ///
     /// Returns false (leaving the entry untouched) when the target is empty or
-    /// malformed, when `id` is unknown, or when another entry already holds that
-    /// node — two rows on one node would make `recordRecent`, which upserts BY
-    /// NODE rather than by id, and `directoryEntry(forNode:)` ambiguous.
-    /// Re-committing an entry's existing node is a successful no-op, not a
-    /// collision with itself.
+    /// malformed, when `id` is unknown, or when another entry on the same
+    /// network already holds that target — two rows for one target would make
+    /// `recordRecent`, which upserts BY NETWORK AND TARGET rather than by id,
+    /// and `directoryEntry(forNode:network:)` ambiguous. Re-committing an
+    /// entry's existing target is a successful no-op, not a collision with
+    /// itself.
     @discardableResult
     public func directorySetNode(id: String, to target: String) -> Bool {
         let trimmed = target.trimmingCharacters(in: .whitespaces)
-        guard DialTarget.parse(trimmed) != nil else { return false }
         let entries = directoryStore.all()
         guard var entry = entries.first(where: { $0.id == id }) else { return false }
-        guard !entries.contains(where: { $0.id != id && $0.node == trimmed }) else { return false }
+        guard Self.isSavableTarget(trimmed, network: entry.network) else { return false }
+        guard
+            !entries.contains(where: {
+                $0.id != id && $0.matches(target: trimmed, network: entry.network)
+            })
+        else { return false }
         guard entry.node != trimmed else { return true }
         entry.node = trimmed
         directoryStore.upsert(entry)
+        directoryChanged()
         return true
     }
 
     /// Remove a directory entry by id — the Settings manager's delete.
     public func directoryRemove(id: String) {
         directoryStore.remove(id: id)
+        directoryChanged()
     }
 
-    /// Whether `node` is currently a favorite.
-    public func isFavorite(node: String) -> Bool {
-        directoryStore.all().contains { $0.node == node && $0.favorite }
+    /// Whether `node` on `network` is currently a favorite.
+    public func isFavorite(node: String, network: Network = .allstar) -> Bool {
+        directoryStore.all().contains { $0.favorite && $0.matches(target: node, network: network) }
     }
 
-    /// Favorite a node with a label (callsign/name). Upserts by node so it merges
-    /// with an existing recent/entry rather than duplicating, preserving lastUsed.
-    /// `network` stamps a BRAND NEW entry's network (astar-c2e5, default
-    /// `.allstar` — today's only caller-reachable network); an existing
-    /// entry's network is left as-is (it was already correctly stamped by
-    /// whatever `recordRecent`/earlier `addFavorite` created it, and a caller
-    /// re-favoriting it may not have the right network in scope — e.g. the
-    /// Settings "Add favorite" row, which only ever adds AllStar numbers).
+    /// Favorite `node` on `network` with a label (callsign/name). Upserts by
+    /// network and target so it merges with an existing recent rather than
+    /// duplicating, preserving lastUsed; the same target on another network
+    /// is a separate entry. A blank label keeps an existing entry's label, and
+    /// names a new one after its target.
     public func addFavorite(node: String, label: String, network: Network = .allstar) {
         let trimmedNode = node.trimmingCharacters(in: .whitespaces)
         guard !trimmedNode.isEmpty else { return }
         let label = label.trimmingCharacters(in: .whitespaces)
         var list = directoryStore.all()
-        if let idx = list.firstIndex(where: { $0.node == trimmedNode }) {
+        if let idx = list.firstIndex(where: { $0.matches(target: trimmedNode, network: network) }) {
             list[idx].favorite = true
             if !label.isEmpty { list[idx].label = label }
             directoryStore.upsert(list[idx])
@@ -2896,12 +3644,14 @@ public final class CallSession: ObservableObject {
                     label: label.isEmpty ? trimmedNode : label,
                     node: trimmedNode, favorite: true, network: network))
         }
+        directoryChanged()
     }
 
-    /// Un-favorite a node (keeps it as a recent if it has a `lastUsed`; otherwise
-    /// removes it entirely so the directory doesn't accumulate dead entries).
-    public func removeFavorite(node: String) {
-        let entries = directoryStore.all().filter { $0.node == node }
+    /// Un-favorite `node` on `network` (keeps it as a recent if it has a
+    /// `lastUsed`; otherwise removes it entirely so the directory doesn't
+    /// accumulate dead entries).
+    public func removeFavorite(node: String, network: Network = .allstar) {
+        let entries = directoryStore.all().filter { $0.matches(target: node, network: network) }
         for var e in entries {
             if e.lastUsed != nil {
                 e.favorite = false
@@ -2910,6 +3660,37 @@ public final class CallSession: ObservableObject {
                 directoryStore.remove(id: e.id)
             }
         }
+        directoryChanged()
+    }
+
+    /// Star `node` on `network`, or take its star off — the one toggle the
+    /// dial row's star and the EchoLink station browser's stars both use.
+    /// An EchoLink target is first turned into the callsign the station list
+    /// gives it (`echolinkCanonicalTarget`), so starring node 9999 and
+    /// starring `*ECHOTEST*` are the same favorite. Returns whether the
+    /// target is a favorite afterwards.
+    @discardableResult
+    public func toggleFavorite(node: String, network: Network, label: String = "") -> Bool {
+        guard network == .echolink else {
+            if isFavorite(node: node, network: network) {
+                removeFavorite(node: node, network: network)
+                return false
+            }
+            addFavorite(node: node, label: label, network: network)
+            return true
+        }
+        // EchoLink: the favorite may have been saved under the number, before
+        // the list knew the station, or under the callsign. Either one is
+        // this star, so taking it off takes off both.
+        let canonical = echolinkCanonicalTarget(node)
+        if isEchoLinkFavorite(node) {
+            for alias in echolinkAliases(node) where isFavorite(node: alias, network: .echolink) {
+                removeFavorite(node: alias, network: .echolink)
+            }
+            return false
+        }
+        addFavorite(node: canonical, label: label, network: .echolink)
+        return true
     }
 
     /// Read-modify-write the persisted audio prefs so toggling one field doesn't
@@ -2983,6 +3764,12 @@ public func connectFailureMessage(for error: Error, node: String) -> String {
     guard let stationError = error as? StationError else {
         return error.localizedDescription
     }
+    // Vocoder trust: every AMBE network's refusal carries the same sentence,
+    // and it already says what to do. Shown as-is so the popover can pair it
+    // with its "Open Settings → Vocoders" button (`VocoderSetupPrompt`).
+    if VocoderSetupPrompt.offersSettings(for: stationError.detail) {
+        return Station.noTrustedVocoderMessage + "."
+    }
     // Raw codes, not the IAX_ERR_* constants: those live in the CAstarStation C
     // module, which the vendored AstarStation wrapper imports without re-exporting.
     switch stationError.code {
@@ -3018,6 +3805,16 @@ public func connectFailureMessage(for error: Error, node: String) -> String {
         }
         return "Couldn’t connect to \(node) — check this network’s DMR password "
             + "and that the ThumbDV is plugged in."
+    case -24:  // IAX_ERR_ECHOLINK — not logged in, no listed station matches,
+        // or the UDP ports would not open. The engine says which in its
+        // detail ("No station 9999 is logged in to EchoLink"), and that
+        // sentence is already the whole message.
+        let why = engineDetail(stationError)
+        if !why.isEmpty {
+            return "\(why)."
+        }
+        return "Couldn’t call \(node) on EchoLink — check that you’re logged in "
+            + "and the station is listed."
     case -19:  // IAX_ERR_DSTAR — every D-Star connect failure, and the most
         // likely one by far is the dongle. The engine DOES classify these
         // precisely ("ThumbDV at /dev/cu.usbserial-… is busy — another

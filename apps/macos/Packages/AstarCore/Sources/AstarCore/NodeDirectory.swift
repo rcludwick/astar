@@ -4,8 +4,9 @@
 
 import Foundation
 
-/// A saved node in the user's directory: a callsign or human label mapped to an
-/// AllStar node number, e.g. "AJ7HR" → "77777". `favorite` entries are curated
+/// A saved node in the user's directory: a callsign or human label mapped to a
+/// dial target on one network, e.g. "AJ7HR" → AllStar node "77777", or
+/// "KC-Wide" → D-Star "XLX458 C". `favorite` entries are curated
 /// by the user; entries with a `lastUsed` are auto-tracked recents (a node the
 /// user has successfully connected to). The two overlap: favoriting a recent
 /// keeps its `lastUsed`, and re-dialing a favorite updates its `lastUsed`.
@@ -16,7 +17,10 @@ public struct NodeEntry: Codable, Equatable, Identifiable {
     public var id: String
     /// User-facing label — a callsign or name, e.g. "AJ7HR".
     public var label: String
-    /// AllStar node number as a string, e.g. "77777".
+    /// The dial target, exactly as the dial field holds it for `network`: an
+    /// AllStar node number or address ("77777"), a reflector and module
+    /// ("XLX836 A"), a whole DMR target ("system/91/2"), or an EchoLink
+    /// callsign ("*ECHOTEST*"). Named `node` because it began as AllStar's.
     public var node: String
     /// User-curated favorite (shown first, sorted by label).
     public var favorite: Bool
@@ -82,6 +86,29 @@ public struct NodeEntry: Codable, Equatable, Identifiable {
     }
 }
 
+extension NodeEntry {
+    /// The entry's identity in the directory: its network and its target.
+    /// Two entries with the same key are the same saved node; the same
+    /// number on two networks is two entries, because EchoLink node 1234 and
+    /// AllStar node 1234 are different stations.
+    public var directoryKey: String { Self.directoryKey(network: network, target: node) }
+
+    /// The key for `target` on `network`. Targets are trimmed, and an
+    /// EchoLink target is upper-cased too: it is a callsign (or a number),
+    /// and EchoLink callsigns match in any case. Every other network keeps
+    /// the target's case, as it always has.
+    public static func directoryKey(network: Network, target: String) -> String {
+        let trimmed = target.trimmingCharacters(in: .whitespaces)
+        let normalized = network == .echolink ? trimmed.uppercased() : trimmed
+        return "\(network.rawValue):\(normalized)"
+    }
+
+    /// Whether this entry is the saved node for `target` on `network`.
+    public func matches(target: String, network: Network) -> Bool {
+        directoryKey == Self.directoryKey(network: network, target: target)
+    }
+}
+
 /// Persists the node directory and derives the favorites/recents lists.
 public protocol NodeDirectoryStore {
     /// Every entry, in storage order.
@@ -90,11 +117,11 @@ public protocol NodeDirectoryStore {
     func upsert(_ entry: NodeEntry)
     /// Remove the entry with `id` (no-op if absent).
     func remove(id: String)
-    /// Auto-track a successful connect: upsert by **node** (not id), so re-dialing
-    /// the same node updates its `lastUsed` rather than duplicating. An existing
-    /// favorite flag and curated label are preserved. `network` stamps which
-    /// network the connect went out on (astar-c2e5) — a recent recorded while
-    /// on M17 must not read back as AllStar.
+    /// Auto-track a successful connect: upsert by **network and target** (not
+    /// id), so re-dialing the same node updates its `lastUsed` rather than
+    /// duplicating. An existing favorite flag and curated label are preserved.
+    /// The same target on a different network is a different entry: AllStar
+    /// node 1234 and EchoLink node 1234 are not the same station.
     func recordRecent(node: String, label: String, network: Network)
 }
 
@@ -161,11 +188,9 @@ public final class UserDefaultsNodeDirectoryStore: NodeDirectoryStore {
 
     public func recordRecent(node: String, label: String, network: Network) {
         var list = all()
-        if let idx = list.firstIndex(where: { $0.node == node }) {
-            // Existing node: bump lastUsed + the network just dialed on,
-            // preserve favorite + curated label.
+        if let idx = list.firstIndex(where: { $0.matches(target: node, network: network) }) {
+            // Existing node: bump lastUsed, preserve favorite + curated label.
             list[idx].lastUsed = Date()
-            list[idx].network = network
         } else {
             list.append(NodeEntry(label: label, node: node, lastUsed: Date(), network: network))
         }

@@ -1,0 +1,4 @@
+# astar: never reformat vendored upstream source. `cargo fmt --all` also
+# formats local path dependencies, and this crate must stay byte-for-byte
+# upstream (see VENDORED.md).
+disable_all_formatting = true

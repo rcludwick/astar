@@ -1,0 +1,11 @@
+request: GET /admin/recordings HTTP/1.1
+status: 303
+header: cache-control: no-store
+header: content-security-policy: default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; media-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+header: content-type: text/plain; charset=utf-8
+header: location: /admin/signin?next=/admin/recordings
+header: referrer-policy: no-referrer
+header: x-content-type-options: nosniff
+header: x-frame-options: DENY
+body: See Other
+

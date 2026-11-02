@@ -110,11 +110,14 @@ use astar_codec::ambe::{
     AMBE_STREAM_MAX_IN_FLIGHT, AmbeBackend, AmbeStream, VocoderMode, open_ambe_stream,
 };
 use astar_codec::nxdn::{NxdnVoiceError, unpack_voice};
-use astar_codec::ysf::DnFrame;
+use astar_codec::ysf::{DnFrame, dn_frame_to_channel};
 use astar_nxdn::frame::{MESSAGE_TYPE_TX_REL, NetFrame, USC_SACCH_NS};
 use astar_nxdn::{FsmAction, LinkState, NxdnFsm, wire};
+use astar_record::frames::{CaptureMode, Dir, FrameEvent};
+use astar_record::tap::TapSlot;
 
 use crate::heard::{HeardEntry, HeardLog};
+use crate::over_tap::OverTap;
 use crate::session::ConsoleError;
 
 /// How long the socket blocks before the loop runs `tick` anyway.
@@ -249,6 +252,9 @@ pub struct NxdnLink {
     thread: Option<JoinHandle<()>>,
     /// `Some` only for a link opened with audio.
     backend: Option<AmbeBackend>,
+    /// The codec-frame recording tap ([`NxdnLink::frame_tap`]). A link with
+    /// no audio decodes nothing, so its slot is never offered to.
+    frame_tap: TapSlot<FrameEvent>,
 }
 
 #[derive(Debug)]
@@ -322,6 +328,15 @@ struct Audio {
     /// be a struct that exists only to be constructed by a test — this is
     /// the same guard with nothing invented around it.
     transmitting: bool,
+    /// The codec-frame recording tap and the received over it has open.
+    /// Receive only: there is no transmit path to record.
+    rec: OverTap,
+}
+
+/// The recorder a link with audio carries: `nxdn` frames, each DN frame in
+/// the AMBE-3000's own bit order (as unamblify stores them). Only bits move.
+fn over_tap(backend: AmbeBackend) -> OverTap {
+    OverTap::new("nxdn", CaptureMode::Nxdn, backend.as_str())
 }
 
 /// `LinkState` has no numeric repr of its own — it is a protocol type and
@@ -396,15 +411,16 @@ impl NxdnLink {
     pub fn connect_with_audio(
         cfg: &NxdnConfig,
         audio: CallAudio,
+        trust: &astar_codec::vocoder_trust::VocoderTrust,
     ) -> Result<NxdnLink, ConsoleError> {
         // Hardware-only, exactly as D-Star and YSF: the AMBE-3000 in a
         // `ThumbDV` is the whole vocoder story, so a missing dongle is an
         // error naming its reason rather than a link that quietly makes no
         // sound.
-        let (ambe, backend) = open_ambe_stream(Some(AmbeBackend::Hardware), VocoderMode::YsfDn)
-            .ok_or_else(|| {
-                ConsoleError::Nxdn(astar_codec::ambe::classify_thumbdv_failure().message())
-            })?;
+        let (ambe, backend) =
+            open_ambe_stream(Some(AmbeBackend::Hardware), VocoderMode::YsfDn, trust).ok_or_else(
+                || ConsoleError::Nxdn(astar_codec::ambe::classify_thumbdv_failure(trust).message()),
+            )?;
         Self::connect_with_stream(cfg, audio, ambe, backend)
     }
 
@@ -431,6 +447,7 @@ impl NxdnLink {
             decoded: VecDeque::new(),
             next_release: None,
             transmitting: false,
+            rec: over_tap(backend),
         };
         Self::spawn(
             &cfg.host,
@@ -490,6 +507,9 @@ impl NxdnLink {
             .map_err(|e| ConsoleError::Nxdn(format!("socket timeout: {e}")))?;
 
         let shared = Arc::new(Shared::new());
+        let frame_tap = audio
+            .as_ref()
+            .map_or_else(TapSlot::default, |a| a.rec.slot());
 
         let thread = {
             let shared = Arc::clone(&shared);
@@ -503,6 +523,7 @@ impl NxdnLink {
             shared,
             thread: Some(thread),
             backend,
+            frame_tap,
         })
     }
 
@@ -523,6 +544,17 @@ impl NxdnLink {
             tx_dbfs: -60.0,
             rx_dbfs: -60.0,
         }
+    }
+
+    /// The codec-frame recording tap: install a [`astar_record::Tap`] here
+    /// and the link thread offers every received over to it as
+    /// [`FrameEvent`]s under `nxdn` — each DN frame in the chip's bit order
+    /// as it goes into the vocoder, then the 160 samples it decoded to. The
+    /// slot is shared: setting it on the returned handle reaches the live
+    /// link.
+    #[must_use]
+    pub fn frame_tap(&self) -> TapSlot<FrameEvent> {
+        self.frame_tap.clone()
     }
 
     /// Who has keyed up on this link, newest first — see
@@ -657,6 +689,12 @@ fn run(
         }
     }
 
+    // Close a received recording that is still open. Frames still in the
+    // vocoder never decode; the recorder trims a stream's undecoded tail.
+    if let Some(a) = audio.as_mut() {
+        a.rec.close(Dir::Rx);
+    }
+
     // Best effort: the reflector drops us on its own timeout anyway, and a
     // failed send here is not worth reporting to a caller that has gone.
     for datagram in fsm.unlink(Instant::now()) {
@@ -688,9 +726,6 @@ fn handle(
                 .store(u32::from(packet.src_id), Ordering::Relaxed);
             let src = packet.src_id.to_string();
             shared.heard.note("nxdn", &src);
-            if let Ok(mut slot) = shared.last_heard.lock() {
-                *slot = Some(src);
-            }
             let end = is_end_of_transmission(packet);
             shared.receiving.store(!end, Ordering::Relaxed);
             if let Some(a) = audio {
@@ -700,7 +735,7 @@ fn handle(
                 // on one chip is how both come out wrong. Only the voice is
                 // refused; the header above is still read.
                 if !a.transmitting {
-                    decode_frame(&packet.frame, a);
+                    decode_frame(&packet.frame, a, &src);
                     if end {
                         // The tail of a transmission is still working
                         // through the pipeline when its last frame arrives.
@@ -708,8 +743,12 @@ fn handle(
                         // and one shorter than the pipeline depth would be
                         // silent.
                         flush(a);
+                        a.rec.close(Dir::Rx);
                     }
                 }
+            }
+            if let Ok(mut slot) = shared.last_heard.lock() {
+                *slot = Some(src);
             }
             true
         }
@@ -779,6 +818,7 @@ fn rx_watchdog(
         && !a.transmitting
     {
         flush(a);
+        a.rec.close(Dir::Rx);
     }
 }
 
@@ -786,9 +826,22 @@ fn rx_watchdog(
 ///
 /// Everything that can go wrong here is a property of the frame, not of the
 /// link, so nothing in this function tears the session down.
-fn decode_frame(bytes: &[u8; astar_nxdn::FRAME_LEN], audio: &mut Audio) {
+///
+/// `talker` is the source id, for the recording: an over is recorded from
+/// its first frame that actually carries voice, so a header- or
+/// signalling-only over leaves nothing behind.
+fn decode_frame(bytes: &[u8; astar_nxdn::FRAME_LEN], audio: &mut Audio, talker: &str) {
     match unpack_voice(bytes) {
         Ok(frames) => {
+            let now = Instant::now();
+            if audio.rec.rotates(talker, now) {
+                // A new id (or the same one after a quiet spell) with no end
+                // between: finish the previous over — its queued and
+                // in-flight frames and their audio — inside its own
+                // recording before this one opens.
+                flush(audio);
+            }
+            audio.rec.note_rx(talker, now);
             audio.pending.extend(frames);
             pump(audio);
         }
@@ -814,12 +867,16 @@ fn pump(audio: &mut Audio) {
         let Some(frame) = audio.pending.pop_front() else {
             break;
         };
+        audio
+            .rec
+            .frame_with(Dir::Rx, || dn_frame_to_channel(&frame).to_vec());
         audio.ambe.submit_decode(frame.into());
     }
     // Decoded frames go to a queue, NOT straight to the bus: the vocoder
     // finishes a whole network frame's worth in ~30 ms and the bus wants
-    // them spread over 80. See `release`.
+    // them spread over 80. See `release`. Recorded here, at the decode.
     while let Some(pcm) = audio.ambe.poll_decoded() {
+        audio.rec.pcm(Dir::Rx, &pcm);
         audio.decoded.push_back(pcm);
     }
     release(audio, Instant::now());
@@ -966,10 +1023,12 @@ mod tests {
     use super::*;
     use astar_codec::ambe::ChannelFrame;
     use astar_codec::nxdn::{FRAMES_PER_FRAME, pack_voice_block};
+    use astar_codec::ysf::dn_frame_to_channel;
     use astar_nxdn::frame::{
         MESSAGE_TYPE_TX_REL, MESSAGE_TYPE_VCALL, RFCT_RDCH, STEAL_FACCH, STEAL_NONE, USC_SACCH_SS,
     };
     use astar_nxdn::{Callsign, FRAME_LEN, Reflector};
+    use astar_record::frames::{CaptureMode, Dir, FrameEvent};
     use std::sync::atomic::AtomicU32;
     use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -1080,6 +1139,7 @@ mod tests {
                 decoded: VecDeque::new(),
                 next_release: None,
                 transmitting: false,
+                rec: over_tap(AmbeBackend::Hardware),
             },
             rx_rx,
             tx_tx,
@@ -1136,6 +1196,188 @@ mod tests {
             end,
             frame,
         }
+    }
+
+    // ── Recording (the frame tap) ───────────────────────────────────────
+
+    /// Install a tap on `audio`'s recorder and hand back its far end.
+    fn tapped(audio: &Audio) -> Receiver<FrameEvent> {
+        let (tap, events) = astar_record::tap::tap_channel(256);
+        audio.rec.slot().set(Some(tap));
+        events
+    }
+
+    /// A received over goes under `nxdn`, named for its source id, with
+    /// each DN frame in the chip's bit order ahead of its audio.
+    #[test]
+    fn a_recorded_nxdn_over_goes_under_nxdn() {
+        let (mut audio, _rx) = test_audio();
+        let events = tapped(&audio);
+        let shared = Arc::new(Shared::new());
+        let (sock, addr, _peer) = udp_pair();
+        for (frame, start, end) in [
+            (voice_frame(), true, false),
+            (voice_frame(), false, false),
+            (header_frame(MESSAGE_TYPE_TX_REL), false, true),
+        ] {
+            assert!(handle(
+                &FsmAction::Data(Box::new(packet(frame, start, end))),
+                &sock,
+                addr,
+                &shared,
+                Some(&mut audio),
+            ));
+        }
+
+        let events: Vec<FrameEvent> = events.try_iter().collect();
+        let FrameEvent::Start {
+            dir: Dir::Rx,
+            network,
+            mode,
+            talker,
+            ..
+        } = &events[0]
+        else {
+            panic!("an over opens with Start: {:?}", events[0]);
+        };
+        assert_eq!(*mode, CaptureMode::Nxdn);
+        assert_eq!(*network, "nxdn");
+        assert_eq!(talker.as_deref(), Some(RADIO_ID.to_string().as_str()));
+        assert_eq!(events.last(), Some(&FrameEvent::End { dir: Dir::Rx }));
+
+        let (mut frames, mut pcm) = (Vec::new(), Vec::new());
+        for e in &events[1..events.len() - 1] {
+            match e {
+                FrameEvent::Frame {
+                    dir: Dir::Rx,
+                    bytes,
+                    seq: None,
+                } => frames.push(bytes.clone()),
+                FrameEvent::Pcm {
+                    dir: Dir::Rx,
+                    pcm: p,
+                } => {
+                    assert!(pcm.len() < frames.len(), "audio ahead of its frame");
+                    pcm.push(p[0]);
+                }
+                other => panic!("unexpected mid-over event {other:?}"),
+            }
+        }
+        let want: Vec<Vec<u8>> = (1..=4u8)
+            .chain(1..=4)
+            .map(|b| dn_frame_to_channel(&DnFrame::from_bytes([b, 0, 0, 0, 0, 0, 0])).to_vec())
+            .collect();
+        assert_eq!(frames, want);
+        assert_eq!(pcm, [1, 2, 3, 4, 1, 2, 3, 4]);
+    }
+
+    /// A different source id mid-over is a different talker: the first
+    /// recording closes before the second opens.
+    #[test]
+    fn a_new_source_id_opens_a_new_recording() {
+        let (mut audio, _rx) = test_audio();
+        let events = tapped(&audio);
+        let shared = Arc::new(Shared::new());
+        let (sock, addr, _peer) = udp_pair();
+        let mut second = packet(voice_frame(), true, false);
+        second.src_id = 7863;
+        for p in [packet(voice_frame(), true, false), second] {
+            handle(
+                &FsmAction::Data(Box::new(p)),
+                &sock,
+                addr,
+                &shared,
+                Some(&mut audio),
+            );
+        }
+        let edges: Vec<FrameEvent> = events
+            .try_iter()
+            .filter(|e| matches!(e, FrameEvent::Start { .. } | FrameEvent::End { .. }))
+            .collect();
+        assert_eq!(edges.len(), 3, "{edges:?}");
+        assert!(matches!(&edges[2], FrameEvent::Start { talker: Some(t), .. } if t == "7863"));
+        assert_eq!(edges[1], FrameEvent::End { dir: Dir::Rx });
+    }
+
+    /// A new source id with no end between, while the first one's frames
+    /// are still in flight: the first recording is played out and closed
+    /// with as many blocks of audio as frames, and the second opens clean.
+    #[test]
+    fn a_source_change_mid_pipeline_keeps_each_recording_paired() {
+        let (mut audio, _rx) = test_audio();
+        audio.ambe = Box::new(LatentVocoder {
+            queue: VecDeque::new(),
+            in_flight: 0,
+        });
+        let events = tapped(&audio);
+        let shared = Arc::new(Shared::new());
+        let (sock, addr, _peer) = udp_pair();
+        let mut second = packet(voice_frame(), true, false);
+        second.src_id = 7863;
+        handle(
+            &FsmAction::Data(Box::new(packet(voice_frame(), true, false))),
+            &sock,
+            addr,
+            &shared,
+            Some(&mut audio),
+        );
+        assert!(audio.ambe.in_flight() > 0, "frames must be in flight");
+        handle(
+            &FsmAction::Data(Box::new(second)),
+            &sock,
+            addr,
+            &shared,
+            Some(&mut audio),
+        );
+
+        let events: Vec<FrameEvent> = events.try_iter().collect();
+        let second_start = events
+            .iter()
+            .rposition(|e| matches!(e, FrameEvent::Start { .. }))
+            .expect("second recording");
+        let first = &events[..second_start];
+        assert_eq!(first.last(), Some(&FrameEvent::End { dir: Dir::Rx }));
+        let count = |evs: &[FrameEvent], pcm: bool| {
+            evs.iter()
+                .filter(|e| {
+                    if pcm {
+                        matches!(e, FrameEvent::Pcm { .. })
+                    } else {
+                        matches!(e, FrameEvent::Frame { .. })
+                    }
+                })
+                .count()
+        };
+        assert_eq!(count(first, false), FRAMES_PER_FRAME);
+        assert_eq!(count(first, true), FRAMES_PER_FRAME);
+        let second = &events[second_start..];
+        assert!(matches!(&second[0], FrameEvent::Start { talker: Some(t), .. } if t == "7863"));
+        assert!(
+            matches!(second[1], FrameEvent::Frame { .. }),
+            "the second recording opens on its own frame, not leftover audio"
+        );
+    }
+
+    /// A header and a terminator with no voice between open no recording.
+    #[test]
+    fn an_over_with_no_voice_records_nothing() {
+        let (mut audio, _rx) = test_audio();
+        let events = tapped(&audio);
+        let shared = Arc::new(Shared::new());
+        let (sock, addr, _peer) = udp_pair();
+        for (frame, start, end) in [
+            (header_frame(MESSAGE_TYPE_VCALL), true, false),
+            (header_frame(MESSAGE_TYPE_TX_REL), false, true),
+        ] {
+            handle(
+                &FsmAction::Data(Box::new(packet(frame, start, end))),
+                &sock,
+                addr,
+                &shared,
+                Some(&mut audio),
+            );
+        }
+        assert_eq!(events.try_iter().count(), 0, "no events, so no files");
     }
 
     // ── The link ────────────────────────────────────────────────────────
@@ -1215,7 +1457,7 @@ mod tests {
     #[test]
     fn a_voice_frame_becomes_four_frames_of_speech() {
         let (mut audio, rx) = test_audio();
-        decode_frame(&voice_frame(), &mut audio);
+        decode_frame(&voice_frame(), &mut audio, "");
         flush(&mut audio);
         let played: Vec<Vec<i16>> = rx.try_iter().map(|f| f.pcm).collect();
         assert_eq!(
@@ -1238,7 +1480,7 @@ mod tests {
     #[test]
     fn a_signalling_frame_is_not_decoded_as_voice() {
         let (mut audio, rx) = test_audio();
-        decode_frame(&header_frame(MESSAGE_TYPE_VCALL), &mut audio);
+        decode_frame(&header_frame(MESSAGE_TYPE_VCALL), &mut audio, "");
         flush(&mut audio);
         assert_eq!(rx.try_iter().count(), 0);
         assert!(audio.pending.is_empty());
@@ -1250,8 +1492,8 @@ mod tests {
     #[test]
     fn the_fourth_frame_of_a_burst_is_not_dropped() {
         let (mut audio, rx) = test_audio();
-        decode_frame(&voice_frame(), &mut audio);
-        decode_frame(&voice_frame(), &mut audio);
+        decode_frame(&voice_frame(), &mut audio, "");
+        decode_frame(&voice_frame(), &mut audio, "");
         flush(&mut audio);
         assert_eq!(rx.try_iter().count(), 2 * FRAMES_PER_FRAME);
         assert!(audio.pending.is_empty(), "the queue must drain");
@@ -1635,6 +1877,7 @@ mod tests {
             decoded: VecDeque::new(),
             next_release: None,
             transmitting: false,
+            rec: over_tap(AmbeBackend::Hardware),
         };
         let frame = voice_frame();
 
@@ -1651,7 +1894,7 @@ mod tests {
                     arrivals.push(Instant::now().duration_since(t0).as_secs_f64());
                 }
             }
-            decode_frame(&frame, &mut audio);
+            decode_frame(&frame, &mut audio, "");
             while rx_rx.try_recv().is_ok() {
                 arrivals.push(Instant::now().duration_since(t0).as_secs_f64());
             }

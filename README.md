@@ -126,6 +126,7 @@ One cargo workspace, one git history, three deliverables:
 | `apps/gui` | **astar** — the Iced client for Windows and Linux, same intended feature set. |
 | `bindings/` | The engine's own bindings: Swift (`AstarStation`, `AstarSerial`) and Python. |
 | `vendor/ambe-thumbdv` | The ThumbDV / DV3000 AMBE vocoder driver. An MIT/Apache-2.0 island — see [Licence](#licence). |
+| `vendor/codec2` | Codec 2, the M17 voice codec (the pure-Rust `codec2` crate, unmodified). An LGPL-2.1-only AND MIT island — see [Licence](#licence). |
 
 **Architecture rule: fat core, thin views.** All protocol / audio / PTT logic
 lives in `crates/`. The macOS and Iced clients are views over the same engine,
@@ -249,9 +250,10 @@ cp deploy/node.toml.example node.toml   # then edit
 just node                               # astar-server serve --config node.toml
 ```
 
-`node.toml` is **secret-free by design**: the registration secret comes from
-the environment (`ALLSTAR_SECRET`) or is POSTed to the loopback control port
-at runtime. Never put a password in it.
+`node.toml` is **secret-free by design**: credentials live in
+`credentials.toml` beside it (mode 0600, written by the settings page at
+`http://127.0.0.1:8730/settings`), or come from the environment or the
+loopback control port. Never put a password in `node.toml`.
 
 ---
 
@@ -291,9 +293,13 @@ self-built app both have M17 with nothing else installed.
 **Everything else resolves a system `libcodec2` at runtime** — the engine,
 `astar-server` and the Iced client `dlopen` it, trying `IAX_CODEC2_PATH`, then
 configured search directories, then `/opt/homebrew/lib`, `/usr/local/lib` and
-`/usr/lib`. A build that finds neither a system copy nor a linked one reports
-M17 as unavailable, which is why the network picker can hide M17 on an
-otherwise working build.
+`/usr/lib`, and on Linux also the multiarch `/usr/lib/x86_64-linux-gnu` and
+`/usr/lib/aarch64-linux-gnu` where Debian and Ubuntu put it. In each directory
+it tries `libcodec2.so` and then the versioned `libcodec2.so.1.2`, `.1.1` and
+`.1.0`, so a distribution's runtime package is enough without its `-dev`
+package (macOS: `libcodec2.dylib`). A build that finds neither a system copy
+nor a linked one reports M17 as unavailable, which is why the network picker
+can hide M17 on an otherwise working build.
 
 The runtime path wins where both exist: a healthy system library is preferred
 and the linked copy is the fallback. Keeping Codec 2 out of every *default*
@@ -354,16 +360,17 @@ notices and the written offer that goes with static linking.
 
 ### Third-party components
 
-These keep their own terms and are **not** covered by the AGPL. The first three
+These keep their own terms and are **not** covered by the AGPL. The first four
 rows are paths in this repository; the last two are upstream dependencies:
 
 | Path or crate | Component | Licence |
 |---|---|---|
 | `vendor/ambe-thumbdv` | ThumbDV / DV3000 AMBE driver (Rob's own, vendored in) | MIT **OR** Apache-2.0 — see its `LICENSE-MIT`, `LICENSE-APACHE`, and `VENDORED.md` |
+| `vendor/codec2` (the `codec2` crate, vendored unmodified) / system `libcodec2` | Codec 2 — the M17 voice codec. Opt-in features only, never in a default feature set | `LGPL-2.1-only AND MIT` / LGPL-2.1 — see its `LICENSE-LGPL-2.1` and `VENDORED.md`; notices and relink offer in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) |
 | `apps/gui/assets/fonts` | Inter typeface | SIL Open Font License 1.1 |
 | `harness/asterisk_parity/c_iaxclient/vendored/libiax2` | The historical C libiax2, used only as a parity reference by the test harness — never linked into a shipped binary | GPL / LGPL, see its `COPYING` and `COPYING.LIB` |
-| `codec2` crate / system `libcodec2` | Codec 2 — the M17 voice codec. Opt-in features only, never in a default feature set | `LGPL-2.1-only AND MIT` / LGPL-2.1 — notices and relink offer in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) |
 | `nnnoiseless` crate (dependency, not vendored) | RNNoise — mic noise reduction. Compiled into every build; the model is a const array in the crate | BSD-3-Clause — five copyright lines reproduced in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) |
+| `oxideav-gsm` crate (dependency, not vendored) | GSM 06.10 — the EchoLink voice codec, also used for GSM-only AllStar nodes. `astar-codec` feature `gsm` | MIT — notice and patent reasoning in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) §8 |
 
 Everything else — every `astar-*` crate, both applications, the bindings, the
 scripts and the docs — is AGPL-3.0-only. Every first-party `.rs`, `.swift`,

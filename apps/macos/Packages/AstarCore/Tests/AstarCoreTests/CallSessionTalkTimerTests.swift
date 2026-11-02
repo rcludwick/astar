@@ -114,6 +114,31 @@ final class CallSessionTalkTimerTests: XCTestCase {
             .red)
     }
 
+    func testAnEchoLinkCallIgnoresAnAllStarFavouriteWithTheSameNumber() {
+        let fake = FakeStation()
+        let directory = UserDefaultsNodeDirectoryStore(scratchDefaults())
+        let session = CallSession(station: fake, directoryStore: directory)
+        // An AllStar favourite 9999 with its timer switched off.
+        session.addFavorite(node: "9999", label: "AllStar 9999")
+        let id = directory.all().first { $0.node == "9999" }!.id
+        session.directorySetTalkTimer(id: id, enabled: false, seconds: nil)
+
+        // EchoLink node 9999 is a different station: the global default holds.
+        session.setDialedNode("9999")
+        session.setActiveCallNetwork(.echolink)
+        fake.snapshotToReturn = keyedSnapshot(true)
+        session.poll()
+        guard let since = session.keyedSince else { return XCTFail("expected keyedSince") }
+        XCTAssertEqual(
+            session.talkTimerPhase(
+                defaultEnabled: true, defaultLimitSeconds: 120, now: since.addingTimeInterval(130)),
+            .red, "the favourite's override must not reach an EchoLink call")
+
+        // The same number on AllStar does take the override.
+        session.setActiveCallNetwork(.allstar)
+        XCTAssertNil(session.talkTimerPhase(defaultEnabled: true, defaultLimitSeconds: 120))
+    }
+
     func testPhaseNilWhenDisabledForNode() {
         let fake = FakeStation()
         let directory = UserDefaultsNodeDirectoryStore(scratchDefaults())

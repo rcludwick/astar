@@ -1,0 +1,1710 @@
+nodebench-asl3: codecs = slin16,slin,ulaw
+Unable to install capabilities.
+[0mAsterisk 22.10.1+asl3-3.10.5-1.deb12, Copyright (C) 1999 - 2025, Sangoma Technologies Corporation and others.
+Created by Mark Spencer <markster@digium.com>
+Asterisk comes with ABSOLUTELY NO WARRANTY; type 'core show warranty' for details.
+This is free software, with components licensed under the GNU General Public
+License version 2 and other licenses; you are welcome to redistribute it under
+certain conditions. Type 'core show license' for details.
+=========================================================================
+Running as user 'asterisk'
+Running under group 'asterisk'
+PBX UUID: cffab55c-bf4d-4d5c-97a5-b100c7c775d8
+Could not find option 'minimum_size' with type 'threadpool' in module 'stasis'
+[1;30m [0mAsterisk PBX Core Initializing
+[1;30m [0mAsterisk Dynamic Loader Starting:
+[2026-10-11 20:40:55.869] [1;33mNOTICE[0m[1]: [1;37mloader.c[0m:[1;37m2568[0m [1;37mload_modules[0m: 69 modules will be loaded.
+[2026-10-11 20:40:55.877] [1;33mNOTICE[0m[1]: [1;37mcdr.c[0m:[1;37m4656[0m [1;37mcdr_toggle_runtime_options[0m: CDR simple logging enabled.
+[2026-10-11 20:40:55.878] [1;33mNOTICE[0m[1]: [1;37mdnsmgr.c[0m:[1;37m493[0m [1;37mdo_reload[0m: Managed DNS entries will be refreshed every 300 seconds.
+[2026-10-11 20:40:55.881] [1;33mNOTICE[0m[1]: [1;37mindications.c[0m:[1;37m1100[0m [1;37mload_indications[0m: Default country for indication tones: us
+[2026-10-11 20:40:55.881] [1;33mNOTICE[0m[1]: [1;37mindications.c[0m:[1;37m424[0m [1;37mast_set_indication_country[0m: Setting default indication country to 'us'
+[1;30m  == [0mBinding IAX2 to address 0.0.0.0:4569
+[1;30m  == [0m10 helper threads started
+[1;30m  == [0mIAX Ready and Listening
+[1;30m    -- [0mLoaded provisioning template 'default'
+[1;30m  == [0mSetting global variable 'TAILFILEINDEX' to '0'
+[1;32mAsterisk Ready.[0m
+[2026-10-11 20:40:56.155] [1;33mNOTICE[0m[48]: [1;37mapp_rpt.c[0m:[1;37m6082[0m [1;37mload_config[0m: Domain used for DNS node lookup is: nodes.allstarlink.org
+[1;30m    -- [0mLoading initial config for repeater 1999
+[2026-10-11 20:40:56.155] [1;33mNOTICE[0m[48]: [1;37mapp_rpt.c[0m:[1;37m6311[0m [1;37mrpt_master[0m: Normal Repeater Init  1999    
+[1;30m    -- [0mChannel Local/LocalTX@default-00000001;2 joined 'softmix' base-bridge <d9a302d3-4b93-4678-b70c-a43cde51752a>
+[1;30m    -- [0mChannel Recorder/PChan-00000000;2 joined 'softmix' base-bridge <d2193ae3-028f-4711-a4e6-c7837da9b9ad>
+[1;30m    -- [0mChannel Announcer/RXPChan-00000003;2 joined 'softmix' base-bridge <d2193ae3-028f-4711-a4e6-c7837da9b9ad>
+[1;30m    -- [0mChannel Recorder/MonChan-00000002;2 joined 'softmix' base-bridge <d9a302d3-4b93-4678-b70c-a43cde51752a>
+[1;30m    -- [0mChannel Announcer/TXPChan-00000004;2 joined 'softmix' base-bridge <d9a302d3-4b93-4678-b70c-a43cde51752a>
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+IAX2 Debugging Enabled
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+app_rpt Debugging enabled, previous level: 7, new level: 7
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Tx-Frame Retry[000] -- OSeqno: 000 ISeqno: 000 Type: IAX     Subclass: NEW    
+[1;30m [0m   Timestamp: 00016ms  SCall: 16094  DCall: 00000 127.0.0.1:4570
+[1;30m [0m   VERSION         : 2
+[1;30m [0m   CALLED NUMBER   : 1998
+[1;30m [0m   CODEC_PREFS     : (slin|slin16|ulaw)
+[1;30m [0m   CALLING NUMBER  : 1999
+[1;30m [0m   CALLING PRESNTN : 0
+[1;30m [0m   CALLING TYPEOFN : 0
+[1;30m [0m   CALLING TRANSIT : 0
+[1;30m [0m   CALLING ANI2    : 0
+[1;30m [0m   LANGUAGE        : en
+[1;30m [0m   USERNAME        : radio
+[1;30m [0m   FORMAT          : 64
+[1;30m [0m   FORMAT2         : slin
+[1;30m [0m   CAPABILITY      : 32836
+[1;30m [0m   CAPABILITY2     : Unknown
+[1;30m [0m   ADSICPE         : 2
+[1;30m [0m   DATE TIME       : 2026-10-11  20:40:58
+[1;30m [0m   CALLTOKEN       : Present
+
+[1;30m    -- [0mChannel Announcer/IAXLink-00000005;2 joined 'softmix' base-bridge <d2193ae3-028f-4711-a4e6-c7837da9b9ad>
+Rx-Frame Retry[ No] -- OSeqno: 000 ISeqno: 000 Type: IAX     Subclass: CTOKEN 
+[1;30m [0m   Timestamp: 00000ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m [0m   CALLTOKEN       : 16 bytes
+
+Tx-Frame Retry[000] -- OSeqno: 000 ISeqno: 000 Type: IAX     Subclass: NEW    
+[1;30m [0m   Timestamp: 00019ms  SCall: 16094  DCall: 00000 127.0.0.1:4570
+[1;30m [0m   VERSION         : 2
+[1;30m [0m   CALLED NUMBER   : 1998
+[1;30m [0m   CODEC_PREFS     : (slin|slin16|ulaw)
+[1;30m [0m   CALLING NUMBER  : 1999
+[1;30m [0m   CALLING PRESNTN : 0
+[1;30m [0m   CALLING TYPEOFN : 0
+[1;30m [0m   CALLING TRANSIT : 0
+[1;30m [0m   CALLING ANI2    : 0
+[1;30m [0m   LANGUAGE        : en
+[1;30m [0m   USERNAME        : radio
+[1;30m [0m   FORMAT          : 64
+[1;30m [0m   FORMAT2         : slin
+[1;30m [0m   CAPABILITY      : 32836
+[1;30m [0m   CAPABILITY2     : Unknown
+[1;30m [0m   ADSICPE         : 2
+[1;30m [0m   DATE TIME       : 2026-10-11  20:40:58
+[1;30m [0m   CALLTOKEN       : 16 bytes
+
+Rx-Frame Retry[ No] -- OSeqno: 001 ISeqno: 001 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 00019ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 000 ISeqno: 000 Type: IAX     Subclass: ACCEPT 
+[1;30m [0m   Timestamp: 00000ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m [0m   FORMAT          : 64
+
+[1;30m    -- [0mChannel Announcer/Telemetry-00000006;2 joined 'softmix' base-bridge <d9a302d3-4b93-4678-b70c-a43cde51752a>
+[1;30m    -- [0mCall accepted by 127.0.0.1:4570 (format slin)
+[1;30m    -- [0mFormat for call is (slin)
+Tx-Frame Retry[-01] -- OSeqno: 000 ISeqno: 001 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 00022ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 001 ISeqno: 000 Type: CONTROL Subclass: ANSWER 
+[1;30m [0m   Timestamp: 00000ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[-01] -- OSeqno: 000 ISeqno: 002 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 00034ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 002 ISeqno: 000 Type: VOICE   Subclass: 64
+[1;30m [0m   Timestamp: 00020ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[-01] -- OSeqno: 000 ISeqno: 003 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 00020ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 001 ISeqno: 003 Type: TEXT    Subclass: 0
+[1;30m [0m   Timestamp: 00037ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 003 ISeqno: 001 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 00037ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 002 ISeqno: 003 Type: TEXT    Subclass: 0
+[1;30m [0m   Timestamp: 00040ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 003 ISeqno: 003 Type: TEXT    Subclass: 0
+[1;30m [0m   Timestamp: 00043ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 004 ISeqno: 003 Type: TEXT    Subclass: 0
+[1;30m [0m   Timestamp: 00046ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 003 ISeqno: 002 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 00040ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 003 ISeqno: 003 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 00043ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 003 ISeqno: 004 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 00046ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 005 ISeqno: 003 Type: TEXT    Subclass: 0
+[1;30m [0m   Timestamp: 00302ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 003 ISeqno: 005 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 00302ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[2026-10-11 20:41:00.561] [1;31mWARNING[0m[71]: [1;37mapp_rpt.c[0m:[1;37m3496[0m [1;37mperiodic_process_link[0m: 0xfffec40014b8 newkeytimer expired on connected node, setting newkey from RADIO_KEY_NOT_ALLOWED to RADIO_KEY_ALLOWED.
+Tx-Frame Retry[000] -- OSeqno: 006 ISeqno: 003 Type: VOICE   Subclass: 64
+[1;30m [0m   Timestamp: 02040ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 003 ISeqno: 006 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 02040ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mChannel Announcer/Telemetry-00000007;2 joined 'softmix' base-bridge <d9a302d3-4b93-4678-b70c-a43cde51752a>
+Rx-Frame Retry[ No] -- OSeqno: 003 ISeqno: 006 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 02001ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 004 ISeqno: 006 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 02001ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 007 ISeqno: 004 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 02001ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 101
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 008 ISeqno: 005 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 02001ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 005 ISeqno: 007 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 02001ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 005 ISeqno: 008 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 02001ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mChannel Announcer/Telemetry-00000006;2 left 'softmix' base-bridge <d9a302d3-4b93-4678-b70c-a43cde51752a>
+[1;30m    -- [0mChannel Announcer/Telemetry-00000008;2 joined 'softmix' base-bridge <d9a302d3-4b93-4678-b70c-a43cde51752a>
+[1;30m    -- [0mChannel Announcer/Telemetry-00000007;2 left 'softmix' base-bridge <d9a302d3-4b93-4678-b70c-a43cde51752a>
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Tx-Frame Retry[001] -- OSeqno: 008 ISeqno: 005 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 02001ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 005 ISeqno: 009 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 02001ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 005 ISeqno: 009 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 04002ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 006 ISeqno: 009 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 04002ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 009 ISeqno: 006 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 04002ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 201
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 010 ISeqno: 007 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 04002ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 007 ISeqno: 010 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 04002ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 007 ISeqno: 011 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 04002ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0m<Announcer/Telemetry-00000008;1> Playing 'rpt/node.gsm' (language 'en')
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0m<Announcer/Telemetry-00000008;1> Playing 'digits/1.ulaw' (language 'en')
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 007 ISeqno: 011 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 06004ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 008 ISeqno: 011 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 06004ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 011 ISeqno: 008 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 06004ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 301
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 012 ISeqno: 009 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 06004ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m    -- [0m<Announcer/Telemetry-00000008;1> Playing 'digits/9.ulaw' (language 'en')
+Rx-Frame Retry[ No] -- OSeqno: 009 ISeqno: 012 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 06004ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 009 ISeqno: 013 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 06004ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0m<Announcer/Telemetry-00000008;1> Playing 'digits/9.ulaw' (language 'en')
+[1;30m    -- [0m<Announcer/Telemetry-00000008;1> Playing 'digits/8.ulaw' (language 'en')
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 009 ISeqno: 013 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 08005ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 010 ISeqno: 013 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 08005ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 013 ISeqno: 010 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 08005ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 401
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 014 ISeqno: 011 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 08005ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 011 ISeqno: 014 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 08005ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 011 ISeqno: 015 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 08005ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0m<Announcer/Telemetry-00000008;1> Playing 'rpt/connected-to.gsm' (language 'en')
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0m<Announcer/Telemetry-00000008;1> Playing 'rpt/node.gsm' (language 'en')
+Tx-Frame Retry[000] -- OSeqno: 015 ISeqno: 011 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 10043ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 011 ISeqno: 016 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 10043ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 011 ISeqno: 016 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 10043ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[-01] -- OSeqno: 016 ISeqno: 012 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 10043ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 012 ISeqno: 016 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 10006ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 013 ISeqno: 016 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 10006ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 016 ISeqno: 013 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 10006ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 501
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 017 ISeqno: 014 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 10006ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 014 ISeqno: 017 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 10006ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 014 ISeqno: 018 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 10006ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0m<Announcer/Telemetry-00000008;1> Playing 'digits/1.ulaw' (language 'en')
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0m<Announcer/Telemetry-00000008;1> Playing 'digits/9.ulaw' (language 'en')
+Rx-Frame Retry[ No] -- OSeqno: 014 ISeqno: 018 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 12006ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 015 ISeqno: 018 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 12006ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 018 ISeqno: 015 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 12006ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 601
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 019 ISeqno: 016 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 12006ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 016 ISeqno: 019 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 12006ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 016 ISeqno: 020 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 12006ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0m<Announcer/Telemetry-00000008;1> Playing 'digits/9.ulaw' (language 'en')
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0m<Announcer/Telemetry-00000008;1> Playing 'digits/9.ulaw' (language 'en')
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 016 ISeqno: 020 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 14008ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 017 ISeqno: 020 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 14008ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 020 ISeqno: 017 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 14008ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 702
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 021 ISeqno: 018 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 14008ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 018 ISeqno: 021 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 14008ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 018 ISeqno: 022 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 14008ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mChannel Announcer/Telemetry-00000008;2 left 'softmix' base-bridge <d9a302d3-4b93-4678-b70c-a43cde51752a>
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 018 ISeqno: 022 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 16008ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 019 ISeqno: 022 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 16008ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 022 ISeqno: 019 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 16008ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 802
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 023 ISeqno: 020 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 16008ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 020 ISeqno: 023 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 16008ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 020 ISeqno: 024 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 16008ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mChannel Announcer/Telemetry-00000009;2 joined 'softmix' base-bridge <d9a302d3-4b93-4678-b70c-a43cde51752a>
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 020 ISeqno: 024 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 18008ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 021 ISeqno: 024 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 18008ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 024 ISeqno: 021 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 18008ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 901
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 025 ISeqno: 022 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 18008ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 022 ISeqno: 025 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 18008ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 022 ISeqno: 026 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 18008ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mChannel Announcer/Telemetry-00000009;2 left 'softmix' base-bridge <d9a302d3-4b93-4678-b70c-a43cde51752a>
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Tx-Frame Retry[000] -- OSeqno: 026 ISeqno: 022 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 20040ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 022 ISeqno: 027 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 20040ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 022 ISeqno: 027 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 20040ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[-01] -- OSeqno: 027 ISeqno: 023 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 20040ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 023 ISeqno: 027 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 20009ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 024 ISeqno: 027 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 20009ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 027 ISeqno: 024 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 20009ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 1001
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 028 ISeqno: 025 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 20009ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 025 ISeqno: 028 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 20009ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 025 ISeqno: 029 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 20009ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Tx-Frame Retry[000] -- OSeqno: 029 ISeqno: 025 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 21038ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 025 ISeqno: 030 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 21038ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 025 ISeqno: 030 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 21038ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[-01] -- OSeqno: 030 ISeqno: 026 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 21038ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 026 ISeqno: 030 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 22010ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 027 ISeqno: 030 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 22010ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 030 ISeqno: 027 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 22010ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 1102
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 031 ISeqno: 028 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 22010ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 028 ISeqno: 031 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 22010ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 028 ISeqno: 032 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 22010ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 028 ISeqno: 032 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 24010ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 029 ISeqno: 032 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 24010ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 032 ISeqno: 029 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 24010ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 1202
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 033 ISeqno: 030 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 24010ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 030 ISeqno: 033 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 24010ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 030 ISeqno: 034 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 24010ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 030 ISeqno: 034 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 26011ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 031 ISeqno: 034 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 26011ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 034 ISeqno: 031 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 26011ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 1302
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 035 ISeqno: 032 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 26011ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 032 ISeqno: 035 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 26011ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 032 ISeqno: 036 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 26011ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 032 ISeqno: 036 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 28011ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 033 ISeqno: 036 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 28011ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 036 ISeqno: 033 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 28011ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 1402
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 037 ISeqno: 034 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 28011ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 034 ISeqno: 037 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 28011ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 034 ISeqno: 038 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 28011ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Tx-Frame Retry[000] -- OSeqno: 038 ISeqno: 034 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 30041ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 034 ISeqno: 039 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 30041ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 034 ISeqno: 039 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 30041ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[-01] -- OSeqno: 039 ISeqno: 035 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 30041ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 035 ISeqno: 039 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 30012ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 036 ISeqno: 039 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 30012ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 039 ISeqno: 036 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 30012ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 1502
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 040 ISeqno: 037 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 30012ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 037 ISeqno: 040 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 30012ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 037 ISeqno: 041 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 30012ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 041 ISeqno: 037 Type: TEXT    Subclass: 0
+[1;30m [0m   Timestamp: 30323ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 037 ISeqno: 042 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 30323ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 037 ISeqno: 042 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 32013ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 038 ISeqno: 042 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 32013ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 042 ISeqno: 038 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 32013ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 1602
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 043 ISeqno: 039 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 32013ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 039 ISeqno: 043 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 32013ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 039 ISeqno: 044 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 32013ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 039 ISeqno: 044 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 34014ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 040 ISeqno: 044 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 34014ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 044 ISeqno: 040 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 34014ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 1702
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 045 ISeqno: 041 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 34014ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 041 ISeqno: 045 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 34014ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 041 ISeqno: 046 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 34014ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 041 ISeqno: 046 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 36017ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 042 ISeqno: 046 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 36017ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 046 ISeqno: 042 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 36017ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 1802
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 047 ISeqno: 043 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 36017ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 043 ISeqno: 047 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 36017ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 043 ISeqno: 048 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 36017ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 043 ISeqno: 048 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 38019ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 044 ISeqno: 048 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 38019ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 048 ISeqno: 044 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 38019ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 1902
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 049 ISeqno: 045 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 38019ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 045 ISeqno: 049 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 38019ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 045 ISeqno: 050 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 38019ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Tx-Frame Retry[000] -- OSeqno: 050 ISeqno: 045 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 40041ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 045 ISeqno: 051 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 40041ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 045 ISeqno: 051 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 40041ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[-01] -- OSeqno: 051 ISeqno: 046 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 40041ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 046 ISeqno: 051 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 40020ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 047 ISeqno: 051 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 40020ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 051 ISeqno: 047 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 40020ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 2002
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 052 ISeqno: 048 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 40020ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 048 ISeqno: 052 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 40020ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 048 ISeqno: 053 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 40020ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Tx-Frame Retry[000] -- OSeqno: 053 ISeqno: 048 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 42038ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 048 ISeqno: 054 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 42038ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 048 ISeqno: 054 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 42038ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[-01] -- OSeqno: 054 ISeqno: 049 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 42038ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 049 ISeqno: 054 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 42022ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 050 ISeqno: 054 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 42022ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 054 ISeqno: 050 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 42022ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 2102
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 055 ISeqno: 051 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 42022ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 051 ISeqno: 055 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 42022ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 051 ISeqno: 056 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 42022ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 051 ISeqno: 056 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 44024ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 056 ISeqno: 052 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 44024ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 2202
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Rx-Frame Retry[ No] -- OSeqno: 052 ISeqno: 056 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 44024ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 053 ISeqno: 057 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 44024ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 057 ISeqno: 053 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 44024ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 053 ISeqno: 058 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 44024ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 053 ISeqno: 058 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 46024ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 054 ISeqno: 058 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 46024ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 058 ISeqno: 054 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 46024ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 2302
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 059 ISeqno: 055 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 46024ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 055 ISeqno: 059 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 46024ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 055 ISeqno: 060 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 46024ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 055 ISeqno: 060 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 48087ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 056 ISeqno: 060 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 48087ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 060 ISeqno: 056 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 48087ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 2
+[1;30m [0m   RR_LOSS         : 16777222
+[1;30m [0m   RR_PKTS         : 2392
+[1;30m [0m   RR_DELAY        : 60
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 0
+
+Tx-Frame Retry[000] -- OSeqno: 061 ISeqno: 057 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 48087ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 057 ISeqno: 061 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 48087ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 057 ISeqno: 062 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 48087ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Tx-Frame Retry[000] -- OSeqno: 062 ISeqno: 057 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 49817ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 057 ISeqno: 063 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 49817ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 057 ISeqno: 063 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 49817ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[-01] -- OSeqno: 063 ISeqno: 058 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 49817ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 058 ISeqno: 063 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 50089ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 059 ISeqno: 063 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 50089ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 063 ISeqno: 059 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 50089ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1520
+[1;30m [0m   RR_LOSS         : 83886081
+[1;30m [0m   RR_PKTS         : 2429
+[1;30m [0m   RR_DELAY        : 1000
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 064 ISeqno: 060 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 50089ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 060 ISeqno: 064 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 50089ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 060 ISeqno: 065 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 50089ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 060 ISeqno: 065 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 52091ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 061 ISeqno: 065 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 52091ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 065 ISeqno: 061 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 52091ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1534
+[1;30m [0m   RR_LOSS         : 201326593
+[1;30m [0m   RR_PKTS         : 2529
+[1;30m [0m   RR_DELAY        : 1000
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 066 ISeqno: 062 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 52091ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 062 ISeqno: 066 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 52091ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 062 ISeqno: 067 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 52091ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 062 ISeqno: 067 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 54093ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 063 ISeqno: 067 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 54093ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 067 ISeqno: 063 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 54093ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1534
+[1;30m [0m   RR_LOSS         : 285212673
+[1;30m [0m   RR_PKTS         : 2629
+[1;30m [0m   RR_DELAY        : 1000
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 068 ISeqno: 064 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 54093ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 064 ISeqno: 068 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 54093ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 064 ISeqno: 069 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 54093ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 064 ISeqno: 069 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 56093ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 065 ISeqno: 069 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 56093ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 069 ISeqno: 065 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 56093ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1534
+[1;30m [0m   RR_LOSS         : 352321537
+[1;30m [0m   RR_PKTS         : 2729
+[1;30m [0m   RR_DELAY        : 1000
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 070 ISeqno: 066 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 56093ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 066 ISeqno: 070 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 56093ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 066 ISeqno: 071 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 56093ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 066 ISeqno: 071 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 58096ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 067 ISeqno: 071 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 58096ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 071 ISeqno: 067 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 58096ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 1534
+[1;30m [0m   RR_LOSS         : 402653185
+[1;30m [0m   RR_PKTS         : 2829
+[1;30m [0m   RR_DELAY        : 1000
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 072 ISeqno: 068 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 58096ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 068 ISeqno: 072 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 58096ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 068 ISeqno: 073 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 58096ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Tx-Frame Retry[000] -- OSeqno: 073 ISeqno: 068 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 59803ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 068 ISeqno: 074 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 59803ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 068 ISeqno: 074 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 59803ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[-01] -- OSeqno: 074 ISeqno: 069 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 59803ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 069 ISeqno: 074 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 60098ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 070 ISeqno: 074 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 60098ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 074 ISeqno: 070 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 60098ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 385875968
+[1;30m [0m   RR_PKTS         : 2930
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 075 ISeqno: 071 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 60098ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 071 ISeqno: 075 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 60098ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 071 ISeqno: 076 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 60098ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 076 ISeqno: 071 Type: TEXT    Subclass: 0
+[1;30m [0m   Timestamp: 60103ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 071 ISeqno: 077 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 60103ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 071 ISeqno: 077 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 62102ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 072 ISeqno: 077 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 62102ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 077 ISeqno: 072 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 62102ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 318767104
+[1;30m [0m   RR_PKTS         : 3029
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Rx-Frame Retry[ No] -- OSeqno: 073 ISeqno: 078 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 62102ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 078 ISeqno: 073 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 62102ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 073 ISeqno: 079 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 62102ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Tx-Frame Retry[000] -- OSeqno: 079 ISeqno: 073 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 62800ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 073 ISeqno: 080 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 62800ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 073 ISeqno: 080 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 62800ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[-01] -- OSeqno: 080 ISeqno: 074 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 62800ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 074 ISeqno: 080 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 64103ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 075 ISeqno: 080 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 64103ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 080 ISeqno: 075 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 64103ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 251658240
+[1;30m [0m   RR_PKTS         : 3130
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 081 ISeqno: 076 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 64103ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 076 ISeqno: 081 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 64103ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 076 ISeqno: 082 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 64103ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 076 ISeqno: 082 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 66104ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 077 ISeqno: 082 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 66104ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 082 ISeqno: 077 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 66104ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 201326592
+[1;30m [0m   RR_PKTS         : 3230
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 083 ISeqno: 078 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 66104ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 078 ISeqno: 083 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 66104ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 078 ISeqno: 084 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 66104ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 078 ISeqno: 084 Type: VOICE   Subclass: 64
+[1;30m [0m   Timestamp: 65540ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[-01] -- OSeqno: 084 ISeqno: 079 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 65540ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 079 ISeqno: 084 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 68105ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 080 ISeqno: 084 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 68105ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 084 ISeqno: 080 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 68105ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 167772160
+[1;30m [0m   RR_PKTS         : 3330
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 085 ISeqno: 081 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 68105ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 081 ISeqno: 085 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 68105ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 081 ISeqno: 086 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 68105ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Tx-Frame Retry[000] -- OSeqno: 086 ISeqno: 081 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 69801ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 081 ISeqno: 087 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 69801ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 081 ISeqno: 087 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 69801ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[-01] -- OSeqno: 087 ISeqno: 082 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 69801ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 082 ISeqno: 087 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 70106ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 083 ISeqno: 087 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 70106ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 087 ISeqno: 083 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 70106ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 134217728
+[1;30m [0m   RR_PKTS         : 3430
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 088 ISeqno: 084 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 70106ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 084 ISeqno: 088 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 70106ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 084 ISeqno: 089 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 70106ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 084 ISeqno: 089 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 72107ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 085 ISeqno: 089 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 72107ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 089 ISeqno: 085 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 72107ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 100663296
+[1;30m [0m   RR_PKTS         : 3530
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 090 ISeqno: 086 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 72107ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 086 ISeqno: 090 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 72107ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 086 ISeqno: 091 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 72107ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 086 ISeqno: 091 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 74109ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 087 ISeqno: 091 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 74109ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 091 ISeqno: 087 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 74109ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 83886080
+[1;30m [0m   RR_PKTS         : 3630
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 092 ISeqno: 088 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 74109ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 088 ISeqno: 092 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 74109ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 088 ISeqno: 093 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 74109ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 088 ISeqno: 093 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 76109ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 089 ISeqno: 093 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 76109ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 093 ISeqno: 089 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 76109ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 67108864
+[1;30m [0m   RR_PKTS         : 3730
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 094 ISeqno: 090 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 76109ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 090 ISeqno: 094 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 76109ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 090 ISeqno: 095 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 76109ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 090 ISeqno: 095 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 78112ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 091 ISeqno: 095 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 78112ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 095 ISeqno: 091 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 78112ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 50331648
+[1;30m [0m   RR_PKTS         : 3830
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 096 ISeqno: 092 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 78112ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 092 ISeqno: 096 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 78112ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 092 ISeqno: 097 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 78112ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Tx-Frame Retry[000] -- OSeqno: 097 ISeqno: 092 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 79802ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 092 ISeqno: 098 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 79802ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 092 ISeqno: 098 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 79802ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[-01] -- OSeqno: 098 ISeqno: 093 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 79802ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 093 ISeqno: 098 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 80114ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 094 ISeqno: 098 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 80114ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 098 ISeqno: 094 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 80114ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 33554432
+[1;30m [0m   RR_PKTS         : 3930
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 099 ISeqno: 095 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 80114ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 095 ISeqno: 099 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 80114ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 095 ISeqno: 100 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 80114ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 095 ISeqno: 100 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 82114ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 096 ISeqno: 100 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 82114ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 100 ISeqno: 096 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 82114ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 33554432
+[1;30m [0m   RR_PKTS         : 4030
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 101 ISeqno: 097 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 82114ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 097 ISeqno: 101 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 82114ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 097 ISeqno: 102 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 82114ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Tx-Frame Retry[000] -- OSeqno: 102 ISeqno: 097 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 83799ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 097 ISeqno: 103 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 83799ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 097 ISeqno: 103 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 83799ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[-01] -- OSeqno: 103 ISeqno: 098 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 83799ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 098 ISeqno: 103 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 84117ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 099 ISeqno: 103 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 84117ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 103 ISeqno: 099 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 84117ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 16777216
+[1;30m [0m   RR_PKTS         : 4130
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 104 ISeqno: 100 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 84117ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 100 ISeqno: 104 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 84117ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 100 ISeqno: 105 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 84117ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 100 ISeqno: 105 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 86120ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 101 ISeqno: 105 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 86120ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 105 ISeqno: 101 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 86120ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 16777216
+[1;30m [0m   RR_PKTS         : 4231
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 106 ISeqno: 102 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 86120ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 102 ISeqno: 106 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 86120ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 102 ISeqno: 107 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 86120ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 102 ISeqno: 107 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 88120ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 103 ISeqno: 107 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 88120ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 107 ISeqno: 103 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 88120ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 16777216
+[1;30m [0m   RR_PKTS         : 4331
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 108 ISeqno: 104 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 88120ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 104 ISeqno: 108 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 88120ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 104 ISeqno: 109 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 88120ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Tx-Frame Retry[000] -- OSeqno: 109 ISeqno: 104 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 89802ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 104 ISeqno: 110 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 89802ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 104 ISeqno: 110 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 89802ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[-01] -- OSeqno: 110 ISeqno: 105 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 89802ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 105 ISeqno: 110 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 90122ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 106 ISeqno: 110 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 90122ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 110 ISeqno: 106 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 90122ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 4431
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 111 ISeqno: 107 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 90122ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 107 ISeqno: 111 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 90122ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 107 ISeqno: 112 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 90122ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 112 ISeqno: 107 Type: TEXT    Subclass: 0
+[1;30m [0m   Timestamp: 90083ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 107 ISeqno: 113 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 90083ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 107 ISeqno: 113 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 92123ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 108 ISeqno: 113 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 92123ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 113 ISeqno: 108 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 92123ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 4531
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 114 ISeqno: 109 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 92123ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 109 ISeqno: 114 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 92123ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 109 ISeqno: 115 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 92123ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 109 ISeqno: 115 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 94123ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 110 ISeqno: 115 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 94123ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 115 ISeqno: 110 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 94123ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 4631
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 116 ISeqno: 111 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 94123ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 111 ISeqno: 116 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 94123ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 111 ISeqno: 117 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 94123ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 111 ISeqno: 117 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 96125ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 112 ISeqno: 117 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 96125ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 117 ISeqno: 112 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 96125ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 4731
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 118 ISeqno: 113 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 96125ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 113 ISeqno: 118 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 96125ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 113 ISeqno: 119 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 96125ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 113 ISeqno: 119 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 98126ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 114 ISeqno: 119 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 98126ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 119 ISeqno: 114 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 98126ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 4831
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 120 ISeqno: 115 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 98126ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 115 ISeqno: 120 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 98126ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 115 ISeqno: 121 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 98126ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Tx-Frame Retry[000] -- OSeqno: 121 ISeqno: 115 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 99803ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 115 ISeqno: 122 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 99803ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 115 ISeqno: 122 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 99803ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[-01] -- OSeqno: 122 ISeqno: 116 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 99803ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 116 ISeqno: 122 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 100127ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 117 ISeqno: 122 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 100127ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 122 ISeqno: 117 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 100127ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 4931
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 123 ISeqno: 118 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 100127ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 118 ISeqno: 123 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 100127ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 118 ISeqno: 124 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 100127ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 118 ISeqno: 124 Type: IAX     Subclass: PING   
+[1;30m [0m   Timestamp: 102127ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 119 ISeqno: 124 Type: IAX     Subclass: LAGRQ  
+[1;30m [0m   Timestamp: 102127ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 124 ISeqno: 119 Type: IAX     Subclass: PONG   
+[1;30m [0m   Timestamp: 102127ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   RR_JITTER       : 4
+[1;30m [0m   RR_LOSS         : 0
+[1;30m [0m   RR_PKTS         : 5031
+[1;30m [0m   RR_DELAY        : 44
+[1;30m [0m   RR_DROPPED      : 0
+[1;30m [0m   RR_OUTOFORDER   : 2
+
+Tx-Frame Retry[000] -- OSeqno: 125 ISeqno: 120 Type: IAX     Subclass: LAGRP  
+[1;30m [0m   Timestamp: 102127ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 120 ISeqno: 125 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 102127ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 120 ISeqno: 126 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 102127ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mChannel Announcer/Telemetry-0000000a;2 joined 'softmix' base-bridge <d9a302d3-4b93-4678-b70c-a43cde51752a>
+Tx-Frame Retry[000] -- OSeqno: 126 ISeqno: 120 Type: TEXT    Subclass: 0
+[1;30m [0m   Timestamp: 103523ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m    -- [0mHungup 'IAX2/127.0.0.1:4570-16094'
+Tx-Frame Retry[000] -- OSeqno: 127 ISeqno: 120 Type: TEXT    Subclass: 0
+[1;30m [0m   Timestamp: 103526ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+Tx-Frame Retry[000] -- OSeqno: 128 ISeqno: 120 Type: IAX     Subclass: HANGUP 
+[1;30m [0m   Timestamp: 103540ms  SCall: 16094  DCall: 00001 127.0.0.1:4570
+[1;30m [0m   CAUSE CODE      : 0
+
+[1;30m    -- [0mChannel Announcer/IAXLink-00000005;2 left 'softmix' base-bridge <d2193ae3-028f-4711-a4e6-c7837da9b9ad>
+Rx-Frame Retry[ No] -- OSeqno: 120 ISeqno: 127 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 103523ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 120 ISeqno: 128 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 103526ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+Rx-Frame Retry[ No] -- OSeqno: 120 ISeqno: 129 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 103540ms  SCall: 00001  DCall: 16094 127.0.0.1:4570
+[1;30m    -- [0mChannel Announcer/Telemetry-0000000a;2 left 'softmix' base-bridge <d9a302d3-4b93-4678-b70c-a43cde51752a>
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+Rx-Frame Retry[ No] -- OSeqno: 000 ISeqno: 000 Type: IAX     Subclass: NEW    
+[1;30m [0m   Timestamp: 00000ms  SCall: 00001  DCall: 00000 127.0.0.1:42097
+[1;30m [0m   CALLED NUMBER   : 1999
+[1;30m [0m   USERNAME        : 1998
+[1;30m [0m   CAPABILITY      : 32844
+[1;30m [0m   FORMAT          : 32768
+[1;30m [0m   VERSION         : 2
+[1;30m [0m   CALLTOKEN       : Present
+
+Tx-Frame Retry[ No] -- OSeqno: 000 ISeqno: 001 Type: IAX     Subclass: CTOKEN 
+[1;30m [0m   Timestamp: 00000ms  SCall: 00001  DCall: 00001 127.0.0.1:42097
+[1;30m [0m   CALLTOKEN       : 51 bytes
+
+Rx-Frame Retry[ No] -- OSeqno: 000 ISeqno: 000 Type: IAX     Subclass: NEW    
+[1;30m [0m   Timestamp: 00000ms  SCall: 00001  DCall: 00000 127.0.0.1:42097
+[1;30m [0m   CALLED NUMBER   : 1999
+[1;30m [0m   USERNAME        : 1998
+[1;30m [0m   CAPABILITY      : 32844
+[1;30m [0m   FORMAT          : 32768
+[1;30m [0m   VERSION         : 2
+[1;30m [0m   CALLTOKEN       : 51 bytes
+
+Tx-Frame Retry[-01] -- OSeqno: 000 ISeqno: 001 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 00002ms  SCall: 09269  DCall: 00001 127.0.0.1:42097
+Tx-Frame Retry[000] -- OSeqno: 000 ISeqno: 001 Type: IAX     Subclass: AUTHREQ
+[1;30m [0m   Timestamp: 00005ms  SCall: 09269  DCall: 00001 127.0.0.1:42097
+[1;30m [0m   AUTHMETHODS     : 2
+[1;30m [0m   CHALLENGE       : \x32\x30\x38\x31\x38\x31\x33\x35\x35
+[1;30m [0m   USERNAME        : 1998
+
+Rx-Frame Retry[ No] -- OSeqno: 001 ISeqno: 001 Type: IAX     Subclass: AUTHREP
+[1;30m [0m   Timestamp: 00000ms  SCall: 00001  DCall: 09269 127.0.0.1:42097
+[1;30m [0m   MD5 RESULT      : 503289a8373056a2e857a3109a100b4d
+
+Tx-Frame Retry[-01] -- OSeqno: 001 ISeqno: 002 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 00008ms  SCall: 09269  DCall: 00001 127.0.0.1:42097
+[1;30m    -- [0mAccepting AUTHENTICATED call from 127.0.0.1:42097:
+[1;30m    -- [0m       > requested auth methods = (MD5),
+[1;30m    -- [0m       > actual auth method = MD5,
+[1;30m    -- [0m       > encrypted = no,
+[1;30m    -- [0m       > requested format = slin16,
+[1;30m    -- [0m       > requested prefs = (),
+[1;30m    -- [0m       > actual format = slin16,
+[1;30m    -- [0m       > host prefs = (slin16|slin|ulaw),
+[1;30m    -- [0m       > priority = mine
+Tx-Frame Retry[000] -- OSeqno: 001 ISeqno: 002 Type: IAX     Subclass: ACCEPT 
+[1;30m [0m   Timestamp: 00011ms  SCall: 09269  DCall: 00001 127.0.0.1:42097
+[1;30m [0m   FORMAT          : 32768
+[1;30m [0m   FORMAT2         : slin16
+
+[1;30m    -- [0mExecuting [1999@radio-secure:1] [1;36mSet[0m("[1;35mIAX2/1998-9269[0m", "[1;35mNODENUM=[0m") in new stack
+[1;30m    -- [0mExecuting [1999@radio-secure:2] [1;36mNoOp[0m("[1;35mIAX2/1998-9269[0m", "[1;35mConnect from node  to node 1999 using IAX2 from 127.0.0.1[0m") in new stack
+[1;30m    -- [0mExecuting [1999@radio-secure:3] [1;36mExecIf[0m("[1;35mIAX2/1998-9269[0m", "[1;35m0?Hangup[0m") in new stack
+[1;30m    -- [0mExecuting [1999@radio-secure:4] [1;36mExecIf[0m("[1;35mIAX2/1998-9269[0m", "[1;35m0?Set(CALLERID(num)=1998)[0m") in new stack
+[1;30m    -- [0mExecuting [1999@radio-secure:5] [1;36mRpt[0m("[1;35mIAX2/1998-9269[0m", "[1;35m1999[0m") in new stack
+[2026-10-11 20:42:45.686] [1;31mWARNING[0m[269][C-00000001]: [1;37mapp_rpt.c[0m:[1;37m7187[0m [1;37mrpt_exec[0m: Node  invalid for connection: Caller ID is not numeric
+[1;30m  == [0mSpawn extension (radio-secure, 1999, 5) exited non-zero on 'IAX2/1998-9269'
+[1;30m    -- [0mHungup 'IAX2/1998-9269'
+Tx-Frame Retry[000] -- OSeqno: 002 ISeqno: 002 Type: IAX     Subclass: HANGUP 
+[1;30m [0m   Timestamp: 00014ms  SCall: 09269  DCall: 00001 127.0.0.1:42097
+[1;30m [0m   CAUSE CODE      : 0
+
+Rx-Frame Retry[ No] -- OSeqno: 002 ISeqno: 002 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 00011ms  SCall: 00001  DCall: 09269 127.0.0.1:42097
+Rx-Frame Retry[ No] -- OSeqno: 002 ISeqno: 003 Type: IAX     Subclass: ACK    
+[1;30m [0m   Timestamp: 00014ms  SCall: 00001  DCall: 09269 127.0.0.1:42097
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected
+[1;30m    -- [0mRemote UNIX connection
+[1;30m    -- [0mRemote UNIX connection disconnected

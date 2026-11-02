@@ -1,0 +1,42 @@
+# nodebench: astar-server as node 1998, in the same pod as the ASL3 node 1999.
+# Derived from deploy/smoke/node.toml. The two nodes talk over 127.0.0.1 (one
+# network namespace). Sockets bind 0.0.0.0 only because podman delivers
+# host-forwarded traffic to the pod interface, not to its loopback; the host
+# side of every published port is 127.0.0.1.
+
+[listener]
+# Asterisk owns 4569 in this netns, so astar-server takes 4570. The ASL3
+# node's rpt.conf [nodes] says 1998 = radio@127.0.0.1:4570/1998.
+bind      = "0.0.0.0:4570"
+answer    = "auto"
+max_calls = 4
+auth      = "off"
+
+# Registers with the ASL3 node as 1998 (iax.conf [1998]). This is the variant
+# that reproduces the registration storm in RIG.md; node.toml is the default.
+[register]
+peer    = "127.0.0.1:4569"
+node_id = "1998"
+
+[bridge]
+mode                = "bridge"
+mix_minus           = true
+include_local_radio = false
+
+[control]
+bind = "0.0.0.0:8730"
+# A wildcard control bind is refused at load without this. Sealed container
+# only: the host side of the published port is 127.0.0.1.
+allow_wildcard_bind = true
+
+# Secrets come from the pod's environment (pod.yaml): ALLSTAR_NODE=1998,
+# ALLSTAR_SECRET and ALLSTAR_LINK_1999 carry the bench's loopback-only test
+# secret, which matches iax.conf [1998] on the ASL3 node.
+[secrets]
+source = "env"
+
+[announce]
+enabled = false
+
+[audio]
+backend = "none"

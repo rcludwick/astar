@@ -112,7 +112,7 @@ fn link_set_mode_switches_an_existing_link_without_a_second_entry() {
 #[test]
 fn drain_dtmf_digits_empty_when_idle() {
     let s = test_station();
-    assert!(s.drain_dtmf_digits().is_empty());
+    assert_eq!(s.drain_dtmf_digits(), [] as [(u64, char); 0]);
 }
 
 /// The link roster never carries the dial-time secret.

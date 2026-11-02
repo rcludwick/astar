@@ -21,6 +21,7 @@ include = [
     "IaxAuthPolicy",
     "IaxNodeConfig",
     "IaxCredentialResolver",
+    "IaxVocoderEnrol",
 ]
 
 [enum]

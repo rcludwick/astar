@@ -96,7 +96,7 @@ fn antialias_lowpass(from: u32, to: u32) -> Vec<Biquad> {
 
 /// One direction of the rate bridge: exactly one 20 ms frame in, exactly
 /// one 20 ms frame out, no drift.
-struct RateBridge {
+pub(crate) struct RateBridge {
     /// Anti-alias cascade run at `from` before a downsample; empty upward.
     aa: Vec<Biquad>,
     rs: Resampler1,
@@ -111,7 +111,7 @@ struct RateBridge {
 }
 
 impl RateBridge {
-    fn new(from: u32, to: u32) -> Result<Self, AudioError> {
+    pub(crate) fn new(from: u32, to: u32) -> Result<Self, AudioError> {
         Ok(Self {
             aa: if to < from {
                 antialias_lowpass(from, to)
@@ -130,7 +130,7 @@ impl RateBridge {
     /// Convert one frame. `None` only on an internal resampler failure, in
     /// which case the frame is dropped rather than the route poisoned.
     #[allow(clippy::cast_possible_truncation)]
-    fn convert(&mut self, pcm: &[i16]) -> Option<Vec<i16>> {
+    pub(crate) fn convert(&mut self, pcm: &[i16]) -> Option<Vec<i16>> {
         // One frame in, one frame out is the whole contract: an off-size
         // input would still convert, but the FIFO would slide and the
         // cadence would drift a sample at a time. Nothing in this crate

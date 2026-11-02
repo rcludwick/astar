@@ -158,6 +158,15 @@ pub fn run_tui(ctrl: &NodeController) {
             break;
         }
     }
+
+    // The same end-of-run teardown `serve` performs, for the same reason and
+    // with one extra: this loop also ends on EOF, which executes no
+    // `Shutdown` at all, so without this a `tui` session closed with Ctrl-D
+    // would leave everyone it muted muted. The controller IS dropped on this
+    // path a moment later, which would send the gateway's `Shutdown` — but
+    // only after this point, with nothing having enqueued the unmutes it
+    // would carry.
+    ctrl.teardown_discord();
 }
 
 /// Pretty-print a [`NodeEvent`] to stdout.
@@ -170,6 +179,17 @@ fn print_event(ev: &NodeEvent) {
                 snap.registered,
                 snap.calls.len()
             );
+            if let Some(d) = &snap.discord {
+                let state = if d.connected { "joined" } else { "idle" };
+                let channel = d.channel_id.as_deref().unwrap_or("-");
+                println!(
+                    "  discord  {state}  channel {channel}  frames {}",
+                    d.frames_sent
+                );
+                if let Some(e) = &d.last_error {
+                    println!("           last error: {e}");
+                }
+            }
         }
         NodeEvent::IncomingCall { from } => {
             println!("event: incoming call from {from}");
@@ -201,6 +221,15 @@ fn print_event(ev: &NodeEvent) {
         } => match command {
             Some(cmd) => println!("event: dtmf {digit} (call {call}) → {cmd}"),
             None => println!("event: dtmf {digit} (call {call})"),
+        },
+        NodeEvent::M17 {
+            kind,
+            reflector,
+            module,
+            reason,
+        } => match reason {
+            Some(r) => println!("event: m17 {kind} — {reflector} {module} ({r})"),
+            None => println!("event: m17 {kind} — {reflector} {module}"),
         },
     }
 }

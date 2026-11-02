@@ -1,0 +1,539 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nodebench</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f5f5f3;
+  --surface: #fcfcfb;
+  --surface-2: #f0efec;
+  --border: #e3e2de;
+  --text: #0b0b0b;
+  --text-2: #52514e;
+  --text-3: #7a7974;
+  --accent: #2a78d6;
+  --accent-soft: #e6effa;
+  --good: #0ca30c;
+  --good-text: #006300;
+  --good-soft: #e5f4e5;
+  --warning: #fab219;
+  --warning-text: #7a5200;
+  --warning-soft: #fdf3dc;
+  --critical: #d03b3b;
+  --critical-text: #a82525;
+  --critical-soft: #fae6e6;
+  --neutral: #a9a8a2;
+  --neutral-soft: #eceae6;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --shadow: 0 1px 2px rgba(0,0,0,.04), 0 1px 1px rgba(0,0,0,.03);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #121211;
+    --surface: #1a1a19;
+    --surface-2: #232321;
+    --border: #2f2f2c;
+    --text: #f0efec;
+    --text-2: #c3c2b7;
+    --text-3: #8d8c84;
+    --accent: #3987e5;
+    --accent-soft: #1d2a3a;
+    --good-text: #5fd35f;
+    --good-soft: #15291a;
+    --warning-text: #fac65a;
+    --warning-soft: #2e2512;
+    --critical-text: #f07a7a;
+    --critical-soft: #331a1a;
+    --neutral: #6b6a65;
+    --neutral-soft: #2a2a27;
+    --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121211; --surface: #1a1a19; --surface-2: #232321; --border: #2f2f2c;
+  --text: #f0efec; --text-2: #c3c2b7; --text-3: #8d8c84;
+  --accent: #3987e5; --accent-soft: #1d2a3a;
+  --good-text: #5fd35f; --good-soft: #15291a;
+  --warning-text: #fac65a; --warning-soft: #2e2512;
+  --critical-text: #f07a7a; --critical-soft: #331a1a;
+  --neutral: #6b6a65; --neutral-soft: #2a2a27; --shadow: none;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.app { display: grid; grid-template-columns: 300px 1fr; height: 100vh; }
+aside {
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  display: flex; flex-direction: column; min-height: 0;
+}
+.brand { padding: 18px 18px 12px; display: flex; align-items: baseline; gap: 8px; }
+.brand h1 { font-size: 17px; margin: 0; letter-spacing: -.01em; }
+.brand span { color: var(--text-3); font-size: 12px; }
+.filters { display: flex; gap: 4px; padding: 0 14px 10px; }
+.filters button {
+  flex: 1; border: 1px solid var(--border); background: transparent; color: var(--text-2);
+  border-radius: 7px; padding: 4px 0; font: inherit; font-size: 12px; cursor: pointer;
+}
+.filters button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: transparent; font-weight: 600; }
+.runs { overflow-y: auto; padding: 0 8px 16px; flex: 1; }
+.run {
+  display: block; width: 100%; text-align: left; border: 0; background: transparent; color: inherit;
+  padding: 9px 10px; border-radius: 9px; cursor: pointer; font: inherit; margin-bottom: 2px;
+}
+.run:hover { background: var(--surface-2); }
+.run[aria-current="true"] { background: var(--accent-soft); }
+.run .top { display: flex; align-items: center; gap: 8px; }
+.run .id { font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
+.run .when { color: var(--text-3); font-size: 12px; margin-left: auto; }
+.run .sub { color: var(--text-2); font-size: 12px; margin-top: 3px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.tag { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--text-3); }
+main { overflow-y: auto; min-width: 0; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 26px 32px 60px; }
+.empty { color: var(--text-3); padding: 80px 0; text-align: center; }
+header.run-head h2 { margin: 0; font-size: 22px; letter-spacing: -.01em; font-family: var(--mono); font-weight: 600; }
+.meta { color: var(--text-2); font-size: 13px; margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.meta code { font-family: var(--mono); font-size: 12px; }
+.pill {
+  display: inline-flex; align-items: center; gap: 4px; border-radius: 999px; padding: 1px 8px 1px 6px;
+  font-size: 11.5px; font-weight: 600; white-space: nowrap; line-height: 18px;
+}
+.pill svg { width: 12px; height: 12px; flex: none; }
+.pill.pass { background: var(--good-soft); color: var(--good-text); }
+.pill.fail { background: var(--critical-soft); color: var(--critical-text); }
+.pill.skip { background: var(--neutral-soft); color: var(--text-2); }
+.pill.live { background: var(--accent-soft); color: var(--accent); }
+.pill.warn { background: var(--warning-soft); color: var(--warning-text); }
+.live-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 22px 0 8px; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; box-shadow: var(--shadow); }
+.tile .k { color: var(--text-2); font-size: 12px; }
+.tile .v { font-size: 22px; font-weight: 600; letter-spacing: -.01em; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.tile .s { color: var(--text-3); font-size: 12px; margin-top: 1px; }
+section { margin-top: 26px; }
+section > h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-3); margin: 0 0 10px; font-weight: 600; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); overflow: hidden; }
+.card + .card { margin-top: 10px; }
+details.scen > summary {
+  list-style: none; cursor: pointer; padding: 12px 16px; display: flex; align-items: center; gap: 10px;
+}
+details.scen > summary::-webkit-details-marker { display: none; }
+details.scen > summary .chev { width: 12px; height: 12px; color: var(--text-3); transition: transform .15s; flex: none; }
+details.scen[open] > summary .chev { transform: rotate(90deg); }
+.scen .name { font-family: var(--mono); font-weight: 600; font-size: 13px; }
+.scen .desc { color: var(--text-2); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+.scen .dur { color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+.checks { border-top: 1px solid var(--border); }
+.check { display: grid; grid-template-columns: 70px minmax(160px, 260px) 1fr auto; gap: 12px; padding: 8px 16px; align-items: baseline; }
+.check + .check { border-top: 1px solid var(--border); }
+.check .cn { font-weight: 500; }
+.check .cd { color: var(--text-2); font-size: 12.5px; word-break: break-word; }
+.check .cm { color: var(--text-2); font-size: 12px; font-family: var(--mono); white-space: nowrap; }
+.notes { border-top: 1px solid var(--border); padding: 10px 16px; color: var(--text-2); font-size: 12.5px; }
+.notes ul { margin: 0; padding-left: 18px; }
+.artifacts { border-top: 1px solid var(--border); padding: 10px 16px; display: flex; gap: 8px; flex-wrap: wrap; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.artifacts a, .files a { font-family: var(--mono); font-size: 12px; }
+.files { columns: 3 220px; padding: 12px 16px; }
+.files div { break-inside: avoid; padding: 1px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.banner { border-radius: 12px; padding: 12px 16px; margin-top: 18px; font-size: 13px; }
+.banner.fail { background: var(--critical-soft); color: var(--critical-text); }
+/* timeline */
+.timeline { padding: 16px 16px 10px; position: relative; }
+.timeline svg { display: block; width: 100%; height: auto; overflow: visible; }
+.legend { display: flex; gap: 16px; flex-wrap: wrap; color: var(--text-2); font-size: 12px; padding: 0 16px 14px; }
+.legend i { display: inline-block; width: 12px; height: 8px; border-radius: 2px; margin-right: 6px; vertical-align: 1px; }
+.tip {
+  position: fixed; pointer-events: none; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 9px; padding: 8px 10px; font-size: 12px; box-shadow: 0 6px 24px rgba(0,0,0,.14);
+  max-width: 360px; z-index: 10; display: none; color: var(--text);
+}
+.tip b { font-weight: 600; }
+.tip .muted { color: var(--text-2); }
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+th { text-align: left; color: var(--text-3); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+td { padding: 7px 12px; border-top: 1px solid var(--border); vertical-align: top; }
+td.t { font-family: var(--mono); font-size: 12px; white-space: nowrap; color: var(--text-2); }
+td.d { color: var(--text-2); word-break: break-word; }
+tr:first-child td { border-top: 0; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; background: transparent; color: var(--text-2); font: inherit; font-size: 12px; padding: 4px 10px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--surface-2); color: var(--text); font-weight: 600; }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.row h3 { margin: 0; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+@media (max-width: 760px) {
+  .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; height: auto; }
+  aside { border-right: 0; border-bottom: 1px solid var(--border); max-height: 40vh; }
+  .wrap { padding: 18px 16px 40px; }
+  .check { grid-template-columns: 60px 1fr; }
+  .check .cd, .check .cm { grid-column: 2; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="brand"><h1>nodebench</h1><span>astar-server × ASL3</span></div>
+    <div class="filters" role="group" aria-label="Show">
+      <button data-f="all" aria-pressed="true">All</button>
+      <button data-f="run" aria-pressed="false">Runs</button>
+      <button data-f="soak" aria-pressed="false">Soaks</button>
+    </div>
+    <nav class="runs" id="runs" aria-label="Runs"></nav>
+  </aside>
+  <main><div class="wrap" id="detail"><div class="empty">Loading runs…</div></div></main>
+</div>
+<div class="tip" id="tip" role="tooltip"></div>
+<script>
+"use strict";
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const ICON = {
+  pass: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.2l2.3 2.3 4.7-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  fail: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
+  skip: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 6h6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>',
+  warn: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M6 2.2l4.2 7.3H1.8z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M6 5.2v1.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>',
+};
+const CHEV = '<svg class="chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 2.5L8 6l-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const pill = (kind, label) => `<span class="pill ${kind}">${ICON[kind] || ""}${esc(label)}</span>`;
+const livePill = () => '<span class="pill live"><span class="live-dot"></span>Running</span>';
+
+function fmtSecs(s) {
+  if (s == null || isNaN(s)) return "–";
+  if (s < 120) return `${s.toFixed(s < 10 ? 1 : 0)} s`;
+  if (s < 3600) return `${Math.floor(s / 60)} m ${String(Math.round(s % 60)).padStart(2, "0")} s`;
+  return `${Math.floor(s / 3600)} h ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")} m`;
+}
+function idToDate(id) {
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/.exec(id);
+  return m ? new Date(Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6])) : null;
+}
+function rel(d) {
+  if (!d) return "";
+  const s = (Date.now() - d.getTime()) / 1000;
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+const clock = t => new Date(t * 1000).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+const stamp = d => d ? d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
+
+let runs = [], current = null, filter = "all", detailCache = null, eventView = "edges";
+try { filter = localStorage.getItem("nb.filter") || "all"; } catch (_) {}
+
+function runVerdict(r) {
+  const h = r.headline || {};
+  if (r.running) return livePill();
+  if (r.kind === "soak") {
+    if (h.drops > 0) return pill("fail", `${h.drops} drop${h.drops === 1 ? "" : "s"}`);
+    if (h.setup_failures > 0) return pill("warn", `${h.setup_failures} failed setup`);
+    return pill("pass", "No drops");
+  }
+  if (r.kind === "run") {
+    if (h.rig_error) return pill("fail", "Rig error");
+    if (h.failed > 0) return pill("fail", `${h.failed_scenarios} of ${h.scenarios} failed`);
+    return pill("pass", `${h.scenarios} passed`);
+  }
+  return pill("skip", "Incomplete");
+}
+
+function renderList() {
+  const el = $("#runs");
+  const shown = runs.filter(r => filter === "all" || r.kind === filter || (filter === "run" && r.kind === "incomplete"));
+  document.querySelectorAll(".filters button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.f === filter)));
+  if (!shown.length) { el.innerHTML = '<div class="empty" style="padding:30px 10px">No runs in target/nodebench yet.</div>'; return; }
+  el.innerHTML = shown.map(r => {
+    const d = idToDate(r.id);
+    const h = r.headline || {};
+    const extra = r.kind === "soak"
+      ? `${esc(r.topology || "")}${h.udp_timeout ? ` · udp ${h.udp_timeout} s` : ""} · ${fmtSecs(h.covered_secs)}`
+      : r.kind === "run" ? `${esc(r.topology || "")} · ${h.passed ?? 0}/${h.checks ?? 0} checks` : `${h.scenarios_started ?? 0} scenarios so far`;
+    return `<button class="run" data-id="${esc(r.id)}" aria-current="${r.id === current}">
+      <div class="top"><span class="id">${esc(r.id)}</span><span class="when">${esc(rel(d))}</span></div>
+      <div class="sub"><span class="tag">${esc(r.kind)}</span>${runVerdict(r)}<span>${extra}</span></div>
+    </button>`;
+  }).join("");
+}
+
+async function loadRuns() {
+  try {
+    const r = await fetch("api/runs", { cache: "no-store" });
+    runs = await r.json();
+  } catch (e) { runs = []; }
+  renderList();
+  if (!current && runs.length) select(runs[0].id, true);
+  else if (!runs.length) $("#detail").innerHTML = '<div class="empty">No runs yet. Start one with <code>just nodebench</code> or <code>just nodebench-soak</code>.</div>';
+}
+
+async function select(id, replace) {
+  current = id;
+  const h = `#/${encodeURIComponent(id)}`;
+  if (location.hash !== h) (replace ? history.replaceState(null, "", h) : history.pushState(null, "", h));
+  renderList();
+  await loadDetail();
+}
+
+async function loadDetail() {
+  if (!current) return;
+  let d;
+  try {
+    const r = await fetch(`api/run/${encodeURIComponent(current)}`, { cache: "no-store" });
+    if (!r.ok) throw new Error(await r.text());
+    d = await r.json();
+  } catch (e) {
+    $("#detail").innerHTML = `<div class="empty">Could not load ${esc(current)}: ${esc(e.message)}</div>`;
+    return;
+  }
+  detailCache = d;
+  const open = new Set([...document.querySelectorAll("details.scen[open]")].map(x => x.dataset.id));
+  $("#detail").innerHTML = d.entry.kind === "soak" ? soakView(d) : d.entry.kind === "run" ? runView(d) : incompleteView(d);
+  document.querySelectorAll("details.scen").forEach(x => { if (open.has(x.dataset.id)) x.open = true; });
+  wireTimeline();
+}
+
+const fileLink = (id, path) => `<a href="files/${encodeURIComponent(id)}/${path.split("/").map(encodeURIComponent).join("/")}" target="_blank" rel="noopener">${esc(path)}</a>`;
+function relArtifact(id, p) {
+  const k = p.indexOf(`/${id}/`);
+  return k >= 0 ? p.slice(k + id.length + 2) : null;
+}
+function filesSection(d) {
+  const files = (d.files || []).filter(f => !f.endsWith(".pcapng"));
+  const pcaps = (d.files || []).length - files.length;
+  if (!d.files || !d.files.length) return "";
+  return `<section><h3>Files</h3><div class="card"><div class="files">${files.map(f => `<div>${fileLink(d.entry.id, f)}</div>`).join("")}</div>
+    ${pcaps ? `<div class="notes">${pcaps} capture file${pcaps === 1 ? "" : "s"} (pcapng) in <code>pcap/</code>: open them with Wireshark.</div>` : ""}</div></section>`;
+}
+
+// report.json writes a check's verdict as {"status": {"status": "fail", "reason": ...}}.
+const cst = c => (c.status && typeof c.status === "object" ? c.status.status : c.status) || "skip";
+const creason = c => (c.status && typeof c.status === "object" ? c.status.reason : c.reason) || "";
+function statusOf(c) { const s = cst(c); return s === "pass" ? "pass" : s === "fail" ? "fail" : "skip"; }
+
+function runView(d) {
+  const r = d.report, e = r.env || {}, s = r.summary || {};
+  const started = r.started ? new Date(r.started) : null, finished = r.finished ? new Date(r.finished) : null;
+  const dur = started && finished ? (finished - started) / 1000 : null;
+  const scen = r.scenarios || [];
+  const failedScen = scen.filter(x => (x.checks || []).some(c => cst(c) === "fail")).length;
+  const cards = scen.map(x => {
+    const checks = x.checks || [];
+    const verdict = checks.some(c => cst(c) === "fail") ? "fail" : checks.length && checks.every(c => cst(c) === "skip") ? "skip" : "pass";
+    const label = verdict === "fail" ? `${checks.filter(c => cst(c) === "fail").length} failed` : verdict === "skip" ? "Skipped" : "Passed";
+    const rows = checks.map(c => `<div class="check">
+        <div>${pill(statusOf(c), { pass: "Pass", fail: "Fail", skip: "Skip" }[statusOf(c)])}</div>
+        <div class="cn">${esc(c.name)}</div>
+        <div class="cd">${esc([c.detail, creason(c)].filter(Boolean).join(" · "))}</div>
+        <div class="cm">${c.measured != null ? esc(`${+c.measured.toFixed(3)} ${c.unit || ""}`) : ""}</div>
+      </div>`).join("");
+    const notes = (x.notes || []).length ? `<div class="notes"><ul>${x.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul></div>` : "";
+    const arts = (x.artifacts || []).map(p => relArtifact(d.entry.id, p)).filter(Boolean);
+    const artHtml = arts.length ? `<div class="artifacts">${arts.map(a => fileLink(d.entry.id, a)).join("")}</div>` : "";
+    return `<details class="card scen" data-id="${esc(x.id)}" ${verdict === "fail" ? "open" : ""}>
+      <summary>${CHEV}${pill(verdict, label)}<span class="name">${esc(x.id)}</span><span class="desc">${esc(x.describe)}</span><span class="dur">${fmtSecs(x.duration_secs)}</span></summary>
+      <div class="checks">${rows || '<div class="check"><div></div><div class="cd">No checks</div></div>'}</div>${notes}${artHtml}
+    </details>`;
+  }).join("");
+  return `<header class="run-head"><h2>${esc(r.run_id)}</h2>
+    <div class="meta"><span>${esc(stamp(started))}</span><span>topology <b>${esc(e.topology)}</b></span>
+      ${e.git_sha ? `<span>git <code>${esc(e.git_sha.slice(0, 12))}${e.git_sha.endsWith("-dirty") ? "-dirty" : ""}</code></span>` : ""}
+      ${e.podman_version ? `<span>podman ${esc(e.podman_version)}</span>` : ""}<span>${esc(e.host_os)}/${esc(e.host_arch)}</span></div></header>
+    ${r.rig_error ? `<div class="banner fail"><b>The rig did not come up.</b> ${esc(r.rig_error)}</div>` : ""}
+    <div class="tiles">
+      <div class="tile"><div class="k">Scenarios</div><div class="v">${scen.length - failedScen}<span style="color:var(--text-3);font-weight:500"> / ${scen.length}</span></div><div class="s">passed</div></div>
+      <div class="tile"><div class="k">Checks passed</div><div class="v">${s.passed ?? 0}</div><div class="s">of ${s.checks ?? 0}</div></div>
+      <div class="tile"><div class="k">Checks failed</div><div class="v" style="color:${s.failed ? "var(--critical-text)" : "inherit"}">${s.failed ?? 0}</div><div class="s">${s.skipped ?? 0} skipped</div></div>
+      <div class="tile"><div class="k">Duration</div><div class="v">${fmtSecs(dur)}</div><div class="s">wall clock</div></div>
+    </div>
+    <section><h3>Scenarios</h3>${cards || '<div class="card"><div class="empty">No scenarios ran.</div></div>'}</section>
+    ${(r.rig_notes || []).length ? `<section><h3>Rig notes</h3><div class="card"><div class="notes"><ul>${r.rig_notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul></div></div></section>` : ""}
+    ${filesSection(d)}`;
+}
+
+function incompleteView(d) {
+  return `<header class="run-head"><h2>${esc(d.entry.id)}</h2><div class="meta">${d.entry.running ? livePill() : pill("skip", "Incomplete")}
+    <span>No report.json yet: ${d.entry.running ? "the run is still going" : "the run stopped before writing one"}.</span></div></header>
+    ${filesSection(d)}`;
+}
+
+// ---- soak ------------------------------------------------------------------
+
+function soakSegments(events) {
+  // [start, end] wall-time spans the soak was running (split by resumes).
+  const segs = []; let cur = null, last = null;
+  for (const e of events) {
+    if (e.kind === "start" || e.kind === "resume") { if (cur != null && last != null) segs.push([cur, last]); cur = e.t; }
+    last = e.t;
+  }
+  if (cur != null && last != null) segs.push([cur, last]);
+  return segs;
+}
+
+function soakView(d) {
+  const s = d.soak.summary, st = d.soak.start || {}, ev = d.soak.events || [];
+  const segs = soakSegments(ev);
+  const running = d.entry.running;
+  const now = Date.now() / 1000;
+  const t0 = segs.length ? segs[0][0] : now;
+  let t1 = segs.length ? segs[segs.length - 1][1] : now;
+  const links = (s.links || []).map(l => ({ ...l }));
+  if (running) { t1 = Math.max(t1, now); links.forEach(l => { if (l.ended === "stopped" && l.down_at && Math.abs(l.down_at - segs[segs.length - 1][1]) < 1) { l.down_at = t1; l.ended = "up"; l.secs = t1 - l.up_at; } }); }
+  const hang = Object.entries(s.hangup_by || {}).map(([k, v]) => `${k} ${v}`).join(" · ") || "–";
+  const drops = s.drops, pct = s.uptime_pct;
+  const banner = drops > 0
+    ? `<div class="banner fail"><b>${drops} drop${drops === 1 ? "" : "s"}.</b> Hangup sent by ${esc(hang)}. ${s.median_secs != null ? `Median link lasted ${fmtSecs(s.median_secs)}.` : ""}</div>` : "";
+  return `<header class="run-head"><h2>${esc(s.run_id || d.entry.id)}</h2>
+    <div class="meta">${running ? livePill() : drops ? pill("fail", "Dropped") : s.setup_failures ? pill("warn", "Setup failures") : pill("pass", "Held")}
+      <span>soak · <b>${esc(s.topology)}</b>${s.udp_timeout ? ` · conntrack UDP timeout <b>${s.udp_timeout} s</b>` : ""}</span>
+      <span>dialled by ${esc(s.dialer || "?")}</span><span>sample every ${st.sample_secs ?? 5} s</span>
+      ${st.git_sha ? `<span>git <code>${esc(st.git_sha.slice(0, 12))}</code></span>` : ""}
+      <span>stopped: ${esc(s.stop_reason)}</span></div></header>
+    ${banner}
+    <div class="tiles">
+      <div class="tile"><div class="k">Ran</div><div class="v">${fmtSecs(running ? s.covered_secs + (now - segs[segs.length - 1][1]) : s.covered_secs)}</div><div class="s">of ${fmtSecs(s.planned_secs)} planned${s.segments > 1 ? ` · ${s.segments} segments` : ""}</div></div>
+      <div class="tile"><div class="k">Drops</div><div class="v" style="color:${drops ? "var(--critical-text)" : "inherit"}">${drops}</div><div class="s">${s.setup_failures} failed setup${s.setup_failures === 1 ? "" : "s"}</div></div>
+      <div class="tile"><div class="k">Link up</div><div class="v">${pct.toFixed(pct >= 99.95 || pct === 0 ? 0 : 1)} %</div><div class="s">${fmtSecs(s.uptime_secs)}</div></div>
+      <div class="tile"><div class="k">Longest link</div><div class="v">${fmtSecs(s.longest_secs)}</div><div class="s">median ${fmtSecs(s.median_secs)}</div></div>
+      <div class="tile"><div class="k">Samples</div><div class="v">${s.samples}</div><div class="s">both sides polled</div></div>
+    </div>
+    ${st.conntrack ? `<div class="meta" style="margin-top:4px"><span>router: <code>${esc(st.conntrack.replace(/\n/g, " · "))}</code></span></div>` : ""}
+    <section><h3>Link timeline</h3><div class="card">
+      <div class="timeline" id="tl" data-t0="${t0}" data-t1="${t1}">${timelineSvg(t0, t1, segs, links, ev)}</div>
+      <div class="legend"><span><i style="background:var(--good)"></i>Link up</span><span><i style="background:var(--critical)"></i>Drop</span>
+        <span><i style="background:var(--warning)"></i>Setup failed</span><span><i style="background:var(--neutral-soft);outline:1px solid var(--border)"></i>Down / not running</span></div>
+    </div></section>
+    <section><div class="row"><h3>Events</h3>
+      <div class="seg" role="group" aria-label="Events shown"><button data-ev="edges" aria-pressed="${eventView === "edges"}">Edges</button><button data-ev="links" aria-pressed="${eventView === "links"}">Links</button></div></div>
+      <div class="card">${eventView === "links" ? linksTable(d.entry.id, links, ev) : eventsTable(d.entry.id, ev)}</div></section>
+    ${filesSection(d)}`;
+}
+
+function timelineSvg(t0, t1, segs, links, ev) {
+  const W = 1000, H = 76, top = 18, bar = 26, span = Math.max(t1 - t0, 1);
+  const x = t => ((t - t0) / span) * W;
+  let g = `<rect x="0" y="${top}" width="${W}" height="${bar}" rx="5" fill="var(--neutral-soft)"/>`;
+  // Gaps between segments (the soak was not running).
+  for (let i = 1; i < segs.length; i++) {
+    const a = x(segs[i - 1][1]), b = x(segs[i][0]);
+    g += `<rect x="${a}" y="${top}" width="${Math.max(b - a, 1)}" height="${bar}" fill="url(#hatch)"><title>not running</title></rect>`;
+  }
+  links.forEach((l, i) => {
+    const a = x(l.up_at), b = x(l.down_at ?? t1), w = Math.max(b - a - 1, 1.5);
+    g += `<rect class="hit" data-i="${i}" x="${a}" y="${top}" width="${w}" height="${bar}" rx="${w > 8 ? 4 : 1}" fill="var(--good)"/>`;
+  });
+  ev.forEach((e, i) => {
+    if (e.kind === "link_down") g += `<g class="hit" data-e="${i}"><rect x="${x(e.t) - 1.5}" y="${top - 6}" width="3" height="${bar + 12}" rx="1.5" fill="var(--critical)"/><rect x="${x(e.t) - 8}" y="${top - 8}" width="16" height="${bar + 16}" fill="transparent"/></g>`;
+    else if (e.kind === "setup_failed") g += `<g class="hit" data-e="${i}"><circle cx="${x(e.t)}" cy="${top + bar + 12}" r="4" fill="var(--warning)" stroke="var(--surface)" stroke-width="2"/><rect x="${x(e.t) - 8}" y="${top + bar + 2}" width="16" height="20" fill="transparent"/></g>`;
+  });
+  // Ticks: about six, at whole minutes/hours.
+  const steps = [10, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400];
+  const step = steps.find(s => span / s <= 7) || 86400;
+  let ticks = "";
+  for (let t = t0 + step; t < t1 - step * 0.3; t += step) {
+    const d = t - t0;
+    const lab = d >= 3600 ? (d % 3600 ? fmtSecs(d) : `${d / 3600} h`) : d >= 60 ? (d % 60 ? fmtSecs(d) : `${d / 60} min`) : fmtSecs(d);
+    ticks += `<line x1="${x(t)}" x2="${x(t)}" y1="${top + bar + 4}" y2="${top + bar + 8}" stroke="var(--text-3)"/><text x="${x(t)}" y="${H - 2}" text-anchor="middle" font-size="11" fill="var(--text-3)">+${esc(lab)}</text>`;
+  }
+  return `<svg viewBox="0 -2 ${W} ${H + 4}" role="img" aria-label="Link up and down over the soak">
+    <defs><pattern id="hatch" width="6" height="6" patternTransform="rotate(45)" patternUnits="userSpaceOnUse"><rect width="6" height="6" fill="var(--neutral-soft)"/><line x1="0" y1="0" x2="0" y2="6" stroke="var(--border)" stroke-width="3"/></pattern></defs>
+    <text x="0" y="10" font-size="11" fill="var(--text-3)">${esc(clock(t0))}</text><text x="${W}" y="10" font-size="11" text-anchor="end" fill="var(--text-3)">${esc(clock(t1))}</text>
+    ${g}${ticks}</svg>`;
+}
+
+function wireTimeline() {
+  const tl = $("#tl"), tip = $("#tip");
+  if (!tl || !detailCache || !detailCache.soak) return;
+  const s = detailCache.soak.summary, ev = detailCache.soak.events;
+  tl.addEventListener("mousemove", e => {
+    const el = e.target.closest(".hit");
+    if (!el) { tip.style.display = "none"; return; }
+    let html = "";
+    if (el.dataset.i != null) {
+      const l = s.links[+el.dataset.i];
+      html = l ? `<b>Link up</b> ${esc(fmtSecs(l.secs))}<div class="muted">${esc(clock(l.up_at))} → ${l.down_at ? esc(clock(l.down_at)) : "now"}${l.ended === "drop" ? ` · dropped, hangup by ${esc(l.hangup)}` : ""}</div>` : "<b>Link up</b>";
+    } else {
+      const x = ev[+el.dataset.e];
+      html = x.kind === "link_down"
+        ? `<b style="color:var(--critical-text)">Drop</b> at ${esc(clock(x.t))} after ${esc(fmtSecs(x.held_secs))}<div class="muted">gone first on ${esc(x.first_side)} · hangup by ${esc(x.hangup)}</div><div class="muted" style="margin-top:4px">${esc(x.detail).slice(0, 400)}</div>`
+        : `<b style="color:var(--warning-text)">Setup failed</b> at ${esc(clock(x.t))}<div class="muted">${esc(x.error).slice(0, 400)}</div>`;
+    }
+    tip.innerHTML = html; tip.style.display = "block";
+    const r = tip.getBoundingClientRect();
+    tip.style.left = Math.min(e.clientX + 14, innerWidth - r.width - 10) + "px";
+    tip.style.top = Math.min(e.clientY + 14, innerHeight - r.height - 10) + "px";
+  });
+  tl.addEventListener("mouseleave", () => { tip.style.display = "none"; });
+}
+
+const KIND = {
+  start: ["skip", "Start"], resume: ["skip", "Resume"], link_up: ["pass", "Link up"], link_down: ["fail", "Drop"],
+  setup_failed: ["warn", "Setup failed"], sample: ["warn", "Sample"], note: ["skip", "Note"], stop: ["skip", "Stop"],
+};
+function eventText(id, e) {
+  switch (e.kind) {
+    case "start": return `${esc(e.topology)}, dialled by ${esc(e.dialer)}, ${fmtSecs(e.planned_secs)} planned${e.udp_timeout ? `, UDP timeout ${e.udp_timeout} s` : ""}`;
+    case "link_up": return `${esc(e.leg)} · ${e.setup_secs.toFixed(1)} s to set up`;
+    case "link_down": return `held ${esc(fmtSecs(e.held_secs))} · gone first on <b>${esc(e.first_side)}</b> · hangup by <b>${esc(e.hangup)}</b><br>${esc(e.detail)}${e.evidence ? `<br>${fileLink(id, e.evidence)}` : ""}`;
+    case "setup_failed": return esc(e.error);
+    case "sample": return `node ${e.node ? "up" : "down"}, server ${e.server ? "up" : "down"}${e.detail ? ` · ${esc(e.detail)}` : ""}`;
+    case "note": return esc(e.text);
+    case "stop": return esc(e.reason);
+    default: return "";
+  }
+}
+function eventsTable(id, ev) {
+  const rows = ev.filter(e => e.kind !== "sample").map(e => {
+    const [k, l] = KIND[e.kind] || ["skip", e.kind];
+    return `<tr><td class="t">${esc(clock(e.t))}</td><td>${pill(k, l)}</td><td class="d">${eventText(id, e)}</td></tr>`;
+  }).join("");
+  return `<table><thead><tr><th>Time</th><th>Event</th><th>Detail</th></tr></thead><tbody>${rows || '<tr><td colspan="3" class="d">No events.</td></tr>'}</tbody></table>`;
+}
+function linksTable(id, links) {
+  const rows = links.map((l, i) => `<tr><td class="t">${i + 1}</td><td class="t">${esc(clock(l.up_at))}</td><td class="t">${l.down_at ? esc(clock(l.down_at)) : "–"}</td>
+    <td class="t">${esc(fmtSecs(l.secs))}</td><td>${l.ended === "drop" ? pill("fail", "Dropped") : l.ended === "up" ? livePill() : pill("skip", "Stopped")}</td>
+    <td class="d">${l.ended === "drop" ? `gone first on ${esc(l.first_side)} · hangup by ${esc(l.hangup)}` : ""}</td></tr>`).join("");
+  return `<table><thead><tr><th>#</th><th>Up</th><th>Down</th><th>Lasted</th><th>Ended</th><th>Who</th></tr></thead><tbody>${rows || '<tr><td colspan="6" class="d">The link never came up.</td></tr>'}</tbody></table>`;
+}
+
+// ---- wiring ----------------------------------------------------------------
+
+$("#runs").addEventListener("click", e => { const b = e.target.closest(".run"); if (b) select(b.dataset.id); });
+document.querySelectorAll(".filters button").forEach(b => b.addEventListener("click", () => {
+  filter = b.dataset.f; try { localStorage.setItem("nb.filter", filter); } catch (_) {} renderList();
+}));
+$("#detail").addEventListener("click", e => {
+  const b = e.target.closest("[data-ev]"); if (!b) return;
+  eventView = b.dataset.ev; if (detailCache) { $("#detail").innerHTML = soakView(detailCache); wireTimeline(); }
+});
+addEventListener("popstate", () => { const id = decodeURIComponent(location.hash.replace(/^#\//, "")); if (id && id !== current) { current = id; renderList(); loadDetail(); } });
+document.addEventListener("keydown", e => {
+  if (e.target.closest("input, textarea") || !["j", "k", "ArrowDown", "ArrowUp"].includes(e.key) || !e.target.closest("aside, body")) return;
+  const shown = [...document.querySelectorAll(".run")]; const i = shown.findIndex(b => b.dataset.id === current);
+  const n = shown[(e.key === "j" || e.key === "ArrowDown") ? i + 1 : i - 1];
+  if (n && (e.key === "j" || e.key === "k" || document.activeElement.closest(".runs"))) { e.preventDefault(); select(n.dataset.id); n.focus(); }
+});
+const fromHash = decodeURIComponent(location.hash.replace(/^#\//, ""));
+if (fromHash) current = fromHash;
+loadRuns().then(() => { if (fromHash) loadDetail(); });
+setInterval(async () => {
+  await loadRuns();
+  const r = runs.find(x => x.id === current);
+  if (r && r.running) loadDetail();
+}, 5000);
+</script>
+</body>
+</html>

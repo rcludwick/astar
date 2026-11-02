@@ -207,10 +207,24 @@ final class CallSessionDMRDialTests: XCTestCase {
 
     func testDiallingWithNoVocoderIsRefusedBeforeTheEngine() {
         let (session, fake) = session(available: false)
+        // A trusted stick that is not plugged in. With nothing trusted at all
+        // the refusal is `noTrustedVocoder` instead — see
+        // VocoderTrustSessionTests and the test below.
+        session.applyVocoderTrust(["TESTSER1"])
         XCTAssertThrowsError(
             try session.connect(node: "freedmr-network-server-freedmr-eu/91/2", network: .dmr)
         ) { error in
             XCTAssertEqual(error as? CallSession.ConnectError, .dmrUnavailable)
+        }
+        XCTAssertTrue(fake.connectDMRCalls.isEmpty, "the dongle is never opened")
+    }
+
+    func testDiallingWithNothingTrustedSaysToAddAVocoder() {
+        let (session, fake) = session(available: false)
+        XCTAssertThrowsError(
+            try session.connect(node: "freedmr-network-server-freedmr-eu/91/2", network: .dmr)
+        ) { error in
+            XCTAssertEqual(error as? CallSession.ConnectError, .noTrustedVocoder(.dmr))
         }
         XCTAssertTrue(fake.connectDMRCalls.isEmpty, "the dongle is never opened")
     }

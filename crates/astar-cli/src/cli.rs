@@ -138,7 +138,9 @@ OPTIONS:
     -h, --help          Print this help and exit.
 
 D-Star is hardware-only: a ThumbDV USB dongle must be attached (no software
-fallback). Links, prints \"linked <host> module <M> (backend: thumbdv)\",
+fallback). Only an enrolled stick is opened: set
+ASTAR_VOCODER_SERIALS to its USB serial number (comma-separate several). With
+it unset nothing is opened and the connect fails with \"No trusted vocoder\". Links, prints \"linked <host> module <M> (backend: thumbdv)\",
 then a \"▶ <callsign>\" line per received transmission (with slow-data text
 appended once it arrives).
 
@@ -173,7 +175,9 @@ OPTIONS:
 RECEIVE ONLY. This command has no PTT; keying is the operator's, in the app.
 
 YSF is hardware-only: a ThumbDV USB dongle must be attached (AMBE+2, no
-software fallback). Links, prints \"linked <host>:<port> (backend: thumbdv)\",
+software fallback). Only an enrolled stick is opened: set
+ASTAR_VOCODER_SERIALS to its USB serial number (comma-separate several). With
+it unset nothing is opened and the connect fails with \"No trusted vocoder\". Links, prints \"linked <host>:<port> (backend: thumbdv)\",
 then a \"▶ <callsign>\" line per received transmission.
 
 astar decodes DN — V/D modes 1 and 2, what Yaesu radios transmit. A reflector
@@ -214,7 +218,9 @@ OPTIONS:
 RECEIVE ONLY. This command has no PTT; astar has no NXDN transmit path yet.
 
 NXDN is hardware-only: a ThumbDV USB dongle must be attached (AMBE+2, no
-software fallback). Links, prints \"linked <host>:<port> (backend: thumbdv)\",
+software fallback). Only an enrolled stick is opened: set
+ASTAR_VOCODER_SERIALS to its USB serial number (comma-separate several). With
+it unset nothing is opened and the connect fails with \"No trusted vocoder\". Links, prints \"linked <host>:<port> (backend: thumbdv)\",
 then a \"▶ <id>\" line per received transmission — a numeric id, not a
 callsign, because NXDN carries no callsign on the wire for anyone but the
 polling client itself. Ctrl-C unlinks cleanly.
@@ -288,7 +294,9 @@ rather than against somebody's network:
       3153591 31313
 
 DMR is hardware-only: a ThumbDV USB dongle must be attached (AMBE+2 at
-2450 + 1150, no software fallback). Logs in, prints
+2450 + 1150, no software fallback). Only an enrolled stick is opened: set
+ASTAR_VOCODER_SERIALS to its USB serial number (comma-separate several). With
+it unset nothing is opened and the connect fails with \"No trusted vocoder\". Logs in, prints
 \"linked <host>:<port> (backend: thumbdv)\", then a \"▶ <id>\" line per received
 transmission — a numeric id, not a callsign, because a DMRD carries srcId and
 no callsign at all. Ctrl-C logs out cleanly.

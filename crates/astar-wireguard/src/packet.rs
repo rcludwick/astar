@@ -180,11 +180,11 @@ pub fn parse_udp4(packet: &[u8]) -> Result<ParsedUdp4<'_>, PacketError> {
 /// Accumulate big-endian 16-bit words of `data` onto `sum` (RFC 1071).
 /// An odd trailing byte is zero-padded on the right.
 fn sum_words(mut sum: u32, data: &[u8]) -> u32 {
-    let mut chunks = data.chunks_exact(2);
-    for word in chunks.by_ref() {
-        sum += u32::from(u16::from_be_bytes([word[0], word[1]]));
+    let (chunks, remainder) = data.as_chunks::<2>();
+    for word in chunks {
+        sum += u32::from(u16::from_be_bytes(*word));
     }
-    if let [last] = chunks.remainder() {
+    if let [last] = remainder {
         sum += u32::from(u16::from_be_bytes([*last, 0]));
     }
     sum
@@ -277,7 +277,7 @@ mod tests {
         let pkt = build_udp4(reference_src(), reference_dst(), &[]).unwrap();
         assert_eq!(pkt.len(), IPV4_HEADER_LEN + UDP_HEADER_LEN);
         let parsed = parse_udp4(&pkt).unwrap();
-        assert!(parsed.payload.is_empty());
+        assert_eq!(parsed.payload, []);
     }
 
     #[test]

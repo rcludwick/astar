@@ -134,6 +134,9 @@ fn snapshot_fills_idle_state() {
         nxdn_active: true,
         dmr_available: true,
         dmr_active: true,
+        echolink_available: false,
+        echolink_active: true,
+        echolink_logged_in: true,
     };
     let rc = unsafe { iax_station_snapshot(st, std::ptr::from_mut(&mut state)) };
     assert_eq!(rc, IAX_OK);
@@ -252,6 +255,9 @@ fn null_guards_return_err_null() {
         nxdn_active: false,
         dmr_available: false,
         dmr_active: false,
+        echolink_available: false,
+        echolink_active: false,
+        echolink_logged_in: false,
     };
     assert_eq!(
         unsafe { iax_station_snapshot(ptr::null_mut(), std::ptr::from_mut(&mut state)) },
@@ -407,6 +413,9 @@ fn mint_token_without_portal_is_portal_err() {
         nxdn_active: false,
         dmr_available: false,
         dmr_active: false,
+        echolink_available: false,
+        echolink_active: false,
+        echolink_logged_in: false,
     };
     assert_eq!(
         unsafe { iax_station_snapshot(st, std::ptr::from_mut(&mut state)) },
@@ -1989,6 +1998,521 @@ fn ysf_connect_requires_a_host_and_a_callsign() {
         unsafe { iax_station_connect_ysf(st, host.as_ptr(), ptr::null(), ptr::null()) },
         IAX_ERR_NULL,
         "a NULL callsign must be refused"
+    );
+    unsafe { iax_station_free(st) };
+}
+
+// --- Vocoder trust (on-air safety) ---
+//
+// Nothing here opens a serial port. A station with an empty trust list
+// refuses every AMBE connect before it enumerates anything, which is what
+// makes the connect test below safe to run on a machine with sticks and
+// radio cables plugged in. Enrolment itself is never exercised against real
+// hardware: only its argument guards are.
+
+fn read_trust(st: *mut IaxStation) -> String {
+    let mut buf = [0u8; 256];
+    let n = unsafe { iax_station_vocoder_trust(st, buf.as_mut_ptr().cast(), buf.len()) };
+    assert!(n >= 0);
+    CStr::from_bytes_until_nul(&buf)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn vocoder_trust_round_trips_and_null_clears() {
+    let scfg = null_config();
+    let st = unsafe { iax_station_new(std::ptr::from_ref(&scfg)) };
+    assert_eq!(read_trust(st), "", "a new station trusts nothing");
+
+    let list = CString::new("TESTSER1, TESTSER2\nTESTSER1").unwrap();
+    assert_eq!(
+        unsafe { iax_station_set_vocoder_trust(st, list.as_ptr()) },
+        IAX_OK
+    );
+    assert_eq!(read_trust(st), "TESTSER1\nTESTSER2");
+
+    assert_eq!(
+        unsafe { iax_station_set_vocoder_trust(st, ptr::null()) },
+        IAX_OK
+    );
+    assert_eq!(read_trust(st), "", "NULL trusts nothing");
+    unsafe { iax_station_free(st) };
+}
+
+#[test]
+fn vocoder_trust_guards() {
+    let list = CString::new("TESTSER1").unwrap();
+    assert_eq!(
+        unsafe { iax_station_set_vocoder_trust(ptr::null_mut(), list.as_ptr()) },
+        IAX_ERR_NULL
+    );
+    assert_eq!(
+        unsafe { iax_station_vocoder_trust(ptr::null_mut(), ptr::null_mut(), 0) },
+        IAX_ERR_NULL
+    );
+    let scfg = null_config();
+    let st = unsafe { iax_station_new(std::ptr::from_ref(&scfg)) };
+    let bad: &[u8] = b"\xff\xfe\0";
+    assert_eq!(
+        unsafe { iax_station_set_vocoder_trust(st, bad.as_ptr().cast()) },
+        IAX_ERR_UTF8
+    );
+    unsafe { iax_station_free(st) };
+}
+
+#[test]
+fn connect_dstar_with_no_trusted_vocoder_is_refused_by_name() {
+    let scfg = null_config();
+    let st = unsafe { iax_station_new(std::ptr::from_ref(&scfg)) };
+    let host = CString::new("127.0.0.1").unwrap();
+    let call = CString::new("N0CALL").unwrap();
+    let rc = unsafe {
+        iax_station_connect_dstar(
+            st,
+            host.as_ptr(),
+            30001,
+            cc(b'A'),
+            call.as_ptr(),
+            ptr::null(),
+        )
+    };
+    assert_eq!(rc, IAX_ERR_DSTAR);
+    let mut buf = [0u8; 256];
+    unsafe { iax_station_last_error(st, buf.as_mut_ptr().cast(), buf.len()) };
+    let msg = CStr::from_bytes_until_nul(&buf).unwrap().to_str().unwrap();
+    assert!(
+        msg.ends_with("No trusted vocoder — add one in Settings → Vocoders"),
+        "the refusal names its reason, got {msg:?}"
+    );
+    unsafe { iax_station_free(st) };
+}
+
+#[test]
+fn vocoder_enrol_guards() {
+    assert_eq!(
+        unsafe { astar_vocoder_enrol(ptr::null(), ptr::null_mut(), 0) },
+        IAX_ERR_NULL
+    );
+    let bad: &[u8] = b"\xff\xfe\0";
+    assert_eq!(
+        unsafe { astar_vocoder_enrol(bad.as_ptr().cast(), ptr::null_mut(), 0) },
+        IAX_ERR_UTF8
+    );
+}
+
+#[test]
+fn vocoder_enrol_codes_are_stable() {
+    assert_eq!(IaxVocoderEnrol::Trusted as i32, 0);
+    assert_eq!(IaxVocoderEnrol::Unsupported as i32, 1);
+    assert_eq!(IaxVocoderEnrol::WrongDevice as i32, 2);
+    assert_eq!(IaxVocoderEnrol::NoAnswer as i32, 3);
+    assert_eq!(IaxVocoderEnrol::OpenFailed as i32, 4);
+    assert_eq!(IaxVocoderEnrol::NotFound as i32, 5);
+    assert_eq!(IaxVocoderEnrol::NotCompiled as i32, 6);
+}
+
+// --- EchoLink: error code, idle documents, flags and NULL guards (offline) ---
+//
+// None of these logs in or calls anyone: a fresh station is logged out, and
+// every refusal below happens before a socket is opened.
+
+#[test]
+fn echolink_error_code_has_its_text() {
+    // -24, not -23: -23 is IAX_ERR_RECORD.
+    assert_eq!(IAX_ERR_ECHOLINK, -24);
+    assert_ne!(IAX_ERR_ECHOLINK, IAX_ERR_DMR);
+    let text = unsafe { CStr::from_ptr(iax_error_text(IAX_ERR_ECHOLINK)) };
+    assert_eq!(text.to_str().expect("utf8"), "echolink error");
+}
+
+#[test]
+fn echolink_state_is_empty_object_when_logged_out() {
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(std::ptr::from_ref(&cfg)) };
+    let needed = unsafe { iax_station_echolink_state(st, ptr::null_mut(), 0) };
+    assert_eq!(needed, 2, "a sizing query reports the length of `{{}}`");
+    let mut buf = vec![0 as std::ffi::c_char; 16];
+    let n = unsafe { iax_station_echolink_state(st, buf.as_mut_ptr(), buf.len()) };
+    assert_eq!(n, needed);
+    let json = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().unwrap();
+    assert_eq!(json, "{}");
+    unsafe { iax_station_free(st) };
+}
+
+#[test]
+fn echolink_stations_is_an_empty_array_when_logged_out() {
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(std::ptr::from_ref(&cfg)) };
+    let needed = unsafe { iax_station_echolink_stations(st, ptr::null_mut(), 0) };
+    assert_eq!(needed, 2);
+    let mut buf = vec![0 as std::ffi::c_char; 16];
+    let n = unsafe { iax_station_echolink_stations(st, buf.as_mut_ptr(), buf.len()) };
+    assert_eq!(n, needed);
+    let json = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().unwrap();
+    assert_eq!(json, "[]");
+    unsafe { iax_station_free(st) };
+}
+
+#[test]
+fn echolink_flags_are_false_on_a_fresh_station() {
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(std::ptr::from_ref(&cfg)) };
+    let mut state = IaxState {
+        status: IaxStatus::Hangup,
+        ptt: false,
+        remote_ptt: false,
+        tx_db: 0.0,
+        rx_db: 0.0,
+        input_db: 0.0,
+        rtt_ms: -1,
+        mode: IaxMode::Wt,
+        tx_reanchors: 0,
+        tx_capture_overruns: 0,
+        rx_underruns: 0,
+        rx_jitter_ms: 0,
+        rx_jb_depth_ms: 0,
+        rx_frames_lost: 0,
+        rx_frames_late: 0,
+        rx_frames_ooo: 0,
+        rx_jb_enabled: true,
+        rx_jb_min_ms: 40,
+        rx_jb_max_ms: 200,
+        denoise_chain: IaxDenoiseChain::NotCapturing,
+        denoise_device_rate: 0,
+        denoise_live: false,
+        negotiated_format: 0,
+        dtmf_played: 0,
+        dtmf_total: 0,
+        m17_available: false,
+        m17_active: false,
+        dstar_available: false,
+        dstar_active: false,
+        ysf_available: false,
+        ysf_active: false,
+        nxdn_available: false,
+        nxdn_active: false,
+        dmr_available: false,
+        dmr_active: false,
+        // Pre-poisoned, to prove the snapshot overwrites them.
+        echolink_available: !cfg!(feature = "echolink"),
+        echolink_active: true,
+        echolink_logged_in: true,
+    };
+    assert_eq!(
+        unsafe { iax_station_snapshot(st, std::ptr::from_mut(&mut state)) },
+        IAX_OK
+    );
+    assert!(!state.echolink_active);
+    assert!(!state.echolink_logged_in);
+    // Availability is this library's own `echolink` feature (and the
+    // station's): on in a default build, off without the feature.
+    #[cfg(feature = "echolink")]
+    assert!(state.echolink_available, "a default build has EchoLink");
+    #[cfg(not(feature = "echolink"))]
+    assert!(
+        !state.echolink_available,
+        "a build without the feature must not offer EchoLink"
+    );
+    unsafe { iax_station_free(st) };
+}
+
+#[test]
+fn null_arguments_are_iax_err_null() {
+    let null = ptr::null_mut();
+    let call = c"KX7ABC".as_ptr();
+    let pass = c"pw".as_ptr();
+    let servers = c"127.0.0.1:5200".as_ptr();
+    // A NULL station, on every entry point.
+    unsafe {
+        assert_eq!(
+            iax_station_echolink_login(null, call, pass, servers),
+            IAX_ERR_NULL
+        );
+        assert_eq!(iax_station_echolink_logout(null), IAX_ERR_NULL);
+        assert_eq!(iax_station_echolink_connect(null, call), IAX_ERR_NULL);
+        assert_eq!(iax_station_echolink_disconnect(null), IAX_ERR_NULL);
+        assert_eq!(iax_station_echolink_refresh_list(null), IAX_ERR_NULL);
+        assert_eq!(iax_station_echolink_send_chat(null, call), IAX_ERR_NULL);
+        assert_eq!(iax_station_echolink_set_location(null, call), IAX_ERR_NULL);
+        assert_eq!(
+            iax_station_echolink_state(null, ptr::null_mut(), 0),
+            IAX_ERR_NULL
+        );
+        assert_eq!(
+            iax_station_echolink_stations(null, ptr::null_mut(), 0),
+            IAX_ERR_NULL
+        );
+    }
+    // A NULL string argument on a real station. A NULL password is a caller
+    // bug, not an empty password. Without this library's `echolink` feature
+    // the gate refuses before any argument is read, so the code is
+    // IAX_ERR_ECHOLINK there.
+    let want = if cfg!(feature = "echolink") {
+        IAX_ERR_NULL
+    } else {
+        IAX_ERR_ECHOLINK
+    };
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(std::ptr::from_ref(&cfg)) };
+    unsafe {
+        assert_eq!(
+            iax_station_echolink_login(st, ptr::null(), pass, servers),
+            want
+        );
+        assert_eq!(
+            iax_station_echolink_login(st, call, ptr::null(), servers),
+            want
+        );
+        assert_eq!(
+            iax_station_echolink_login(st, call, pass, ptr::null()),
+            want
+        );
+        assert_eq!(iax_station_echolink_connect(st, ptr::null()), want);
+        assert_eq!(iax_station_echolink_send_chat(st, ptr::null()), want);
+        assert_eq!(iax_station_echolink_set_location(st, ptr::null()), want);
+    }
+    unsafe { iax_station_free(st) };
+}
+
+#[cfg(feature = "echolink")]
+#[test]
+fn echolink_refusals_report_the_echolink_code() {
+    // Every one of these is refused before a thread or a socket starts.
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(std::ptr::from_ref(&cfg)) };
+    let servers = c"127.0.0.1:5200".as_ptr();
+    unsafe {
+        // Empty callsign, empty password, no non-empty server.
+        assert_eq!(
+            iax_station_echolink_login(st, c"".as_ptr(), c"pw".as_ptr(), servers),
+            IAX_ERR_ECHOLINK
+        );
+        assert_eq!(
+            iax_station_echolink_login(st, c"KX7ABC".as_ptr(), c"".as_ptr(), servers),
+            IAX_ERR_ECHOLINK
+        );
+        assert_eq!(
+            iax_station_echolink_login(st, c"KX7ABC".as_ptr(), c"pw".as_ptr(), c"\n  \n".as_ptr()),
+            IAX_ERR_ECHOLINK
+        );
+        // An empty target, and a call while not logged in.
+        assert_eq!(
+            iax_station_echolink_connect(st, c" ".as_ptr()),
+            IAX_ERR_ECHOLINK
+        );
+        assert_eq!(
+            iax_station_echolink_connect(st, c"1234".as_ptr()),
+            IAX_ERR_ECHOLINK
+        );
+        // Chat with no call in hand.
+        assert_eq!(
+            iax_station_echolink_send_chat(st, c"hi".as_ptr()),
+            IAX_ERR_NOT_CONNECTED
+        );
+        // A fresh list needs a login.
+        assert_eq!(iax_station_echolink_refresh_list(st), IAX_ERR_ECHOLINK);
+        // A password the directory line cannot carry: CR, LF, or a 0xAC
+        // byte (U+00AC is C2 AC in UTF-8).
+        for bad in [c"pa\rss", c"pa\nss", c"pa\u{ac}ss"] {
+            assert_eq!(
+                iax_station_echolink_login(st, c"KX7ABC".as_ptr(), bad.as_ptr(), servers),
+                IAX_ERR_ECHOLINK
+            );
+        }
+        // Logout, hang-up and location are fine with nothing running.
+        assert_eq!(
+            iax_station_echolink_set_location(st, c"Seattle".as_ptr()),
+            IAX_OK
+        );
+        assert_eq!(iax_station_echolink_disconnect(st), IAX_OK);
+        assert_eq!(iax_station_echolink_logout(st), IAX_OK);
+    }
+    // The last error never carries the password. The servers are refused
+    // AFTER the callsign and password are accepted, so the password has been
+    // copied and handed over by the time the error is written.
+    let mut buf = vec![0 as std::ffi::c_char; 512];
+    unsafe {
+        assert_eq!(
+            iax_station_echolink_login(
+                st,
+                c"KX7ABC".as_ptr(),
+                c"hunter2".as_ptr(),
+                c"   \n \t ".as_ptr()
+            ),
+            IAX_ERR_ECHOLINK
+        );
+        iax_station_last_error(st, buf.as_mut_ptr(), buf.len());
+    }
+    let last = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().unwrap();
+    assert_ne!(last, "");
+    assert!(!last.contains("hunter2"), "{last}");
+    unsafe { iax_station_free(st) };
+}
+
+/// Without this library's `echolink` feature, a well-formed login is refused
+/// at the gate, even though astar-station below still has `EchoLink` from its
+/// own defaults: off here means nothing starts. The server is loopback, so
+/// even a broken gate could reach nothing but this machine.
+#[cfg(not(feature = "echolink"))]
+#[test]
+fn echolink_entry_points_refuse_without_the_feature() {
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(std::ptr::from_ref(&cfg)) };
+    let call = c"KX7ABC".as_ptr();
+    unsafe {
+        assert_eq!(
+            iax_station_echolink_login(st, call, c"pw".as_ptr(), c"127.0.0.1:5200".as_ptr()),
+            IAX_ERR_ECHOLINK
+        );
+        let mut buf = vec![0 as std::ffi::c_char; 512];
+        iax_station_last_error(st, buf.as_mut_ptr(), buf.len());
+        let last = CStr::from_ptr(buf.as_ptr()).to_str().unwrap();
+        assert!(last.contains("echolink support not compiled in"), "{last}");
+        // Nothing started: no login is running or failed.
+        let mut doc = vec![0 as std::ffi::c_char; 64];
+        iax_station_echolink_state(st, doc.as_mut_ptr(), doc.len());
+        assert_eq!(CStr::from_ptr(doc.as_ptr()).to_str().unwrap(), "{}");
+        // Every other action is refused the same way.
+        assert_eq!(iax_station_echolink_logout(st), IAX_ERR_ECHOLINK);
+        assert_eq!(
+            iax_station_echolink_connect(st, c"1234".as_ptr()),
+            IAX_ERR_ECHOLINK
+        );
+        assert_eq!(iax_station_echolink_disconnect(st), IAX_ERR_ECHOLINK);
+        assert_eq!(iax_station_echolink_refresh_list(st), IAX_ERR_ECHOLINK);
+        assert_eq!(
+            iax_station_echolink_send_chat(st, c"hi".as_ptr()),
+            IAX_ERR_ECHOLINK
+        );
+        assert_eq!(
+            iax_station_echolink_set_location(st, c"Seattle".as_ptr()),
+            IAX_ERR_ECHOLINK
+        );
+        let mut list = vec![0 as std::ffi::c_char; 64];
+        iax_station_echolink_stations(st, list.as_mut_ptr(), list.len());
+        assert_eq!(CStr::from_ptr(list.as_ptr()).to_str().unwrap(), "[]");
+    }
+    unsafe { iax_station_free(st) };
+}
+
+// --- Recording: iax_station_record_start / _stop / _state_json ---
+
+/// Read `iax_station_record_state_json` into a `String`: size, then fill.
+fn record_state_json(st: *mut IaxStation) -> String {
+    let needed = unsafe { iax_station_record_state_json(st, ptr::null_mut(), 0) };
+    assert!(needed > 0, "the state is never empty JSON");
+    let mut buf = vec![0 as std::ffi::c_char; usize::try_from(needed).unwrap() + 1];
+    let wrote = unsafe { iax_station_record_state_json(st, buf.as_mut_ptr(), buf.len()) };
+    assert_eq!(wrote, needed);
+    unsafe { CStr::from_ptr(buf.as_ptr()) }
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// With no call or digital session there is nothing to record: the start is
+/// refused as not connected, and `last_error` says so.
+#[test]
+fn record_start_while_idle_returns_not_connected() {
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(ptr::from_ref(&cfg)) };
+    let dir = CString::new(
+        std::env::temp_dir()
+            .join("astar-ffi-record")
+            .to_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let label = CString::new("AllStar 2000").unwrap();
+    let rc = unsafe { iax_station_record_start(st, dir.as_ptr(), 0, false, label.as_ptr(), 0) };
+    assert_eq!(rc, IAX_ERR_NOT_CONNECTED);
+    let mut buf = [0 as std::ffi::c_char; 128];
+    let n = unsafe { iax_station_last_error(st, buf.as_mut_ptr(), buf.len()) };
+    assert!(n > 0, "the refusal is explained through last_error");
+    unsafe { iax_station_free(st) };
+}
+
+/// Only 0, 1 and 2 name a layout; anything else is unsupported, and NULL or
+/// non-UTF-8 strings are refused before the station is asked.
+#[test]
+fn record_start_rejects_an_unknown_layout() {
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(ptr::from_ref(&cfg)) };
+    let dir = CString::new("/tmp/astar-ffi-record").unwrap();
+    let label = CString::new("AllStar 2000").unwrap();
+    for layout in [7, -1, 3] {
+        assert_eq!(
+            unsafe { iax_station_record_start(st, dir.as_ptr(), layout, false, label.as_ptr(), 0) },
+            IAX_ERR_UNSUPPORTED,
+            "layout {layout}"
+        );
+    }
+    assert_eq!(
+        unsafe { iax_station_record_start(st, ptr::null(), 0, false, label.as_ptr(), 0) },
+        IAX_ERR_NULL
+    );
+    assert_eq!(
+        unsafe { iax_station_record_start(st, dir.as_ptr(), 0, false, ptr::null(), 0) },
+        IAX_ERR_NULL
+    );
+    let bad = CString::new(vec![0xff_u8, 0xfe]).unwrap();
+    assert_eq!(
+        unsafe { iax_station_record_start(st, bad.as_ptr(), 0, false, label.as_ptr(), 0) },
+        IAX_ERR_UTF8
+    );
+    assert_eq!(
+        unsafe { iax_station_record_start(st, dir.as_ptr(), 0, false, bad.as_ptr(), 0) },
+        IAX_ERR_UTF8
+    );
+    assert_eq!(
+        unsafe {
+            iax_station_record_start(ptr::null_mut(), dir.as_ptr(), 0, false, label.as_ptr(), 0)
+        },
+        IAX_ERR_NULL
+    );
+    unsafe { iax_station_free(st) };
+}
+
+/// A new station reports the idle state with every pinned key; a stop while
+/// idle is a no-op.
+#[test]
+fn record_state_json_reports_idle() {
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(ptr::from_ref(&cfg)) };
+    assert_eq!(unsafe { iax_station_record_stop(st) }, IAX_OK);
+    assert_eq!(unsafe { iax_station_record_stop(st) }, IAX_OK);
+    let v: serde_json::Value = serde_json::from_str(&record_state_json(st)).unwrap();
+    assert_eq!(v["recording"], false);
+    assert_eq!(v["elapsed_ms"], 0);
+    assert_eq!(v["files"], serde_json::json!([]));
+    assert_eq!(v["dropped_frames"], 0);
+    assert!(v["error"].is_null());
+    assert_eq!(v["layout"], "stereo");
+    assert_eq!(
+        unsafe { iax_station_record_stop(ptr::null_mut()) },
+        IAX_ERR_NULL
+    );
+    unsafe { iax_station_free(st) };
+}
+
+/// `len == 0` is a sizing query; a short buffer is truncated, NUL-terminated,
+/// and still reports the full size.
+#[test]
+fn record_state_json_fill_buf_reports_needed_size() {
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(ptr::from_ref(&cfg)) };
+    let needed = unsafe { iax_station_record_state_json(st, ptr::null_mut(), 0) };
+    assert!(needed > 0);
+    let mut short = [0x7f as std::ffi::c_char; 8];
+    let n = unsafe { iax_station_record_state_json(st, short.as_mut_ptr(), short.len()) };
+    assert_eq!(n, needed);
+    assert_eq!(short[7], 0, "a truncated fill is NUL-terminated");
+    assert_eq!(
+        unsafe { iax_station_record_state_json(ptr::null_mut(), ptr::null_mut(), 0) },
+        IAX_ERR_NULL
     );
     unsafe { iax_station_free(st) };
 }

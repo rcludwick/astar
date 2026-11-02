@@ -115,7 +115,7 @@ extension Network {
         case .ysf: return .ysf
         case .nxdn: return .nxdn
         case .dmr: return .dmr
-        case .allstar, .hamlink: return nil
+        case .allstar, .hamlink, .echolink: return nil
         }
     }
 }

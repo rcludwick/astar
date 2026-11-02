@@ -1,0 +1,80 @@
+[package]
+name = "astar-discord"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+# OFF by default. Enabling this pulls tokio and songbird into the build;
+# ci/guard-discord-feature.sh proves a default build links neither.
+default = []
+discord = ["dep:songbird", "dep:serenity", "dep:tokio", "dep:symphonia"]
+# Test-only constructors (`Gateway::orphan`) for this crate's tests and for
+# astar-server's, which cannot see a `#[cfg(test)]` item across a crate
+# boundary. Pulls in no dependency and is never enabled by a shipped build —
+# same shape as astar-audio's `test-backend`.
+test-support = []
+
+[dependencies]
+# No sound devices of its own: the bridge is a conference member.
+astar-audio = { path = "../astar-audio", version = "0.1.18-beta", default-features = false }
+astar-iax = { path = "../astar-iax", version = "0.1.18-beta", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Discord voice, all optional and pulled in only by the `discord` feature.
+# rustls is required on both: without a TLS backend the gateway cannot
+# connect. songbird's build script hard-requires exactly one of
+# `tungstenite`/`tws` whenever `driver` is on — it is not part of songbird's
+# own `default-features = true` bloat, so naming it explicitly here does not
+# pull anything unwanted; `twilight` (the `tws` alternative) stays off.
+# "receive" is enabled for PACKET TIMING AND NOTHING ELSE, under one rule
+# that the rest of this crate's safety story rests on: the driver runs in
+# `DecodeMode::Pass`, so received packets are never decrypted and never
+# decoded. The node learns THAT an SSRC sent a packet in a 20 ms tick, which
+# is the only way Discord will tell anyone that a speaker has stopped — there
+# is no "stopped speaking" event — and that is what unkeys the mic after
+# `mic_silence_secs` of silence. No Discord audio ever exists inside the
+# process, so there is none to relay: `NetLink::send` still has no production
+# caller and the conference member is still enrolled non-contributing.
+# `gateway::voice_config` is the single place that `Config` is built and the
+# only place `Pass` could be changed; see the comment above it before
+# touching either.
+songbird = { version = "0.6", optional = true, default-features = false, features = [
+    "driver",
+    "gateway",
+    "serenity",
+    "rustls",
+    "tungstenite",
+    "receive",
+] }
+# "voice" is what gates ClientBuilder's voice_manager_arc/voice_manager
+# plumbing that songbird::serenity::register_with needs; songbird's own
+# dependency on serenity already requests it, so leaving it off here would
+# still compile today via feature unification, but naming it directly is the
+# honest statement of what this crate actually calls.
+serenity = { version = "0.12", optional = true, default-features = false, features = [
+    "client",
+    "gateway",
+    "model",
+    "voice",
+    "rustls_backend",
+] }
+# NOT used by name anywhere in this crate — it is here for ONE cargo feature.
+# The audio path into Discord is songbird's raw container, which tags its
+# track CODEC_TYPE_PCM_F32LE and leaves decoding to whichever symphonia codecs
+# are compiled in. songbird only turns those on through its own default
+# features, which this crate disables; without `pcm` there is no decoder, the
+# track dies on its first frame ("no compatible track found"), and the bridge
+# reports `connected: true` while delivering nothing. Feature unification is
+# what makes naming it here reach songbird's copy, so the version must stay
+# the one songbird resolves (0.5). Pinned by
+# `songbird_can_decode_the_pcm_this_crate_streams_into_it`.
+symphonia = { version = "0.5", optional = true, default-features = false, features = ["pcm"] }
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true

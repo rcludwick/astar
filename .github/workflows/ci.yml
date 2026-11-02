@@ -51,6 +51,18 @@ on:
         description: "Include the Iced client job (slow: iced/wgpu on a 3 GB box)"
         type: boolean
         default: true
+      run_nodebench:
+        description: "Include nodebench (needs the runner changes in harness/nodebench/README.md, CI)"
+        type: boolean
+        default: false
+      nodebench_scenarios:
+        description: "nodebench scenario ids, space-separated (empty = the whole quick tier)"
+        type: string
+        default: ""
+      nodebench_hold_secs:
+        description: "nodebench hold window for the 'link holds' checks, seconds"
+        type: string
+        default: "60"
 
 # One run at a time per branch. Dispatching again supersedes a run still
 # queued behind the first — the box has 4 cores and 3 GB of RAM, so
@@ -79,12 +91,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      # Keep this list in step with the `guards` recipe in the justfile. Two
+      # of these were written and then never added here, so the invariant
+      # they enforce held only on whichever Mac last ran `just guards`:
+      # guard-codec2-licensing.sh (no LGPL in a default build) and
+      # guard-discord-feature.sh (no tokio/songbird in a default build).
       - name: Merge invariants
         run: |
           ./ci/guard-safety-env.sh
           ./ci/guard-no-git-deps.sh
           ./ci/guard-distribution-claims.sh
           ./ci/guard-spdx-headers.sh
+          ./ci/guard-codec2-licensing.sh
+          ./ci/guard-discord-feature.sh
+          ./ci/guard-no-tiny-http.sh
+          ./ci/guard-echolink.sh
 
   # The `just ci` equivalent. `just` is deliberately not installed on the box,
   # so the recipes are spelled out; keep the two in step by hand.
@@ -117,6 +138,14 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-targets
 
+      # astar-codec's opt-in `gsm` feature, which the default-features clippy
+      # and test above never compile. Mirrors `just gsm-check`. The ETSI test
+      # skips here (no ASTAR_GSM_ETSI_DIR); the golden-frame test runs.
+      - name: GSM 06.10 (--features gsm)
+        run: |
+          cargo clippy -p astar-codec --all-targets --features gsm -- -D warnings
+          cargo test -p astar-codec --features gsm
+
       # Pinned: different cbindgen releases format headers differently, and a
       # mismatch reads as spurious drift in a committed header.
       - name: cbindgen (cached in CARGO_HOME after the first run)
@@ -131,6 +160,63 @@ jobs:
         run: |
           ./scripts/check-cbindgen.sh
           ./scripts/check-cbindgen-serial.sh
+
+  # The Discord bridge, which the `rust` job above cannot see: `discord` is off
+  # by default (guard-discord-feature.sh proves it), so a default-features
+  # clippy and test compile none of crates/astar-discord/src/songbird_link.rs,
+  # none of astar-server's `#[cfg(feature = "discord")]` items, and none of the
+  # feature-gated tests. That is several hundred lines with no automated gate
+  # at all — while the released astar-server container IS built with
+  # `--features discord` (LICENSE-EXCEPTIONS.md §4), so this is shipped code.
+  #
+  # Its OWN job, not extra steps on `rust`: the feature resolves ~200 packages
+  # more than a default build (songbird, serenity, tokio and their trees), and
+  # folding that in would put the cbindgen/header-drift gate behind a second
+  # heavy compile on a 4-core box. Separate, it runs in parallel and a failure
+  # names itself.
+  discord:
+    # Private repo only — see the header. Skips cleanly in public.
+    if: github.repository == 'rcludwick/astar-private'
+    runs-on: [self-hosted, ionos]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Clippy (--features discord)
+        run: |
+          cargo clippy -p astar-server -p astar-discord --all-targets \
+            --features discord -- -D warnings
+
+      - name: Test (--features discord)
+        run: |
+          cargo test -p astar-discord --features discord
+          cargo test -p astar-server  --features discord
+
+  # astar-server's opt-in `dns-providers` feature (the extra DNS providers),
+  # which a default-features clippy and test never compile. The release build
+  # has it. Mirrors `just dns-check`; its tests use only in-memory fakes and
+  # 127.0.0.1.
+  dns-providers:
+    # Private repo only — see the header. Skips cleanly in public.
+    if: github.repository == 'rcludwick/astar-private'
+    runs-on: [self-hosted, ionos]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Clippy (--features dns-providers)
+        run: |
+          cargo clippy -p astar-server --all-targets \
+            --features dns-providers -- -D warnings
+
+      - name: Test (--features dns-providers)
+        run: |
+          cargo test -p astar-server --features dns-providers --lib -- public::
+          cargo test -p astar-server --features dns-providers --lib -- config::
 
   # --strict, so a broken link or a nav entry pointing at a missing page fails
   # here instead of failing the manual Pages publish later. Same script the
@@ -214,3 +300,87 @@ jobs:
           name: gui-linux-shot
           path: apps/gui/.shots/linux-idle.png
           if-no-files-found: warn
+
+  # nodebench: astar-server against a real AllStarLink 3 node in a podman pod
+  # (harness/nodebench/README.md). No radio exists in the rig, every service
+  # talks on 127.0.0.1 inside one pod, and every published port is on the
+  # runner container's own 127.0.0.1.
+  #
+  # OFF BY DEFAULT (`run_nodebench`), because the runner cannot run it yet:
+  # the image has no podman, and the runner container is created with
+  # podman's default confinement, under which a nested rootless podman cannot
+  # even set up its user namespace. README.md "CI" lists exactly what the
+  # runner needs; `harness/nodebench/ci/nested-trial.sh` proves that recipe on
+  # the Mac by running the rig inside a stand-in of the runner image.
+  # Until the box has it, the preflight step below fails with that pointer
+  # rather than letting the job pretend.
+  #
+  # It does not gate the others (no `needs:`), and the quick tier currently
+  # FAILS on known, still-open astar-server bugs (harness/nodebench/RIG.md,
+  # findings 2, 3 and 6-8). Red here is the bench doing its job.
+  nodebench:
+    if: github.repository == 'rcludwick/astar-private' && inputs.run_nodebench
+    runs-on: [self-hosted, ionos]
+    # The full quick tier with 60 s holds has not been timed end to end yet
+    # (several scenarios hold 60 s each, and codec_matrix links 24 times);
+    # the two images, a release build of astar-server among them, add more
+    # on a cold cache. 90 minutes is a ceiling, not an estimate.
+    timeout-minutes: 90
+    env:
+      # The box has 3.8 GB; the astar-server image build and the host build
+      # of the bench must not run unbounded codegen side by side.
+      CARGO_BUILD_JOBS: "2"
+      # Inside the runner, podman is local. Never inherit a remote connection.
+      CONTAINER_CONNECTION: ""
+      # Where a pod reaches the runner container's 127.0.0.1 (slirp4netns
+      # with allow_host_loopback=true). The node's USRP transmit audio comes
+      # back to the bench here; host.containers.internal would name the box.
+      NODEBENCH_USRP_HOST: "10.0.2.2"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Preflight (nested rootless podman)
+        run: |
+          fail() {
+            echo "::error::nodebench: $1. The runner needs the changes in harness/nodebench/README.md (CI)."
+            exit 1
+          }
+          command -v podman >/dev/null 2>&1 || fail "podman is not installed in the runner image"
+          podman --version
+          podman info --format 'store={{.Store.GraphDriverName}} net={{.Host.NetworkBackend}}' \
+            || fail "podman cannot start here (user namespace or storage)"
+          podman run --rm docker.io/library/busybox:1.36 true \
+            || fail "a nested container will not start (devices, seccomp or /proc masks)"
+
+      - name: Build the rig images
+        run: harness/nodebench/rig.sh build
+
+      # Inputs arrive through env and are checked, never pasted into the
+      # script, so a dispatch input cannot become shell.
+      - name: Quick tier
+        env:
+          NB_SCENARIOS: ${{ inputs.nodebench_scenarios }}
+          NB_HOLD: ${{ inputs.nodebench_hold_secs }}
+        run: |
+          [[ "$NB_HOLD" =~ ^[0-9]+$ ]] || { echo "::error::hold secs must be a number: $NB_HOLD"; exit 2; }
+          [[ "$NB_SCENARIOS" =~ ^[a-z0-9_\ ]*$ ]] || { echo "::error::scenario ids are [a-z0-9_]"; exit 2; }
+          read -r -a scenarios <<<"$NB_SCENARIOS"
+          cargo run -q --locked -p astar-nodebench -- run \
+            --replace \
+            --hold-secs "$NB_HOLD" \
+            --var "USRP_HOST=$NODEBENCH_USRP_HOST" \
+            "${scenarios[@]}"
+
+      # report.json, per-scenario last-frames.txt and log tails, the pcap ring.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nodebench-report
+          path: target/nodebench/
+          if-no-files-found: warn
+
+      - name: Tear the rig down
+        if: always()
+        run: harness/nodebench/rig.sh down || true

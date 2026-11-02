@@ -85,8 +85,8 @@ Per-network designs: `ysf-network.md`, `nxdn-network.md`, `p25-network.md`,
 
 ### 2.3 Session module
 
-`crates/astar-console/src/dstar.rs` and `m17.rs`. **One audio lane** (see
-`docs/superpowers/implemented/2026-09-06-one-audio-lane-design.md`): the
+`crates/astar-console/src/dstar.rs` and `m17/` (`mod.rs`, `session.rs`). **One audio lane** (see the
+`crates/astar-console/src/voice_route.rs` module docs): the
 station's single `AudioRouter`, owned for the session's lifetime by the
 `Manager` a `ConsoleSession` already holds, is where every meter and every
 spectrum is computed, once, for every network. A session takes its audio, it
@@ -105,6 +105,11 @@ does not build it. The shape both share:
   same shape (`connect_with_stream` beside `connect_with_audio`). M17 has no
   seam of that kind — `M17Session::connect(cfg, audio)` is its only
   constructor, because there is no dongle to fake.
+  M17 now has a receive-only constructor: `M17Monitor` (astar-console) joins
+  the conference through `Manager::add_source_member`, which can only
+  contribute. It takes no `CallAudio` and has no transmit path at all; a
+  network that wants a node-side, receive-only leg should copy it rather
+  than run an unkeyed session.
   There is no shared `CallAudio` test helper, and none is owed: M17 and
   D-Star each build one in-module with a private `fake_call_audio()`, YSF's
   private `test_audio()` does the same, and each integration test file
@@ -169,8 +174,7 @@ live, and `open_voice_route` pushes the full set at connect through the same
 > session, so it played at the router's unity default while every other
 > network sat where it had been set — heard on air as "D-Star is louder than
 > it should be". That whole class of bug is what the one-audio-lane refactor
-> (2026-09-06) removed by construction; see
-> `docs/superpowers/implemented/2026-09-06-one-audio-lane-design.md`.
+> (2026-09-06) removed by construction.
 
 ### 2.5 Station facade
 
@@ -239,10 +243,17 @@ Then `just cbindgen` — the committed `astar.h` must not drift, and CI checks i
 > **Know what the error code costs you.** `iax_error_text()` returns a *static
 > string per code*: `IAX_ERR_DSTAR` is `"dstar error"`. The engine's careful
 > classification — "ThumbDV at /dev/cu.usbserial-… is busy — another process has
-> it open" — **does not cross the ABI**. Until there is a last-error accessor,
-> the app has to write its own message for the code (see
-> `connectFailureMessage`), which can only name likely causes rather than the
-> real one.
+> it open" — does not fit in the code. **`iax_station_last_error` carries it**:
+> it fills a caller-sized buffer with the most recent failure's detail
+> (`StationError`'s own `Display`, secret-free by construction), so read it
+> immediately after a negative return and show that sentence rather than
+> writing a guess per code. EchoLink is the worked example: the app's
+> `connectFailureMessage` shows the engine's detail for `IAX_ERR_ECHOLINK`
+> ("No station 9999 is logged in to EchoLink.") and falls back to its own text
+> only when the detail is empty. A network with a login that can fail
+> separately from a call (EchoLink's directory) also wants its own
+> last-error sentence, as EchoLink has in `Station::echolink_last_error` and
+> in the `error` field of its state JSON.
 
 ### 2.8 The node guard
 

@@ -527,13 +527,24 @@ fn dvsi_bit_order() -> [usize; VOICE_BITS] {
 /// 72 bits. See [`crate::dmr::ratep_dmr`].
 #[must_use]
 pub fn channel_in_dn(frame: DnFrame) -> Vec<u8> {
+    let mut fields = vec![0x01, 0x31]; // CHAND field ID, bit count (49)
+    fields.extend_from_slice(&dn_frame_to_channel(&frame));
+    dvsi_packet(1, &fields)
+}
+
+/// A [`DnFrame`]'s 49 bits in the AMBE-3000's own channel-bit order — the
+/// exact inverse of [`dn_frame_from_channel`], and the bytes
+/// [`channel_in_dn`] puts after its field header.
+///
+/// This only moves bits; it decodes nothing. It exists so a recording can
+/// store a frame the way the chip sees it (unamblify's `ysf-dmr` captures).
+#[must_use]
+pub fn dn_frame_to_channel(frame: &DnFrame) -> [u8; VOICE_BYTES] {
     let mut bits = [0u8; VOICE_BYTES];
     for (i, &to) in dvsi_bit_order().iter().enumerate() {
         write_bit(&mut bits, to, read_bit(&frame.0, i));
     }
-    let mut fields = vec![0x01, 0x31]; // CHAND field ID, bit count (49)
-    fields.extend_from_slice(&bits);
-    dvsi_packet(1, &fields)
+    bits
 }
 
 /// Turns a channel packet's 49 bits — as the AMBE-3000 emits them when
@@ -686,6 +697,42 @@ mod tests {
             let mut bits = [0u8; VOICE_BYTES];
             bits.copy_from_slice(&packet[6..]);
             assert_eq!(dn_frame_from_channel(&bits), frame);
+        }
+    }
+
+    /// The inverse, checked from the chip's side: any 49 channel bits read
+    /// in and written back out come back unchanged.
+    #[test]
+    fn dn_frame_to_channel_inverts_dn_frame_from_channel() {
+        let mut patterns: Vec<[u8; VOICE_BYTES]> = (0..VOICE_BITS)
+            .map(|bit| {
+                let mut b = [0u8; VOICE_BYTES];
+                write_bit(&mut b, bit, true);
+                b
+            })
+            .collect();
+        for fill in [0x55, 0xAA] {
+            let mut b = [fill; VOICE_BYTES];
+            b[6] &= 0x80; // only bit 48 of the last byte is a voice bit
+            patterns.push(b);
+        }
+        for bits in patterns {
+            assert_eq!(dn_frame_to_channel(&dn_frame_from_channel(&bits)), bits);
+        }
+    }
+
+    /// What the decode packet carries after its `0x01, 0x31` field header
+    /// is exactly the chip-order bytes.
+    #[test]
+    fn dn_frame_to_channel_is_what_channel_in_dn_sends() {
+        for frame in sample_frames() {
+            let packet = channel_in_dn(frame);
+            let at = packet
+                .windows(2)
+                .position(|w| w == [0x01, 0x31])
+                .expect("CHAND field header")
+                + 2;
+            assert_eq!(packet[at..], dn_frame_to_channel(&frame));
         }
     }
 

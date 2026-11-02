@@ -1,0 +1,11 @@
+request: GET /stream.mp3 HTTP/1.1
+status: 503
+header: cache-control: no-store
+header: content-security-policy: default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; media-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+header: content-type: text/plain; charset=utf-8
+header: referrer-policy: no-referrer
+header: retry-after: 10
+header: x-content-type-options: nosniff
+header: x-frame-options: DENY
+body: Full, try again shortly
+

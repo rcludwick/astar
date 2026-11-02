@@ -106,8 +106,17 @@ final class CallSessionYSFDialTests: XCTestCase {
 
     func testDiallingWithNoVocoderIsRefusedBeforeTheEngine() {
         let (session, fake) = session(available: false)
+        session.applyVocoderTrust(["TESTSER1"])  // trusted, not plugged in
         XCTAssertThrowsError(try session.connect(node: "US-KCWIDE", network: .ysf)) { error in
             XCTAssertEqual(error as? CallSession.ConnectError, .ysfUnavailable)
+        }
+        XCTAssertTrue(fake.ysfConnects.isEmpty, "the dongle is never opened")
+    }
+
+    func testDiallingWithNothingTrustedSaysToAddAVocoder() {
+        let (session, fake) = session(available: false)
+        XCTAssertThrowsError(try session.connect(node: "US-KCWIDE", network: .ysf)) { error in
+            XCTAssertEqual(error as? CallSession.ConnectError, .noTrustedVocoder(.ysf))
         }
         XCTAssertTrue(fake.ysfConnects.isEmpty, "the dongle is never opened")
     }

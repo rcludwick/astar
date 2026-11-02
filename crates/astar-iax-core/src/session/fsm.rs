@@ -1204,10 +1204,13 @@ mod fsm_tests {
         use crate::session::call_profile::CallProfile;
 
         for (policy, named) in [
-            // gsm: outside the mask AND unencodable.
-            (CodecPolicy::PreferSlin, VoiceFormat::Gsm.as_u32()),
+            // g729: outside the mask AND unencodable.
+            (CodecPolicy::PreferSlin, VoiceFormat::G729.as_u32()),
             // slin16: perfectly encodable, but this station never offered it.
             (CodecPolicy::UlawOnly, VoiceFormat::Slin16.as_u32()),
+            // gsm: carried on calls we answer, never offered on one we place.
+            (CodecPolicy::UlawOnly, VoiceFormat::Gsm.as_u32()),
+            (CodecPolicy::PreferSlin16, VoiceFormat::Gsm.as_u32()),
         ] {
             let mut f = Fsm::new(creds(), CallNo::new(1).unwrap()).with_call_profile(CallProfile {
                 codec_policy: policy,
@@ -1557,6 +1560,21 @@ mod fsm_tests {
         );
         let _ = f.handle(Event::Frame { frame: accept, now });
         (f, now)
+    }
+
+    #[test]
+    fn active_stop_indications_control_is_a_quiet_no_op() {
+        // chan_iax2 sends ast_indicate(chan, -1) as control subclass 0xff;
+        // app_rpt does it after ANSWER. Nothing to stop, nothing to log.
+        let (mut f, now) = drive_to_active();
+        // The bytes ASL3 sent in nodebench: a control frame, subclass 0xff.
+        let wire = [
+            0x80, 0x07, 0x00, 0x01, 0, 0, 0, 0x1a, 0x03, 0x02, 0x04, 0xff,
+        ];
+        let frame = crate::frame::parse_lenient(&wire).expect("parses");
+        let actions = f.handle(Event::Frame { frame, now });
+        assert!(actions.is_empty(), "{actions:?}");
+        assert!(matches!(f.state(), SessionState::Active(_)));
     }
 
     #[test]
@@ -2860,7 +2878,7 @@ mod fsm_tests {
         let ies = crate::ie::Ies::parse(new.ie_bytes()).expect("parse NEW ies");
         assert_eq!(
             ies.capability,
-            Some(CodecPolicy::PreferSlin.capability_mask().get()),
+            Some(CodecPolicy::PreferSlin.offer_mask().get()),
             "WT + non-ulaw policy must advertise CAPABILITY"
         );
         assert_eq!(ies.format, Some(VoiceFormat::Slin.as_u32()));
@@ -2975,7 +2993,7 @@ mod fsm_tests {
         assert_eq!(
             capability,
             VoiceFormat::G711U.as_u32() | VoiceFormat::G711A.as_u32(),
-            "default policy advertises exactly G711U|G711A"
+            "default policy advertises exactly G711U|G711A: GSM is never offered outbound"
         );
     }
 
@@ -3359,11 +3377,13 @@ mod fsm_tests {
         assert!(matches!(f.state(), SessionState::Active(_)));
     }
 
-    // iax-a195: inbound !!DISCONNECT!! TEXT frame must trigger peer hangup teardown.
+    // !!DISCONNECT!! (as app_rpt sends it, NUL included) is surfaced as text
+    // and the leg stays up: app_rpt's HANGUP follows and must be ACKed by the
+    // ordinary peer-HANGUP path (nodebench relink_after_drop).
     #[test]
-    fn inbound_disconnect_text_triggers_hangup() {
+    fn inbound_disconnect_text_waits_for_the_peers_hangup() {
         let (mut f, now) = drive_to_active();
-        let body: &'static [u8] = b"!!DISCONNECT!!";
+        let body: &'static [u8] = b"!!DISCONNECT!!\0";
         let frame = Frame::Full(Box::new(FullFrame {
             source_call: 7,
             dest_call: 1,
@@ -3378,21 +3398,18 @@ mod fsm_tests {
         }));
         let actions = f.handle(Event::Frame { frame, now });
         assert!(
-            actions.iter().any(|a| matches!(
-                a,
-                Action::AppEvent(AppEvent::Disconnected {
-                    reason: FailReason::RemoteHangup { .. }
-                })
-            )),
-            "!!DISCONNECT!! must emit RemoteHangup Disconnected"
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::AppEvent(AppEvent::Disconnected { .. }))),
+            "{actions:?}"
         );
-        assert!(matches!(
-            f.state(),
-            SessionState::Hangup(HangupData {
-                initiated_by: HangupOrigin::Peer,
-                ..
-            })
-        ));
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::AppEvent(AppEvent::TextReceived(_)))),
+            "{actions:?}"
+        );
+        assert!(matches!(f.state(), SessionState::Active(_)));
     }
 
     // iax-a195: an arbitrary inbound TEXT frame (e.g. "L <list>") must surface

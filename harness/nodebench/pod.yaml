@@ -1,0 +1,91 @@
+# nodebench loopback topology: one pod, one network namespace. The ASL3 node
+# (1999) and astar-server (1998) reach each other on 127.0.0.1; the tshark
+# sidecar captures every UDP packet on lo and eth0 (not "any", which records
+# each loopback packet twice).
+#
+#   harness/nodebench/rig.sh up        (renders @CAPTURES@ and plays this)
+#
+# Host ports are published on the host's 127.0.0.1 only, and on ports offset
+# by 20000 from the services' own (24569 IAX2, 25038 AMI, 24570 astar IAX2,
+# 28730 astar control): other tests on the same host dial 127.0.0.1:4569 and
+# 8730 and would otherwise land in the rig and corrupt its results. Inside the pod the
+# services bind 0.0.0.0, because podman delivers forwarded traffic to the
+# pod's own interface, not to its loopback. The pod's interface is reachable
+# only from inside the podman VM; nothing here has a route to a radio.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nodebench
+  labels:
+    app: nodebench
+spec:
+  restartPolicy: Never
+  containers:
+    - name: asl3
+      image: localhost/nodebench-asl3:latest
+      env:
+        - name: NODEBENCH_CODECS
+          value: "@CODECS@"
+        - name: NODEBENCH_DEBUG
+          value: "@DEBUG@"
+        - name: NODEBENCH_FILL_CALLERID
+          value: "@FILLCID@"
+      ports:
+        - { containerPort: 4569, hostPort: 24569, hostIP: 127.0.0.1, protocol: UDP }
+        - { containerPort: 5038, hostPort: 25038, hostIP: 127.0.0.1, protocol: TCP }
+    - name: astar-server
+      image: localhost/nodebench-astar-server:latest
+      args: ["serve", "--config", "/etc/nodebench/@CONFIG@"]
+      env:
+        - name: RUST_LOG
+          value: "@RUST_LOG@"
+        # Loopback-only test secret, shared with iax.conf [1998] on the node.
+        - { name: ALLSTAR_NODE, value: "1998" }
+        - { name: ALLSTAR_SECRET, value: "nodebench-loopback-only" }
+        - { name: ALLSTAR_LINK_1999, value: "nodebench-loopback-only" }
+      ports:
+        - { containerPort: 4570, hostPort: 24570, hostIP: 127.0.0.1, protocol: UDP }
+        - { containerPort: 8730, hostPort: 28730, hostIP: 127.0.0.1, protocol: TCP }
+    # USRP, the node's radio. chan_usrp binds 127.0.0.1:32001 (it receives the
+    # radio's audio there) and sends its transmit audio to 127.0.0.1:34001,
+    # both on the pod's loopback, which no published port reaches. This relay
+    # bridges both directions to the host:
+    #   host 127.0.0.1:32001 -> published -> :32011 here -> node 127.0.0.1:32001
+    #   node -> 127.0.0.1:34001 here -> @USRP_HOST@:34001 (the Mac's 127.0.0.1)
+    - name: usrp-relay
+      image: docker.io/nicolaka/netshoot:v0.13
+      command: ["sh", "-c"]
+      args:
+        - >-
+          socat -u UDP4-RECV:32011 UDP4-SENDTO:127.0.0.1:32001 &
+          socat -u UDP4-RECV:34001,bind=127.0.0.1 UDP4-SENDTO:@USRP_HOST@:34001 &
+          wait -n
+      ports:
+        - { containerPort: 32011, hostPort: 32001, hostIP: 127.0.0.1, protocol: UDP }
+    - name: capture
+      image: docker.io/nicolaka/netshoot:v0.13
+      command: ["tshark"]
+      args:
+        - "-i"
+        - "lo"
+        - "-i"
+        - "eth0"
+        - "-f"
+        - "udp"
+        - "-q"
+        - "-b"
+        - "filesize:20480"
+        - "-b"
+        - "files:50"
+        - "-w"
+        - "/captures/nodebench.pcapng"
+      securityContext:
+        capabilities:
+          add: ["NET_RAW", "NET_ADMIN"]
+      volumeMounts:
+        - { name: captures, mountPath: /captures }
+  volumes:
+    - name: captures
+      hostPath:
+        path: "@CAPTURES@"
+        type: DirectoryOrCreate

@@ -787,7 +787,7 @@ fn dstar_available_matches_the_ambe_probe() {
     let station = test_station();
     assert_eq!(
         station.dstar_available(),
-        astar_console::dstar_available(),
+        astar_console::dstar_available(&station.vocoder_trust()),
         "Station::dstar_available must mirror astar_console::dstar_available exactly"
     );
 }
@@ -820,6 +820,10 @@ fn dstar_connect_without_a_thumbdv_fails_with_stationerror_dstar() {
         std::env::set_var("IAX_THUMBDV_PORT", "/dev/cu.usbserial-NOSUCHDEVICE");
     }
     let station = test_station();
+    // A made-up trusted serial, so the connect gets past the trust gate and
+    // reaches the (pinned-away, empty) candidate scan and its classified
+    // message. Nothing with this serial exists.
+    station.set_vocoder_trust(astar_station::VocoderTrust::new(["TESTSER1"]));
     let err = station.dstar_connect("127.0.0.1", 30_001, 'A', "N0CALL", None);
     // SAFETY: same serialization as the `set_var` above.
     unsafe {
@@ -834,6 +838,38 @@ fn dstar_connect_without_a_thumbdv_fails_with_stationerror_dstar() {
         ),
         other => panic!("expected StationError::Dstar, got {other:?}"),
     }
+}
+
+/// Vocoder trust (on-air safety): a station built with the default config
+/// trusts no stick, so a D-Star connect is refused with the operator-facing
+/// "No trusted vocoder" message — before any serial port is enumerated or
+/// opened, so no env pin is needed to make this safe.
+#[test]
+fn dstar_connect_with_an_empty_trust_list_is_refused_by_name() {
+    let station = test_station();
+    assert!(station.vocoder_trust().is_empty());
+    assert!(!station.dstar_available());
+    match station.dstar_connect("127.0.0.1", 30_001, 'A', "N0CALL", None) {
+        Err(StationError::Dstar(msg)) => assert_eq!(msg, astar_station::NO_TRUSTED_VOCODER),
+        other => panic!("expected StationError::Dstar(NO_TRUSTED_VOCODER), got {other:?}"),
+    }
+    assert!(station.dstar_state().is_none());
+}
+
+/// The trust list from `StationConfig` reaches the session, and the setter
+/// replaces it.
+#[test]
+fn station_config_seeds_the_trust_list() {
+    let station = astar_station::Station::with_backend_factory(
+        astar_station::StationConfig {
+            vocoder_trust: astar_station::VocoderTrust::new(["TESTSER1"]),
+            ..astar_station::StationConfig::default()
+        },
+        Box::new(|| Box::new(astar_audio::NullBackend::new())),
+    );
+    assert_eq!(station.vocoder_trust().serials, vec!["TESTSER1"]);
+    station.set_vocoder_trust(astar_station::VocoderTrust::none());
+    assert!(station.vocoder_trust().is_empty());
 }
 
 /// A failed connect must not leave the station's ONE audio lane reserved.

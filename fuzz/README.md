@@ -13,6 +13,11 @@ otherwise break the stable `cargo build`.
 - **`parse_encode_parse`** — when `parse()` succeeds, re-encodes the parsed
   frame and re-parses it. Asserts the second parse also succeeds and the
   two parsed frames compare equal. Catches encode/parse asymmetry.
+- **`http_read_head`** — feeds arbitrary bytes to `astar_http::parse::read_head`
+  (the HTTP request-head parser) with an 8 KiB cap; any `Err` is fine, a panic
+  is a bug, as is a result that breaks the contract (an error that is not
+  400/431, a control byte or non-tchar name in a parsed head). Seed inputs are in
+  `fuzz/seeds/http_read_head/`: `cargo fuzz run http_read_head corpus/http_read_head seeds/http_read_head` (new inputs land in the first directory)`.
 
 ## Running
 

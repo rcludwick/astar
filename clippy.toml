@@ -15,5 +15,7 @@ doc-valid-idents = [
     "RNNoise",
     # Apple's audio framework — a product name, not a Rust item.
     "CoreAudio",
+    # The W3C standard behind passkeys — a standard's name, not a Rust item.
+    "WebAuthn",
     "..",
 ]

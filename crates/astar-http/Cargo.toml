@@ -1,0 +1,31 @@
+[package]
+name = "astar-http"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "astar-http: the workspace's synchronous HTTP/1.1 server — thread per connection, capped, one request per connection."
+
+[features]
+# HTTPS on the same port as HTTP (first-byte sniff) with a certificate slot
+# that can be swapped while serving. rustls with ring only.
+tls = ["dep:rustls"]
+# WebSocket upgrade (tungstenite's handshake helpers and frame codec).
+ws = ["dep:tungstenite"]
+# `testing::serve`: a stub server on 127.0.0.1 for other crates' tests.
+testing = []
+
+[dependencies]
+tracing.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"], optional = true }
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"], optional = true }
+
+[dev-dependencies]
+proptest = "1"
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+
+[lints]
+workspace = true

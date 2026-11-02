@@ -221,8 +221,10 @@ fn decode_wav_mono(bytes: &[u8]) -> Result<(u32, Vec<i16>), String> {
             let start = i + 8;
             let end = (start + sz).min(bytes.len());
             let samples: Vec<i16> = bytes[start..end]
-                .chunks_exact(2)
-                .map(|b| i16::from_le_bytes([b[0], b[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| i16::from_le_bytes(*b))
                 .collect();
             pcm = Some(samples);
         }

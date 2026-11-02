@@ -371,6 +371,10 @@ fn leg_run_loop(p: LegSpawn) {
     fsm.seed_entropy(token, challenge_hex);
     let mut rel = Reliability::new(our_call, ReliabilityConfig::default());
     rel.set_peer_call(peer_call);
+    // iax-cnlink: the demux consumed the peer's NEW (oseqno 0) before this
+    // leg existed. Count it, so ACCEPT/AUTHREQ acknowledge it with iseqno 1
+    // and every later ACK is the peer's oseqno + 1, as chan_iax2 expects.
+    rel.restart_after_peer_new();
     let mut timers: Vec<(Instant, TimerKind)> = Vec::new();
     let mut pending_answer_oseqno: Option<u8> = None;
     // iax-7bdc: the app's answer/reject can land while the calltoken/auth
@@ -379,11 +383,19 @@ fn leg_run_loop(p: LegSpawn) {
     // outside AcceptSent, so park the decision here and replay it the moment
     // the handshake reaches AcceptSent.
     let mut parked_decision: Option<AppCommand> = None;
-    let mut next_voice_ts: u32 = 0;
+    // Voice timestamps ride the wall clock from the leg's start, re-anchored
+    // after a gap (`runtime::voice_ts_ladder`): the bridge sends a link
+    // nothing between overs, and a counted-up timestamp would lag the clock
+    // by every silent second.
+    let leg_start = Instant::now();
+    rel.set_epoch(leg_start);
+    let mut next_voice_ts: Option<u32> = None;
     // RX codec edge (iax-31f7): warn once per leg on an undecodable RX payload.
     let mut rx_decode_warned = false;
     // iax-rxjb: this leg's receive-side media clock.
     let mut rx_clock = crate::rx_clock::RxTimestamps::default();
+    // The far end's keying mode, app_rpt's rule (nodebench finding 7).
+    let mut keying = crate::link_keying::LinkKeying::default();
     // Rate-adapting codec edge (iax-4348): resamples bus-rate PCM ↔ the
     // negotiated wire rate. `sample_rate == 8000` builds no resampler and the
     // edge is byte-identical to the pure encode/decode.
@@ -404,6 +416,7 @@ fn leg_run_loop(p: LegSpawn) {
             &mut pending_answer_oseqno,
             &mut rx_decode_warned,
             &mut rx_clock,
+            &mut keying,
         );
         let actions = fsm.handle(Event::App(AppCommand::DriveInbound {
             now: Instant::now(),
@@ -419,10 +432,17 @@ fn leg_run_loop(p: LegSpawn) {
         }
     }
 
+    // Our own hangup to an app_rpt node, held while it reads !!DISCONNECT!!
+    // (nodebench finding 3; `link_keying::DISCONNECT_GRACE`).
+    let mut pending_hangup: Option<crate::link_keying::PendingHangup> = None;
     let mut events = Events::with_capacity(8);
     loop {
         let now = Instant::now();
-        let next_timer = timers.iter().map(|(at, _)| *at).min();
+        let next_timer = timers
+            .iter()
+            .map(|(at, _)| *at)
+            .chain(pending_hangup.as_ref().map(|p| p.due))
+            .min();
         let timeout = match next_timer {
             Some(t) if t > now => t - now,
             Some(_) => Duration::from_millis(0),
@@ -456,11 +476,35 @@ fn leg_run_loop(p: LegSpawn) {
                 &mut pending_answer_oseqno,
                 &mut rx_decode_warned,
                 &mut rx_clock,
+                &mut keying,
             );
-            match ctx.rel.on_frame_in(frame, now) {
+            // iax-cnlink: the token-bearing NEW restarts the peer's numbering
+            // at oseqno 0 (`chan_iax2` `resend_with_token`), which our counters
+            // (already past the first NEW) would drop as a duplicate. Hand it
+            // to the FSM directly; its ResetReliability restarts the counters
+            // with this NEW counted, and the ACCEPT/AUTHREQ acknowledges it.
+            let outcome =
+                if matches!(fsm.state(), SessionState::CallTokenIssued(_)) && is_full_new(&frame) {
+                    RxOutcome::Deliver {
+                        frame,
+                        send_ack: None,
+                    }
+                } else {
+                    ctx.rel.on_frame_in(frame, now)
+                };
+            match outcome {
                 RxOutcome::Deliver { frame, send_ack } => {
                     if let Some(ack) = send_ack {
                         let _ = ctx.sock.send_to(&ack, peer_addr);
+                    }
+                    // This frame's iseqno may be what released our ANSWER:
+                    // `app_rpt` acknowledges it with its `!NEWKEY1!`, not a
+                    // bare ACK. Go Active first, or the FSM, still in
+                    // `AnswerSent`, drops the frame and the node never hears
+                    // its NEWKEY answered (nodebench finding 6).
+                    if ctx.answer_acked_if_released(&mut fsm, &mut edge) {
+                        terminated = true;
+                        break;
                     }
                     let actions = fsm.handle(Event::Frame { frame, now });
                     if ctx.dispatch(
@@ -502,6 +546,53 @@ fn leg_run_loop(p: LegSpawn) {
 
         // Drain control commands (answer/reject from the IncomingCall handle).
         while let Ok(cmd) = cmd_rx.try_recv() {
+            // A hangup to an app_rpt node says !!DISCONNECT!! first and holds
+            // the HANGUP (finding 3). While one is held, a later Shutdown
+            // waits for it.
+            let is_hangup = matches!(cmd, RuntimeCommand::App(AppCommand::Hangup { .. }));
+            if let Some(p) = pending_hangup.as_mut()
+                && (is_hangup || matches!(cmd, RuntimeCommand::Shutdown))
+            {
+                p.then_shutdown |= matches!(cmd, RuntimeCommand::Shutdown);
+                continue;
+            }
+            if let RuntimeCommand::App(AppCommand::Hangup { cause, .. }) = &cmd
+                && keying.is_app_rpt()
+                && matches!(fsm.state(), SessionState::Active(_))
+            {
+                let cause = cause.clone();
+                let mut ctx = leg_ctx(
+                    sock.as_ref(),
+                    peer_addr,
+                    &mut rel,
+                    &mut timers,
+                    &spk_tx,
+                    &event_tx,
+                    &state,
+                    &remote_keyed,
+                    &mut pending_answer_oseqno,
+                    &mut rx_decode_warned,
+                    &mut rx_clock,
+                    &mut keying,
+                );
+                let actions = fsm.handle(Event::App(AppCommand::SendText(
+                    crate::link_keying::DISCONNECT.into(),
+                )));
+                if ctx.dispatch(
+                    &mut edge,
+                    actions,
+                    fsm.negotiated_format().unwrap_or(VoiceFormat::G711U),
+                ) {
+                    terminated = true;
+                    break;
+                }
+                pending_hangup = Some(crate::link_keying::PendingHangup {
+                    cause,
+                    due: Instant::now() + crate::link_keying::DISCONNECT_GRACE,
+                    then_shutdown: false,
+                });
+                continue;
+            }
             match cmd {
                 RuntimeCommand::App(app) => {
                     // iax-7bdc: an answer/reject arriving before the
@@ -532,6 +623,7 @@ fn leg_run_loop(p: LegSpawn) {
                         &mut pending_answer_oseqno,
                         &mut rx_decode_warned,
                         &mut rx_clock,
+                        &mut keying,
                     );
                     let actions = fsm.handle(Event::App(app));
                     if ctx.dispatch(
@@ -553,6 +645,40 @@ fn leg_run_loop(p: LegSpawn) {
             break;
         }
 
+        // The held hangup is due: send it now.
+        if pending_hangup
+            .as_ref()
+            .is_some_and(|p| Instant::now() >= p.due)
+        {
+            let p = pending_hangup.take().expect("checked is_some");
+            let mut ctx = leg_ctx(
+                sock.as_ref(),
+                peer_addr,
+                &mut rel,
+                &mut timers,
+                &spk_tx,
+                &event_tx,
+                &state,
+                &remote_keyed,
+                &mut pending_answer_oseqno,
+                &mut rx_decode_warned,
+                &mut rx_clock,
+                &mut keying,
+            );
+            let actions = fsm.handle(Event::App(AppCommand::Hangup {
+                cause: p.cause,
+                now: Instant::now(),
+            }));
+            if ctx.dispatch(
+                &mut edge,
+                actions,
+                fsm.negotiated_format().unwrap_or(VoiceFormat::G711U),
+            ) || p.then_shutdown
+            {
+                break;
+            }
+        }
+
         // iax-7bdc: replay a parked answer/reject once the handshake reaches
         // AcceptSent (the frame drain above is where the token/auth NEW
         // advances the state, so the parked decision applies within the same
@@ -571,6 +697,7 @@ fn leg_run_loop(p: LegSpawn) {
                 &mut pending_answer_oseqno,
                 &mut rx_decode_warned,
                 &mut rx_clock,
+                &mut keying,
             );
             let actions = fsm.handle(Event::App(app));
             if ctx.dispatch(
@@ -606,6 +733,7 @@ fn leg_run_loop(p: LegSpawn) {
                 &mut pending_answer_oseqno,
                 &mut rx_decode_warned,
                 &mut rx_clock,
+                &mut keying,
             );
             let actions = fsm.handle(Event::Timer { kind, now });
             if ctx.dispatch(
@@ -624,10 +752,7 @@ fn leg_run_loop(p: LegSpawn) {
         // AnswerAcked seam (Decision §2): when Reliability releases the in-flight
         // ANSWER's oseqno, drive AnswerSent -> Active. The FSM never sees the
         // bare ACK (Reliability consumed it).
-        if let Some(oseqno) = pending_answer_oseqno
-            && !rel.has_inflight(oseqno)
         {
-            pending_answer_oseqno = None;
             let mut ctx = leg_ctx(
                 sock.as_ref(),
                 peer_addr,
@@ -640,15 +765,9 @@ fn leg_run_loop(p: LegSpawn) {
                 &mut pending_answer_oseqno,
                 &mut rx_decode_warned,
                 &mut rx_clock,
+                &mut keying,
             );
-            let actions = fsm.handle(Event::App(AppCommand::AnswerAcked {
-                now: Instant::now(),
-            }));
-            if ctx.dispatch(
-                &mut edge,
-                actions,
-                fsm.negotiated_format().unwrap_or(VoiceFormat::G711U),
-            ) {
+            if ctx.answer_acked_if_released(&mut fsm, &mut edge) {
                 break;
             }
         }
@@ -657,7 +776,9 @@ fn leg_run_loop(p: LegSpawn) {
         // edge (iax-31f7): the bus carries PCM; the leg encodes to the format it
         // chose in its own ACCEPT (this is where inbound slin TX happens).
         while let Ok(pcm) = mic_rx.try_recv() {
-            next_voice_ts = next_voice_ts.wrapping_add(20);
+            #[allow(clippy::cast_possible_truncation)]
+            let wall_ms = leg_start.elapsed().as_millis() as u32;
+            let (voice_ts, _) = crate::runtime::voice_ts_ladder(&mut next_voice_ts, wall_ms, 0);
             let format = fsm.negotiated_format().unwrap_or(VoiceFormat::G711U);
             // Outbound codec edge (iax-31f7 / iax-4348): encode to the leg's
             // chosen format, resampling to the wire rate when it differs.
@@ -674,11 +795,12 @@ fn leg_run_loop(p: LegSpawn) {
                 &mut pending_answer_oseqno,
                 &mut rx_decode_warned,
                 &mut rx_clock,
+                &mut keying,
             );
             let actions = fsm.handle(Event::App(AppCommand::SendVoice {
                 format,
                 payload,
-                ts: next_voice_ts,
+                ts: voice_ts,
             }));
             if ctx.dispatch(
                 &mut edge,
@@ -711,6 +833,7 @@ fn leg_run_loop(p: LegSpawn) {
                 &mut pending_answer_oseqno,
                 &mut rx_decode_warned,
                 &mut rx_clock,
+                &mut keying,
             );
             let actions = fsm.handle(Event::DeliveryFailed { oseqno });
             if ctx.dispatch(
@@ -760,6 +883,8 @@ struct LegCtx<'a> {
     /// iax-rxjb: this leg's receive-side media clock (mini-frame timestamps
     /// rebuilt to the sender's full 32-bit millisecond clock).
     rx_clock: &'a mut crate::rx_clock::RxTimestamps,
+    /// Whether received voice counts as the far end talking (finding 7).
+    keying: &'a mut crate::link_keying::LinkKeying,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -775,6 +900,7 @@ fn leg_ctx<'a>(
     pending_answer_oseqno: &'a mut Option<u8>,
     rx_decode_warned: &'a mut bool,
     rx_clock: &'a mut crate::rx_clock::RxTimestamps,
+    keying: &'a mut crate::link_keying::LinkKeying,
 ) -> LegCtx<'a> {
     LegCtx {
         sock,
@@ -788,10 +914,39 @@ fn leg_ctx<'a>(
         pending_answer_oseqno,
         rx_decode_warned,
         rx_clock,
+        keying,
     }
 }
 
 impl LegCtx<'_> {
+    /// The `AnswerAcked` seam (Decision §2): once Reliability has released
+    /// the in-flight ANSWER's oseqno, drive `AnswerSent -> Active`. The FSM
+    /// never sees the bare ACK (Reliability consumed it), and a peer frame
+    /// whose iseqno acknowledges the ANSWER must reach an Active FSM, so this
+    /// runs before such a frame is delivered as well as once per loop.
+    /// Returns `true` when the call terminated.
+    fn answer_acked_if_released(
+        &mut self,
+        fsm: &mut Fsm,
+        edge: &mut crate::codec_edge::EdgeAudio,
+    ) -> bool {
+        let Some(oseqno) = *self.pending_answer_oseqno else {
+            return false;
+        };
+        if self.rel.has_inflight(oseqno) {
+            return false;
+        }
+        *self.pending_answer_oseqno = None;
+        let actions = fsm.handle(Event::App(AppCommand::AnswerAcked {
+            now: Instant::now(),
+        }));
+        self.dispatch(
+            edge,
+            actions,
+            fsm.negotiated_format().unwrap_or(VoiceFormat::G711U),
+        )
+    }
+
     /// Apply FSM actions: send via `send_to(peer_addr)`, arm/cancel timers, route
     /// decoded voice to the speaker, forward lifecycle events. Returns `true`
     /// when the call has terminated. Captures the ANSWER oseqno for the
@@ -836,9 +991,12 @@ impl LegCtx<'_> {
                     self.timers.retain(|(_, k)| *k != kind);
                 }
                 Action::ResetReliability => {
-                    self.rel.reset();
+                    // The only inbound reset is the accepted token NEW, which
+                    // is the new call's first frame (iax-cnlink).
+                    self.rel.restart_after_peer_new();
                 }
                 Action::AppEvent(ev) => {
+                    self.keying.observe(&ev, now);
                     match &ev {
                         AppEvent::Connected { .. } => {
                             self.state.store(STATE_ACTIVE, Ordering::Relaxed);
@@ -859,6 +1017,14 @@ impl LegCtx<'_> {
                         ts,
                     } = &ev
                     {
+                        // An app_rpt link that never did NEWKEY is heard only
+                        // while RADIO_KEYed; a monitor link never keys.
+                        if !self
+                            .keying
+                            .rx_open(self.remote_keyed.load(Ordering::Relaxed), now)
+                        {
+                            continue;
+                        }
                         // RX codec edge (iax-31f7 / iax-4348): decode on the
                         // received frame's own format into bus-rate PCM
                         // (resampling if the wire rate differs); drop undecodable
@@ -1381,7 +1547,14 @@ fn demux_one(
         // this, every voice frame after the opening FULL frame (all of which are
         // mini frames) was dropped: node-as-handset RX played one frame then
         // went silent (iax-64b6).
-        if let Some(entry) = by_local_call.values().find(|e| e.peer_addr == src) {
+        //
+        // iax-cnlink: route by (address, the mini frame's source call), not by
+        // address alone, so two calls from one node (a re-link overlapping
+        // the old call's tail) cannot receive each other's audio.
+        if let Some(entry) = peek_mini_source_call(bytes)
+            .and_then(|sc| by_peer.get(&(src, sc)))
+            .and_then(|our| by_local_call.get(our))
+        {
             let _ = entry.frame_tx.send((bytes.to_vec(), src));
             let _ = entry.waker.wake();
         }
@@ -1398,9 +1571,21 @@ fn demux_one(
                 tracing::debug!(target: "astar_iax::listener", "drop frame: source addr mismatch");
                 return;
             }
-            let _ = entry.frame_tx.send((bytes.to_vec(), src));
-            let _ = entry.waker.wake();
-            return;
+            // iax-cnlink: the frame must also come from this leg's peer CALL.
+            // A different source call is a previous call that used the same
+            // destination number (we free and reuse call numbers at once),
+            // typically chan_iax2 retransmitting its HANGUP. Delivering it
+            // tore the new call down. Answer it as chan_iax2 answers a frame
+            // for a call it does not know: INVAL, below.
+            if peek_source_call(bytes) == Some(entry.peer_call.value()) {
+                let _ = entry.frame_tx.send((bytes.to_vec(), src));
+                let _ = entry.waker.wake();
+                return;
+            }
+            tracing::debug!(
+                target: "astar_iax::listener",
+                "frame for call {dest_call} from a stale peer call; INVAL"
+            );
         }
         // Unknown dest_call: INVAL, drop (R-6.9-02) — but NEVER reply to a frame
         // that is itself unanswerable. An ACK is unreliable and generates no
@@ -1497,12 +1682,39 @@ fn demux_one(
     }
 }
 
+/// Map 16 entropy bytes onto a printable CALLTOKEN (iax-cnlink).
+///
+/// `chan_iax2` stores the token we issue as a C string and echoes it with
+/// `strlen`, so a raw random token containing a NUL came back truncated and
+/// the call was rejected "Call Token Invalid". Each byte selects one of 64
+/// printable ASCII symbols (96 bits of the 128 survive), which is ample
+/// for an anti-spoof nonce that lives ten seconds.
+fn printable_calltoken(entropy: [u8; 16]) -> [u8; 16] {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    entropy.map(|b| ALPHABET[usize::from(b & 0x3f)])
+}
+
+/// `true` for a full IAX `NEW` frame.
+fn is_full_new(frame: &Frame<'_>) -> bool {
+    matches!(frame, Frame::Full(f) if f.subclass == Subclass::Iax(IaxCommand::New))
+}
+
 /// Read the peer's `source_call` (low 15 bits of bytes 0-1) for inline replies.
 fn peek_source_call(buf: &[u8]) -> Option<u16> {
     if buf.len() < 2 || buf[0] & 0x80 == 0 {
         return None;
     }
     Some(u16::from_be_bytes([buf[0], buf[1]]) & 0x7fff)
+}
+
+/// Read a mini frame's `source_call` (bytes 0-1, top bit clear). `None` for a
+/// full frame, a short buffer, or call number 0 (a meta frame).
+fn peek_mini_source_call(buf: &[u8]) -> Option<u16> {
+    if buf.len() < 4 || buf[0] & 0x80 != 0 {
+        return None;
+    }
+    let sc = u16::from_be_bytes([buf[0], buf[1]]);
+    (sc != 0).then_some(sc)
 }
 
 /// Whether an unknown-`dest_call` datagram warrants an inline INVAL reply.
@@ -1570,6 +1782,7 @@ fn spawn_leg(
     rand::rngs::SysRng
         .try_fill_bytes(&mut token)
         .expect("system entropy");
+    let token = printable_calltoken(token);
     let mut chal = [0u8; 16];
     rand::rngs::SysRng
         .try_fill_bytes(&mut chal)
@@ -1776,6 +1989,31 @@ mod tests {
         let p = IncomingCallPolicy::default();
         let dump = format!("{p:?}");
         assert!(dump.contains("credential_resolver: None"));
+    }
+
+    /// iax-cnlink: `chan_iax2` echoes the CALLTOKEN IE as a C string, so a
+    /// NUL byte truncates the echo and the call is rejected "Call Token
+    /// Invalid" (about 6 % of inbound links with raw random bytes). The token
+    /// must be printable ASCII whatever the entropy bytes are.
+    #[test]
+    fn calltoken_is_printable_for_any_entropy() {
+        for fill in [0x00u8, 0x0a, 0x7f, 0x80, 0xff] {
+            let tok = printable_calltoken([fill; 16]);
+            assert!(
+                tok.iter().all(u8::is_ascii_graphic),
+                "token from {fill:#04x} must be printable: {tok:?}"
+            );
+        }
+        // All 64 six-bit values map to distinct symbols: no entropy is lost
+        // beyond the two high bits of each byte.
+        let mut seen = std::collections::HashSet::new();
+        for chunk in 0u8..4 {
+            let tok = printable_calltoken(std::array::from_fn(|i| {
+                chunk * 16 + u8::try_from(i).unwrap()
+            }));
+            seen.extend(tok);
+        }
+        assert_eq!(seen.len(), 64, "the 64 six-bit values map to 64 symbols");
     }
 
     #[test]

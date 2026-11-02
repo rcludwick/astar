@@ -122,8 +122,17 @@ final class CallSessionNXDNDialTests: XCTestCase {
 
     func testDiallingWithNoVocoderIsRefusedBeforeTheEngine() {
         let (session, fake) = session(available: false)
+        session.applyVocoderTrust(["TESTSER1"])  // trusted, not plugged in
         XCTAssertThrowsError(try session.connect(node: "100", network: .nxdn)) { error in
             XCTAssertEqual(error as? CallSession.ConnectError, .nxdnUnavailable)
+        }
+        XCTAssertTrue(fake.connectNXDNCalls.isEmpty, "the dongle is never opened")
+    }
+
+    func testDiallingWithNothingTrustedSaysToAddAVocoder() {
+        let (session, fake) = session(available: false)
+        XCTAssertThrowsError(try session.connect(node: "100", network: .nxdn)) { error in
+            XCTAssertEqual(error as? CallSession.ConnectError, .noTrustedVocoder(.nxdn))
         }
         XCTAssertTrue(fake.connectNXDNCalls.isEmpty, "the dongle is never opened")
     }

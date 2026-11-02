@@ -1,0 +1,7 @@
+after ilink 1:
+
+************************* CONNECTED NODES *************************
+
+<NONE>
+
+{"calls":[],"links":[],"listening":true,"node_id":"1998","registered":false}

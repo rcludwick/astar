@@ -24,6 +24,9 @@ pub enum DeviceError {
     WrongDevice(String),
     /// Protocol parsing error.
     Protocol(String),
+    /// No trusted vocoder: the trust list is empty, or no attached port has
+    /// a trusted serial number. Nothing was opened.
+    NoTrustedDevice,
     /// Device returned a non-zero status.
     Status {
         /// Field identifier.
@@ -40,6 +43,7 @@ impl fmt::Display for DeviceError {
             DeviceError::Timeout(msg) => write!(f, "Timeout: {}", msg),
             DeviceError::WrongDevice(msg) => write!(f, "Wrong device: {}", msg),
             DeviceError::Protocol(msg) => write!(f, "Protocol error: {}", msg),
+            DeviceError::NoTrustedDevice => write!(f, "No trusted vocoder attached"),
             DeviceError::Status { field, status } => {
                 write!(
                     f,
@@ -111,7 +115,7 @@ impl<T: Transport> ThumbDv<T> {
             _ => return Err(DeviceError::Protocol("expected ProdId".into())),
         };
 
-        if !prodid.starts_with("AMBE3000") {
+        if crate::enrol::ChipClass::of(&prodid) != crate::enrol::ChipClass::Ambe3000 {
             return Err(DeviceError::WrongDevice(format!(
                 "expected AMBE3000*, got {}",
                 prodid
@@ -251,35 +255,7 @@ impl<T: Transport> ThumbDv<T> {
 
     /// Send a request and wait for a response with a 300 ms deadline (§6 timeouts).
     fn transact_internal(transport: &mut T, req: &[u8]) -> Result<Response, DeviceError> {
-        transport.send(req)?;
-
-        let deadline = Instant::now() + Duration::from_millis(300);
-        let mut deframer = Deframer::new();
-
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                return Err(DeviceError::Timeout("300 ms deadline expired"));
-            }
-
-            let mut buf = [0u8; 1024];
-            match transport.recv_some(&mut buf, remaining) {
-                Ok(0) => {
-                    // Timeout or no more data.
-                    continue;
-                }
-                Ok(n) => {
-                    deframer.push(&buf[..n]);
-                }
-                Err(e) => return Err(DeviceError::Io(e)),
-            }
-
-            if let Some(pkt) = deframer.next_packet() {
-                let resp = crate::packet::parse_response(&pkt)
-                    .map_err(|e| DeviceError::Protocol(e.to_string()))?;
-                return Ok(resp);
-            }
-        }
+        transact(transport, req)
     }
 
     /// Check if a response is a Status with status ≠ 0, return an error if so.
@@ -305,26 +281,71 @@ impl<T: Transport> ThumbDv<T> {
     }
 }
 
-/// Detect and initialize a ThumbDV device on any available serial port.
+/// Send a request and wait for a response with a 300 ms deadline (§6 timeouts).
+pub(crate) fn transact<T: Transport>(
+    transport: &mut T,
+    req: &[u8],
+) -> Result<Response, DeviceError> {
+    transport.send(req)?;
+
+    let deadline = Instant::now() + Duration::from_millis(300);
+    let mut deframer = Deframer::new();
+
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(DeviceError::Timeout("300 ms deadline expired"));
+        }
+
+        let mut buf = [0u8; 1024];
+        match transport.recv_some(&mut buf, remaining) {
+            Ok(0) => {
+                // Timeout or no more data.
+                continue;
+            }
+            Ok(n) => {
+                deframer.push(&buf[..n]);
+            }
+            Err(e) => return Err(DeviceError::Io(e)),
+        }
+
+        if let Some(pkt) = deframer.next_packet() {
+            let resp = crate::packet::parse_response(&pkt)
+                .map_err(|e| DeviceError::Protocol(e.to_string()))?;
+            return Ok(resp);
+        }
+    }
+}
+
+/// Detect and initialize a ThumbDV whose USB serial number is in `trusted`.
 ///
-/// Tries candidate serial ports at 460800 then 230400 baud (§6 fallback).
-/// Returns the first successfully initialized device.
+/// Walks only [`SerialTransport::candidate_ports_trusted`]: a port whose
+/// serial is not on the list is never opened, however much it looks like a
+/// ThumbDV. Tries each at 460800 then 230400 baud (§6 fallback) and returns
+/// the first that initializes.
+///
+/// There is deliberately no untrusted variant: an FT-X CAT/PTT cable has the
+/// same VID/PID as a DVstick, and opening it raises DTR/RTS.
 ///
 /// # Errors
-/// - `DeviceError::Protocol("no ThumbDV-like serial ports present")` if no candidate ports exist.
-/// - `DeviceError::Timeout("no ThumbDV found")` if candidates exist but none initialize.
-pub fn detect() -> Result<ThumbDv<crate::transport::SerialTransport>, DeviceError> {
+/// - [`DeviceError::NoTrustedDevice`] if `trusted` is empty or no attached
+///   port has a trusted serial.
+/// - `DeviceError::Timeout("no ThumbDV found")` if trusted ports exist but
+///   none initialize.
+///
+/// [`SerialTransport::candidate_ports_trusted`]: crate::transport::SerialTransport::candidate_ports_trusted
+pub fn detect_trusted(
+    trusted: &[String],
+) -> Result<ThumbDv<crate::transport::SerialTransport>, DeviceError> {
     use crate::transport::SerialTransport;
 
-    let candidates = SerialTransport::candidate_ports();
+    let candidates = SerialTransport::candidate_ports_trusted(trusted);
     if candidates.is_empty() {
-        return Err(DeviceError::Protocol(
-            "no ThumbDV-like serial ports present".into(),
-        ));
+        return Err(DeviceError::NoTrustedDevice);
     }
 
     for port_path in candidates {
-        for &baud in &[460800u32, 230400u32] {
+        for &baud in &crate::enrol::PROBE_BAUDS {
             match SerialTransport::open(&port_path, baud) {
                 Ok(transport) => match ThumbDv::init_with(transport) {
                     Ok(dev) => return Ok(dev),
@@ -443,23 +464,12 @@ mod tests {
     }
 
     #[test]
-    fn detect_without_hardware_errors_not_hangs() {
-        let t0 = std::time::Instant::now();
-        match crate::detect() {
-            Err(DeviceError::Protocol(_)) | Err(DeviceError::Timeout(_)) => {
-                // Expected without hardware: either no ports or ports
-                // but no device found.
-            }
-            // A real ThumbDV is attached and answered the probe —
-            // valid on dev machines with the stick plugged in; the
-            // test still bounds detection time below.
-            Ok(_) => {}
-            Err(e) => panic!("expected detect() to error or find a device, got {e:?}"),
+    fn detect_trusted_with_an_empty_list_opens_nothing() {
+        // An empty trust list short-circuits before enumeration results are
+        // even consulted, so this is safe on a machine full of FT-X devices.
+        match detect_trusted(&[]) {
+            Err(DeviceError::NoTrustedDevice) => {}
+            other => panic!("expected NoTrustedDevice, got {other:?}"),
         }
-        // Ensure we didn't hang; detection should be fast.
-        assert!(
-            t0.elapsed() < std::time::Duration::from_secs(5),
-            "detect() took longer than 5 seconds"
-        );
     }
 }

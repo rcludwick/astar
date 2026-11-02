@@ -21,7 +21,7 @@ is designed to consume it.
     runs. D-Star and System Fusion — the networks the directory was built for
     first — are both in the app, on a DVMEGA DVstick 30 or a ThumbDV / DV3000
     dongle. Networks the app cannot dial yet (DMR) are listed and counted, not
-    hidden.
+    hidden. astar-server carries its own small M17 snapshot, described below.
 
 ## Where the data comes from
 
@@ -60,6 +60,24 @@ repository file:
 DVRef covers M17, YSF, NXDN, P25, URF and XRF; the XLX registry is the source of
 record for D-Star, where it lists an order of magnitude more reflectors than any
 other public directory.
+
+## The node's bundled M17 snapshot
+
+`astar-server` carries its own small, dated copy of the M17 part of this
+directory in `crates/astar-server/data/m17-reflectors.json`. It is compiled
+into the binary and is used only when the operator writes
+`directory = "bundled"` in the node's `[m17]` section (see
+[Configuration](../server/configuration.md)). That lets `/dial m17` resolve a
+reflector by name without the node ever fetching anything.
+`ci/fetch-m17-reflectors.sh` regenerates it from the primary endpoint above,
+and each row is reduced to its name, host, port and module list.
+
+The file carries the directory's licence, its source URL and its attribution
+text verbatim. While a monitor is up, the node's `GET /status` reports the
+snapshot's date as `m17.directory_generated`. M17 rows come from DVRef, so the
+line that applies is:
+
+> Reflector data provided by DVRef — <https://dvref.com/>
 
 ## How astar will use it
 

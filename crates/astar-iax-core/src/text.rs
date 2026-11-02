@@ -37,6 +37,16 @@
 use bytes::BufMut;
 use thiserror::Error;
 
+/// A TEXT payload without the C-string terminator(s) `app_rpt` sends.
+///
+/// `app_rpt` writes every link string with `datalen = strlen(str) + 1`, so
+/// `!NEWKEY1!` arrives as `!NEWKEY1!\0`. Compare and parse what this returns.
+#[must_use]
+pub fn trim_c_string(payload: &[u8]) -> &[u8] {
+    let end = payload.iter().rposition(|&b| b != 0).map_or(0, |i| i + 1);
+    &payload[..end]
+}
+
 /// Errors produced when decoding a TEXT-channel payload.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TextParseError {
@@ -258,6 +268,28 @@ fn write_decimal(n: u32, out: &mut [u8; 10]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trim_c_string_drops_app_rpt_terminators_only() {
+        assert_eq!(trim_c_string(b"!NEWKEY1!\0"), b"!NEWKEY1!");
+        assert_eq!(trim_c_string(b"!NEWKEY1!"), b"!NEWKEY1!");
+        assert_eq!(trim_c_string(b"L \0\0"), b"L ");
+        assert_eq!(trim_c_string(b"\0"), b"");
+        assert_eq!(trim_c_string(b""), b"");
+    }
+
+    #[test]
+    fn kstatus_with_its_c_terminator_parses_once_trimmed() {
+        let ev = TextEvent::parse(trim_c_string(b"K 1999 1998 1 3\0")).unwrap();
+        assert!(matches!(
+            ev,
+            TextEvent::KStatus {
+                keyed: true,
+                since: 3,
+                ..
+            }
+        ));
+    }
 
     fn encode_to_vec(ev: &TextEvent<'_>) -> Vec<u8> {
         let mut buf = Vec::new();

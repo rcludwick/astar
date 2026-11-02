@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# astar — Copyright (c) 2026 Rob Ludwick.
+# SPDX-License-Identifier: AGPL-3.0-only
+# Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
+#
+# fake-ssh — ASTAR_SSH stand-in for deploy/test/test_verify.sh. Ignores the
+# host and runs the remote command locally, with fakebox/ first on PATH so
+# podman, df, ss, curl and id answer canned output. stdin passes through, so
+# the fact-collector script verify.sh pipes in runs for real.
+set -u
+[ -n "${FAKE_SSH_FAIL:-}" ] && { echo "ssh: connect to host: Connection refused" >&2; exit 255; }
+while [ $# -gt 1 ]; do shift; done   # drop options and the host
+PATH="$(cd "$(dirname "$0")" && pwd)/fakebox:$PATH" exec bash -c "$1"

@@ -9,12 +9,13 @@
 //! up, no upstream registration, no real audio hardware assumed) and the
 //! operator edits the generated file in place.
 //!
-//! Kept registration-free and secret-free-in-spirit by default: `[register]`
-//! and the non-default parts of `[audio]`/`[announce]` are commented out so
-//! the daemon never tries to dial upstream (or assume real audio hardware)
-//! using placeholder values. `[secrets]` uses `source = "config"` with
-//! `secret = ""` — exactly the Task 8 shape — which is valid-with-warning at
-//! load time (see [`crate::config::NodeFileConfig::from_toml_str`]).
+//! Kept registration-free and secret-free by default: `[register]` and the
+//! non-default parts of `[audio]`/`[announce]` are commented out so the
+//! daemon never tries to dial upstream (or assume real audio hardware) using
+//! placeholder values. `[secrets]` uses `source = "file"`: every credential
+//! lives in `credentials.toml` beside the config, written by the settings
+//! page, so a fresh node never learns the inline `secret = "..."` shape and
+//! nothing secret is ever typed into this file.
 
 /// The commented template written by [`crate::config::NodeFileConfig::load_or_bootstrap`].
 ///
@@ -25,12 +26,14 @@ pub const NODE_TOML_TEMPLATE: &str = r#"# astar-server config — generated temp
 #
 # This file was auto-generated because the --config path did not exist. The
 # daemon has already loaded it and is running with the safe defaults below
-# (listener up, no upstream registration, no secret set). Edit this file in
-# place, then restart astar-server to pick up your changes — no rebuild
+# (listener up, no upstream registration, no credentials yet). Edit this file
+# in place, then restart astar-server to pick up your changes — no rebuild
 # needed:
 #   - fill in [register] node_id below (and uncomment the section) to
 #     register with an upstream registrar
-#   - fill in [secrets] secret with your node's registration password
+#   - set the node's registration password on the settings page at
+#     http://127.0.0.1:8730/settings — it is kept in credentials.toml beside
+#     this file, never in this one
 #   - uncomment [audio] backend = "none" on a headless VPS/container host
 #     with no sound hardware
 
@@ -60,13 +63,11 @@ include_local_radio = false
 bind = "127.0.0.1:8730"
 
 [secrets]
-# source = "config" carries the registration secret inline, right here in
-# this file — see [register] above. Fill in `secret` with your node's
-# registration password before uncommenting [register]. An empty secret is
-# valid at boot: the node still runs, it just can't authenticate
-# registration until you fill this in.
-source = "config"
-secret = ""
+# source = "file" keeps every credential — the registration password, the
+# portal password, the Discord bot token, per-node link secrets — in
+# credentials.toml beside this file, mode 0600, written by the settings
+# page at http://127.0.0.1:8730/settings. Nothing secret goes in THIS file.
+source = "file"
 
 # [announce]
 # Uncomment to enable voice announcements (TTS via piper) on call/inbound
@@ -82,4 +83,43 @@ secret = ""
 #
 # [announce.events]
 # answered = { enabled = true, destination = "to_air" }
+
+# [discord]
+# Mirror this node's conference into a Discord voice channel. Listen-only:
+# the channel hears the net and can never reach it. The bot token is NOT
+# configured here — set it on the settings page (it goes to credentials.toml),
+# or POST /secrets with username "discord".
+# Invite the bot with no privileged gateway intents and permissions=7343104
+# (View Channel, Send Messages, Connect, Speak, Mute Members). Send Messages
+# posts the bridge's state and its PTT panel into the voice channel's own
+# text chat; Mute Members is what enforces the one-open-mic rule. A bot
+# invited with an older integer must be re-authorized to gain the rest —
+# re-authorizing updates its role in place.
+# guild_id = "000000000000000000"
+# channel_id = "000000000000000000"
+# join_at_start = false
+# announce_on_join = true
+# Slash commands are off until approvers are listed. See deploy/node.toml.example
+# for approvers / state_file / mic_timeout_secs / mic_silence_secs and for the
+# limits of a guild-wide server mute.
+# approvers = []
+# state_file = "/var/lib/astar/discord-approvals.json"
+# Reserved — parsed but not yet implemented; the post-filter they would
+# configure does not exist, so setting them changes nothing.
+# model = "/path/to/unamblify.onnx"   # (reserved - not yet implemented)
+# latency = "ll5"                     # (reserved - not yet implemented)
+
+# [echolink]
+# Log this node in to EchoLink so an admin can dial EchoLink stations into
+# the conference from /admin. Calling out only: no incoming call is ever
+# accepted. The callsign must carry -L (a link) or -R (a repeater), and must
+# already be validated with EchoLink. The password is NOT configured here —
+# set ASTAR_ECHOLINK_PASSWORD, add "echolink:<CALLSIGN>" to credentials.toml,
+# or POST /secrets with username "echolink:<CALLSIGN>".
+# EchoLink's access policy forbids linking it to VoIP systems people reach
+# directly from a computer, so this section refuses to load beside
+# [discord], beside [web] public_bind, and beside [stream] enabled = true.
+# callsign = "N0CALL-L"
+# servers  = ["servers.echolink.org", "naeast.echolink.org", "nasouth.echolink.org", "backup.echolink.org"]
+# location = "Anytown, ST"
 "#;

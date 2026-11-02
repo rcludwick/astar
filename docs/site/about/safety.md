@@ -42,18 +42,25 @@ Concretely, in this project:
 These are not defensive coding. They are the difference between a bug and an
 unattended transmission.
 
-### The ThumbDV port pin only narrows the scan
+### Only trusted vocoder sticks are opened
 
-`IAX_THUMBDV_PORT` filters the results of the FTDI `0x0403:0x6015` scan for a
-D-Star vocoder dongle. It can select among ports the scan already matched. It
-can **never** replace the scan or point the opener at an arbitrary serial port.
+The engine opens a vocoder port only when it is an FTDI `0x0403:0x6015` device
+**and** its USB serial number is on the trust list — added by the operator in
+[Settings → Vocoders](../macos/vocoders.md), or in `node.toml`'s `[vocoder]`
+table for the daemon. An empty list opens nothing and scans for nothing.
 
-The reason is physical: opening a USB radio interface's tty **asserts RTS**, and
-RTS is the radio-key line. A pin that could name any port would be a remote
-transmit button disguised as a convenience feature.
+The reason is physical. Many radio CAT/PTT cables use the same FTDI chip as a
+vocoder stick and look identical on USB, and opening a USB radio interface's
+tty **asserts RTS**, which is the radio-key line. A scan that opened every
+matching port would key whatever radio was on the other end of such a cable.
 
-A port the scan did not match yields no candidates, and the open fails. That is
-the correct behaviour.
+Adding a stick is the one operation that opens a port before it is trusted. It
+is always a user action, after the user confirms the device is not a radio
+cable, and it holds DTR and RTS low before writing anything.
+
+`IAX_THUMBDV_PORT` narrows the choice among the trusted ports. It can
+**never** add one: a pin naming a port whose serial is not trusted is refused,
+and the open fails. That is the correct behaviour.
 
 ### The daemon refuses to key during a D-Star session
 
@@ -65,15 +72,19 @@ refusing to key: a D-Star session is active and
 D-Star transmit is not remotely keyable
 ```
 
-D-Star is the one network the daemon must never key remotely. IAX2 and M17 are
-remotely keyable by design; D-Star is not, and the check lives at the caller so
-it cannot be bypassed by reaching the station directly.
+D-Star is the one network the daemon must never key remotely, and the check
+lives at the caller so it cannot be bypassed by reaching the station directly.
+IAX2 and the console's own M17 client session are remotely keyable; the node's
+M17 *monitor* has no transmit path, and `POST /key` cannot reach it.
 
 ## Listening is always safe
 
 If you only want to hear what is happening, astar has a **TX disabled —
 listening only** mode, and links can be established as monitor-only
 (`*2` / `"action": "monitor"`), which receives without ever keying.
+astar-server can also monitor an M17 reflector
+([`POST /m17`](../server/control-api.md) or `/dial m17`): it sends the
+reflector only the packets that hold a link open, never audio.
 
 When in doubt, monitor.
 

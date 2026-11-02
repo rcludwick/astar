@@ -30,7 +30,9 @@ extension Station: StationDriving {
             dstarAvailable: s.dstarAvailable, dstarActive: s.dstarActive,
             ysfAvailable: s.ysfAvailable, ysfActive: s.ysfActive,
             nxdnAvailable: s.nxdnAvailable, nxdnActive: s.nxdnActive,
-            dmrAvailable: s.dmrAvailable, dmrActive: s.dmrActive
+            dmrAvailable: s.dmrAvailable, dmrActive: s.dmrActive,
+            echolinkAvailable: s.echolinkAvailable, echolinkActive: s.echolinkActive,
+            echolinkLoggedIn: s.echolinkLoggedIn
         )
     }
 
@@ -51,7 +53,26 @@ extension Station: StationDriving {
     // signatures are already the protocol's, defaulted arguments included.
     // connectYSF/ysfDisconnect/ysfState the same, for the same reason, and
     // m17State alongside them. connectNXDN/nxdnDisconnect/nxdnState (iax-b9c2)
-    // likewise, and connectDMR/dmrDisconnect/dmrState the same again.
+    // likewise, and connectDMR/dmrDisconnect/dmrState the same again. The
+    // nine echolink… calls match verbatim too.
+}
+
+extension RecordState {
+    /// Build a state from its fields. The binding decodes `RecordState` from
+    /// the engine's JSON and gives it no public memberwise init, so this goes
+    /// through the same JSON, keys and all.
+    static func make(
+        recording: Bool = false, elapsedMS: UInt64 = 0, files: [String] = [],
+        droppedFrames: UInt64 = 0, error: String? = nil, layout: String = "stereo"
+    ) throws -> RecordState {
+        var object: [String: Any] = [
+            "recording": recording, "elapsed_ms": elapsedMS, "files": files,
+            "dropped_frames": droppedFrames, "layout": layout,
+        ]
+        if let error { object["error"] = error }
+        let data = try JSONSerialization.data(withJSONObject: object)
+        return try JSONDecoder().decode(RecordState.self, from: data)
+    }
 }
 
 /// Errors from the fallback `NullStation` (no real engine available).
@@ -90,6 +111,16 @@ public struct NullStation: StationDriving {
     public func m17State() throws -> M17State? { nil }
     /// No engine, so nobody has been heard.
     public func heard() throws -> [HeardEntry] { [] }
+    /// No engine, so nothing to record.
+    public func recordStart(
+        directory: String, layout: RecordingLayout, frames: Bool, label: String,
+        utcOffsetSeconds: Int32
+    ) throws {
+        throw NullStationError.noEngine
+    }
+    public func recordStop() throws {}
+    /// Idle, as a real station is before anything has recorded.
+    public func recordState() throws -> RecordState { try RecordState.make() }
     public func connectYSF(host: String, callsign: String, options: String?) throws {
         throw NullStationError.noEngine
     }
@@ -116,7 +147,25 @@ public struct NullStation: StationDriving {
     /// No engine, so no link — the same answer the real station gives while
     /// idle, which keeps the last-heard line absent rather than wrong.
     public func dmrState() throws -> DMRState? { nil }
+    public func echolinkLogin(callsign: String, password: String, servers: [String]) throws {
+        throw NullStationError.noEngine
+    }
+    public func echolinkLogout() throws {}
+    public func echolinkConnect(_ target: String) throws {
+        throw NullStationError.noEngine
+    }
+    public func echolinkDisconnect() throws {}
+    public func echolinkSendChat(_ text: String) throws {}
+    public func echolinkSetLocation(_ text: String) throws {}
+    /// No engine, so no login — the same answer the real station gives while
+    /// logged out.
+    public func echolinkState() throws -> EchoLinkState? { nil }
+    /// No engine, so no directory list.
+    public func echolinkStations() throws -> [EchoLinkStationEntry] { [] }
+    /// No engine, so no directory to ask.
+    public func echolinkRefreshList() throws -> Bool { throw NullStationError.noEngine }
     public func setCodecDirs(_ dirs: [String]) throws {}
+    public func setVocoderTrust(_ serials: [String]) throws {}
     public func listInputs() throws -> [String] { [] }
     public func listOutputs() throws -> [String] { [] }
     public func setDevices(input: String?, output: String?) throws {}
@@ -148,10 +197,13 @@ extension CallSession {
     /// (astar-e542) and the node decides the narrowband fallback in IAX2
     /// negotiation. Pure, so tests can prove the wiring without constructing an
     /// engine (astar-eb6c).
-    public static func stationConfig(credentials: Credentials?, audio: AudioSettings)
-        -> StationConfig
-    {
+    public static func stationConfig(
+        credentials: Credentials?, audio: AudioSettings, vocoderSerials: [String] = []
+    ) -> StationConfig {
         var config = StationConfig()
+        // The only sticks the engine may open (vocoder trust). Empty — a Mac
+        // nobody has added a stick on — opens no vocoder port at all.
+        config.vocoderSerials = vocoderSerials
         if let c = credentials {
             config.portalUser = c.portalUser
             config.portalPass = c.portalPass
@@ -167,10 +219,15 @@ extension CallSession {
     /// returning it plus whether the WT path is available. Falls back to
     /// `NullStation` if the engine can't be constructed (so the UI always has a
     /// session). The password is consumed into the config here and never retained.
-    public static func makeStation(credentials: Credentials?, audio: AudioSettings) -> (
+    public static func makeStation(
+        credentials: Credentials?, audio: AudioSettings,
+        vocoderTrust: VocoderTrustStore = UserDefaultsVocoderTrustStore()
+    ) -> (
         station: StationDriving, hasCredentials: Bool
     ) {
-        let config = stationConfig(credentials: credentials, audio: audio)
+        let config = stationConfig(
+            credentials: credentials, audio: audio,
+            vocoderSerials: vocoderTrust.load().map(\.serial))
         if let station = try? Station(config: config) {
             return (station, credentials != nil)
         }
@@ -188,6 +245,7 @@ extension CallSession {
     public static func live(
         store: CredentialStore = KeychainCredentialStore(),
         dmrPasswords: DmrPasswordStore = KeychainDmrPasswordStore(),
+        echolinkPasswords: EchoLinkCredentialStore = KeychainEchoLinkCredentialStore(),
         audioStore: AudioSettingsStore = UserDefaultsAudioSettingsStore()
     ) -> CallSession {
         let audio = audioStore.load()
@@ -209,10 +267,11 @@ extension CallSession {
         // are read at the moment of a dial and handed straight to the engine,
         // so the session holds the STORE and never a password. A separate
         // Keychain item from `store`'s, and a separate lifetime — see
-        // `DmrPasswordStore`.
+        // `DmrPasswordStore`. The EchoLink password store goes in the same
+        // way, in an item of its own.
         let session = CallSession(
             station: station, hasCredentials: hasCredentials, credentials: credentials,
-            dmrPasswords: dmrPasswords)
+            dmrPasswords: dmrPasswords, echolinkPasswords: echolinkPasswords)
         session.applyAudioSettings(audio)  // restore saved devices + gains
         return session
     }

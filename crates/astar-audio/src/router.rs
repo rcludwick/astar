@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
+use astar_record::tap::{PcmChunk, Tap, TapSlot};
+
 use crate::meter::peak;
 use crate::mixer::{Mixer, RxFrame, RxJitterConfig, RxJitterSettings};
 use crate::spectrum::SpectrumAnalyzer;
@@ -122,6 +124,9 @@ struct MicSlot {
     denoise_strength: Arc<AtomicU32>,
     /// Active TX announcement injected ahead of the mic (iax-e30d).
     inject: InjectCell,
+    /// The lane's sent-audio recording tap; [`AudioRouter::set_record_taps`]
+    /// fills it. Inert on the injected-sink paths, which have no `MicLane`.
+    sent: TapSlot<PcmChunk>,
 }
 
 /// One open playback device: its stream handle plus the shared `Mixer` the
@@ -144,6 +149,9 @@ struct OutSlot {
     /// RX/output compression strength cell (f32 bits, 0.0..=1.0) shared with
     /// the bus.
     rx_compress_level: Arc<AtomicU32>,
+    /// The bus's heard-audio recording tap; [`AudioRouter::set_record_taps`]
+    /// fills it. Inert on the injected-source path, which has no `OutputBus`.
+    heard: TapSlot<PcmChunk>,
 }
 
 /// Owns the audio backend + the open streams. Phase 2: N mic lanes / N output
@@ -185,6 +193,9 @@ pub struct AudioRouter {
     /// Live RX jitter-buffer configuration (iax-rxjb), shared with every bus
     /// this router opens so a change reaches a call in progress.
     rx_jitter: Arc<RxJitterSettings>,
+    /// The recording taps, kept so a bus or lane opened later gets them too.
+    heard_tap: Option<Tap<PcmChunk>>,
+    sent_tap: Option<Tap<PcmChunk>>,
 }
 
 impl AudioRouter {
@@ -197,7 +208,39 @@ impl AudioRouter {
             mics: HashMap::new(),
             outputs: HashMap::new(),
             rx_jitter: Arc::new(RxJitterSettings::default()),
+            heard_tap: None,
+            sent_tap: None,
         }
+    }
+
+    /// Install (or, with `None`, remove) the read-only recording taps: `heard`
+    /// gets a copy of the final audio of every output bus carrying a call
+    /// (an idle bus offers nothing, so two open buses never interleave in
+    /// the receive lane), `sent` a copy of every
+    /// frame a mic lane hands to a call. Reaches every open bus and lane, and
+    /// every one opened after this. The audio thread never waits on them: a
+    /// full tap drops and counts, a busy slot is skipped.
+    pub fn set_record_taps(&mut self, heard: Option<Tap<PcmChunk>>, sent: Option<Tap<PcmChunk>>) {
+        for slot in self.outputs.values() {
+            slot.heard.set(heard.clone());
+        }
+        for slot in self.mics.values() {
+            slot.sent.set(sent.clone());
+        }
+        self.heard_tap = heard;
+        self.sent_tap = sent;
+    }
+
+    /// The contention counters of every open bus's heard slot and every open
+    /// lane's sent slot: offers skipped because the slot's lock was busy. A
+    /// recorder folds their growth into its lost count.
+    #[must_use]
+    pub fn record_contended_counters(&self) -> Vec<Arc<AtomicU64>> {
+        self.outputs
+            .values()
+            .map(|s| s.heard.contended_counter())
+            .chain(self.mics.values().map(|s| s.sent.contended_counter()))
+            .collect()
     }
 
     /// Set the RX jitter-buffer configuration on every open bus and every bus
@@ -591,6 +634,8 @@ impl AudioRouter {
         let rx_spectrum = bus.rx_spectrum();
         let rx_compress = bus.rx_compress();
         let rx_compress_level = bus.rx_compress_level();
+        let heard = bus.record_tap();
+        heard.set(self.heard_tap.clone());
         let handle = self.backend.open_output(&out_dev, config, Box::new(bus))?;
         self.outputs.insert(
             out.clone(),
@@ -602,6 +647,7 @@ impl AudioRouter {
                 rx_spectrum,
                 rx_compress,
                 rx_compress_level,
+                heard,
             },
         );
         Ok(())
@@ -639,6 +685,8 @@ impl AudioRouter {
         let preroll_ms = lane.preroll_ms_cell();
         let denoise_status = lane.denoise_status_cell();
         let denoise_strength = lane.denoise_strength_cell();
+        let sent = lane.record_tap();
+        sent.set(self.sent_tap.clone());
         let overruns = Arc::new(AtomicU64::new(0));
         let handle =
             self.backend
@@ -664,6 +712,7 @@ impl AudioRouter {
                 denoise_status,
                 denoise_strength,
                 inject,
+                sent,
             },
         );
         Ok(())
@@ -717,6 +766,7 @@ impl AudioRouter {
                 denoise_status: Arc::new(AtomicU64::new(0)),
                 denoise_strength: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
                 inject: Arc::new(Mutex::new(None)),
+                sent: TapSlot::default(),
             },
         );
         self.outputs.insert(
@@ -729,6 +779,7 @@ impl AudioRouter {
                 rx_spectrum: Arc::new(Mutex::new(SpectrumAnalyzer::new(config.sample_rate))),
                 rx_compress: Arc::new(AtomicBool::new(false)),
                 rx_compress_level: Arc::new(AtomicU32::new(DEFAULT_COMPRESS_LEVEL.to_bits())),
+                heard: TapSlot::default(),
             },
         );
         Ok(())
@@ -789,6 +840,7 @@ impl AudioRouter {
                 denoise_status: Arc::new(AtomicU64::new(0)),
                 denoise_strength: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
                 inject: Arc::new(Mutex::new(None)),
+                sent: TapSlot::default(),
             },
         );
         Ok(())
@@ -1132,8 +1184,11 @@ pub struct OutputBus {
     /// `MicLane` owns its `comp` for the capture side.
     comp: Compressor,
     /// Sample rate this bus's `comp` is tuned for (needed to re-tune on a
-    /// live level change).
+    /// live level change), and the rate of every heard-tap chunk.
     sample_rate: u32,
+    /// Heard-audio recording tap: a copy of exactly what the device got,
+    /// offered at the end of `read`. Built only while a tap is installed.
+    heard: TapSlot<PcmChunk>,
 }
 
 impl OutputBus {
@@ -1155,7 +1210,14 @@ impl OutputBus {
                 CompressorParams::for_level(DEFAULT_COMPRESS_LEVEL),
             ),
             sample_rate,
+            heard: TapSlot::default(),
         }
+    }
+
+    /// The bus's heard-audio recording tap slot (shared; the router keeps it).
+    #[must_use]
+    pub fn record_tap(&self) -> TapSlot<PcmChunk> {
+        self.heard.clone()
     }
 
     /// Shared RX-peak cell for per-bus metering (f32 bits in an `AtomicU32`).
@@ -1192,7 +1254,12 @@ impl OutputBus {
 
 impl OutputSource for OutputBus {
     fn read(&mut self, out: &mut [f32]) -> usize {
-        let n = self.mixer.lock().map_or(0, |mut m| m.read(out));
+        // The call count is read under the same lock as the mix, so the
+        // heard tap below sees exactly whether this buffer carried a call.
+        let (n, calls) = self
+            .mixer
+            .lock()
+            .map_or((0, 0), |mut m| (m.read(out), m.call_count()));
         // iax-a4e7 PHASE 1: RX compression — reuse the mic-path Compressor
         // (makeup gain included) on the OUTPUT bus's POST-MIX (summed) audio
         // — `m.read` above already sums every call routed to this bus, so
@@ -1228,6 +1295,17 @@ impl OutputSource for OutputBus {
         // Zeroing the tail also makes the device play clean silence on underrun
         // rather than stale buffer content.
         out[n..].fill(0.0);
+        // Recording: a copy of the final buffer, zeroed tail included, from
+        // a bus carrying a call only. Every open bus shares the one heard
+        // tap, so an idle bus offering its silence would interleave a
+        // second stream into the receive lane. Never waits; nothing is
+        // built unless a tap is installed.
+        if calls > 0 {
+            self.heard.offer_with(|| PcmChunk {
+                rate: self.sample_rate,
+                samples: out.iter().map(|&s| quantise_sample(s)).collect(),
+            });
+        }
         if let Ok(mut sa) = self.rx_spectrum.lock() {
             sa.push(out);
         }
@@ -1237,6 +1315,13 @@ impl OutputSource for OutputBus {
 
 /// One voice frame is 20 ms (160 PCM samples at 8 kHz).
 pub const VOICE_FRAME_MS: u32 = 20;
+
+/// The f32 -> i16 PCM rounding every lane and tap shares: clamp, scale by
+/// 32767, truncate toward zero.
+#[allow(clippy::cast_possible_truncation)]
+fn quantise_sample(s: f32) -> i16 {
+    (s.clamp(-1.0, 1.0) * 32767.0) as i16
+}
 
 /// Samples per 20 ms voice frame at `sample_rate` (160 @ 8 kHz, 320 @ 16 kHz).
 /// Wire byte size is per-format (`VoiceFormat::frame_bytes_20ms`).
@@ -1384,6 +1469,9 @@ pub struct MicLane {
     prev_gate: bool,
     /// Active TX announcement injected ahead of the mic (iax-e30d).
     inject: InjectCell,
+    /// Sent-audio recording tap: a copy of every frame handed to the call,
+    /// pre-roll included. Built only while a tap is installed.
+    sent: TapSlot<PcmChunk>,
 }
 
 impl MicLane {
@@ -1447,7 +1535,14 @@ impl MicLane {
             preroll_ring: std::collections::VecDeque::with_capacity(MAX_PREROLL_FRAMES),
             prev_gate: false,
             inject,
+            sent: TapSlot::default(),
         }
+    }
+
+    /// The lane's sent-audio recording tap slot (shared; the router keeps it).
+    #[must_use]
+    pub fn record_tap(&self) -> TapSlot<PcmChunk> {
+        self.sent.clone()
     }
 
     /// Shared TX-peak cell for per-lane metering (f32 bits in an `AtomicU32`).
@@ -1604,16 +1699,8 @@ impl MicLane {
         if let Ok(mut sa) = self.tx_spectrum.lock() {
             sa.push(&self.buf_f32);
         }
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            clippy::cast_possible_wrap
-        )]
-        self.buf_pcm.extend(
-            self.buf_f32
-                .iter()
-                .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16),
-        );
+        self.buf_pcm
+            .extend(self.buf_f32.iter().map(|&s| quantise_sample(s)));
     }
 }
 
@@ -1758,6 +1845,11 @@ impl InputSink for MicLane {
                         #[allow(clippy::cast_possible_truncation)]
                         lead.fetch_add(flushed as u32, Ordering::Relaxed);
                         for frame in self.preroll_ring.drain(..) {
+                            // Offered before the send: at teardown a recording may hold one frame the call never got.
+                            self.sent.offer_with(|| PcmChunk {
+                                rate: self.sample_rate,
+                                samples: frame.clone(),
+                            });
                             let _ = tx.send(frame);
                         }
                     }
@@ -1805,6 +1897,11 @@ impl InputSink for MicLane {
             let mut sent = false;
             while self.buf_pcm.len() >= self.frame_samples {
                 let frame: Vec<i16> = self.buf_pcm.drain(..self.frame_samples).collect();
+                // Offered before the send: at teardown a recording may hold one frame the call never got.
+                self.sent.offer_with(|| PcmChunk {
+                    rate: self.sample_rate,
+                    samples: frame.clone(),
+                });
                 if tx.send(frame).is_ok() {
                     sent = true;
                 }
@@ -3224,5 +3321,275 @@ mod tests {
         h.cancel();
         controls.push_mic(&[0.0_f32; 160]); // first callback observes cancel
         assert!(h.is_done(), "cancel marks done on next callback");
+    }
+
+    // ---- Recording taps (heard / sent) --------------------------------------
+
+    /// The same f32 -> i16 rounding the mic lane and the heard tap use.
+    #[allow(clippy::cast_possible_truncation)]
+    fn quantised(samples: &[f32]) -> Vec<i16> {
+        samples
+            .iter()
+            .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
+            .collect()
+    }
+
+    fn drain<T>(rx: &std::sync::mpsc::Receiver<T>) -> Vec<T> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    fn tapped_lane(preroll_ms: u32) -> (MicLane, MicDest, Arc<AtomicBool>) {
+        let dest: MicDest = Arc::new(Mutex::new(None));
+        let gate = Arc::new(AtomicBool::new(false));
+        let lane = MicLane::new(
+            8_000,
+            Arc::clone(&dest),
+            Arc::clone(&gate),
+            Arc::new(Mutex::new(None)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(Mutex::new(None)),
+        );
+        lane.preroll_ms_cell().store(preroll_ms, Ordering::Relaxed);
+        (lane, dest, gate)
+    }
+
+    /// 20 ms of a ramp, so every frame's bytes differ from its neighbours'.
+    fn ramp_frame(k: usize) -> Vec<f32> {
+        #[allow(clippy::cast_precision_loss)]
+        (0..160)
+            .map(|i| ((k * 160 + i) % 400) as f32 / 1000.0 - 0.2)
+            .collect()
+    }
+
+    #[test]
+    fn heard_tap_copies_exactly_what_the_bus_produced() {
+        let mixer = Arc::new(Mutex::new(Mixer::new()));
+        let (tx, rx) = channel();
+        mixer.lock().unwrap().add_call(rx);
+        let mut bus = OutputBus::new(Arc::clone(&mixer), 8_000);
+        bus.rx_gain().store(2.0_f32.to_bits(), Ordering::Relaxed);
+        let frame: Vec<i16> = (0..160).map(|i| (i * 97 % 4000) as i16 - 2000).collect();
+        tx.send(RxFrame::from(frame)).unwrap();
+        let (tap, heard) = astar_record::tap::tap_channel(4);
+        bus.record_tap().set(Some(tap));
+
+        // Twice the frame, so the bus underruns and zeroes a tail.
+        let mut out = [0.5_f32; 320];
+        let n = crate::OutputSource::read(&mut bus, &mut out);
+        assert!(
+            n > 0 && n < out.len(),
+            "a real frame and a zeroed tail: n={n}"
+        );
+
+        let chunks = drain(&heard);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].rate, 8_000);
+        assert_eq!(chunks[0].samples, quantised(&out));
+        assert!(chunks[0].samples[n..].iter().all(|&s| s == 0));
+        assert!(chunks[0].samples[..n].iter().any(|&s| s != 0));
+    }
+
+    #[test]
+    fn only_a_bus_carrying_a_call_offers_to_the_heard_tap() {
+        let (tap, heard) = astar_record::tap::tap_channel(16);
+        // Bus A carries a call; bus B is open with nothing on it.
+        let mixer_a = Arc::new(Mutex::new(Mixer::new()));
+        let (tx, rx) = channel();
+        let call = mixer_a.lock().unwrap().add_call(rx);
+        let mut a = OutputBus::new(Arc::clone(&mixer_a), 8_000);
+        let mut b = OutputBus::new(Arc::new(Mutex::new(Mixer::new())), 8_000);
+        a.record_tap().set(Some(tap.clone()));
+        b.record_tap().set(Some(tap));
+        for tick in 0..5_i16 {
+            let frame: Vec<i16> = (0..160_i16).map(|i| (i * 31 + tick * 7) % 900).collect();
+            tx.send(RxFrame::from(frame)).unwrap();
+            let mut out_a = [0.0_f32; 160];
+            let mut out_b = [0.0_f32; 160];
+            crate::OutputSource::read(&mut a, &mut out_a);
+            crate::OutputSource::read(&mut b, &mut out_b);
+            let chunks = drain(&heard);
+            assert_eq!(chunks.len(), 1, "one stream per tick (tick {tick})");
+            assert_eq!(chunks[0].samples, quantised(&out_a), "bus A's samples");
+        }
+        // Once the call is gone, bus A falls quiet too.
+        mixer_a.lock().unwrap().remove_call(call);
+        let mut out = [0.0_f32; 160];
+        crate::OutputSource::read(&mut a, &mut out);
+        crate::OutputSource::read(&mut b, &mut out);
+        assert!(drain(&heard).is_empty(), "no call, no offer");
+    }
+
+    #[test]
+    fn sent_tap_copies_live_and_preroll_frames() {
+        let (mut lane, dest, gate) = tapped_lane(60);
+        let (tx, call) = channel();
+        *dest.lock().unwrap() = Some(test_dest(tx));
+        let (tap, sent) = astar_record::tap::tap_channel(16);
+        lane.record_tap().set(Some(tap));
+
+        // 100 ms unkeyed: the ring keeps the newest 3 frames.
+        for k in 0..5 {
+            crate::InputSink::write(&mut lane, &ramp_frame(k), 0.0);
+        }
+        assert!(drain(&sent).is_empty(), "nothing is sent while unkeyed");
+        gate.store(true, Ordering::Relaxed);
+        for k in 5..7 {
+            crate::InputSink::write(&mut lane, &ramp_frame(k), 0.0);
+        }
+
+        let to_call = drain(&call);
+        let tapped = drain(&sent);
+        assert_eq!(to_call.len(), 5, "3 pre-roll frames then 2 live frames");
+        assert_eq!(
+            tapped.iter().map(|c| c.samples.clone()).collect::<Vec<_>>(),
+            to_call,
+            "the tap is byte-identical to the call, in the same order"
+        );
+        assert!(tapped.iter().all(|c| c.rate == 8_000));
+        // The pre-roll really is frames 2..5 and the live ones 5..7.
+        for (i, k) in (2..7).enumerate() {
+            assert_eq!(to_call[i], quantised(&ramp_frame(k)), "frame {k}");
+        }
+    }
+
+    #[test]
+    fn sent_tap_delivers_nothing_while_unkeyed() {
+        for preroll_ms in [0, 60] {
+            let (mut lane, dest, _gate) = tapped_lane(preroll_ms);
+            let (tx, call) = channel();
+            *dest.lock().unwrap() = Some(test_dest(tx));
+            let (tap, sent) = astar_record::tap::tap_channel(16);
+            lane.record_tap().set(Some(tap));
+            for k in 0..10 {
+                crate::InputSink::write(&mut lane, &ramp_frame(k), 0.0);
+            }
+            assert_eq!(drain(&call), [] as [std::vec::Vec<i16>; 0]);
+            assert!(drain(&sent).is_empty(), "preroll {preroll_ms} ms");
+        }
+    }
+
+    #[test]
+    fn a_full_tap_never_delays_the_audio_thread() {
+        use std::time::{Duration, Instant};
+        const CALLS: usize = 1_000;
+        // A max over many calls is at the mercy of one preemption on a loaded
+        // machine, so: interleave the untapped and tapped calls (both see the
+        // same noise), and allow a few attempts. A tap that really waits fails
+        // every attempt; a scheduler hiccup does not repeat.
+        const ATTEMPTS: usize = 3;
+        // A tap that blocks outright would hang the reads, so they run on a
+        // worker and the test gives up on it rather than hanging CI.
+        const HANG_LIMIT: Duration = Duration::from_secs(30);
+        fn timed(bus: &mut OutputBus, out: &mut [f32]) -> Duration {
+            let t = Instant::now();
+            crate::OutputSource::read(bus, out);
+            t.elapsed()
+        }
+        let mut seen = Vec::new();
+        for _ in 0..ATTEMPTS {
+            let (done_tx, done_rx) = channel();
+            std::thread::spawn(move || {
+                // Each bus carries a (silent) call: only such a bus offers.
+                let busy = || {
+                    let mixer = Arc::new(Mutex::new(Mixer::new()));
+                    let (tx, rx) = channel::<RxFrame>();
+                    mixer.lock().unwrap().add_call(rx);
+                    (OutputBus::new(mixer, 8_000), tx)
+                };
+                let (mut plain, _plain_call) = busy();
+                let (mut tapped_bus, _tapped_call) = busy();
+                let (tap, _never_drained) = astar_record::tap::tap_channel(1);
+                let dropped = tap.dropped_counter();
+                tapped_bus.record_tap().set(Some(tap));
+                let mut out = [0.0_f32; 512];
+                let (mut baseline, mut tapped) = (Duration::ZERO, Duration::ZERO);
+                for _ in 0..CALLS {
+                    baseline = baseline.max(timed(&mut plain, &mut out));
+                    tapped = tapped.max(timed(&mut tapped_bus, &mut out));
+                }
+                let _ = done_tx.send((baseline, tapped, dropped.load(Ordering::Relaxed)));
+            });
+            let (baseline, tapped, dropped) = done_rx
+                .recv_timeout(HANG_LIMIT)
+                .expect("the tapped reads finished (a tap blocked the audio thread)");
+            assert!(dropped > 0, "a full tap drops");
+            if tapped < Duration::from_millis(20) && tapped < baseline * 3 {
+                return;
+            }
+            seen.push((tapped, baseline));
+        }
+        panic!("tapped max not under 20 ms and 3x the baseline max: (tapped, baseline) = {seen:?}");
+    }
+
+    #[test]
+    fn a_sent_tap_reaches_a_mic_lane_opened_after_it_was_set() {
+        let (backend, controls) = test_support_router::NullBackend::with_controls();
+        let mut router = AudioRouter::new(Box::new(backend));
+        let (tap, sent) = astar_record::tap::tap_channel(16);
+        router.set_record_taps(None, Some(tap));
+        // open_call opens the mic lane now, and keys its gate.
+        let call = router
+            .open_call(
+                &MicId::new("in:test"),
+                &OutputId::new("out:test"),
+                crate::StreamConfig::default(),
+            )
+            .expect("router opens streams");
+
+        controls.push_mic(&[0.25_f32; 320]);
+        let to_call = drain(&call.tx_frames);
+        let tapped = drain(&sent);
+        assert_eq!(to_call.len(), 2, "two 20 ms frames reach the call");
+        assert_eq!(
+            tapped.iter().map(|c| c.samples.clone()).collect::<Vec<_>>(),
+            to_call
+        );
+        assert!(tapped.iter().all(|c| c.rate == 8_000));
+    }
+
+    #[test]
+    fn taps_reach_buses_opened_after_they_were_set() {
+        let (backend, controls) = test_support_router::NullBackend::with_controls();
+        let mut router = AudioRouter::new(Box::new(backend));
+        let (tap, heard) = astar_record::tap::tap_channel(4);
+        router.set_record_taps(Some(tap), None);
+        let _call = router
+            .open_monitor_call(&OutputId::new("out:test"), crate::StreamConfig::default())
+            .expect("bus opens");
+
+        let out = controls.pull_output(512);
+        assert_eq!(out.len(), 512);
+        let chunks = drain(&heard);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].rate, 8_000);
+        assert_eq!(chunks[0].samples.len(), 512);
+    }
+
+    #[test]
+    fn clearing_the_taps_stops_delivery() {
+        let (backend, controls) = test_support_router::NullBackend::with_controls();
+        let mut router = AudioRouter::new(Box::new(backend));
+        // Opened BEFORE the taps are set: set_record_taps reaches open slots.
+        let _call = router
+            .open_call(
+                &MicId::new("in:test"),
+                &OutputId::new("out:test"),
+                crate::StreamConfig::default(),
+            )
+            .expect("router opens streams");
+        let (heard_tap, heard) = astar_record::tap::tap_channel(16);
+        let (sent_tap, sent) = astar_record::tap::tap_channel(16);
+        router.set_record_taps(Some(heard_tap), Some(sent_tap));
+
+        controls.pull_output(160);
+        controls.push_mic(&[0.25_f32; 160]);
+        assert_eq!(drain(&heard).len(), 1, "heard while set");
+        assert_eq!(drain(&sent).len(), 1, "sent while set");
+
+        router.set_record_taps(None, None);
+        controls.pull_output(160);
+        controls.push_mic(&[0.25_f32; 160]);
+        assert!(drain(&heard).is_empty(), "no heard after clearing");
+        assert!(drain(&sent).is_empty(), "no sent after clearing");
     }
 }

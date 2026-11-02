@@ -687,12 +687,16 @@ fn main() {
         // Explicit LE and BE readers (the library codec is BE per iax-31f7);
         // this probe stays an independent instrument for either order.
         let pcm_le: Vec<i16> = slin_bytes[..even]
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_le_bytes(*c))
             .collect();
         let pcm_be: Vec<i16> = slin_bytes[..even]
-            .chunks_exact(2)
-            .map(|c| i16::from_be_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_be_bytes(*c))
             .collect();
 
         let hop = win / 2;
@@ -796,12 +800,16 @@ fn main() {
         // since the iax-31f7 live verdict) so this probe stays a valid
         // independent instrument for either order.
         let pcm_le: Vec<i16> = slin_bytes[..even]
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_le_bytes(*c))
             .collect();
         let pcm_be: Vec<i16> = slin_bytes[..even]
-            .chunks_exact(2)
-            .map(|c| i16::from_be_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_be_bytes(*c))
             .collect();
 
         const WIN: usize = 8000; // 1 s

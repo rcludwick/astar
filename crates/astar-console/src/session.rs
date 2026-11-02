@@ -29,9 +29,17 @@ use astar_iax_core::session::auth::Secret;
 use crate::dmr::{DmrConfig, DmrLink, DmrSnapshot};
 #[cfg(feature = "dstar")]
 use crate::dstar::{DstarConfig, DstarSession, DstarSnapshotState};
+#[cfg(feature = "echolink")]
+use crate::echolink::{
+    CallLink, EchoLinkLogin, EchoLinkNetwork, EchoLinkNodeEdge, EchoLinkNodeLeg,
+    EchoLinkPeerStatus, EchoLinkPresence, EchoLinkSession, EchoLinkState, LoginState, PeerAddr,
+    PresenceSnapshot, StationEntry,
+};
 use crate::heard::HeardEntry;
 #[cfg(feature = "m17")]
-use crate::m17::{M17Config, M17Session, M17SnapshotState};
+use crate::m17::{
+    M17Config, M17Monitor, M17MonitorConfig, M17Session, M17SnapshotState, SourceSink,
+};
 use crate::metering::Gain;
 #[cfg(feature = "nxdn")]
 use crate::nxdn::{NxdnConfig, NxdnLink, NxdnSnapshot};
@@ -39,7 +47,11 @@ use crate::state::{CallStatus, ConsoleState};
 #[cfg(feature = "ysf")]
 use crate::ysf::{YsfConfig, YsfLink, YsfSnapshot};
 #[cfg(feature = "m17")]
+use crate::{M17MonitorEdge, M17MonitorStatus};
+#[cfg(feature = "m17")]
 use astar_m17::LinkState;
+use astar_record::frames::FrameEvent;
+use astar_record::tap::{PcmChunk, Tap};
 
 /// Outcome of an outbound node registration attempt. Secret-free: the
 /// registrar password NEVER appears here — only a human-readable failure
@@ -184,6 +196,10 @@ pub enum ConsoleError {
     /// [`crate::nxdn::NxdnLink`] classifying a callsign, radio-id, resolve
     /// or bind failure.
     Nxdn(String),
+    /// An `EchoLink` login or call could not be started: a plain sentence,
+    /// secret-free like every other variant here. The password never reaches
+    /// it.
+    EchoLink(String),
     /// A key-down was refused because the live voice route has no capture
     /// device it could open (none resolved, permission denied, or the device
     /// is held exclusively). Receiving still works; transmitting cannot.
@@ -205,6 +221,7 @@ impl std::fmt::Display for ConsoleError {
             Self::Ysf(msg) => write!(f, "ysf: {msg}"),
             Self::Dmr(msg) => write!(f, "dmr: {msg}"),
             Self::Nxdn(msg) => write!(f, "nxdn: {msg}"),
+            Self::EchoLink(msg) => write!(f, "echolink: {msg}"),
             Self::NoCaptureDevice => write!(f, "no capture device: cannot transmit"),
         }
     }
@@ -265,6 +282,18 @@ pub fn list_devices(
         }
     }
     Ok((inputs, outputs))
+}
+
+/// A live receive-only M17 monitor and the conference member it feeds.
+///
+/// Kept together so that every path that ends the leg also withdraws the
+/// member. `last` is the link state the previous poll saw; it is what turns
+/// linking→linked into exactly one [`M17MonitorEdge::Linked`].
+#[cfg(feature = "m17")]
+struct M17MonitorLeg {
+    monitor: M17Monitor,
+    member: astar_audio::MemberId,
+    last: &'static str,
 }
 
 /// Drives a single web-transceiver call and exposes a pollable [`ConsoleState`].
@@ -371,6 +400,18 @@ pub struct ConsoleSession {
     /// view so only this field needs the `#[cfg]`.
     #[cfg(feature = "m17")]
     m17: Option<M17Session>,
+    /// The node's receive-only M17 reflector monitor, if one is up.
+    ///
+    /// This is deliberately NOT `m17`. `set_ptt`, `m17_is_active()`,
+    /// `can_open_voice_route` and the `ConsoleState.m17_active` mirror never
+    /// read this slot. No keying path can reach the monitor, and
+    /// `m17_active` keeps meaning "the console's own M17 client is live",
+    /// which is what the Mac and Iced clients read. The monitor holds a
+    /// contributing-only conference member, not the voice route, so it can
+    /// coexist with IAX2 calls and links. Dropping the session drops the
+    /// monitor, and the monitor's `Drop` sends DISC.
+    #[cfg(feature = "m17")]
+    m17_monitor: Option<M17MonitorLeg>,
     /// The live D-Star `DExtra` session (iax-a9d4 Task 6 RX; iax-2f6b adds
     /// TX). Mutually exclusive with an active IAX2 call (`active`) AND a
     /// live M17 session (`m17`) — every connect/adopt entry point that
@@ -401,6 +442,37 @@ pub struct ConsoleSession {
     /// here for a snapshot, an error or a log to leak.
     #[cfg(feature = "dmr")]
     dmr: Option<DmrLink>,
+    /// The app's `EchoLink` call, if one has been placed. Like [`Self::m17`]
+    /// it stays `Some` after the far end hangs up (the snapshot then reports
+    /// `Hangup`) until [`Self::echolink_disconnect`] clears it, and it holds
+    /// the voice route for as long as it is here.
+    ///
+    /// Declared BEFORE `echolink_presence` on purpose: fields drop in
+    /// declaration order, so a session dropped mid-call hangs up before it
+    /// logs off, the same order [`Self::echolink_logout`] gives a caller.
+    #[cfg(feature = "echolink")]
+    echolink: Option<EchoLinkSession>,
+    /// The node's `EchoLink` leg: stations an admin dialled, each a peer
+    /// member of the conference. Built on the first
+    /// [`Self::echolink_node_connect`] and kept (its thread idles with no
+    /// port open) so that hanging up never waits on a thread join. Also
+    /// declared before `echolink_presence`, for the same BYE-then-logoff
+    /// order on drop.
+    #[cfg(feature = "echolink")]
+    echolink_node: Option<EchoLinkNodeLeg>,
+    /// The directory login, if one has been started. It owns the password,
+    /// inside its own thread; nothing in this struct ever holds it.
+    #[cfg(feature = "echolink")]
+    echolink_presence: Option<EchoLinkPresence>,
+    /// Where an `EchoLink` call binds and how it finds a station's ports.
+    /// [`EchoLinkNetwork::production`] unless a test swaps in loopback.
+    #[cfg(feature = "echolink")]
+    echolink_net: EchoLinkNetwork,
+    /// The location text other stations see. Not secret. Kept here rather
+    /// than only in the login so that a location set before any login (the
+    /// server sets it first) reaches the login that follows.
+    #[cfg(feature = "echolink")]
+    echolink_location: String,
     /// The live outbound node registration handle (Task 3.1). `Some` only while
     /// a registration is in flight; `Drop` sends REGREL when cleared.
     /// Secret-free: the resolved password was consumed into the `Registrar`
@@ -453,6 +525,26 @@ pub struct ConsoleSession {
     /// (iax-d254), keyed by the source call's raw id. Merged with the
     /// Manager's in-band digit pool by [`ConsoleSession::drain_dtmf_digits`].
     dtmf_digits: Vec<(u64, char)>,
+    /// The USB serials of the vocoder sticks this station may open (vocoder
+    /// trust). Empty by default: no hardware vocoder is opened, or even
+    /// enumerated, until the embedder sets one with
+    /// [`Self::set_vocoder_trust`].
+    vocoder_trust: astar_codec::vocoder_trust::VocoderTrust,
+    /// The recording taps, held here rather than on any one session or
+    /// engine, so a session adopted while recording picks the frame tap up
+    /// and an engine built later gets heard/sent on its router. See
+    /// [`Self::set_record_taps`].
+    record_taps: RecordTaps,
+}
+
+/// The read-only recording taps a [`ConsoleSession`] installs: `heard` and
+/// `sent` on the station router's buses and mic lanes, `frames` on whichever
+/// digital session is live. `Default` is all `None` — nothing recorded.
+#[derive(Clone, Default)]
+pub struct RecordTaps {
+    pub heard: Option<Tap<PcmChunk>>,
+    pub sent: Option<Tap<PcmChunk>>,
+    pub frames: Option<Tap<FrameEvent>>,
 }
 
 /// The pool id every WT call is dialed under. The console drives a single call
@@ -489,6 +581,8 @@ impl ConsoleSession {
             inbound_active: false,
             #[cfg(feature = "m17")]
             m17: None,
+            #[cfg(feature = "m17")]
+            m17_monitor: None,
             #[cfg(feature = "dstar")]
             dstar: None,
             #[cfg(feature = "ysf")]
@@ -497,6 +591,16 @@ impl ConsoleSession {
             nxdn: None,
             #[cfg(feature = "dmr")]
             dmr: None,
+            #[cfg(feature = "echolink")]
+            echolink: None,
+            #[cfg(feature = "echolink")]
+            echolink_node: None,
+            #[cfg(feature = "echolink")]
+            echolink_presence: None,
+            #[cfg(feature = "echolink")]
+            echolink_net: EchoLinkNetwork::production(),
+            #[cfg(feature = "echolink")]
+            echolink_location: String::new(),
             reg_handle: None,
             reg_events: None,
             reg_queue: VecDeque::new(),
@@ -510,7 +614,141 @@ impl ConsoleSession {
             pending_wg: None,
             voice_route: None,
             dtmf_digits: Vec::new(),
+            vocoder_trust: astar_codec::vocoder_trust::VocoderTrust::default(),
+            record_taps: RecordTaps::default(),
         }
+    }
+
+    /// Install (or, with `None` fields, remove) the recording taps. They are
+    /// stored here, so they survive the engine being rebuilt and reach a
+    /// session connected later; heard/sent go onto the router now when an
+    /// engine exists, and the frame tap onto the live digital session.
+    ///
+    /// The frame tap expects one receive source per network: the app has no
+    /// M17 monitor and the server no full M17 client, so the two M17 legs
+    /// never both feed one recording.
+    pub fn set_record_taps(&mut self, taps: RecordTaps) {
+        self.record_taps = taps;
+        if let Some(mgr) = self.manager.as_mut() {
+            mgr.router_mut().set_record_taps(
+                self.record_taps.heard.clone(),
+                self.record_taps.sent.clone(),
+            );
+        }
+        self.apply_frame_tap();
+    }
+
+    /// Change only the codec-frame tap, leaving heard/sent exactly as they
+    /// are — the server's frame logger runs independently of any audio
+    /// recording.
+    pub fn set_frame_tap(&mut self, tap: Option<Tap<FrameEvent>>) {
+        self.record_taps.frames = tap;
+        self.apply_frame_tap();
+    }
+
+    /// The taps installed right now, as [`Self::set_record_taps`] and
+    /// [`Self::set_frame_tap`] left them.
+    #[must_use]
+    pub fn record_taps(&self) -> &RecordTaps {
+        &self.record_taps
+    }
+
+    /// The contention counters of every tap slot that exists right now: the
+    /// router's open buses and lanes, and the live digital sessions' frame
+    /// slots. A slot opened later is not included.
+    #[must_use]
+    pub fn record_contended_counters(&self) -> Vec<Arc<std::sync::atomic::AtomicU64>> {
+        #[allow(unused_mut)] // pushed to only when a digital-voice feature is compiled in.
+        let mut out = self
+            .manager
+            .as_ref()
+            .map(|m| m.router().record_contended_counters())
+            .unwrap_or_default();
+        #[cfg(feature = "dstar")]
+        if let Some(d) = self.dstar.as_ref() {
+            out.push(d.frame_tap().contended_counter());
+        }
+        #[cfg(feature = "m17")]
+        if let Some(m) = self.m17.as_ref() {
+            out.push(m.frame_tap().contended_counter());
+        }
+        #[cfg(feature = "m17")]
+        if let Some(leg) = self.m17_monitor.as_ref() {
+            out.push(leg.monitor.frame_tap().contended_counter());
+        }
+        #[cfg(feature = "ysf")]
+        if let Some(y) = self.ysf.as_ref() {
+            out.push(y.frame_tap().contended_counter());
+        }
+        #[cfg(feature = "nxdn")]
+        if let Some(n) = self.nxdn.as_ref() {
+            out.push(n.frame_tap().contended_counter());
+        }
+        #[cfg(feature = "dmr")]
+        if let Some(d) = self.dmr.as_ref() {
+            out.push(d.frame_tap().contended_counter());
+        }
+        out
+    }
+
+    /// Put the stored frame tap on whichever digital session is live. Like
+    /// [`Self::set_record_taps`], it expects one receive source per network.
+    #[allow(clippy::unused_self)] // `&self` is read only when a digital-voice feature is compiled in.
+    fn apply_frame_tap(&self) {
+        #[cfg(feature = "dstar")]
+        if let Some(d) = self.dstar.as_ref() {
+            d.frame_tap().set(self.record_taps.frames.clone());
+        }
+        #[cfg(feature = "m17")]
+        if let Some(m) = self.m17.as_ref() {
+            m.frame_tap().set(self.record_taps.frames.clone());
+        }
+        #[cfg(feature = "m17")]
+        if let Some(leg) = self.m17_monitor.as_ref() {
+            leg.monitor.frame_tap().set(self.record_taps.frames.clone());
+        }
+        #[cfg(feature = "ysf")]
+        if let Some(y) = self.ysf.as_ref() {
+            y.frame_tap().set(self.record_taps.frames.clone());
+        }
+        #[cfg(feature = "nxdn")]
+        if let Some(n) = self.nxdn.as_ref() {
+            n.frame_tap().set(self.record_taps.frames.clone());
+        }
+        #[cfg(feature = "dmr")]
+        if let Some(d) = self.dmr.as_ref() {
+            d.frame_tap().set(self.record_taps.frames.clone());
+        }
+    }
+
+    /// `true` while an IAX2 call, an `EchoLink` call, or any M17, D-Star,
+    /// System Fusion, NXDN or DMR session is live — the set
+    /// [`Self::dstar_can_connect`] checks, without the voice route. An
+    /// `EchoLink` call rides the router like an IAX2 one, so the heard/sent
+    /// recording taps hear it; it has no codec-frame tap.
+    #[must_use]
+    pub fn has_connection(&self) -> bool {
+        self.active.is_some()
+            || self.m17_is_active()
+            || self.dstar_is_active()
+            || self.ysf_is_active()
+            || self.nxdn_is_active()
+            || self.dmr_is_active()
+            || self.echolink_is_active()
+    }
+
+    /// Replace the vocoder trust list: the USB serials of the AMBE sticks
+    /// every later D-Star/YSF/NXDN/DMR connect, and the `*_available`
+    /// snapshot fields, may consider. A session already running keeps the
+    /// stick it opened.
+    pub fn set_vocoder_trust(&mut self, trust: astar_codec::vocoder_trust::VocoderTrust) {
+        self.vocoder_trust = trust;
+    }
+
+    /// The current vocoder trust list.
+    #[must_use]
+    pub fn vocoder_trust(&self) -> &astar_codec::vocoder_trust::VocoderTrust {
+        &self.vocoder_trust
     }
 
     /// Select the primary-link transport (iax-5bbd; the session-level mirror
@@ -894,6 +1132,7 @@ impl ConsoleSession {
             || self.ysf_is_active()
             || self.nxdn_is_active()
             || self.dmr_is_active()
+            || self.echolink_is_active()
         {
             return Err(ConsoleError::AlreadyConnected);
         }
@@ -1001,6 +1240,7 @@ impl ConsoleSession {
             || self.ysf_is_active()
             || self.nxdn_is_active()
             || self.dmr_is_active()
+            || self.echolink_is_active()
             || self.voice_route.is_some()
         {
             return Err(ConsoleError::AlreadyConnected);
@@ -1337,6 +1577,7 @@ impl ConsoleSession {
                         && !self.ysf_is_active()
                         && !self.nxdn_is_active()
                         && !self.dmr_is_active()
+                        && !self.echolink_is_active()
                         && self.voice_route.is_none()
                     {
                         self.adopt_inbound(call, events);
@@ -1364,6 +1605,7 @@ impl ConsoleSession {
             || self.ysf_is_active()
             || self.nxdn_is_active()
             || self.dmr_is_active()
+            || self.echolink_is_active()
             || self.voice_route.is_some()
         {
             let _ = incoming.reject(Some("busy".into()));
@@ -1493,6 +1735,7 @@ impl ConsoleSession {
             || self.ysf_is_active()
             || self.nxdn_is_active()
             || self.dmr_is_active()
+            || self.echolink_is_active()
             || self.voice_route.is_some()
         {
             return Err(ConsoleError::AlreadyConnected);
@@ -1692,6 +1935,17 @@ impl ConsoleSession {
                 .note(if on { "LocalKey" } else { "LocalUnkey" }, String::new());
             return Ok(());
         }
+        // An EchoLink call, dispatched exactly like the M17 branch above.
+        // The link applies the request on its next pass, and only while the
+        // call is connected; `snapshot()` then mirrors what it applied.
+        #[cfg(feature = "echolink")]
+        if let Some(session) = self.echolink.as_mut() {
+            session.set_ptt(on);
+            self.state.ptt = on;
+            self.tracer
+                .note(if on { "LocalKey" } else { "LocalUnkey" }, String::new());
+            return Ok(());
+        }
         // A live digital-voice session dispatches exactly like the M17
         // branch above, INCLUDING the `self.state.ptt` mirror and the tracer
         // note. Each network's richer state is read through its own accessor
@@ -1850,6 +2104,15 @@ impl ConsoleSession {
             self.state.input_level_db = -60.0;
             return Ok(());
         }
+        #[cfg(feature = "echolink")]
+        if self.echolink.is_some() {
+            // Hangs up and releases the route, exactly as
+            // `echolink_disconnect` does. The directory login stays: being
+            // listed outlives any one call.
+            self.echolink_disconnect();
+            self.state.rtt_ms = None;
+            return Ok(());
+        }
         #[cfg(feature = "ysf")]
         if let Some(link) = self.ysf.take() {
             link.disconnect();
@@ -1987,6 +2250,7 @@ impl ConsoleSession {
         let audio = self.open_voice_route(input, output, || backend)?;
         match M17Session::connect(cfg, audio) {
             Ok(session) => {
+                session.frame_tap().set(self.record_taps.frames.clone());
                 self.m17 = Some(session);
                 Ok(())
             }
@@ -2023,6 +2287,461 @@ impl ConsoleSession {
         }
     }
 
+    // ── EchoLink ────────────────────────────────────────────────────────
+
+    /// Use `net` for every later `EchoLink` call and login (its timings drive
+    /// the directory thread). Production is [`EchoLinkNetwork::production`];
+    /// tests swap in loopback binds and a lookup that points at a fake.
+    #[cfg(feature = "echolink")]
+    pub fn set_echolink_network(&mut self, net: EchoLinkNetwork) {
+        self.echolink_net = net;
+    }
+
+    /// Start logging in to the `EchoLink` directory. Returns at once; the
+    /// login runs on its own thread, and [`Self::echolink_state`] shows how
+    /// it went.
+    ///
+    /// `password` is an in-argument only. It moves into the directory
+    /// thread and is never stored on this session.
+    ///
+    /// When `login.location` is empty, the location last given to
+    /// [`Self::echolink_set_location`] is used; otherwise `login.location`
+    /// becomes the location from here on.
+    ///
+    /// A login already running is replaced. The new login's own thread logs
+    /// the old one off first and only then logs in, so the directory never
+    /// hears the old logoff last (which would delist the callsign until the
+    /// next status refresh), and this call never waits for that logoff,
+    /// which can take about 80 s (see [`EchoLinkPresence::logout`]). A call
+    /// in progress is left up. A login that would be refused (no callsign,
+    /// no server) is refused before the running one is touched, so it
+    /// stands.
+    ///
+    /// # Errors
+    /// [`ConsoleError::EchoLink`] when there is no callsign, no directory
+    /// server, or the thread cannot start.
+    #[cfg(feature = "echolink")]
+    pub fn echolink_login(
+        &mut self,
+        mut login: EchoLinkLogin,
+        password: zeroize::Zeroizing<String>,
+    ) -> Result<(), ConsoleError> {
+        let location = if login.location.trim().is_empty() {
+            self.echolink_location.clone()
+        } else {
+            login.location.clone()
+        };
+        login.location.clone_from(&location);
+        // The checks run before the running login is taken, so a refusal
+        // leaves it in place.
+        let presence = EchoLinkPresence::start_replacing(
+            login,
+            password,
+            self.echolink_net.timings.clone(),
+            &mut self.echolink_presence,
+        )?;
+        self.echolink_location = location;
+        self.echolink_presence = Some(presence);
+        Ok(())
+    }
+
+    /// Hang up any `EchoLink` call, and every station on the node's leg,
+    /// then hand back the directory login for the caller to log off. `None`
+    /// when no login was up.
+    ///
+    /// The call is hung up here, so the far station hears a BYE before this
+    /// station leaves the list. The logoff is the caller's: it waits for a
+    /// directory exchange already in flight, about 80 s in the worst case
+    /// (see [`EchoLinkPresence::logout`]), so the caller must call
+    /// `logout()` on the result outside any lock that guards this session.
+    #[cfg(feature = "echolink")]
+    #[must_use = "the returned login must be logged off with `logout()`, outside the session lock"]
+    pub fn echolink_logout(&mut self) -> Option<EchoLinkPresence> {
+        self.echolink_disconnect();
+        self.echolink_node_disconnect_all();
+        self.echolink_take_presence()
+    }
+
+    /// Hand the directory login out without touching any call, the way
+    /// [`Self::m17_monitor_take`] hands out the monitor. `None` when no
+    /// login is up.
+    ///
+    /// The caller must finish it with `logout()` (or drop it, which does the
+    /// same) outside any lock that guards this session: either can block for
+    /// about 80 s. A session dropped with a login still inside logs off in
+    /// its own drop and blocks just as long, so an owner that drops the
+    /// session under a lock takes the login out first.
+    #[cfg(feature = "echolink")]
+    #[must_use = "the returned login must be logged off with `logout()`, outside the session lock"]
+    pub fn echolink_take_presence(&mut self) -> Option<EchoLinkPresence> {
+        self.echolink_presence.take()
+    }
+
+    /// Set the location text other stations see beside the callsign. It may
+    /// come before any login (the next login then carries it), and while
+    /// logged in it goes out with the next status refresh.
+    #[cfg(feature = "echolink")]
+    pub fn echolink_set_location(&mut self, text: &str) {
+        text.clone_into(&mut self.echolink_location);
+        if let Some(presence) = self.echolink_presence.as_ref() {
+            presence.set_location(text);
+        }
+    }
+
+    /// Call an `EchoLink` station, named by node number or callsign as it
+    /// appears in the directory's list. Returns as soon as the first SDES is
+    /// out; the answer shows in [`Self::snapshot`] and
+    /// [`Self::echolink_state`].
+    ///
+    /// The fast shape, like [`Self::m17_connect`]: open the voice route (the
+    /// reservation, the exclusion check and the preference push), construct
+    /// the session, install it. Nothing here waits on the network.
+    ///
+    /// # Errors
+    /// [`ConsoleError::EchoLink`] when not logged in, when no listed station
+    /// matches `target`, or when the UDP ports cannot be opened;
+    /// [`ConsoleError::AlreadyConnected`] while any other network (or another
+    /// `EchoLink` call) is live; [`ConsoleError::Device`] /
+    /// [`ConsoleError::Audio`] when the output device cannot be opened.
+    #[cfg(feature = "echolink")]
+    pub fn echolink_connect(
+        &mut self,
+        backend: Box<dyn AudioBackend>,
+        target: &str,
+        input: Option<&str>,
+        output: Option<&str>,
+    ) -> Result<(), ConsoleError> {
+        // Both would bind the same two ports, and a station cannot be on the
+        // app's call and in the node's conference at once.
+        if self.echolink_node_has_peers() {
+            return Err(ConsoleError::AlreadyConnected);
+        }
+        let target = target.trim();
+        let (entry, my_call) = {
+            let presence = self
+                .echolink_presence
+                .as_ref()
+                .filter(|p| p.snapshot().state == LoginState::LoggedIn)
+                .ok_or_else(|| ConsoleError::EchoLink("Log in to EchoLink first".to_owned()))?;
+            let entry = presence.find(target).ok_or_else(|| {
+                // The list in hand may be up to ten minutes old: ask for a
+                // fresh one, so a second try can find a station that has
+                // just logged in. The 30 s floor keeps this from hammering
+                // the directory.
+                let _ = presence.refresh_list();
+                ConsoleError::EchoLink(format!("No station {target} is logged in to EchoLink"))
+            })?;
+            (entry, presence.snapshot().callsign)
+        };
+        let audio = self.open_voice_route(input, output, || backend)?;
+        match EchoLinkSession::connect(
+            entry,
+            &my_call,
+            &self.echolink_location,
+            &self.echolink_net,
+            audio,
+        ) {
+            Ok(session) => {
+                self.echolink = Some(session);
+                Ok(())
+            }
+            Err(e) => {
+                // The route opened but the call did not: give the lanes
+                // back, or the station stays reserved forever.
+                let handles = self.release_voice_route();
+                drop(handles);
+                Err(e)
+            }
+        }
+    }
+
+    /// Hang up the `EchoLink` call, if any, and release its voice route. The
+    /// directory login stays up. No-op when no call is in hand, and then the
+    /// route is left alone: `Station::disconnect` calls every network's
+    /// disconnect in turn, and the route may belong to another one.
+    #[cfg(feature = "echolink")]
+    pub fn echolink_disconnect(&mut self) {
+        if let Some(session) = self.echolink.take() {
+            session.disconnect();
+            let handles = self.release_voice_route();
+            drop(handles);
+            self.state.status = CallStatus::Idle;
+            self.state.ptt = false;
+            self.state.remote_ptt = false;
+            self.state.tx_level_db = -60.0;
+            self.state.rx_level_db = -60.0;
+            self.state.input_level_db = -60.0;
+        }
+    }
+
+    /// Send a line of text chat to the station on the call. Dropped by the
+    /// link unless the call is connected.
+    ///
+    /// # Errors
+    /// [`ConsoleError::NotConnected`] when no call is in hand.
+    #[cfg(feature = "echolink")]
+    pub fn echolink_send_chat(&self, text: &str) -> Result<(), ConsoleError> {
+        let session = self.echolink.as_ref().ok_or(ConsoleError::NotConnected)?;
+        session.send_chat(text);
+        Ok(())
+    }
+
+    /// Where the login and the call stand, or `None` when neither has been
+    /// started. Holds no password.
+    #[cfg(feature = "echolink")]
+    #[must_use]
+    pub fn echolink_state(&self) -> Option<EchoLinkState> {
+        let call = self.echolink.as_ref().map(EchoLinkSession::state);
+        let login = match (self.echolink_presence.as_ref(), call.is_some()) {
+            (Some(presence), _) => presence.snapshot(),
+            // A call outlives a login taken out with
+            // `echolink_take_presence`.
+            (None, true) => PresenceSnapshot {
+                state: LoginState::LoggedOut,
+                callsign: String::new(),
+                error: None,
+                retrying: false,
+                stations_age: None,
+            },
+            (None, false) => return None,
+        };
+        Some(EchoLinkState { login, call })
+    }
+
+    /// The latest station list from the directory; empty when not logged in
+    /// or before the first list arrives.
+    #[cfg(feature = "echolink")]
+    #[must_use]
+    pub fn echolink_stations(&self) -> Arc<Vec<StationEntry>> {
+        self.echolink_presence
+            .as_ref()
+            .map_or_else(|| Arc::new(Vec::new()), EchoLinkPresence::stations)
+    }
+
+    /// Ask the directory for a fresh station list now, rather than at the
+    /// next 600 s refresh. Returns `false`, asking nothing, when the last
+    /// list came less than `list_min_interval` (30 s) ago: the caller says
+    /// "try again in a moment".
+    ///
+    /// # Errors
+    /// [`ConsoleError::EchoLink`] when not logged in.
+    #[cfg(feature = "echolink")]
+    pub fn echolink_refresh_list(&self) -> Result<bool, ConsoleError> {
+        self.echolink_presence
+            .as_ref()
+            .filter(|p| p.snapshot().state == LoginState::LoggedIn)
+            .map(EchoLinkPresence::refresh_list)
+            .ok_or_else(|| ConsoleError::EchoLink("Log in to EchoLink first".to_owned()))
+    }
+
+    /// Whether [`Self::echolink_connect`] could place a call right now:
+    /// logged in, and nothing else holding the station. Opens nothing, so a
+    /// front-end can grey its button out.
+    #[cfg(feature = "echolink")]
+    #[must_use]
+    pub fn echolink_can_connect(&self) -> bool {
+        self.echolink_presence
+            .as_ref()
+            .is_some_and(|p| p.snapshot().state == LoginState::LoggedIn)
+            && !self.echolink_node_has_peers()
+            && self.can_open_voice_route().is_ok()
+    }
+
+    // ── EchoLink: the node's leg ────────────────────────────────────────
+
+    /// Dial an `EchoLink` station, named by node number or callsign as the
+    /// directory lists it, into the node's conference as a peer member.
+    /// Returns as soon as the first SDES is out; the answer shows in
+    /// [`Self::echolink_node_peers`] and as an
+    /// [`EchoLinkNodeEdge::Connected`] from [`Self::echolink_node_poll`].
+    ///
+    /// Unlike [`Self::echolink_connect`] this opens no voice route: the
+    /// station's audio goes to and from the conference, the way
+    /// [`Self::m17_monitor_connect`]'s does. The checks run in a fixed order.
+    /// Nothing here waits on the network; the one wait is for the link
+    /// thread to take the new station (and, when an empty leg is rebuilt
+    /// for a new callsign or location, for the old thread to stop), which is
+    /// at most one 50 ms link pass. That is short enough to run under the
+    /// caller's session lock.
+    ///
+    /// # Errors
+    /// [`ConsoleError::AlreadyConnected`] while the app's own `EchoLink` call
+    /// is in hand, or when this station is already on the leg;
+    /// [`ConsoleError::EchoLink`] when not logged in, when no listed station
+    /// matches `target`, when there is no conference to join (`"no
+    /// conference: engine not built"`, `"no conference: bridge topology is
+    /// handset/parrot"`), when another station on the leg has the same IP
+    /// (production matches stations by IP, so the two could not be told
+    /// apart), or when the UDP ports cannot be opened.
+    #[cfg(feature = "echolink")]
+    pub fn echolink_node_connect(&mut self, target: &str) -> Result<(), ConsoleError> {
+        if self.echolink.is_some() {
+            return Err(ConsoleError::AlreadyConnected);
+        }
+        let target = target.trim();
+        let (entry, my_call) = {
+            let presence = self
+                .echolink_presence
+                .as_ref()
+                .filter(|p| p.snapshot().state == LoginState::LoggedIn)
+                .ok_or_else(|| ConsoleError::EchoLink("Log in to EchoLink first".to_owned()))?;
+            let entry = presence.find(target).ok_or_else(|| {
+                // The list in hand may be up to ten minutes old: ask for a
+                // fresh one, so a second try can find a station that has
+                // just logged in. The 30 s floor keeps this from hammering
+                // the directory.
+                let _ = presence.refresh_list();
+                ConsoleError::EchoLink(format!("No station {target} is logged in to EchoLink"))
+            })?;
+            (entry, presence.snapshot().callsign)
+        };
+        let Some(mgr) = self.manager.as_mut() else {
+            return Err(ConsoleError::EchoLink(MONITOR_NO_ENGINE.into()));
+        };
+        let mode = mgr.bridge_config().mode;
+        if !mode.is_conference() || matches!(mode, astar_iax::BridgeMode::Parrot) {
+            return Err(ConsoleError::EchoLink(MONITOR_NO_CONFERENCE.into()));
+        }
+        if let Some(leg) = self.echolink_node.as_ref() {
+            if leg.has(&entry.call) {
+                return Err(ConsoleError::AlreadyConnected);
+            }
+            if let Some(ip) = leg.shares_address(&entry) {
+                return Err(ConsoleError::EchoLink(format!(
+                    "Another station on the node is already at {ip}; EchoLink can't tell two stations at one address apart"
+                )));
+            }
+        }
+        // A leg with nobody on it is replaced when the callsign or location
+        // has changed since it started. Its thread is idle, so the drop
+        // waits at most one 50 ms pass (only when the last hang-up has not
+        // yet reached it).
+        let my_call = my_call.trim().to_uppercase();
+        if self.echolink_node.as_ref().is_some_and(|leg| {
+            leg.is_empty() && !leg.started_for(&my_call, &self.echolink_location)
+        }) {
+            self.echolink_node = None;
+        }
+        if self.echolink_node.is_none() {
+            let leg = EchoLinkNodeLeg::start(&my_call, &self.echolink_location, &self.echolink_net)
+                .map_err(|e| {
+                    tracing::warn!(error = %e, "echolink: node link thread did not start");
+                    ConsoleError::EchoLink("Couldn't start the EchoLink link".to_owned())
+                })?;
+            self.echolink_node = Some(leg);
+        }
+        let Some(handle) = mgr.add_peer_member() else {
+            return Err(ConsoleError::EchoLink(MONITOR_NO_CONFERENCE.into()));
+        };
+        let member = handle.id;
+        let leg = self
+            .echolink_node
+            .as_mut()
+            .expect("the leg was installed above");
+        if let Err(e) = leg.add(entry, handle) {
+            mgr.remove_peer_member(member);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Hang up on one station on the node's leg (a BYE goes out on the
+    /// link's next pass) and withdraw its conference member. The leg's
+    /// thread stays up, so this never waits on a join.
+    ///
+    /// # Errors
+    /// [`ConsoleError::NotConnected`] when no station with that callsign is
+    /// on the leg.
+    #[cfg(feature = "echolink")]
+    pub fn echolink_node_disconnect(&mut self, call: &str) -> Result<(), ConsoleError> {
+        let member = self
+            .echolink_node
+            .as_mut()
+            .and_then(|leg| leg.remove(call.trim()))
+            .ok_or(ConsoleError::NotConnected)?;
+        if let Some(mgr) = self.manager.as_mut() {
+            mgr.remove_peer_member(member);
+        }
+        Ok(())
+    }
+
+    /// Hang up on every station on the node's leg.
+    #[cfg(feature = "echolink")]
+    fn echolink_node_disconnect_all(&mut self) {
+        let members = self
+            .echolink_node
+            .as_mut()
+            .map(EchoLinkNodeLeg::remove_all)
+            .unwrap_or_default();
+        if let Some(mgr) = self.manager.as_mut() {
+            for member in members {
+                mgr.remove_peer_member(member);
+            }
+        }
+    }
+
+    /// Drive the node's leg: report each station that answered or whose
+    /// contact ended, push every station's "talking" into the conference
+    /// (which keys the `AllStar` links on the next
+    /// [`Self::sync_link_keying`]), and reap the stations that are gone,
+    /// withdrawing their members. Call it on every pump tick, before
+    /// `sync_link_keying`. Empty when nothing changed or no leg is up.
+    #[cfg(feature = "echolink")]
+    pub fn echolink_node_poll(&mut self) -> Vec<EchoLinkNodeEdge> {
+        match self.echolink_node.as_mut() {
+            Some(leg) => leg.poll(self.manager.as_mut()),
+            None => Vec::new(),
+        }
+    }
+
+    /// Every station on the node's leg, in the order they were dialled.
+    #[cfg(feature = "echolink")]
+    #[must_use]
+    pub fn echolink_node_peers(&self) -> Vec<EchoLinkPeerStatus> {
+        self.echolink_node
+            .as_ref()
+            .map(EchoLinkNodeLeg::peers)
+            .unwrap_or_default()
+    }
+
+    /// The leg's bound audio and control addresses, or `None` while no
+    /// station is on it. For tests, which aim an uninvited fake at the real
+    /// ephemeral ports.
+    #[cfg(feature = "echolink")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn echolink_node_local_addrs(&self) -> Option<PeerAddr> {
+        self.echolink_node
+            .as_ref()
+            .and_then(EchoLinkNodeLeg::local_addrs)
+    }
+
+    /// `true` while the node's leg has any station on it, reaped or not
+    /// yet. The client call is refused while this holds: both would bind
+    /// the same two ports.
+    #[cfg(feature = "echolink")]
+    fn echolink_node_has_peers(&self) -> bool {
+        self.echolink_node
+            .as_ref()
+            .is_some_and(|leg| !leg.is_empty())
+    }
+
+    /// `true` while an `EchoLink` call is in hand (the mutual-exclusion check
+    /// every other network's entry points use). Always `false` when the
+    /// `echolink` feature isn't compiled in, so callers never need their own
+    /// `#[cfg]`.
+    #[allow(clippy::unused_self)] // `&self` is intentional: kept feature-independent so call sites never need their own `#[cfg]`.
+    fn echolink_is_active(&self) -> bool {
+        #[cfg(feature = "echolink")]
+        {
+            self.echolink.is_some()
+        }
+        #[cfg(not(feature = "echolink"))]
+        {
+            false
+        }
+    }
+
     /// `true` while an M17 session is live (the mutual-exclusion check every
     /// IAX2 entry point uses). Always `false` when the `m17` feature isn't
     /// compiled in, so callers never need their own `#[cfg]`.
@@ -2035,6 +2754,22 @@ impl ConsoleSession {
         #[cfg(not(feature = "m17"))]
         {
             false
+        }
+    }
+
+    /// `true` when no receive-only M17 monitor is up. This is the one place
+    /// outside the monitor's own methods that looks at `m17_monitor`, and it
+    /// exists only for the idle-engine rebuild. Always `true` when the `m17`
+    /// feature isn't compiled in, so that predicate needs no `#[cfg]`.
+    #[allow(clippy::unused_self)] // `&self` is intentional: kept feature-independent so call sites never need their own `#[cfg]`.
+    fn m17_monitor_is_none(&self) -> bool {
+        #[cfg(feature = "m17")]
+        {
+            self.m17_monitor.is_none()
+        }
+        #[cfg(not(feature = "m17"))]
+        {
+            true
         }
     }
 
@@ -2055,6 +2790,132 @@ impl ConsoleSession {
     #[must_use]
     pub fn m17_state(&self) -> Option<M17SnapshotState> {
         self.m17.as_ref().map(M17Session::state)
+    }
+
+    /// Link a receive-only M17 monitor into this session's conference.
+    ///
+    /// Unlike [`Self::m17_connect`] this opens no voice route and is not
+    /// refused by a live IAX2 call. A node's links are calls, and the monitor
+    /// only contributes to the mix they already share. The checks run in a
+    /// fixed order so the caller always learns the most basic problem first.
+    /// [`M17Monitor::spawn`] only starts a thread (codec, DNS and CONN all run
+    /// on it), so nothing here blocks under the caller's session lock.
+    ///
+    /// # Errors
+    /// [`ConsoleError::AlreadyConnected`] while a monitor is live; the
+    /// config's own validation error; `ConsoleError::M17("no conference:
+    /// engine not built")` with no `Manager`; `ConsoleError::M17("no
+    /// conference: bridge topology is handset/parrot")` when the topology
+    /// has no mix to join; otherwise whatever [`M17Monitor::spawn`] returns,
+    /// after the member it was given has been withdrawn again.
+    #[cfg(feature = "m17")]
+    pub fn m17_monitor_connect(&mut self, cfg: M17MonitorConfig) -> Result<(), ConsoleError> {
+        if self.m17_monitor.is_some() {
+            return Err(ConsoleError::AlreadyConnected);
+        }
+        cfg.validate()?;
+        let Some(mgr) = self.manager.as_mut() else {
+            return Err(ConsoleError::M17(MONITOR_NO_ENGINE.into()));
+        };
+        let Some(handle) = mgr.add_source_member() else {
+            return Err(ConsoleError::M17(MONITOR_NO_CONFERENCE.into()));
+        };
+        let member = handle.id;
+        let sink = SourceSink {
+            to_conference: handle.to_conference,
+            bus_rate: handle.sample_rate,
+        };
+        match M17Monitor::spawn(cfg, sink) {
+            Ok(monitor) => {
+                monitor.frame_tap().set(self.record_taps.frames.clone());
+                self.m17_monitor = Some(M17MonitorLeg {
+                    monitor,
+                    member,
+                    last: "linking",
+                });
+                Ok(())
+            }
+            Err(e) => {
+                mgr.remove_source_member(member);
+                Err(e)
+            }
+        }
+    }
+
+    /// Withdraw the monitor's conference member and hand the monitor out.
+    ///
+    /// The caller joins it with [`M17Monitor::disconnect`] after releasing
+    /// whatever lock guards this session: the join waits up to one 50 ms
+    /// socket poll, and holding the station lock through it would stall
+    /// every snapshot (iax-e2c8 item 9). `None` when no monitor is up.
+    #[cfg(feature = "m17")]
+    pub fn m17_monitor_take(&mut self) -> Option<M17Monitor> {
+        let leg = self.m17_monitor.take()?;
+        if let Some(mgr) = self.manager.as_mut() {
+            mgr.remove_source_member(leg.member);
+        }
+        Some(leg.monitor)
+    }
+
+    /// Report the monitor's next lifecycle edge, reaping it when it is over.
+    ///
+    /// Returns `(Some(Linked), None)` once, on linking→linked. When
+    /// `monitor_reap_reason` says the leg is over, this withdraws the
+    /// member, takes the leg and returns `(Some(Ended(reason)), Some(monitor))`
+    /// so the caller can join the monitor off-lock. A reap in the same poll
+    /// as a pending `Linked` wins. `(None, None)` when nothing changed or no
+    /// monitor is up.
+    #[cfg(feature = "m17")]
+    pub fn m17_monitor_poll(&mut self) -> (Option<M17MonitorEdge>, Option<M17Monitor>) {
+        let Some(leg) = self.m17_monitor.as_mut() else {
+            return (None, None);
+        };
+        // Read `finished` and `sink_lost` BEFORE `status`. The monitor thread
+        // records its `fail_reason` (under a mutex) and link state before it
+        // returns and sets `finished`, so a status read after `finished()`
+        // has returned true carries the thread's reason. Read the other way
+        // round, a NACK landing between the two reads would pair a stale
+        // "linking" status with `finished == true` and reap as "monitor
+        // stopped".
+        let finished = leg.monitor.finished();
+        let sink_lost = leg.monitor.sink_lost();
+        let status = leg.monitor.status();
+        let member = leg.member;
+        let conference = self.manager.as_ref().map(|mgr| ConferenceHealth {
+            active: mgr.conference_active(),
+            enrolled: mgr.has_source_member(member),
+            mode: mgr.bridge_config().mode,
+        });
+        let health = LegHealth {
+            failed: status.link == "failed",
+            finished,
+            sink_lost,
+            fail_reason: status.fail_reason.as_deref(),
+        };
+        if let Some(reason) = monitor_reap_reason(health, conference) {
+            return (Some(M17MonitorEdge::Ended(reason)), self.m17_monitor_take());
+        }
+        let edge =
+            (status.link == "linked" && leg.last == "linking").then_some(M17MonitorEdge::Linked);
+        leg.last = status.link;
+        (edge, None)
+    }
+
+    /// The live monitor's secret-free status, or `None` when none is up.
+    #[cfg(feature = "m17")]
+    #[must_use]
+    pub fn m17_monitor_status(&self) -> Option<M17MonitorStatus> {
+        self.m17_monitor.as_ref().map(|leg| leg.monitor.status())
+    }
+
+    /// Stations the live monitor has heard, newest first. Empty with no monitor.
+    #[cfg(feature = "m17")]
+    #[must_use]
+    pub fn m17_monitor_heard(&self) -> Vec<HeardEntry> {
+        self.m17_monitor
+            .as_ref()
+            .map(|leg| leg.monitor.heard())
+            .unwrap_or_default()
     }
 
     /// Connect to a D-Star `DExtra` reflector, full-transceive (iax-a9d4
@@ -2087,7 +2948,8 @@ impl ConsoleSession {
         // The route is the reservation, the mutual exclusion AND the pref
         // push, all at once — see [`Self::m17_connect`].
         let audio = self.open_voice_route(input, output, || backend)?;
-        match DstarSession::connect(cfg, audio) {
+        let trust = self.vocoder_trust.clone();
+        match DstarSession::connect(cfg, audio, &trust) {
             Ok(session) => self.dstar_adopt(session),
             Err(e) => {
                 // The route opened but the session did not: give the lanes
@@ -2124,6 +2986,7 @@ impl ConsoleSession {
             || self.ysf_is_active()
             || self.nxdn_is_active()
             || self.dmr_is_active()
+            || self.echolink_is_active()
             || self.voice_route.is_some()
         {
             return Err(ConsoleError::AlreadyConnected);
@@ -2166,6 +3029,7 @@ impl ConsoleSession {
             || self.ysf_is_active()
             || self.nxdn_is_active()
             || self.dmr_is_active()
+            || self.echolink_is_active()
             || self.voice_route.is_none()
         {
             session.disconnect();
@@ -2173,6 +3037,7 @@ impl ConsoleSession {
             drop(handles);
             return Err(ConsoleError::AlreadyConnected);
         }
+        session.frame_tap().set(self.record_taps.frames.clone());
         self.dstar = Some(session);
         Ok(())
     }
@@ -2274,7 +3139,8 @@ impl ConsoleSession {
         // The route is the reservation, the mutual exclusion AND the pref
         // push, all at once — see [`Self::dstar_connect`].
         let audio = self.open_voice_route(input, output, || backend)?;
-        match YsfLink::connect_with_audio(cfg, audio) {
+        let trust = self.vocoder_trust.clone();
+        match YsfLink::connect_with_audio(cfg, audio, &trust) {
             Ok(link) => self.ysf_adopt(link),
             Err(e) => {
                 // The route opened but the link did not: give the lanes
@@ -2303,6 +3169,7 @@ impl ConsoleSession {
             || self.ysf.is_some()
             || self.nxdn_is_active()
             || self.dmr_is_active()
+            || self.echolink_is_active()
             || self.voice_route.is_some()
         {
             return Err(ConsoleError::AlreadyConnected);
@@ -2339,6 +3206,7 @@ impl ConsoleSession {
             || self.ysf.is_some()
             || self.nxdn_is_active()
             || self.dmr_is_active()
+            || self.echolink_is_active()
             || self.voice_route.is_none()
         {
             link.disconnect();
@@ -2346,6 +3214,7 @@ impl ConsoleSession {
             drop(handles);
             return Err(ConsoleError::AlreadyConnected);
         }
+        link.frame_tap().set(self.record_taps.frames.clone());
         self.ysf = Some(link);
         Ok(())
     }
@@ -2437,7 +3306,8 @@ impl ConsoleSession {
         output: Option<&str>,
     ) -> Result<(), ConsoleError> {
         let audio = self.open_voice_route(input, output, || backend)?;
-        match NxdnLink::connect_with_audio(cfg, audio) {
+        let trust = self.vocoder_trust.clone();
+        match NxdnLink::connect_with_audio(cfg, audio, &trust) {
             Ok(link) => self.nxdn_adopt(link),
             Err(e) => {
                 // The route opened but the link did not: give the lanes
@@ -2466,6 +3336,7 @@ impl ConsoleSession {
             || self.ysf_is_active()
             || self.nxdn.is_some()
             || self.dmr_is_active()
+            || self.echolink_is_active()
             || self.voice_route.is_some()
         {
             return Err(ConsoleError::AlreadyConnected);
@@ -2500,6 +3371,7 @@ impl ConsoleSession {
             || self.ysf_is_active()
             || self.nxdn.is_some()
             || self.dmr_is_active()
+            || self.echolink_is_active()
             || self.voice_route.is_none()
         {
             link.disconnect();
@@ -2507,6 +3379,7 @@ impl ConsoleSession {
             drop(handles);
             return Err(ConsoleError::AlreadyConnected);
         }
+        link.frame_tap().set(self.record_taps.frames.clone());
         self.nxdn = Some(link);
         Ok(())
     }
@@ -2603,7 +3476,8 @@ impl ConsoleSession {
         output: Option<&str>,
     ) -> Result<(), ConsoleError> {
         let audio = self.open_voice_route(input, output, || backend)?;
-        match DmrLink::connect_with_audio(cfg, audio) {
+        let trust = self.vocoder_trust.clone();
+        match DmrLink::connect_with_audio(cfg, audio, &trust) {
             Ok(link) => self.dmr_adopt(link),
             Err(e) => {
                 // The route opened but the link did not: give the lanes
@@ -2632,6 +3506,7 @@ impl ConsoleSession {
             || self.ysf_is_active()
             || self.nxdn_is_active()
             || self.dmr.is_some()
+            || self.echolink_is_active()
             || self.voice_route.is_some()
         {
             return Err(ConsoleError::AlreadyConnected);
@@ -2667,6 +3542,7 @@ impl ConsoleSession {
             || self.ysf_is_active()
             || self.nxdn_is_active()
             || self.dmr.is_some()
+            || self.echolink_is_active()
             || self.voice_route.is_none()
         {
             link.disconnect();
@@ -2674,6 +3550,7 @@ impl ConsoleSession {
             drop(handles);
             return Err(ConsoleError::AlreadyConnected);
         }
+        link.frame_tap().set(self.record_taps.frames.clone());
         self.dmr = Some(link);
         Ok(())
     }
@@ -2746,13 +3623,26 @@ impl ConsoleSession {
     /// harness detaches here (only cheap pool/router bookkeeping via `remove`
     /// happens under the lock), releases the lock, then hangs the `Call` up and
     /// drops the `Manager` off-lock.
+    ///
+    /// The `Manager` comes back as `None`, and stays in the session, while a
+    /// receive-only M17 monitor is up. The monitor's source member lives in
+    /// this engine's conference, so dropping the engine would end a reflector
+    /// link that hanging up this call has no business ending. `remove` still
+    /// unbinds the call's mic and takes its lane off the bus. That is all
+    /// [`Self::disconnect`] and [`Self::disconnect_inbound`] ever do to the
+    /// engine. With no monitor up the engine goes as it always has, and its
+    /// router closes the audio device streams.
     #[must_use]
-    pub fn detach(&mut self) -> Option<(Call, Manager)> {
+    pub fn detach(&mut self) -> Option<(Call, Option<Manager>)> {
         let id = self.active.take()?;
-        let mut manager = self.manager.take()?;
         // Cheap pool/router bookkeeping under the lock; the blocking parts
         // (Call thread join + Manager/router stream drop) run off-lock.
-        let call = manager.remove(id);
+        let (call, manager) = if self.m17_monitor_is_none() {
+            let mut manager = self.manager.take()?;
+            (manager.remove(id), Some(manager))
+        } else {
+            (self.manager.as_mut()?.remove(id), None)
+        };
         self.events = None;
         self.frames = None;
         self.inbound_active = false;
@@ -3087,6 +3977,62 @@ impl ConsoleSession {
             .map_or(0, |m| m.announce_to_non_link_members(req))
     }
 
+    /// Enroll a receive-only external conference member (the Discord bridge).
+    /// `None` when no `Manager` has been built yet (the engine is lazy — see
+    /// [`Self::ensure_engine`]) or the current bridge topology is not a plain
+    /// mix-minus conference.
+    pub fn add_bridge_member(&mut self) -> Option<astar_iax::BridgeMemberHandle> {
+        self.manager.as_mut()?.add_bridge_member()
+    }
+
+    /// Number of members currently enrolled in the mix-minus conference,
+    /// including any [`Self::add_bridge_member`] enrollees. `0` with no
+    /// `Manager` built yet. Introspection for tests that need to prove a
+    /// member was (or was not) actually withdrawn.
+    #[must_use]
+    pub fn conference_member_count(&self) -> usize {
+        self.manager
+            .as_ref()
+            .map_or(0, astar_iax::Manager::conference_member_count)
+    }
+
+    /// Whether a member [`Self::add_bridge_member`] enrolled is still in the
+    /// current conference. `false` with no `Manager` built yet.
+    #[must_use]
+    pub fn has_bridge_member(&self, id: astar_audio::MemberId) -> bool {
+        self.manager
+            .as_ref()
+            .is_some_and(|m| m.has_bridge_member(id))
+    }
+
+    /// Withdraw a member enrolled by [`Self::add_bridge_member`].
+    pub fn remove_bridge_member(&mut self, id: astar_audio::MemberId) {
+        if let Some(mgr) = self.manager.as_mut() {
+            mgr.remove_bridge_member(id);
+        }
+    }
+
+    /// Play a private announcement to a member enrolled by
+    /// [`Self::add_bridge_member`] — the Discord bridge's join notice and
+    /// periodic ID. Reaches that one member only; see
+    /// [`astar_iax::Manager::announce_to_bridge_member`].
+    ///
+    /// # Errors
+    /// [`ConsoleError::Iax`] if no `Manager` has been built yet, the member id
+    /// is unknown to the conference, or the phrase cannot be resolved.
+    pub fn announce_to_bridge_member(
+        &mut self,
+        member: astar_audio::MemberId,
+        req: astar_iax::AnnounceRequest,
+        lead: std::time::Duration,
+    ) -> Result<(), ConsoleError> {
+        self.manager
+            .as_mut()
+            .ok_or(astar_iax::IaxError::NoActiveCall)?
+            .announce_to_bridge_member(member, req, lead)
+            .map_err(ConsoleError::from)
+    }
+
     /// Propagate member keying onto transceive links (iax-7d51): a far-end
     /// node mutes relayed audio from an unkeyed sender, so the links must key
     /// while a conference member is transmitting. Idempotent; safe to call
@@ -3165,7 +4111,8 @@ impl ConsoleSession {
     /// the rest of the process.
     ///
     /// "Idle" is strict: no pooled calls, no inbound listener, no voice
-    /// route, no digital session, no live registration. A live `WireGuard` transport with no
+    /// route, no digital session, no receive-only M17 monitor, no live
+    /// registration. A live `WireGuard` transport with no
     /// pending config left to replay it from also blocks the rebuild — a
     /// fresh engine would come up on plain UDP and the dial would leave the
     /// tunnel without saying so. In both cases the old (capped) behaviour
@@ -3200,10 +4147,14 @@ impl ConsoleSession {
             // rebuild would leave it running on an orphaned transport.
             && self.reg_handle.is_none()
             && !self.m17_is_active()
+            // A receive-only monitor's source member lives in THIS engine's
+            // conference; a rebuild would drop it out from under the link.
+            && self.m17_monitor_is_none()
             && !self.dstar_is_active()
             && !self.ysf_is_active()
             && !self.nxdn_is_active()
-            && !self.dmr_is_active();
+            && !self.dmr_is_active()
+            && !self.echolink_is_active();
         if !idle {
             return;
         }
@@ -3250,6 +4201,18 @@ impl ConsoleSession {
                 .as_ref()
                 .expect("just set")
                 .set_rx_jitter(self.rx_jitter.get());
+            // Recording taps set before this engine existed (or before it was
+            // rebuilt) go onto its router.
+            if self.record_taps.heard.is_some() || self.record_taps.sent.is_some() {
+                self.manager
+                    .as_mut()
+                    .expect("just set")
+                    .router_mut()
+                    .set_record_taps(
+                        self.record_taps.heard.clone(),
+                        self.record_taps.sent.clone(),
+                    );
+            }
             // Replay any pending announce config pushed before the Manager existed.
             if let Some(cfg) = self.pending_announce.clone() {
                 self.manager
@@ -3556,7 +4519,7 @@ impl ConsoleSession {
             };
         }
         self.state.dstar_active = self.dstar_is_active();
-        self.state.dstar_available = dstar_available();
+        self.state.dstar_available = dstar_available(&self.vocoder_trust);
 
         // System Fusion, mirrored the same way and for the same reason the two
         // branches above are: a front-end drives ONE connection state machine
@@ -3601,7 +4564,7 @@ impl ConsoleSession {
             };
         }
         self.state.ysf_active = self.ysf_is_active();
-        self.state.ysf_available = ysf_available();
+        self.state.ysf_available = ysf_available(&self.vocoder_trust);
 
         // NXDN, mirrored exactly as the three branches above are and for the
         // same reason: a front-end drives ONE connection state machine off
@@ -3641,7 +4604,7 @@ impl ConsoleSession {
             };
         }
         self.state.nxdn_active = self.nxdn_is_active();
-        self.state.nxdn_available = nxdn_available();
+        self.state.nxdn_available = nxdn_available(&self.vocoder_trust);
 
         // DMR, mirrored exactly as the four branches above are and for the
         // same reason: a front-end drives ONE connection state machine off
@@ -3690,7 +4653,43 @@ impl ConsoleSession {
             };
         }
         self.state.dmr_active = self.dmr_is_active();
-        self.state.dmr_available = dmr_available();
+        self.state.dmr_available = dmr_available(&self.vocoder_trust);
+
+        // EchoLink, mirrored like every branch above: `status` from the
+        // call's link so a front-end runs one connection state machine for
+        // every network, `ptt` as the link actually applied it, and
+        // `remote_ptt` from "the far end is talking".
+        //
+        // `echolink_active` is NOT `echolink_is_active()`. The exclusion
+        // check counts a call in hand, ended or not, because it still holds
+        // the voice route; `echolink_active` counts a station on the far end
+        // (connecting or connected), which is what the server's key refusal
+        // needs to know.
+        #[cfg(feature = "echolink")]
+        {
+            let call = self.echolink.as_ref().map(EchoLinkSession::state);
+            if let Some(st) = call.as_ref() {
+                self.state.ptt = st.ptt;
+                self.state.remote_ptt = st.receiving;
+                self.state.status = match st.link {
+                    CallLink::Connecting => CallStatus::Dialing,
+                    CallLink::Connected => CallStatus::Answered,
+                    CallLink::Closed => CallStatus::Hangup {
+                        reason: "echolink call ended".into(),
+                    },
+                };
+            }
+            self.state.echolink_active = call.is_some_and(|c| c.link != CallLink::Closed)
+                || self
+                    .echolink_node
+                    .as_ref()
+                    .is_some_and(EchoLinkNodeLeg::active);
+            self.state.echolink_logged_in = self
+                .echolink_presence
+                .as_ref()
+                .is_some_and(|p| p.snapshot().state == LoginState::LoggedIn);
+        }
+        self.state.echolink_available = crate::echolink_available();
 
         // The capture gate is driven by `set_ptt` ONLY, never reconciled
         // here. `state.ptt` above is the run loop's ACTUALLY-APPLIED value,
@@ -3759,6 +4758,84 @@ pub fn resolve_device(
     }
 }
 
+/// Refusal when the monitor is asked for before any engine exists: there is
+/// no conference to contribute into, and building one here would pin the
+/// pipeline rate behind the operator's back.
+#[cfg(feature = "m17")]
+const MONITOR_NO_ENGINE: &str = "no conference: engine not built";
+/// Refusal when the topology has no mix a source member could join
+/// (`Manager::add_source_member` is `None` in Handset and Parrot).
+#[cfg(feature = "m17")]
+const MONITOR_NO_CONFERENCE: &str = "no conference: bridge topology is handset/parrot";
+/// Reap reason when the leg's conference end has gone away (sink lost, engine
+/// or conference dropped, member withdrawn, or the mode left the mix).
+#[cfg(feature = "m17")]
+const MONITOR_CONFERENCE_GONE: &str = "conference gone";
+/// Defensive reap reason: the thread stopped without recording why.
+#[cfg(feature = "m17")]
+const MONITOR_STOPPED: &str = "monitor stopped";
+
+/// What the reap predicate reads off the monitor leg itself.
+#[cfg(feature = "m17")]
+#[derive(Clone, Copy)]
+struct LegHealth<'a> {
+    /// `status().link == "failed"`.
+    failed: bool,
+    /// `finished()`: the thread exited on its own.
+    finished: bool,
+    /// `sink_lost()`: a send into the conference failed.
+    sink_lost: bool,
+    /// `status().fail_reason`, one of the monitor's end reasons.
+    fail_reason: Option<&'a str>,
+}
+
+/// What the reap predicate reads off the engine. `None` in the caller means
+/// there is no `Manager` at all.
+#[cfg(feature = "m17")]
+#[derive(Clone, Copy)]
+struct ConferenceHealth {
+    /// `Manager::conference_active()`.
+    active: bool,
+    /// `Manager::has_source_member(leg.member)`: false once the conference
+    /// the member joined was dropped, even if a new one was built since.
+    enrolled: bool,
+    /// `Manager::bridge_config().mode`.
+    mode: astar_iax::BridgeMode,
+}
+
+/// Why a live monitor leg must be reaped now, or `None` while it is healthy.
+///
+/// A quiet reflector never sends audio, so it never hits the `SendError`
+/// that would set `sink_lost`. The conference-side terms exist so that a
+/// `POST /bridge`, an engine rebuild or a `set_bridge_config` still ends the
+/// leg on the next poll instead of leaving it linked to nothing. Parrot keeps
+/// the conference and the member, so only the mode term catches it. The
+/// monitor's own `fail_reason`, when it has one, is the most specific
+/// explanation and always wins.
+#[cfg(feature = "m17")]
+fn monitor_reap_reason(leg: LegHealth<'_>, conference: Option<ConferenceHealth>) -> Option<String> {
+    let conference_gone = match conference {
+        None => true,
+        Some(c) => {
+            !c.active
+                || !c.enrolled
+                || matches!(
+                    c.mode,
+                    astar_iax::BridgeMode::Handset | astar_iax::BridgeMode::Parrot
+                )
+        }
+    };
+    let stopped = leg.failed || leg.finished;
+    if !stopped && !leg.sink_lost && !conference_gone {
+        return None;
+    }
+    Some(match leg.fail_reason {
+        Some(reason) => reason.to_owned(),
+        None if leg.sink_lost || conference_gone => MONITOR_CONFERENCE_GONE.to_owned(),
+        None => MONITOR_STOPPED.to_owned(),
+    })
+}
+
 /// `true` when M17 voice is available: the `m17` feature is compiled in AND a
 /// working Codec 2 backend was found (iax-f2b8 Task 4). Cached after the
 /// first call — `codec2_available`'s static backend does a full
@@ -3788,22 +4865,31 @@ pub fn m17_available() -> bool {
 /// keep in step with this one — see [`dstar_available`] for why the probe is
 /// enumeration-only and why it is cached on a short TTL rather than once.
 #[cfg(any(feature = "dstar", feature = "ysf", feature = "nxdn", feature = "dmr"))]
-fn thumbdv_available_cached() -> bool {
-    static CACHE: std::sync::Mutex<Option<(std::time::Instant, bool)>> =
-        std::sync::Mutex::new(None);
+fn thumbdv_available_cached(trust: &astar_codec::vocoder_trust::VocoderTrust) -> bool {
+    type Cached = Option<(
+        std::time::Instant,
+        astar_codec::vocoder_trust::VocoderTrust,
+        bool,
+    )>;
+    static CACHE: std::sync::Mutex<Cached> = std::sync::Mutex::new(None);
+    // Nothing trusted, nothing available — and nothing enumerated either.
+    if trust.is_empty() {
+        return false;
+    }
     // Poison-tolerant: there is no invariant to protect here (a memoized
     // bool + timestamp), so a panicking prior caller must not wedge every
     // later availability query.
     let mut cache = CACHE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((at, val)) = *cache
+    if let Some((at, cached_trust, val)) = cache.as_ref()
+        && cached_trust == trust
         && at.elapsed() < DSTAR_AVAILABLE_TTL
     {
-        return val;
+        return *val;
     }
-    let val = astar_codec::ambe::thumbdv_present();
-    *cache = Some((std::time::Instant::now(), val));
+    let val = astar_codec::ambe::thumbdv_present(trust);
+    *cache = Some((std::time::Instant::now(), trust.clone(), val));
     val
 }
 
@@ -3818,13 +4904,14 @@ fn thumbdv_available_cached() -> bool {
 ///
 /// Always `false` when the `ysf` feature isn't compiled in.
 #[must_use]
-pub fn ysf_available() -> bool {
+pub fn ysf_available(trust: &astar_codec::vocoder_trust::VocoderTrust) -> bool {
     #[cfg(feature = "ysf")]
     {
-        thumbdv_available_cached()
+        thumbdv_available_cached(trust)
     }
     #[cfg(not(feature = "ysf"))]
     {
+        let _ = trust;
         false
     }
 }
@@ -3839,13 +4926,14 @@ pub fn ysf_available() -> bool {
 ///
 /// Always `false` when the `nxdn` feature isn't compiled in.
 #[must_use]
-pub fn nxdn_available() -> bool {
+pub fn nxdn_available(trust: &astar_codec::vocoder_trust::VocoderTrust) -> bool {
     #[cfg(feature = "nxdn")]
     {
-        thumbdv_available_cached()
+        thumbdv_available_cached(trust)
     }
     #[cfg(not(feature = "nxdn"))]
     {
+        let _ = trust;
         false
     }
 }
@@ -3863,13 +4951,14 @@ pub fn nxdn_available() -> bool {
 /// either way: `astar-server` reads `dmr_active` off a snapshot in a build
 /// that may not compile the session at all.
 #[must_use]
-pub fn dmr_available() -> bool {
+pub fn dmr_available(trust: &astar_codec::vocoder_trust::VocoderTrust) -> bool {
     #[cfg(feature = "dmr")]
     {
-        thumbdv_available_cached()
+        thumbdv_available_cached(trust)
     }
     #[cfg(not(feature = "dmr"))]
     {
+        let _ = trust;
         false
     }
 }
@@ -3895,13 +4984,14 @@ pub fn dmr_available() -> bool {
 ///
 /// Always `false` when the `dstar` feature isn't compiled in.
 #[must_use]
-pub fn dstar_available() -> bool {
+pub fn dstar_available(trust: &astar_codec::vocoder_trust::VocoderTrust) -> bool {
     #[cfg(feature = "dstar")]
     {
-        thumbdv_available_cached()
+        thumbdv_available_cached(trust)
     }
     #[cfg(not(feature = "dstar"))]
     {
+        let _ = trust;
         false
     }
 }
@@ -4046,7 +5136,7 @@ mod tests {
     #[test]
     fn heard_is_empty_with_no_digital_session() {
         let s = ConsoleSession::new();
-        assert!(s.heard().is_empty());
+        assert_eq!(s.heard(), [] as [crate::heard::HeardEntry; 0]);
     }
 
     #[test]
@@ -4305,7 +5395,7 @@ mod tests {
         let digits = session.drain_dtmf_digits();
         assert_eq!(digits, vec![(7, '5')]);
         // Draining consumes.
-        assert!(session.drain_dtmf_digits().is_empty());
+        assert_eq!(session.drain_dtmf_digits(), [] as [(u64, char); 0]);
     }
 
     // --- iax-5bbd: the WireGuard link-transport surface at the session layer ---
@@ -4667,6 +5757,43 @@ mod tests {
     /// The refusal is the console's now because only the lane knows whether
     /// a capture device exists. Getting this wrong puts an RF header and a
     /// stream of silence on the air, which is worse than not transmitting.
+    /// Vocoder trust: a fresh session trusts no stick, so a D-Star connect is
+    /// refused with the operator-facing "No trusted vocoder" message, the
+    /// lane is handed back, and the snapshot reports D-Star unavailable —
+    /// all without enumerating or opening a serial port.
+    #[cfg(feature = "dstar")]
+    #[test]
+    fn dstar_connect_with_no_trusted_vocoder_is_refused_by_name() {
+        let target = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind silent target");
+        let addr = target.local_addr().expect("local addr");
+
+        let mut s = ConsoleSession::new();
+        assert!(
+            s.vocoder_trust().is_empty(),
+            "nothing is trusted by default"
+        );
+        let err = s
+            .dstar_connect(null(), dstar_cfg(addr), Some("no such device"), None)
+            .expect_err("no trusted vocoder, no D-Star");
+        match err {
+            ConsoleError::Dstar(m) => assert_eq!(m, astar_codec::vocoder_trust::NO_TRUSTED_VOCODER),
+            other => panic!("expected ConsoleError::Dstar, got {other:?}"),
+        }
+        assert!(!s.snapshot().dstar_available);
+        assert!(
+            s.open_voice_route(None, None, null).is_ok(),
+            "the refused connect gave the lane back"
+        );
+    }
+
+    #[cfg(feature = "dstar")]
+    #[test]
+    fn the_trust_list_is_settable() {
+        let mut s = ConsoleSession::new();
+        s.set_vocoder_trust(astar_codec::vocoder_trust::VocoderTrust::new(["TESTSER1"]));
+        assert!(s.vocoder_trust().contains("TESTSER1"));
+    }
+
     #[cfg(feature = "dstar")]
     #[test]
     fn keying_a_receive_only_route_is_refused_for_dstar() {
@@ -5691,7 +6818,7 @@ mod tests {
         // Feature-independent by construction: astar-server reads
         // `dmr_active` off a snapshot in a build that may not compile the
         // session at all.
-        let _ = dmr_available();
+        let _ = dmr_available(&astar_codec::vocoder_trust::VocoderTrust::none());
     }
 
     // ── The one audio lane: `VoiceRoute` on the station router ───────────
@@ -5904,5 +7031,1070 @@ mod tests {
         assert!(matches!(s.set_ptt(true), Err(ConsoleError::NotConnected)));
         let mgr = s.manager.as_ref().expect("engine");
         assert_eq!(mgr.router().mic_count(), 1, "the capture lane stays open");
+    }
+    // --- the receive-only M17 monitor's reap predicate ---------------------
+    //
+    // `monitor_reap_reason` is pure so that every condition can be pinned on
+    // its own: each test below sets exactly ONE unhealthy input against an
+    // otherwise healthy baseline, so deleting that one term from the
+    // predicate fails exactly that test.
+
+    #[cfg(feature = "m17")]
+    fn healthy_leg() -> LegHealth<'static> {
+        LegHealth {
+            failed: false,
+            finished: false,
+            sink_lost: false,
+            fail_reason: None,
+        }
+    }
+
+    #[cfg(feature = "m17")]
+    fn healthy_conference() -> ConferenceHealth {
+        ConferenceHealth {
+            active: true,
+            enrolled: true,
+            mode: astar_iax::BridgeMode::Bridge,
+        }
+    }
+
+    #[cfg(feature = "m17")]
+    #[test]
+    fn a_healthy_monitor_in_a_bridge_or_conference_is_not_reaped() {
+        assert_eq!(
+            monitor_reap_reason(healthy_leg(), Some(healthy_conference())),
+            None
+        );
+        let conference = Some(ConferenceHealth {
+            active: true,
+            enrolled: true,
+            mode: astar_iax::BridgeMode::Conference,
+        });
+        assert_eq!(monitor_reap_reason(healthy_leg(), conference), None);
+    }
+
+    #[cfg(feature = "m17")]
+    #[test]
+    fn a_failed_link_is_reaped_with_the_monitors_own_reason() {
+        let leg = LegHealth {
+            failed: true,
+            fail_reason: Some("reflector refused the link"),
+            ..healthy_leg()
+        };
+        assert_eq!(
+            monitor_reap_reason(leg, Some(healthy_conference())),
+            Some("reflector refused the link".to_string())
+        );
+    }
+
+    #[cfg(feature = "m17")]
+    #[test]
+    fn a_failed_link_with_no_reason_is_reaped_as_monitor_stopped() {
+        let leg = LegHealth {
+            failed: true,
+            ..healthy_leg()
+        };
+        assert_eq!(
+            monitor_reap_reason(leg, Some(healthy_conference())),
+            Some("monitor stopped".to_string())
+        );
+    }
+
+    #[cfg(feature = "m17")]
+    #[test]
+    fn a_finished_thread_is_reaped_as_monitor_stopped() {
+        let leg = LegHealth {
+            finished: true,
+            ..healthy_leg()
+        };
+        assert_eq!(
+            monitor_reap_reason(leg, Some(healthy_conference())),
+            Some("monitor stopped".to_string())
+        );
+    }
+
+    #[cfg(feature = "m17")]
+    #[test]
+    fn a_lost_sink_is_reaped_as_conference_gone() {
+        let leg = LegHealth {
+            sink_lost: true,
+            ..healthy_leg()
+        };
+        assert_eq!(
+            monitor_reap_reason(leg, Some(healthy_conference())),
+            Some("conference gone".to_string())
+        );
+    }
+
+    #[cfg(feature = "m17")]
+    #[test]
+    fn no_engine_is_reaped_as_conference_gone() {
+        assert_eq!(
+            monitor_reap_reason(healthy_leg(), None),
+            Some("conference gone".to_string())
+        );
+    }
+
+    #[cfg(feature = "m17")]
+    #[test]
+    fn an_inactive_conference_is_reaped_as_conference_gone() {
+        let conference = Some(ConferenceHealth {
+            active: false,
+            enrolled: true,
+            mode: astar_iax::BridgeMode::Bridge,
+        });
+        assert_eq!(
+            monitor_reap_reason(healthy_leg(), conference),
+            Some("conference gone".to_string())
+        );
+    }
+
+    #[cfg(feature = "m17")]
+    #[test]
+    fn a_member_no_longer_enrolled_is_reaped_as_conference_gone() {
+        let conference = Some(ConferenceHealth {
+            active: true,
+            enrolled: false,
+            mode: astar_iax::BridgeMode::Bridge,
+        });
+        assert_eq!(
+            monitor_reap_reason(healthy_leg(), conference),
+            Some("conference gone".to_string())
+        );
+    }
+
+    #[cfg(feature = "m17")]
+    #[test]
+    fn handset_mode_is_reaped_as_conference_gone() {
+        let conference = Some(ConferenceHealth {
+            active: true,
+            enrolled: true,
+            mode: astar_iax::BridgeMode::Handset,
+        });
+        assert_eq!(
+            monitor_reap_reason(healthy_leg(), conference),
+            Some("conference gone".to_string())
+        );
+    }
+
+    #[cfg(feature = "m17")]
+    #[test]
+    fn parrot_mode_is_reaped_as_conference_gone() {
+        // Bridge -> Parrot keeps the conference AND the member, so only the
+        // mode term can catch it.
+        let conference = Some(ConferenceHealth {
+            active: true,
+            enrolled: true,
+            mode: astar_iax::BridgeMode::Parrot,
+        });
+        assert_eq!(
+            monitor_reap_reason(healthy_leg(), conference),
+            Some("conference gone".to_string())
+        );
+    }
+
+    #[cfg(feature = "m17")]
+    #[test]
+    fn the_monitors_own_reason_wins_over_conference_gone() {
+        let leg = LegHealth {
+            failed: true,
+            fail_reason: Some("reflector sent DISC"),
+            ..healthy_leg()
+        };
+        assert_eq!(
+            monitor_reap_reason(leg, None),
+            Some("reflector sent DISC".to_string())
+        );
+    }
+
+    #[cfg(feature = "m17")]
+    fn m17_monitor_cfg(addr: std::net::SocketAddr) -> M17MonitorConfig {
+        M17MonitorConfig {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+            module: b'A',
+            callsign: "AJ7HR".to_string(),
+            codec_dirs: Vec::new(),
+            keepalive_timeout: Duration::from_secs(30),
+        }
+    }
+
+    /// The monitor's source member lives in THIS engine's conference. An
+    /// idle-engine rebuild would drop it, and the next poll would reap a
+    /// link the operator asked for. So a live monitor makes the engine busy,
+    /// even with no call, listener, route or digital session.
+    #[cfg(feature = "m17")]
+    #[test]
+    fn an_idle_engine_is_not_rebuilt_under_a_live_m17_monitor() {
+        // A bound, silent 127.0.0.1 target: the monitor stays "linking",
+        // which is all this needs.
+        let (_target, addr) = sink_socket();
+        let mut s = ConsoleSession::new();
+        s.set_bridge_config(BridgeConfig {
+            mode: astar_iax::BridgeMode::Bridge,
+            ..BridgeConfig::default()
+        })
+        .expect("bridge mode stored");
+        let _ = s.ensure_engine(null_backend);
+        assert_eq!(s.pipeline_sample_rate(), 8_000);
+        s.m17_monitor_connect(m17_monitor_cfg(addr))
+            .expect("monitor up");
+        assert_eq!(s.conference_member_count(), 1);
+
+        s.set_station_policy(CodecPolicy::PreferSlin16);
+        assert!(s.has_engine(), "a live monitor makes the engine busy");
+        assert_eq!(s.pipeline_sample_rate(), 8_000, "the rate stands");
+        assert_eq!(
+            s.conference_member_count(),
+            1,
+            "the monitor's member survives"
+        );
+
+        let monitor = s.m17_monitor_take().expect("leg");
+        assert_eq!(s.conference_member_count(), 0);
+        monitor.disconnect();
+        // Control: with the monitor gone, the same request does rebuild,
+        // so the monitor was the only thing holding it back.
+        s.set_station_policy(CodecPolicy::PreferSlin16);
+        assert!(!s.has_engine(), "an idle engine is dropped for rebuild");
+    }
+
+    /// The monitor is what makes a node's M17 link receive-only, so it must
+    /// sit beside the node's IAX2 links, not exclude them. `m17_connect` and
+    /// `open_voice_route` refuse `AlreadyConnected` while a call is pooled;
+    /// the monitor must not inherit that refusal.
+    #[cfg(feature = "m17")]
+    #[test]
+    fn a_pooled_iax_call_does_not_refuse_the_m17_monitor() {
+        let (_peer, peer_addr) = sink_socket();
+        let (_refl_sock, refl_addr) = sink_socket();
+        let mut s = ConsoleSession::new();
+        s.set_bridge_config(BridgeConfig {
+            mode: astar_iax::BridgeMode::Bridge,
+            ..BridgeConfig::default()
+        })
+        .expect("bridge mode stored");
+        s.connect(
+            null_backend(),
+            peer_addr,
+            ConsoleConfig {
+                node: "9999".into(),
+                calling_node: "9999".into(),
+                secret: "s".into(),
+                name: "t".into(),
+                input_device: None,
+                output_device: None,
+                codec_policy: CodecPolicy::default(),
+            },
+        )
+        .expect("dial pools a call");
+        assert_eq!(s.call_count(), 1);
+        let before = s.conference_member_count();
+        s.m17_monitor_connect(m17_monitor_cfg(refl_addr))
+            .expect("a pooled call does not refuse the monitor");
+        assert_eq!(s.conference_member_count(), before + 1);
+
+        let monitor = s.m17_monitor_take().expect("leg");
+        assert_eq!(s.conference_member_count(), before);
+        monitor.disconnect();
+        s.disconnect().expect("teardown");
+    }
+
+    /// The console's own digital sessions (`m17_connect`, `dstar_connect`,
+    /// …) open the one voice route through `can_open_voice_route`. A node
+    /// monitoring a reflector must not make the console refuse them: the
+    /// monitor is not the route and holds no lane.
+    #[cfg(feature = "m17")]
+    #[test]
+    fn a_live_m17_monitor_does_not_hold_the_voice_route() {
+        let (_target, addr) = sink_socket();
+        let mut s = ConsoleSession::new();
+        s.set_bridge_config(BridgeConfig {
+            mode: astar_iax::BridgeMode::Bridge,
+            ..BridgeConfig::default()
+        })
+        .expect("bridge mode stored");
+        let _ = s.ensure_engine(null_backend);
+        s.m17_monitor_connect(m17_monitor_cfg(addr))
+            .expect("monitor up");
+
+        let audio = s
+            .open_voice_route(None, None, null_backend)
+            .expect("the monitor does not hold the voice route");
+        drop(audio);
+        drop(s.release_voice_route());
+
+        s.m17_monitor_take().expect("leg").disconnect();
+    }
+
+    // --- EchoLink rides the one lane ----------------------------------------
+    //
+    // Every station here is a `FakeDirectory` or a `FakeStation` on
+    // 127.0.0.1, and every test build of this crate is loopback-only, so
+    // nothing below can reach a real EchoLink server or station.
+    #[cfg(feature = "echolink")]
+    mod echolink_wiring {
+        use super::*;
+        use crate::echolink::{
+            CallLink, EchoLinkLogin, EchoLinkNetwork, LoginState, PeerAddr, StationEntry, Timings,
+        };
+        use astar_audio::{InputSink, OutputSource, StreamConfig, StreamHandle};
+        use astar_echolink::directory::logoff_line;
+        use astar_echolink::fake::{FakeDirectory, FakeLogin, FakeStation};
+        use std::time::Instant;
+        use zeroize::Zeroizing;
+
+        const CALL: &str = "KX7ABC";
+        const PASSWORD: &str = "s3cret-pw";
+        const NODE: u32 = 9999;
+        const ECHO_CALL: &str = "*ECHOTEST*";
+        /// Long enough for anything a test waits for; a pass ends far sooner.
+        const WAIT: Duration = Duration::from_secs(3);
+
+        fn ms(n: u64) -> Duration {
+            Duration::from_millis(n)
+        }
+
+        fn wait_for(mut f: impl FnMut() -> bool) -> bool {
+            let deadline = Instant::now() + WAIT;
+            loop {
+                if f() {
+                    return true;
+                }
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(ms(10));
+            }
+        }
+
+        /// Loopback binds on ephemeral ports, and the fake's node mapped to
+        /// the fake's own two ports.
+        fn network(station: &FakeStation) -> EchoLinkNetwork {
+            let addr = station.addr();
+            EchoLinkNetwork {
+                audio_bind: "127.0.0.1:0".parse().unwrap(),
+                control_bind: "127.0.0.1:0".parse().unwrap(),
+                peer_addr: Arc::new(move |e: &StationEntry| {
+                    if e.node == NODE {
+                        addr
+                    } else {
+                        PeerAddr::fixed(e.ip)
+                    }
+                }),
+                match_by_ip: false,
+                timings: Timings {
+                    keepalive: ms(100),
+                    connection_timeout: ms(2_000),
+                    give_up_after: 20,
+                    talk_hold: ms(100),
+                    ..Timings::default()
+                },
+            }
+        }
+
+        fn login(dir: &FakeDirectory, location: &str) -> EchoLinkLogin {
+            EchoLinkLogin {
+                callsign: CALL.to_owned(),
+                servers: vec![dir.addr().to_string()],
+                location: location.to_owned(),
+            }
+        }
+
+        fn password() -> Zeroizing<String> {
+            Zeroizing::new(PASSWORD.to_owned())
+        }
+
+        /// A fake station, a fake directory listing it, and a session pointed
+        /// at both but not yet logged in.
+        struct Rig {
+            station: FakeStation,
+            dir: FakeDirectory,
+            s: ConsoleSession,
+        }
+
+        fn rig() -> Rig {
+            let station = FakeStation::start(ECHO_CALL);
+            let dir = FakeDirectory::start(FakeLogin::Ok, vec![station.entry(NODE)]);
+            let mut s = ConsoleSession::new();
+            s.set_echolink_network(network(&station));
+            Rig { station, dir, s }
+        }
+
+        /// [`rig`], logged in with the station list in hand.
+        fn logged_in() -> Rig {
+            let mut r = rig();
+            r.s.echolink_login(login(&r.dir, "Denver"), password())
+                .expect("login starts");
+            assert!(
+                wait_for(|| r
+                    .s
+                    .echolink_state()
+                    .is_some_and(|st| st.login.state == LoginState::LoggedIn)
+                    && !r.s.echolink_stations().is_empty()),
+                "never logged in: {:?}",
+                r.s.echolink_state()
+            );
+            r
+        }
+
+        fn connect(s: &mut ConsoleSession) -> Result<(), ConsoleError> {
+            s.echolink_connect(Box::new(NullBackend::new()), "9999", None, None)
+        }
+
+        fn call_link(s: &ConsoleSession) -> Option<CallLink> {
+            s.echolink_state().and_then(|st| st.call).map(|c| c.link)
+        }
+
+        fn wait_connected(s: &ConsoleSession) {
+            assert!(
+                wait_for(|| call_link(s) == Some(CallLink::Connected)),
+                "never connected: {:?}",
+                call_link(s)
+            );
+        }
+
+        /// The capture sink a [`CaptureBackend`] was handed, so a test can
+        /// play the microphone.
+        type Mic = Arc<Mutex<Option<Box<dyn InputSink>>>>;
+
+        /// A `NullBackend` that keeps the capture sink instead of dropping it.
+        struct CaptureBackend {
+            inner: NullBackend,
+            mic: Mic,
+        }
+
+        impl AudioBackend for CaptureBackend {
+            fn devices(&self) -> Result<Vec<astar_audio::DeviceInfo>, AudioError> {
+                self.inner.devices()
+            }
+            fn default_input(&self) -> Option<astar_audio::DeviceInfo> {
+                self.inner.default_input()
+            }
+            fn default_output(&self) -> Option<astar_audio::DeviceInfo> {
+                self.inner.default_output()
+            }
+            fn open_input(
+                &self,
+                d: &astar_audio::DeviceInfo,
+                c: StreamConfig,
+                s: Box<dyn InputSink>,
+                o: Arc<std::sync::atomic::AtomicU64>,
+            ) -> Result<Box<dyn StreamHandle>, AudioError> {
+                *self.mic.lock().unwrap() = Some(s);
+                // A handle that touches no device.
+                self.inner.open_input(d, c, Box::new(Discard), o)
+            }
+            fn open_output(
+                &self,
+                d: &astar_audio::DeviceInfo,
+                c: StreamConfig,
+                s: Box<dyn OutputSource>,
+            ) -> Result<Box<dyn StreamHandle>, AudioError> {
+                self.inner.open_output(d, c, s)
+            }
+        }
+
+        struct Discard;
+        impl InputSink for Discard {
+            fn write(&mut self, _samples: &[f32], _meter: f32) {}
+        }
+
+        #[test]
+        fn echolink_snapshot_maps_link_to_call_status() {
+            let mut r = logged_in();
+            r.station.set_answer(false);
+            connect(&mut r.s).expect("connect");
+            assert_eq!(call_link(&r.s), Some(CallLink::Connecting));
+            assert_eq!(r.s.snapshot().status, CallStatus::Dialing);
+
+            r.station.set_answer(true);
+            wait_connected(&r.s);
+            assert_eq!(r.s.snapshot().status, CallStatus::Answered);
+
+            r.station.send_bye();
+            assert!(wait_for(|| call_link(&r.s) == Some(CallLink::Closed)));
+            assert!(
+                matches!(r.s.snapshot().status, CallStatus::Hangup { .. }),
+                "{:?}",
+                r.s.snapshot().status
+            );
+            r.s.echolink_disconnect();
+            assert_eq!(r.s.snapshot().status, CallStatus::Idle);
+        }
+
+        #[test]
+        fn echolink_flags_mirror_into_console_state() {
+            let mut r = rig();
+            let st = r.s.snapshot();
+            assert!(st.echolink_available);
+            assert!(!st.echolink_logged_in && !st.echolink_active);
+            assert!(r.s.echolink_state().is_none());
+
+            r.s.echolink_login(login(&r.dir, "Denver"), password())
+                .expect("login starts");
+            assert!(wait_for(|| r.s.snapshot().echolink_logged_in));
+            assert!(!r.s.snapshot().echolink_active);
+            assert!(wait_for(|| !r.s.echolink_stations().is_empty()));
+            assert!(r.s.echolink_can_connect());
+
+            connect(&mut r.s).expect("connect");
+            wait_connected(&r.s);
+            let st = r.s.snapshot();
+            assert!(st.echolink_active && st.echolink_logged_in);
+            assert!(!r.s.echolink_can_connect(), "one call at a time");
+
+            // The password is an in-argument only: it reaches neither the
+            // console's snapshot nor the EchoLink state.
+            assert!(!format!("{st:?}").contains(PASSWORD));
+            assert!(!format!("{:?}", r.s.echolink_state()).contains(PASSWORD));
+
+            // An EchoLink call is a connection, so a recording can start on it.
+            assert!(r.s.has_connection(), "an EchoLink call is a connection");
+
+            r.s.echolink_disconnect();
+            assert!(!r.s.has_connection());
+            assert!(!r.s.snapshot().echolink_active);
+            assert!(r.s.snapshot().echolink_logged_in);
+            r.s.echolink_logout().expect("a login to finish").logout();
+            assert!(!r.s.snapshot().echolink_logged_in);
+            assert!(r.s.echolink_state().is_none());
+        }
+
+        #[cfg(feature = "m17")]
+        #[test]
+        fn echolink_connect_is_refused_while_m17_is_live() {
+            let target = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind silent target");
+            let addr = target.local_addr().expect("local addr");
+            let mut r = logged_in();
+            r.s.m17_connect(Box::new(NullBackend::new()), m17_cfg(addr), None, None)
+                .expect("m17 connect");
+            assert!(!r.s.echolink_can_connect());
+            assert!(matches!(
+                connect(&mut r.s),
+                Err(ConsoleError::AlreadyConnected)
+            ));
+            assert!(r.s.echolink_state().unwrap().call.is_none());
+            r.s.m17_disconnect();
+
+            connect(&mut r.s).expect("connect once M17 is gone");
+            assert!(matches!(
+                r.s.m17_connect(Box::new(NullBackend::new()), m17_cfg(addr), None, None),
+                Err(ConsoleError::AlreadyConnected)
+            ));
+            r.s.echolink_disconnect();
+        }
+
+        #[test]
+        fn every_other_network_is_refused_while_echolink_is_live() {
+            let mut r = logged_in();
+            connect(&mut r.s).expect("connect");
+            assert!(r.s.echolink_is_active());
+            // Each `*_can_connect` exists only when its own feature is
+            // compiled in; `--features dstar,ysf,nxdn,dmr` asserts them all.
+            #[cfg(feature = "dstar")]
+            assert!(matches!(
+                r.s.dstar_can_connect(),
+                Err(ConsoleError::AlreadyConnected)
+            ));
+            #[cfg(feature = "ysf")]
+            assert!(matches!(
+                r.s.ysf_can_connect(),
+                Err(ConsoleError::AlreadyConnected)
+            ));
+            #[cfg(feature = "nxdn")]
+            assert!(matches!(
+                r.s.nxdn_can_connect(),
+                Err(ConsoleError::AlreadyConnected)
+            ));
+            #[cfg(feature = "dmr")]
+            assert!(matches!(
+                r.s.dmr_can_connect(),
+                Err(ConsoleError::AlreadyConnected)
+            ));
+            #[cfg(feature = "m17")]
+            {
+                let target = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind silent target");
+                let addr = target.local_addr().expect("local addr");
+                assert!(matches!(
+                    r.s.m17_connect(Box::new(NullBackend::new()), m17_cfg(addr), None, None),
+                    Err(ConsoleError::AlreadyConnected)
+                ));
+            }
+            // The exclusion check itself, which every voice-route path runs,
+            // and the IAX2 dial.
+            assert!(matches!(
+                r.s.can_open_voice_route(),
+                Err(ConsoleError::AlreadyConnected)
+            ));
+            assert!(matches!(
+                r.s.connect(
+                    Box::new(NullBackend::new()),
+                    "127.0.0.1:4569".parse().unwrap(),
+                    slin16_config()
+                ),
+                Err(ConsoleError::AlreadyConnected)
+            ));
+            r.s.echolink_disconnect();
+            assert!(!r.s.echolink_is_active());
+        }
+
+        #[test]
+        fn echolink_connect_needs_a_login() {
+            let mut r = rig();
+            let err = connect(&mut r.s).expect_err("not logged in");
+            assert!(
+                matches!(&err, ConsoleError::EchoLink(m) if m == "Log in to EchoLink first"),
+                "{err:?}"
+            );
+            assert!(r.s.voice_route.is_none(), "no route held on refusal");
+
+            let mut r = logged_in();
+            let err =
+                r.s.echolink_connect(Box::new(NullBackend::new()), "1234", None, None)
+                    .expect_err("nobody is node 1234");
+            assert!(
+                matches!(&err, ConsoleError::EchoLink(m)
+                    if m == "No station 1234 is logged in to EchoLink"),
+                "{err:?}"
+            );
+            assert!(r.s.voice_route.is_none(), "no route held on refusal");
+        }
+
+        #[test]
+        fn echolink_disconnect_releases_the_voice_route() {
+            let mut r = logged_in();
+            connect(&mut r.s).expect("connect");
+            assert!(r.s.voice_route.is_some());
+            r.s.echolink_disconnect();
+            assert!(r.s.voice_route.is_none());
+            assert!(r.s.echolink_state().unwrap().call.is_none());
+            #[cfg(feature = "m17")]
+            {
+                let target = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind silent target");
+                let addr = target.local_addr().expect("local addr");
+                r.s.m17_connect(Box::new(NullBackend::new()), m17_cfg(addr), None, None)
+                    .expect("the route came back");
+                // A second disconnect finds no EchoLink call and must leave
+                // M17's route alone.
+                r.s.echolink_disconnect();
+                assert!(r.s.voice_route.is_some(), "M17 still holds its route");
+                r.s.m17_disconnect();
+            }
+        }
+
+        #[test]
+        fn echolink_set_ptt_reaches_the_session() {
+            let mut r = logged_in();
+            r.station.set_echo(false);
+            let mic: Mic = Arc::new(Mutex::new(None));
+            r.s.echolink_connect(
+                Box::new(CaptureBackend {
+                    inner: NullBackend::new(),
+                    mic: Arc::clone(&mic),
+                }),
+                "9999",
+                None,
+                None,
+            )
+            .expect("connect");
+            wait_connected(&r.s);
+            assert!(mic.lock().unwrap().is_some(), "the route opened the mic");
+
+            r.s.set_ptt(true).expect("key");
+            assert!(r.s.state.ptt, "the optimistic mirror");
+            assert!(wait_for(|| r.s.snapshot().ptt), "PTT never applied");
+            // 40 frames of tone, as a capture callback would deliver them.
+            let tone: Vec<f32> = (0..160 * 40)
+                .map(|i| if i % 8 < 4 { 0.25 } else { -0.25 })
+                .collect();
+            for chunk in tone.chunks(160) {
+                mic.lock().unwrap().as_mut().unwrap().write(chunk, 0.25);
+            }
+            assert!(
+                wait_for(|| r.station.audio_packets() >= 1),
+                "no audio reached the station"
+            );
+            r.s.set_ptt(false).expect("unkey");
+            assert!(wait_for(|| !r.s.snapshot().ptt), "PTT never released");
+            r.s.echolink_disconnect();
+        }
+
+        #[test]
+        fn location_set_before_login_reaches_the_login() {
+            let mut r = rig();
+            r.s.echolink_set_location("Denver");
+            r.s.echolink_login(login(&r.dir, ""), password())
+                .expect("login starts");
+            assert!(wait_for(|| !r.dir.lines().is_empty()));
+            let first = r.dir.lines().into_iter().next().unwrap();
+            assert!(
+                first.ends_with(b"\rDenver\r"),
+                "{:?}",
+                String::from_utf8_lossy(&first)
+            );
+            r.s.echolink_logout().expect("a login to finish").logout();
+        }
+
+        #[test]
+        fn logging_out_hangs_up_first() {
+            let mut r = logged_in();
+            connect(&mut r.s).expect("connect");
+            wait_connected(&r.s);
+            let presence = r.s.echolink_logout().expect("the login comes back");
+            assert!(r.s.voice_route.is_none(), "the call's route is released");
+            assert!(r.s.echolink_state().is_none());
+            // The BYE left before `echolink_logout` returned, but the fake
+            // station stamps it on its own thread when the datagram lands,
+            // so wait for that record rather than reading it at once. It
+            // arriving while the login is still unfinished is the proof
+            // that the hang-up came from `echolink_logout`.
+            assert!(
+                wait_for(|| !r.station.bye_times().is_empty()),
+                "hung up under the call"
+            );
+            let logoff = logoff_line(CALL, PASSWORD, "Denver");
+            assert!(
+                !r.dir.lines().iter().any(|l| l[..] == logoff[..]),
+                "the logoff waits for the caller"
+            );
+            // The caller finishes the login with no lock held.
+            presence.logout();
+
+            let bye = *r.station.bye_times().first().expect("a BYE");
+            let logoff_at = || {
+                r.dir
+                    .line_times()
+                    .into_iter()
+                    .find(|(_, line)| line[..] == logoff[..])
+                    .map(|(t, _)| t)
+            };
+            assert!(wait_for(|| logoff_at().is_some()), "a logoff line");
+            let logged_off = logoff_at().expect("a logoff line");
+            assert!(
+                bye < logged_off,
+                "BYE {bye:?} must precede logoff {logged_off:?}"
+            );
+        }
+
+        #[test]
+        fn echolink_relogin_logs_the_old_one_off_first_without_blocking() {
+            let station = FakeStation::start(ECHO_CALL);
+            let dir = FakeDirectory::start(FakeLogin::Ok, vec![station.entry(NODE)]);
+            let mut s = ConsoleSession::new();
+            let mut net = network(&station);
+            // The old login's logoff will hang for the whole read time-out.
+            net.timings.directory_read_timeout = ms(1_000);
+            s.set_echolink_network(net);
+            s.echolink_login(login(&dir, "Denver"), password())
+                .expect("first login");
+            assert!(wait_for(|| s.snapshot().echolink_logged_in));
+
+            dir.set_reply(FakeLogin::Silent);
+            let asked = Instant::now();
+            s.echolink_login(login(&dir, "Denver"), password())
+                .expect("second login starts");
+            let took = asked.elapsed();
+            assert!(
+                took < ms(200),
+                "re-login waited {took:?} on the old logoff (read time-out 1 s)"
+            );
+
+            let logoff = logoff_line(CALL, PASSWORD, "Denver");
+            let logoff_at = || {
+                dir.line_times()
+                    .into_iter()
+                    .find(|(_, l)| l[..] == logoff[..])
+                    .map(|(t, _)| t)
+            };
+            assert!(wait_for(|| logoff_at().is_some()), "the old login logs off");
+            dir.set_reply(FakeLogin::Ok);
+            assert!(wait_for(|| s.snapshot().echolink_logged_in));
+
+            let logins: Vec<Instant> = dir
+                .line_times()
+                .into_iter()
+                .filter(|(_, l)| l.windows(8).any(|w| w == b"BUSY3.40"))
+                .map(|(t, _)| t)
+                .collect();
+            assert_eq!(logins.len(), 2, "one login line each");
+            assert!(
+                logoff_at().unwrap() < logins[1],
+                "the old logoff must reach the directory before the new login"
+            );
+
+            let taken = s.echolink_take_presence().expect("a login to take");
+            assert!(s.echolink_take_presence().is_none());
+            assert!(!s.snapshot().echolink_logged_in);
+            taken.logout();
+        }
+
+        #[test]
+        fn a_bad_echolink_relogin_keeps_the_working_one() {
+            let mut r = logged_in();
+            let bad = EchoLinkLogin {
+                callsign: "  ".to_owned(),
+                ..login(&r.dir, "Denver")
+            };
+            assert!(matches!(
+                r.s.echolink_login(bad, password()),
+                Err(ConsoleError::EchoLink(_))
+            ));
+            let no_servers = EchoLinkLogin {
+                servers: vec![" ".to_owned()],
+                ..login(&r.dir, "Denver")
+            };
+            assert!(matches!(
+                r.s.echolink_login(no_servers, password()),
+                Err(ConsoleError::EchoLink(_))
+            ));
+            assert!(r.s.snapshot().echolink_logged_in, "the first login stands");
+            let logoff = logoff_line(CALL, PASSWORD, "Denver");
+            assert!(!r.dir.lines().iter().any(|l| l[..] == logoff[..]));
+            r.s.echolink_logout().expect("a login").logout();
+        }
+    }
+
+    // ---- recording taps ------------------------------------------------
+
+    /// Holds the input sink and output source the router opens, so a test can
+    /// drive the lanes the way the device callbacks would. No device opened.
+    #[derive(Clone, Default)]
+    struct StashBackend {
+        sink: Arc<Mutex<Option<Box<dyn astar_audio::InputSink>>>>,
+        source: Arc<Mutex<Option<Box<dyn astar_audio::OutputSource>>>>,
+    }
+
+    struct StashHandle;
+    impl astar_audio::StreamHandle for StashHandle {
+        fn stop(self: Box<Self>) {}
+        fn pause(&self) -> Result<(), AudioError> {
+            Ok(())
+        }
+        fn resume(&self) -> Result<(), AudioError> {
+            Ok(())
+        }
+    }
+
+    impl AudioBackend for StashBackend {
+        fn devices(&self) -> Result<Vec<DeviceInfo>, AudioError> {
+            Ok(vec![
+                dev("in:stash", Direction::Input),
+                dev("out:stash", Direction::Output),
+            ])
+        }
+        fn default_input(&self) -> Option<DeviceInfo> {
+            Some(dev("in:stash", Direction::Input))
+        }
+        fn default_output(&self) -> Option<DeviceInfo> {
+            Some(dev("out:stash", Direction::Output))
+        }
+        fn open_input(
+            &self,
+            _d: &DeviceInfo,
+            _c: astar_audio::StreamConfig,
+            s: Box<dyn astar_audio::InputSink>,
+            _overruns: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        ) -> Result<Box<dyn astar_audio::StreamHandle>, AudioError> {
+            *self.sink.lock().unwrap() = Some(s);
+            Ok(Box::new(StashHandle))
+        }
+        fn open_output(
+            &self,
+            _d: &DeviceInfo,
+            _c: astar_audio::StreamConfig,
+            s: Box<dyn astar_audio::OutputSource>,
+        ) -> Result<Box<dyn astar_audio::StreamHandle>, AudioError> {
+            *self.source.lock().unwrap() = Some(s);
+            Ok(Box::new(StashHandle))
+        }
+    }
+
+    impl StashBackend {
+        /// One playback callback's worth of output.
+        fn pull(&self, n: usize) {
+            let mut out = vec![0.0_f32; n];
+            if let Some(src) = self.source.lock().unwrap().as_mut() {
+                src.read(&mut out);
+            }
+        }
+        /// One capture callback's worth of mic audio.
+        fn push(&self, n: usize) {
+            if let Some(sink) = self.sink.lock().unwrap().as_mut() {
+                sink.write(&vec![0.25_f32; n], 0.0);
+            }
+        }
+    }
+
+    fn drained<T>(rx: &std::sync::mpsc::Receiver<T>) -> usize {
+        std::iter::from_fn(|| rx.try_recv().ok()).count()
+    }
+
+    /// The console holds the frame tap, not the session: one set before a
+    /// D-Star session exists still reaches it once it is adopted.
+    #[cfg(feature = "dstar")]
+    #[test]
+    fn set_record_taps_reaches_a_session_adopted_later() {
+        let target = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind silent target");
+        let addr = target.local_addr().expect("local addr");
+        let (frames, _events) = astar_record::tap::tap_channel(4);
+
+        let mut s = ConsoleSession::new();
+        s.set_record_taps(RecordTaps {
+            frames: Some(frames),
+            ..RecordTaps::default()
+        });
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        s.dstar_adopt(dstar_session(addr, audio)).expect("adopt");
+        assert!(
+            s.dstar.as_ref().expect("live").frame_tap().is_set(),
+            "the adopted session must pick up the console's frame tap"
+        );
+        assert!(s.has_connection(), "a live D-Star session is a connection");
+
+        s.set_record_taps(RecordTaps::default());
+        assert!(
+            !s.dstar.as_ref().expect("live").frame_tap().is_set(),
+            "clearing the taps clears the live session's too"
+        );
+        s.dstar_disconnect();
+        assert!(!s.has_connection());
+    }
+
+    /// The same for M17: a frame tap set before either the client or the
+    /// receive-only monitor exists reaches each once it is up, and clearing
+    /// it clears both.
+    #[cfg(feature = "m17")]
+    #[test]
+    fn set_record_taps_reaches_the_m17_session_and_monitor() {
+        let (_target, addr) = sink_socket();
+        let (frames, _events) = astar_record::tap::tap_channel(4);
+
+        let mut s = ConsoleSession::new();
+        s.set_bridge_config(BridgeConfig {
+            mode: astar_iax::BridgeMode::Bridge,
+            ..BridgeConfig::default()
+        })
+        .expect("bridge mode stored");
+        s.set_record_taps(RecordTaps {
+            frames: Some(frames),
+            ..RecordTaps::default()
+        });
+        s.m17_connect(Box::new(NullBackend::new()), m17_cfg(addr), None, None)
+            .expect("m17 connect");
+        s.m17_monitor_connect(m17_monitor_cfg(addr))
+            .expect("monitor up");
+        let session_tap = s.m17.as_ref().expect("live").frame_tap();
+        let monitor_tap = s.m17_monitor.as_ref().expect("leg").monitor.frame_tap();
+        assert!(
+            session_tap.is_set(),
+            "the M17 client picks up the frame tap"
+        );
+        assert!(
+            monitor_tap.is_set(),
+            "the M17 monitor picks up the frame tap"
+        );
+
+        s.set_frame_tap(None);
+        assert!(!session_tap.is_set(), "clearing reaches the M17 client");
+        assert!(!monitor_tap.is_set(), "clearing reaches the M17 monitor");
+        s.m17_monitor_take().expect("leg").disconnect();
+        s.m17_disconnect();
+    }
+
+    /// The same for System Fusion, NXDN and DMR: a frame tap set before the
+    /// link exists reaches it on adoption, and clearing it clears the live
+    /// link's.
+    #[cfg(all(feature = "ysf", feature = "nxdn", feature = "dmr"))]
+    #[test]
+    fn set_record_taps_reaches_ysf_nxdn_and_dmr_links_adopted_later() {
+        fn check(s: &mut ConsoleSession, slot: &astar_record::tap::TapSlot<FrameEvent>) {
+            assert!(slot.is_set(), "the adopted link must pick up the tap");
+            s.set_frame_tap(None);
+            assert!(!slot.is_set(), "clearing the tap clears the live link's");
+            let (frames, _events) = astar_record::tap::tap_channel(4);
+            s.set_frame_tap(Some(frames));
+            assert!(slot.is_set(), "and setting it again reaches it");
+        }
+        let (frames, _events) = astar_record::tap::tap_channel(4);
+        let mut s = ConsoleSession::new();
+        s.set_record_taps(RecordTaps {
+            frames: Some(frames),
+            ..RecordTaps::default()
+        });
+
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        let (reflector, link) = loopback_ysf(audio);
+        s.ysf_adopt(link).expect("adopt ysf");
+        let slot = s.ysf.as_ref().expect("live").frame_tap();
+        check(&mut s, &slot);
+        s.ysf_disconnect();
+        reflector.shutdown();
+
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        let (reflector, link) = loopback_nxdn(audio);
+        s.nxdn_adopt(link).expect("adopt nxdn");
+        let slot = s.nxdn.as_ref().expect("live").frame_tap();
+        check(&mut s, &slot);
+        s.nxdn_disconnect();
+        reflector.shutdown();
+
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        let (master, link) = loopback_dmr(audio);
+        s.dmr_adopt(link).expect("adopt dmr");
+        let slot = s.dmr.as_ref().expect("live").frame_tap();
+        check(&mut s, &slot);
+        s.dmr_disconnect();
+        master.shutdown();
+    }
+
+    #[test]
+    fn has_connection_is_false_when_idle() {
+        let mut s = ConsoleSession::new();
+        assert!(!s.has_connection(), "a fresh console has no connection");
+        let _ = s.ensure_engine(null_backend);
+        assert!(!s.has_connection(), "an engine alone is not a connection");
+    }
+
+    /// `set_frame_tap` is the server's codec-frame logger: turning it on or
+    /// off must never disturb the heard/sent recording taps (F9). The taps
+    /// are set before the engine exists, so this also pins that building
+    /// the engine installs them on its router.
+    #[test]
+    fn set_frame_tap_leaves_heard_and_sent_alone() {
+        let backend = StashBackend::default();
+        let (heard_tap, heard) = astar_record::tap::tap_channel(16);
+        let (sent_tap, sent) = astar_record::tap::tap_channel(16);
+        let (frames, _events) = astar_record::tap::tap_channel(4);
+
+        let mut s = ConsoleSession::new();
+        s.set_record_taps(RecordTaps {
+            heard: Some(heard_tap),
+            sent: Some(sent_tap),
+            frames: None,
+        });
+        let b = backend.clone();
+        let _audio = s
+            .open_voice_route(None, None, move || Box::new(b))
+            .expect("route");
+        {
+            let router = s.manager.as_mut().expect("engine").router_mut();
+            assert!(s.voice_route.as_mut().expect("route").key(router, true));
+        }
+
+        s.set_frame_tap(Some(frames));
+        s.set_frame_tap(None);
+
+        backend.pull(160);
+        backend.push(160);
+        assert_eq!(drained(&heard), 1, "heard is still installed");
+        assert_eq!(drained(&sent), 1, "sent is still installed");
+
+        // And clearing the record taps takes them off the live router.
+        s.set_record_taps(RecordTaps::default());
+        backend.pull(160);
+        backend.push(160);
+        assert_eq!(drained(&heard), 0, "heard cleared");
+        assert_eq!(drained(&sent), 0, "sent cleared");
     }
 }

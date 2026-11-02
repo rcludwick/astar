@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn buffer_assigns_monotonic_seq_and_filters_by_since() {
         let b = MonitorBuffer::new(64);
-        assert!(b.since(0).is_empty());
+        assert_eq!(b.since(0), [] as [crate::serial_monitor::SerialRecord; 0]);
         let s1 = b.push(b"AB", 10);
         let s2 = b.push(b"CD", 20);
         assert_eq!((s1, s2), (1, 2));
@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(tail[0].ascii, "CD");
 
         // since at/after the head → empty
-        assert!(b.since(2).is_empty());
+        assert_eq!(b.since(2), [] as [crate::serial_monitor::SerialRecord; 0]);
     }
 
     #[test]
@@ -410,7 +410,10 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let mut src = ErrSource;
         run_loop(&monitor, &mut src, &stop); // must return, not spin
-        assert!(monitor.buffer.since(0).is_empty());
+        assert_eq!(
+            monitor.buffer.since(0),
+            [] as [crate::serial_monitor::SerialRecord; 0]
+        );
     }
 
     #[test]

@@ -2,7 +2,8 @@
 # astar — Copyright (c) 2026 Rob Ludwick.
 # SPDX-License-Identifier: AGPL-3.0-only
 # Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
-# Merge invariant: no LGPL code in a DEFAULT build (astar-8c4d).
+# Merge invariant: no LGPL code in a DEFAULT build (astar-8c4d): neither
+# Codec 2 nor LAME (astar-server's stream-mp3).
 #
 # Codec 2 is `LGPL-2.1-only AND MIT`. astar ships it deliberately, linked into
 # the macOS app so M17 works on a Mac with no Homebrew libcodec2, and carries
@@ -24,13 +25,33 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 # Crates a downstream consumer builds with defaults. astar-station and
-# astar-console are the two that route M17, and astar-sys is what the Swift
-# binding compiles.
-DEFAULT_CLEAN=(astar-codec astar-console astar-station astar-sys)
+# astar-console are the two that route M17, astar-sys is what the Swift
+# binding compiles, and astar-server is the node binary the container ships:
+# it loads the distribution's libcodec2 at run time and links none.
+DEFAULT_CLEAN=(astar-codec astar-console astar-station astar-sys astar-server)
 
+# Every check walks normal edges only (`-e normal`): astar-console,
+# astar-station and astar-server force codec2-static on for their own TEST
+# builds through a dev-dependency, which a downstream consumer never links, so
+# those edges must not count either way. `--prefix none` prints each crate as
+# a bare `name vX.Y.Z` line, so `^codec2 v` matches whatever characters cargo
+# would otherwise draw the tree with.
+# A `cargo tree` that errors (a renamed or misspelled crate) fails the guard
+# rather than passing it silently, as in ci/guard-discord-feature.sh.
 fail=0
 for crate in "${DEFAULT_CLEAN[@]}"; do
-  if cargo tree -p "$crate" 2>/dev/null | grep -qE '^\|?[[:space:]|`+-]*codec2 v'; then
+  if ! output=$(cargo tree -p "$crate" -e normal --prefix none 2>&1); then
+    echo "FAIL: 'cargo tree -p $crate' errored — crate name wrong or missing?" >&2
+    echo "$output" >&2
+    fail=1
+    continue
+  fi
+  if grep -qE '^mp3lame-(sys|encoder) v' <<<"$output"; then
+    echo "FAIL: a default build of $crate pulls in LAME (LGPL)." >&2
+    echo "      stream-mp3 must stay opt-in — see crates/astar-server/Cargo.toml." >&2
+    fail=1
+  fi
+  if grep -qE '^codec2 v' <<<"$output"; then
     echo "FAIL: a default build of $crate pulls in codec2 (LGPL)." >&2
     echo "      codec2-static/codec2-runtime must stay opt-in — see" >&2
     echo "      crates/astar-codec/Cargo.toml and LICENSE-EXCEPTIONS.md." >&2
@@ -40,12 +61,25 @@ done
 
 # And the opt-in must actually still work, or the guard above would pass
 # vacuously after someone deleted the feature.
-if ! cargo tree -p astar-sys --features codec2-static 2>/dev/null | grep -qE 'codec2 v'; then
+if ! cargo tree -p astar-sys -e normal --prefix none --features codec2-static 2>/dev/null | grep -qE '^codec2 v'; then
   echo "FAIL: astar-sys --features codec2-static does NOT pull in codec2." >&2
   echo "      The shipped app builds with this feature (see" >&2
   echo "      bindings/swift/build-xcframework.sh); M17 would have no codec." >&2
   fail=1
 fi
 
+# astar-server's opt-in must work too. Normal edges matter most here: its
+# dev-dependency would otherwise satisfy this check with the feature emptied.
+if ! cargo tree -p astar-server -e normal --prefix none --features codec2-static 2>/dev/null | grep -qE '^codec2 v'; then
+  echo "FAIL: astar-server --features codec2-static does NOT pull in codec2." >&2
+  fail=1
+fi
+
+# LAME's opt-in must work too, or the check above would pass vacuously.
+if ! cargo tree -p astar-server -e normal --prefix none --features stream-mp3 2>/dev/null | grep -qE '^mp3lame-sys v'; then
+  echo "FAIL: astar-server --features stream-mp3 does NOT pull in LAME." >&2
+  fail=1
+fi
+
 [ "$fail" -eq 0 ] || exit 1
-echo "codec2 licensing guard: defaults are LGPL-free, opt-in works."
+echo "codec2 licensing guard: defaults are LGPL-free (no Codec 2, no LAME), opt-ins work."

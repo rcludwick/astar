@@ -72,6 +72,17 @@ stops — no cargo, no manifest check, **no gates at all**, no git. It exists so
 `ci/test_release_sh.sh` can drive the bump in isolation. It is not a way to
 release, and a tree bumped with it has been proven by nothing.
 
+## The server artefact
+
+astar-server ships as one static executable per architecture, built by
+`just server-release x86_64-unknown-linux-musl` (and `aarch64-unknown-linux-musl`).
+The recipe runs `ci/check-server-release.sh`, which must pass: the binary is
+statically linked, carries the listener page and LAME, and its `--features`
+are exactly the `release` set. `just release` does not build it yet; attach
+it to a GitHub release by hand when Rob publishes one. It statically links
+LGPL code (LAME, Codec 2), so the release notes point at
+`LICENSE-EXCEPTIONS.md` and the matching source tag.
+
 ## `just publish <version>`
 
 Preconditions:

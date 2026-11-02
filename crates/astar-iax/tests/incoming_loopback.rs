@@ -160,7 +160,7 @@ fn auto_answer_new_yields_accept_answer_and_unified_call() {
             // It's the same Call keystone an outbound dial yields; snapshot is
             // secret-free and the adopt-rx/tx ends are present (poolable).
             let snap = call.snapshot();
-            assert!(snap.node.is_empty());
+            assert_eq!(snap.node, "");
             // iax-31f7: once the leg reaches Active (the ANSWER was acked by
             // the peer above), CallEvent::Answered must carry the negotiated
             // format — this offer negotiates ulaw.
@@ -809,11 +809,12 @@ fn answer_during_calltoken_handshake_is_parked_not_dropped() {
 // ---------------------------------------------------------------------------
 
 /// ASL codec bits as they appear on the wire. The ones astar cannot carry
-/// (`GSM`, `G726`, `ADPCM`) are here because real ASL peers advertise them and
+/// (`G729`, `G726`, `ADPCM`) are here because real ASL peers advertise them and
 /// the point is what happens when they do.
 const ULAW: u32 = 0x4;
 const ALAW: u32 = 0x8;
 const GSM: u32 = 0x2;
+const G729: u32 = 0x100;
 const G726: u32 = 0x10;
 const ADPCM: u32 = 0x20;
 const SLIN: u32 = 0x40;
@@ -902,7 +903,7 @@ fn ulaw_only_peer_is_answered_in_ulaw_under_prefer_slin16() {
     assert_eq!(
         accept_format_for(
             astar_iax::CodecPolicy::PreferSlin16,
-            Some(GSM | ULAW | ALAW | G726 | ADPCM),
+            Some(G729 | ULAW | ALAW | G726 | ADPCM),
             Some(ULAW)
         ),
         ULAW,
@@ -942,15 +943,29 @@ fn wideband_peer_is_answered_in_slin16_under_prefer_slin16() {
 }
 
 #[test]
+fn a_gsm_only_peer_is_accepted_in_gsm() {
+    for policy in [
+        astar_iax::CodecPolicy::UlawOnly,
+        astar_iax::CodecPolicy::PreferSlin16,
+    ] {
+        assert_eq!(
+            accept_format_for(policy, Some(GSM), Some(GSM)),
+            GSM,
+            "a `disallow=all / allow=gsm` node links in GSM under {policy:?}"
+        );
+    }
+}
+
+#[test]
 fn peer_with_no_common_codec_is_rejected_with_a_cause() {
-    // A `disallow=all / allow=gsm` ASL node. astar implements no GSM, so there
+    // A `disallow=all / allow=g729` node. astar implements no G.729, so there
     // is nothing honest to name in an ACCEPT. Before this, the listener
     // ACCEPTed with ulaw the peer never offered and the call died silently.
     let (listener, events) = negotiating_listener(astar_iax::CodecPolicy::PreferSlin16);
     let listener_addr = listener.local_addr();
     let (peer, _peer_addr) = peer_socket();
     peer.send_to(
-        &new_datagram(offer(Some(GSM), Some(GSM)), PEER_CALL),
+        &new_datagram(offer(Some(G729), Some(G729)), PEER_CALL),
         listener_addr,
     )
     .unwrap();
@@ -968,7 +983,7 @@ fn peer_with_no_common_codec_is_rejected_with_a_cause() {
     assert_eq!(
         f.subclass,
         Subclass::Iax(IaxCommand::Reject),
-        "a gsm-only peer must be REJECTed, never ACCEPTed with a codec it cannot decode"
+        "a g729-only peer must be REJECTed, never ACCEPTed with a codec it cannot decode"
     );
     assert_eq!(
         f.ies.cause,
@@ -1041,7 +1056,7 @@ fn peer_with_no_common_codec_is_rejected_with_a_cause() {
     // leg was properly reaped: `done_tx` -> `by_local_call.remove` ->
     // `allocator.free`. If the slot leaked, no reply comes and this times out.
     peer.send_to(
-        &new_datagram(offer(Some(GSM), Some(GSM)), PEER_CALL),
+        &new_datagram(offer(Some(G729), Some(G729)), PEER_CALL),
         listener_addr,
     )
     .unwrap();

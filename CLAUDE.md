@@ -2,7 +2,9 @@
 
 Native multi-network ham-radio client and node: AllStarLink (IAX2), M17, and
 D-Star. One cargo workspace, one git history. AGPL-3.0-only throughout, except
-the vendored `vendor/ambe-thumbdv` (MIT/Apache-2.0).
+the vendored licence islands: `vendor/ambe-thumbdv` (MIT/Apache-2.0),
+`vendor/codec2` (LGPL-2.1-only AND MIT), and `vendor/mp3lame-sys` +
+`vendor/mp3lame-encoder` (LAME, LGPL; astar-server's opt-in `stream-mp3` only).
 
 Design polish is a first-class requirement: astar should be pretty and easy to
 use, not just functional.
@@ -38,13 +40,27 @@ bindings/        The engine's own bindings: swift (AstarStation),
                  swift-serial (AstarSerial), python.
 apps/macos/      The SwiftUI app (macOS menu-bar; iOS targeted).
 apps/gui/        The Iced client for Windows/Linux (crate astar-gui).
-vendor/          ambe-thumbdv — the ThumbDV vocoder driver, MIT/Apache island.
+vendor/          ambe-thumbdv — the ThumbDV vocoder driver, MIT/Apache island;
+                 codec2 — the M17 voice codec (pure Rust), LGPL-2.1/MIT island;
+                 mp3lame-sys / mp3lame-encoder — LAME for /stream.mp3, LGPL island.
 docs/            Engine docs + docs/app/ for the app's own backlog/design.
 ```
 
 **Fat core, thin views.** All protocol/audio/PTT logic lives in `crates/`. The
 macOS and Iced clients are views over the same engine; every feature ships on
 all platforms with per-platform native UI, same look and feel.
+
+**Iced is being replaced** (decided 2026-10-08, Rob): its look is not good
+enough, and the goal is a complete look-and-feel clone of the macOS app on
+Linux, Windows, iOS and Android (`astar-uiclone` in `docs/app/BACKLOG.md`).
+Until that lands, `apps/gui` still builds and ships, so keep it compiling and
+green.
+
+**The Windows/Linux client is paused** (Rob, 2026-10-08): it is not being
+tested or published. New features skip it, and their `docs/FEATURES.md` row
+marks Windows/Linux "paused" rather than leaving a parity defect. Its parity
+debt is owed to the `astar-uiclone` replacement, not to Iced. Keep the shared
+logic in the engine, so that replacement inherits it.
 
 ## Build / test / run
 
@@ -56,6 +72,11 @@ just app         # build the macOS app        just run   # build + launch
 just app-test    # AstarCore SwiftPM tests    just dmg   # local .dmg
 just gui-linux / just gui-windows             # Iced client cross-checks
 just dstar-test  # hardware-free D-Star half
+just nodebench   # astar-server vs a real ASL3 node in podman (not in `just ci`;
+                 # `harness/nodebench/rig.sh build` first; see its README.md)
+just nodebench-up / just nodebench-down       # leave the rig up / tear it down
+just nodebench-soak 24 / just nodebench-serve # hold one link for hours / browse
+                 # runs on 127.0.0.1:8740
 ```
 
 There is no vendoring step and no sibling repo any more: `apps/macos/project.yml`
@@ -86,23 +107,58 @@ committed `astar.h` / `astarserial.h` must not drift.
 * **Secrets** (node secret, portal pass) are connect/init in-args ONLY: never
   stored on a Station, never in snapshots/events/errors, never logged.
 * Hardware-gated suites (`IAX_THUMBDV_TESTS=1`) are never run by an agent.
+* **nodebench links astar-server to stock AllStarLink software, and it
+  stays sealed** (`harness/nodebench/`). Its ASL3 node and
+  astar-server run in podman, with no radio, sound card or serial device
+  anywhere in the rig. The quick tier stays on 127.0.0.1 inside one pod.
+  The exception, which Rob approved on 2026-10-11, is the soak tier's `nat`
+  topology: it runs on podman `--internal` networks, which have no route
+  out, rather than on 127.0.0.1. The rig never queries AllStar DNS and never
+  registers with the portal, and its nodes are the test numbers 1999 and
+  1998.
 
 ## D-Star / AMBE
 
-D-Star is hardware-only: the ThumbDV / DV3000 dongle via `vendor/ambe-thumbdv`.
-There is **no** software AMBE backend, and none is ever to be added, referenced
-or described here — not in code, docs, comments, backlog or commit messages.
-The vendored driver is the whole AMBE story. `astar-codec`'s `ambe-hw` feature
-is off by default.
+The ThumbDV / DV3000 dongle via `vendor/ambe-thumbdv` is the default vocoder
+everywhere, and `astar-codec`'s `ambe-hw` feature is off by default.
 
-`vendor/ambe-thumbdv/Cargo.toml` hard-codes `license`/`version`/`edition`/
-`repository` on purpose. Do not convert them to `.workspace = true` — that would
-relicense someone else's MIT/Apache code as AGPL. See its `VENDORED.md`.
+**Software vocoders are permitted where the patent term has expired and the
+licence is AGPL-compatible — which today means D-Star's AMBE and nothing
+else.** Decided 2026-09-19 (Rob), reversing the previous hardware-only rule.
+
+| Generation | Modes | Status |
+|---|---|---|
+| AMBE 3600×2400 | D-Star | Patent term expired. A software backend is allowed. |
+| AMBE+2 | DMR, NXDN, YSF | Reads on **US8359197 until 2028-05-20**. Hardware only. Do not add a software backend, and do not let a "software vocoder" config option reach these modes. |
+
+So the software/hardware selector is **per-mode, never global**: offering it
+for DMR, NXDN or YSF would ship an encumbered codec. A UI that greys those out
+needs to say why.
+
+Any software backend is an **opt-in cargo feature, off by default**, with its
+licence and the patent reasoning recorded in `LICENSE-EXCEPTIONS.md` — the
+`codec2` entry is the pattern. The ThumbDV path stays the default even where a
+software backend exists.
+
+**Unchanged: never reference or vendor the software AMBE work from
+`rcludwick/ambe`.** That prohibition is about that specific effort and is not
+lifted by any of the above.
+
+`vendor/ambe-thumbdv/Cargo.toml` and `vendor/codec2/Cargo.toml` hard-code
+`license`/`version`/`edition`/`repository` (and `codec2` its `authors`) on
+purpose. Do not convert them to `.workspace = true` — that would relicense
+someone else's MIT/Apache or LGPL code as AGPL. See each one's `VENDORED.md`.
+`vendor/codec2` is also in the workspace `exclude`, so fmt/clippy never touch
+it: it stays byte-for-byte upstream. The same holds for `vendor/mp3lame-sys`
+and `vendor/mp3lame-encoder` (LGPL-3.0), whose `VENDORED.md` files list every
+patch; `stream-mp3` must never become a default feature
+(`ci/guard-codec2-licensing.sh`).
 
 ## Distribution reality
 
-`0.1.3beta` is published: a Developer ID-signed, notarized, stapled `astar.dmg`
-on the public repo's releases page. It is **arm64 only** (a single slice, macOS
+Beta releases are published (latest: `gh release list -R rcludwick/astar`, or
+the top of `CHANGELOG.md`): each is a Developer ID-signed, notarized, stapled
+`astar.dmg` on the public repo's releases page. It is **arm64 only** (a single slice, macOS
 13+) — there is no Intel and no universal build, so an Intel Mac still builds
 from source. There is still **no** Homebrew tap or cask and no App Store
 listing. Do not write install instructions that imply otherwise.
@@ -176,7 +232,8 @@ The path-dep requirements are the ones to watch: Cargo reads a stale
 never complains — which is how the workspace drifted six releases behind before
 `--check` started reading it.
 
-`vendor/ambe-thumbdv` is outside all of this and stays at its own `0.1.0`.
+`vendor/ambe-thumbdv` and `vendor/codec2` are outside all of this and keep
+their own upstream versions (`0.1.0`, `0.3.1`).
 
 Bumping all five is `just release <version>` (`--dry-run` first); publishing is
 the separate `just publish <version>` — see `docs/RELEASING.md`.
@@ -204,6 +261,32 @@ different versions.
 
 An unstamped preferences domain reads as version 1, not 0 — everything written
 before the version existed *is* version 1.
+
+## Feature list — `docs/FEATURES.md`
+
+`docs/FEATURES.md` is the complete list of what astar does **today**: every
+user-visible feature of the macOS app, the Windows/Linux client and
+`astar-server`, plus the engine capabilities they stand on. One row per
+feature, with which platforms have it, so a gap between clients is visible at a
+glance. It lives outside `docs/site/`, so it is not published.
+
+**Every feature ships on every platform.** A feature is not done until every
+client has it: today that's macOS and the Windows/Linux client, and later the
+`astar-uiclone` clients for iOS and Android. Any platform marked "no" in
+`docs/FEATURES.md` is a defect and gets a backlog item naming that row. A
+feature that cannot reach a platform, because of hardware or an OS limit,
+says why in its row. That is the only acceptable gap.
+
+**Keep it true.** A change that adds, removes or changes what a user can do
+updates `docs/FEATURES.md` in the same commit. Shipped-only: designs and backlog
+items do not go in it until the code lands. When it and the code disagree, the
+code wins; fix the list.
+
+**Every feature is documented.** Adding a feature is not done until it has
+user documentation on the public site (`docs/site/`, wired into the `nav` in
+`zensical.toml`): what it does, how to turn it on, and what each setting means.
+Its `docs/FEATURES.md` row links to that page. A plan for a feature carries the
+docs as a task, not an afterthought.
 
 ## Work tracking
 

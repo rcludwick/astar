@@ -1,0 +1,9 @@
+request: GET /status HTTP/1.0
+status: 400
+header: content-security-policy: default-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'
+header: content-type: text/plain; charset=utf-8
+header: referrer-policy: no-referrer
+header: x-content-type-options: nosniff
+header: x-frame-options: DENY
+body: Host required
+

@@ -108,6 +108,18 @@ public struct CallSnapshot: Equatable {
     /// Whether the live session is a DMR link. Mutually exclusive with every
     /// other network at the engine. Receive only: no PTT while it is set.
     public var dmrActive: Bool
+    /// Whether the engine was built with EchoLink, so the `echolink…` calls
+    /// do something. A BUILD fact, like `m17Available`: EchoLink voice is GSM
+    /// in software and needs no hardware. Defaults `false` so pre-existing
+    /// fixtures (and `NullStation`) need no change.
+    public var echolinkAvailable: Bool
+    /// Whether an EchoLink call is connecting or connected. Mutually
+    /// exclusive with every other network at the engine.
+    public var echolinkActive: Bool
+    /// Whether the EchoLink directory login is up. A login still running, or
+    /// one that failed, reads `false`; `StationDriving.echolinkState()` says
+    /// which.
+    public var echolinkLoggedIn: Bool
 
     public init(
         status: IaxStatus, ptt: Bool, remotePTT: Bool,
@@ -126,7 +138,9 @@ public struct CallSnapshot: Equatable {
         dstarAvailable: Bool = false, dstarActive: Bool = false,
         ysfAvailable: Bool = false, ysfActive: Bool = false,
         nxdnAvailable: Bool = false, nxdnActive: Bool = false,
-        dmrAvailable: Bool = false, dmrActive: Bool = false
+        dmrAvailable: Bool = false, dmrActive: Bool = false,
+        echolinkAvailable: Bool = false, echolinkActive: Bool = false,
+        echolinkLoggedIn: Bool = false
     ) {
         self.status = status
         self.ptt = ptt
@@ -159,6 +173,9 @@ public struct CallSnapshot: Equatable {
         self.nxdnActive = nxdnActive
         self.dmrAvailable = dmrAvailable
         self.dmrActive = dmrActive
+        self.echolinkAvailable = echolinkAvailable
+        self.echolinkActive = echolinkActive
+        self.echolinkLoggedIn = echolinkLoggedIn
     }
 
     /// The receive-path health the call-quality line reads, lifted out of the

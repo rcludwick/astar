@@ -14,6 +14,9 @@ include_local_radio = false
 
 [control]
 bind = "0.0.0.0:8730"
+# A wildcard control bind is refused at load without this. Sealed container
+# only: the host side of the published port is 127.0.0.1.
+allow_wildcard_bind = true
 
 [secrets]
 source = "config"

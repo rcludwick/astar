@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# astar — Copyright (c) 2026 Rob Ludwick.
+# SPDX-License-Identifier: AGPL-3.0-only
+# Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
+# The box's loopback /status. FAKE_STATUS is the body; FAKE_STATUS_AFTER=N
+# answers FAKE_STATUS_EARLY for the first N calls (counted in FAKE_COUNTER).
+case "$*" in *127.0.0.1:8730/status*) ;; *) echo "fake curl: refusing '$*'" >&2; exit 99 ;; esac
+if [ -n "${FAKE_STATUS_AFTER:-}" ]; then
+  n=$(cat "$FAKE_COUNTER" 2>/dev/null || echo 0); echo $((n + 1)) >"$FAKE_COUNTER"
+  [ "$n" -lt "$FAKE_STATUS_AFTER" ] && { printf '%s' "${FAKE_STATUS_EARLY:-}"; exit 0; }
+fi
+good='{"calls":[],"links":[],"listening":true,"node_id":"1999","registered":true}'
+printf '%s' "${FAKE_STATUS-$good}"

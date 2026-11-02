@@ -136,8 +136,11 @@ use astar_codec::ambe::{
 use astar_codec::dmr::unpack_voice;
 use astar_dmr::frame::DT_TERMINATOR_WITH_LC;
 use astar_dmr::{CallType, DmrFsm, DmrNetwork, FailureStage, FsmAction, LinkState, Timeslot, wire};
+use astar_record::frames::{CaptureMode, Dir, FrameEvent};
+use astar_record::tap::TapSlot;
 
 use crate::heard::{HeardEntry, HeardLog};
+use crate::over_tap::OverTap;
 use crate::session::ConsoleError;
 
 /// How long the socket blocks before the loop runs `tick` anyway.
@@ -334,6 +337,9 @@ pub struct DmrLink {
     thread: Option<JoinHandle<()>>,
     /// `Some` only for a link opened with audio.
     backend: Option<AmbeBackend>,
+    /// The codec-frame recording tap ([`DmrLink::frame_tap`]). A link with
+    /// no audio decodes nothing, so its slot is never offered to.
+    frame_tap: TapSlot<FrameEvent>,
 }
 
 #[derive(Debug)]
@@ -429,6 +435,17 @@ struct Audio {
     /// Transmit state, `None` while unkeyed. Its presence IS "this station is
     /// transmitting", so there is no separate flag to keep in step.
     tx: Option<Tx>,
+    /// The codec-frame recording tap and the received over it has open.
+    /// Receive only: there is no transmit path to record.
+    rec: OverTap,
+}
+
+/// The recorder a link with audio carries: `dmr72`, each frame the raw 72
+/// bits the chip is handed, error correction included. Not `ysf-dmr`: astar
+/// has no AMBE+2 decoder to strip them to 49 voice bits (and adds none), and
+/// not `dmr`, which unamblify reads as an old spelling of `ysf-dmr`.
+fn over_tap(backend: AmbeBackend) -> OverTap {
+    OverTap::new("dmr", CaptureMode::Dmr72, backend.as_str())
 }
 
 /// One transmission in progress.
@@ -547,15 +564,19 @@ impl DmrLink {
     /// [`ConsoleError::Dmr`] when no `ThumbDV` is available (the message comes
     /// from `classify_thumbdv_failure`, so "unplugged" and "busy" are told
     /// apart).
-    pub fn connect_with_audio(cfg: DmrConfig, audio: CallAudio) -> Result<DmrLink, ConsoleError> {
+    pub fn connect_with_audio(
+        cfg: DmrConfig,
+        audio: CallAudio,
+        trust: &astar_codec::vocoder_trust::VocoderTrust,
+    ) -> Result<DmrLink, ConsoleError> {
         // Hardware-only, exactly as D-Star, YSF and NXDN: the AMBE-3000 in a
         // `ThumbDV` is the whole vocoder story, so a missing dongle is an
         // error naming its reason rather than a link that quietly makes no
         // sound.
-        let (ambe, backend) = open_ambe_stream(Some(AmbeBackend::Hardware), VocoderMode::Dmr)
-            .ok_or_else(|| {
-                ConsoleError::Dmr(astar_codec::ambe::classify_thumbdv_failure().message())
-            })?;
+        let (ambe, backend) =
+            open_ambe_stream(Some(AmbeBackend::Hardware), VocoderMode::Dmr, trust).ok_or_else(
+                || ConsoleError::Dmr(astar_codec::ambe::classify_thumbdv_failure(trust).message()),
+            )?;
         Self::connect_with_stream(cfg, audio, ambe, backend)
     }
 
@@ -582,6 +603,7 @@ impl DmrLink {
             decoded: VecDeque::new(),
             next_release: None,
             tx: None,
+            rec: over_tap(backend),
         };
         Self::spawn(cfg, Some(audio), Some(backend))
     }
@@ -648,6 +670,9 @@ impl DmrLink {
             .map_err(|e| ConsoleError::Dmr(format!("socket timeout: {e}")))?;
 
         let shared = Arc::new(Shared::new(cfg.talkgroup, cfg.timeslot));
+        let frame_tap = audio
+            .as_ref()
+            .map_or_else(TapSlot::default, |a| a.rec.slot());
 
         tracing::debug!(
             system = cfg.system.as_str(),
@@ -682,6 +707,7 @@ impl DmrLink {
             shared,
             thread: Some(thread),
             backend,
+            frame_tap,
         })
     }
 
@@ -708,6 +734,16 @@ impl DmrLink {
             tx_dbfs: -60.0,
             rx_dbfs: -60.0,
         }
+    }
+
+    /// The codec-frame recording tap: install a [`astar_record::Tap`] here
+    /// and the link thread offers every received over to it as
+    /// [`FrameEvent`]s under `dmr72` — each 72-bit frame exactly as it goes
+    /// into the vocoder, then the 160 samples it decoded to. The slot is
+    /// shared: setting it on the returned handle reaches the live link.
+    #[must_use]
+    pub fn frame_tap(&self) -> TapSlot<FrameEvent> {
+        self.frame_tap.clone()
     }
 
     /// Who has keyed up on this link, newest first — see
@@ -841,6 +877,12 @@ fn run(
         }
     }
 
+    // Close a received recording that is still open. Frames still in the
+    // vocoder never decode; the recorder trims a stream's undecoded tail.
+    if let Some(a) = audio.as_mut() {
+        a.rec.close(Dir::Rx);
+    }
+
     if state_from_index(shared.link_state.load(Ordering::Acquire)) == LinkState::Failed {
         // A failed link has nothing to close — the master refused it, dropped
         // it, or the socket stopped taking bytes — and `failed` plus its stage
@@ -958,9 +1000,6 @@ fn on_data(packet: &wire::DataPacket, shared: &Arc<Shared>, audio: Option<&mut A
     shared.last_heard_id.store(packet.src_id, Ordering::Relaxed);
     let src = packet.src_id.to_string();
     shared.heard.note("dmr", &src);
-    if let Ok(mut slot) = shared.last_heard.lock() {
-        *slot = Some(src);
-    }
 
     let end = matches!(
         packet.frame_type,
@@ -979,9 +1018,25 @@ fn on_data(packet: &wire::DataPacket, shared: &Arc<Shared>, audio: Option<&mut A
         _ => {}
     }
 
-    let Some(a) = audio else {
-        return;
-    };
+    if let Some(a) = audio {
+        play_burst(packet, shared, a, &src, new_stream, end);
+    }
+    if let Ok(mut slot) = shared.last_heard.lock() {
+        *slot = Some(src);
+    }
+}
+
+/// The audio half of [`on_data`], for a link with audio: the transmission's
+/// edges as the pipeline and the recording see them, and the voice.
+/// `src` is the burst's source id, as text.
+fn play_burst(
+    packet: &wire::DataPacket,
+    shared: &Arc<Shared>,
+    a: &mut Audio,
+    src: &str,
+    new_stream: bool,
+    end: bool,
+) {
     // HALF-DUPLEX. The ThumbDV is one physical link with one AMBE-3000 behind
     // it, and no session here decodes and encodes at the same time:
     // interleaving the two directions on one chip is how both come out wrong.
@@ -993,15 +1048,27 @@ fn on_data(packet: &wire::DataPacket, shared: &Arc<Shared>, audio: Option<&mut A
         // Whatever is still in the pipeline belongs to the previous talker.
         // Play it before this one's first frame lands on top of it.
         flush(a);
+        // And close its recording, even when the talker is the same.
+        a.rec.close(Dir::Rx);
     }
     match packet.frame_type {
         wire::FrameType::Voice { .. } | wire::FrameType::VoiceSync => {
+            let now = Instant::now();
+            if a.rec.rotates(src, now) {
+                // A new source in the same stream, or a quiet spell: the
+                // previous over's tail finishes in its own recording.
+                flush(a);
+            }
+            a.rec.note_rx(src, now);
             decode_burst(&packet.burst, a, shared);
         }
         // The tail of a transmission is still working through the pipeline
         // when its terminator arrives. Play it, or every over loses its final
         // ~60 ms — and one shorter than the pipeline depth would be silent.
-        _ if end => flush(a),
+        _ if end => {
+            flush(a);
+            a.rec.close(Dir::Rx);
+        }
         // A data-sync burst that is not the terminator is a BPTC-coded link
         // control, a CSBK or an idle: 33 bytes that are not audio. Decoding
         // them would emit a burst of noise at the start of every
@@ -1060,6 +1127,7 @@ fn rx_watchdog(
         && a.tx.is_none()
     {
         flush(a);
+        a.rec.close(Dir::Rx);
     }
 }
 
@@ -1099,12 +1167,15 @@ fn pump(audio: &mut Audio) {
         let Some(frame) = audio.pending.pop_front() else {
             break;
         };
+        // Raw, exactly the nine bytes the chip is handed.
+        audio.rec.frame_with(Dir::Rx, || frame.as_slice().to_vec());
         audio.ambe.submit_decode(frame);
     }
     // Decoded frames go to a queue, NOT straight to the bus: the vocoder
     // finishes a whole burst's worth in a few milliseconds and the bus wants
-    // them spread over 60. See `release`.
+    // them spread over 60. See `release`. Recorded here, at the decode.
     while let Some(pcm) = audio.ambe.poll_decoded() {
+        audio.rec.pcm(Dir::Rx, &pcm);
         audio.decoded.push_back(pcm);
     }
     release(audio, Instant::now());
@@ -1256,6 +1327,7 @@ mod tests {
     use super::*;
     use astar_codec::dmr::{FRAMES_PER_BURST, pack_voice};
     use astar_dmr::Master;
+    use astar_record::frames::{CaptureMode, Dir, FrameEvent};
     use std::sync::mpsc::{Receiver, Sender, channel};
 
     /// The talkgroup every test here joins. Any number does; this one is the
@@ -1380,6 +1452,7 @@ mod tests {
                 decoded: VecDeque::new(),
                 next_release: None,
                 tx: None,
+                rec: over_tap(AmbeBackend::Hardware),
             },
             rx_rx,
             tx_tx,
@@ -1445,6 +1518,94 @@ mod tests {
         };
         p.burst = [0u8; astar_dmr::frame::BURST_LEN];
         p
+    }
+
+    // ── Recording (the frame tap) ───────────────────────────────────────
+
+    /// Install a tap on `audio`'s recorder and hand back its far end.
+    fn tapped(audio: &Audio) -> Receiver<FrameEvent> {
+        let (tap, events) = astar_record::tap::tap_channel(256);
+        audio.rec.slot().set(Some(tap));
+        events
+    }
+
+    /// A received over goes under `dmr72`, raw: each frame is the nine
+    /// bytes `unpack_voice` produced, error correction and all, ahead of its
+    /// audio — and the terminator closes it.
+    #[test]
+    fn a_recorded_dmr_over_goes_under_dmr72_unconverted() {
+        let (mut audio, _rx) = test_audio();
+        let events = tapped(&audio);
+        let shared = Arc::new(Shared::new(TG, Timeslot::Ts2));
+        let mut second = voice_packet(1, 1);
+        second.burst = voice_burst_from(4);
+        for p in [voice_packet(0, 0), second, terminator_packet()] {
+            on_data(&p, &shared, Some(&mut audio));
+        }
+
+        let events: Vec<FrameEvent> = events.try_iter().collect();
+        let FrameEvent::Start {
+            dir: Dir::Rx,
+            network,
+            mode,
+            talker,
+            ..
+        } = &events[0]
+        else {
+            panic!("an over opens with Start: {:?}", events[0]);
+        };
+        assert_eq!(
+            (*network, *mode, talker.as_deref()),
+            ("dmr", CaptureMode::Dmr72, Some("4242"))
+        );
+        assert_eq!(events.last(), Some(&FrameEvent::End { dir: Dir::Rx }));
+
+        let (mut frames, mut pcm) = (Vec::new(), Vec::new());
+        for e in &events[1..events.len() - 1] {
+            match e {
+                FrameEvent::Frame {
+                    dir: Dir::Rx,
+                    bytes,
+                    seq: None,
+                } => frames.push(bytes.clone()),
+                FrameEvent::Pcm {
+                    dir: Dir::Rx,
+                    pcm: p,
+                } => {
+                    assert!(pcm.len() < frames.len(), "audio ahead of its frame");
+                    pcm.push(p[0]);
+                }
+                other => panic!("unexpected mid-over event {other:?}"),
+            }
+        }
+        let want: Vec<Vec<u8>> = unpack_voice(&voice_burst_from(1))
+            .into_iter()
+            .chain(unpack_voice(&voice_burst_from(4)))
+            .map(|f| f.as_slice().to_vec())
+            .collect();
+        assert_eq!(frames, want);
+        assert!(frames.iter().all(|f| f.len() == 9), "72 bits, unconverted");
+        assert_eq!(pcm, [1, 2, 3, 4, 5, 6]);
+    }
+
+    /// A new stream id is a new over even from the same talker: the first
+    /// recording closes before the second opens.
+    #[test]
+    fn a_new_stream_id_opens_a_new_recording() {
+        let (mut audio, _rx) = test_audio();
+        let events = tapped(&audio);
+        let shared = Arc::new(Shared::new(TG, Timeslot::Ts2));
+        let mut next = voice_packet(0, 0);
+        next.stream_id = [9, 9, 9, 9];
+        for p in [voice_packet(0, 0), next] {
+            on_data(&p, &shared, Some(&mut audio));
+        }
+        let edges: Vec<FrameEvent> = events
+            .try_iter()
+            .filter(|e| matches!(e, FrameEvent::Start { .. } | FrameEvent::End { .. }))
+            .collect();
+        assert_eq!(edges.len(), 3, "{edges:?}");
+        assert_eq!(edges[1], FrameEvent::End { dir: Dir::Rx });
     }
 
     #[test]

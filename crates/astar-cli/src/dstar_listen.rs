@@ -40,7 +40,7 @@ use astar_audio::AudioBackend;
 use astar_codec::ambe::AmbeBackend;
 use astar_console::DstarSnapshotState;
 use astar_dstar::LinkState;
-use astar_station::{Station, StationConfig};
+use astar_station::Station;
 
 use crate::cli::DSTAR_LISTEN_USAGE;
 use crate::ptt::{self, PttCommand};
@@ -155,11 +155,11 @@ pub fn parse(mut args: impl Iterator<Item = String>) -> Result<Parsed, String> {
 /// lands in a file instead.
 fn build_station(wav: Option<&Path>) -> Station {
     match wav {
-        None => Station::new(StationConfig::default()),
+        None => Station::new(crate::vocoder::listener_config()),
         Some(path) => {
             let path = path.to_path_buf();
             Station::with_backend_factory(
-                StationConfig::default(),
+                crate::vocoder::listener_config(),
                 Box::new(move || {
                     Box::new(WavBackend::new(path.clone(), "dstar-listen")) as Box<dyn AudioBackend>
                 }),
@@ -430,6 +430,7 @@ fn stream_line(callsign: &str, slow_text: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use astar_station::StationConfig;
 
     /// A `Station` with no live session: every `set_ptt` on it returns
     /// `NotConnected`, which is the error branch `set_ptt` below has to get

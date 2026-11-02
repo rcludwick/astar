@@ -12,6 +12,11 @@ description = "Audio I/O for astar. cpal-backed."
 workspace = true
 
 [features]
+default = ["device-audio"]
+## Real sound devices through cpal (ALSA on Linux, CoreAudio, WASAPI).
+## Default-on; astar-server's single static release turns it off, because a
+## headless node uses `NullBackend` and static musl cannot link libasound.
+device-audio = ["dep:cpal"]
 ## Exposes a hardware-free `NullBackend` for downstream tests/examples.
 test-backend = []
 ## Derive serde on the secret-free `MicProfile` / `NotchSpec` so a front-end can
@@ -19,12 +24,15 @@ test-backend = []
 serde = ["dep:serde"]
 
 [dependencies]
-cpal.workspace = true
-astar-iax-core = { path = "../astar-iax-core", version = "0.1.16-beta" }
+cpal = { workspace = true, optional = true }
+astar-iax-core = { path = "../astar-iax-core", version = "0.1.18-beta" }
 # The adaptive RX jitter buffer (`jitter.rs`, the `jitterbuf.c` port) the output
 # mixer plays AllStarLink lanes out of — iax-rxjb. Default features only: no
 # codec2, no ambe-hw, so no LGPL and no vocoder driver come along.
-astar-codec = { path = "../astar-codec", version = "0.1.16-beta" }
+astar-codec = { path = "../astar-codec", version = "0.1.18-beta" }
+# Read-only recording taps (`Tap`, `TapSlot`, `PcmChunk`). No `writer`
+# feature: plain std, no FLAC/tar, nothing heavier on the audio thread.
+astar-record = { path = "../astar-record", version = "0.1.18-beta", default-features = false }
 mio = { workspace = true }
 rubato.workspace = true
 rustfft = "6"

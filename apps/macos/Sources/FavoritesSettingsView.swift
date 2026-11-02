@@ -17,11 +17,13 @@
     }
 
     /// Settings section: the **Favorites address book**. Lists saved favorites
-    /// (name + node), each renameable (edit the name in place) and deletable
-    /// (trash button + swipe), with an Add row at the bottom. Mutations go through
-    /// `CallSession`'s directory helpers and bump the shared `directoryRevision`
-    /// so the call-screen dial menu / star re-read the (non-`@Published`) store.
-    /// No network — the online AllStarLink lookup is a separate nugget (astar-6c65).
+    /// from every network (network + name + target), each renameable (edit the
+    /// name in place), repointable and deletable (trash button + swipe), with
+    /// an Add row for AllStar nodes at the bottom — other networks' favorites
+    /// are starred from the call screen, where their targets are built.
+    /// Mutations go through `CallSession`'s directory helpers and bump the
+    /// shared `directoryRevision` so the call-screen dial menu / star re-read
+    /// the (non-`@Published`) store.
     struct FavoritesSettingsView: View {
         @EnvironmentObject private var session: CallSession
         /// Shared with the call screen so its directory menu / star re-render after
@@ -39,6 +41,7 @@
 
         private var favorites: [NodeEntry] {
             _ = directoryRevision  // re-read the (non-@Published) store on edits
+            _ = session.directoryChangeCount  // and on stars toggled elsewhere
             return session.directoryFavorites()
         }
 
@@ -55,7 +58,7 @@
 
                 if favorites.isEmpty {
                     Text(
-                        "No favorites yet. Add a node below, or tap the ☆ next to the node field on the call screen."
+                        "No favorites yet. Add an AllStar node below, or tap the ☆ next to the dial field on the call screen — on any network."
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -110,17 +113,20 @@
             HStack(spacing: 8) {
                 TextField("Name (callsign)", text: $newName)
                     .textFieldStyle(.roundedBorder)
-                TextField("Node", text: $newNode)
+                TextField("AllStar node", text: $newNode)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 72)
+                    .frame(width: 96)
                     .onSubmit(add)
+                    .accessibilityLabel("AllStar node number")
                 Button(action: add) {
                     Label("Add", systemImage: "plus")
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .disabled(!canAdd)
-                .help("Add this node to favorites")
+                .help(
+                    "Add this AllStar node to favorites. To save a favorite on another "
+                        + "network, star it beside the dial field on the call screen.")
             }
         }
 
@@ -196,6 +202,7 @@
         var body: some View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
+                    networkTag
                     TextField("Name", text: $name)
                         .textFieldStyle(.roundedBorder)
                         .onSubmit(commitRename)
@@ -210,8 +217,10 @@
                             RoundedRectangle(cornerRadius: 5, style: .continuous)
                                 .strokeBorder(Color.red, lineWidth: nodeRejected ? 1.5 : 0)
                         )
-                        .help("Node number or address — edit to repoint this favorite")
-                        .accessibilityLabel("Node number or address")
+                        .help(
+                            "\(entry.network.displayName) target — edit to repoint this favorite"
+                        )
+                        .accessibilityLabel("\(entry.network.displayName) target")
                     Button(role: .destructive) {
                         session.directoryRemove(id: entry.id)
                         directoryRevision += 1
@@ -234,6 +243,28 @@
             .background(
                 Color.secondary.opacity(0.06),
                 in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+
+        /// Which network the favorite dials on: the same capsule and symbol
+        /// the call card's network badge uses, so a mixed list reads at a
+        /// glance.
+        private var networkTag: some View {
+            Label {
+                Text(entry.network.badge)
+            } icon: {
+                Image(systemName: entry.network.symbol)
+            }
+            .labelStyle(.titleAndIcon)
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.secondary.opacity(0.15), in: Capsule())
+            .fixedSize()
+            .help(entry.network.displayName)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Network")
+            .accessibilityValue(entry.network.displayName)
         }
 
         /// Per-node talk-timer override: a mode picker (Default / Custom / Off)
@@ -285,11 +316,19 @@
         /// core's own checks so the message always matches the actual refusal.
         private var nodeRejectionReason: String? {
             let trimmed = node.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty { return "Enter a node number or address." }
-            if DialTarget.parse(trimmed) == nil {
-                return "Not a valid node number or address."
+            let network = entry.network
+            if trimmed.isEmpty {
+                return network == .allstar
+                    ? "Enter a node number or address." : "Enter a \(network.displayName) target."
             }
-            if let other = session.directoryEntry(forNode: trimmed), other.id != entry.id {
+            if !CallSession.isSavableTarget(trimmed, network: network) {
+                return network == .allstar
+                    ? "Not a valid node number or address."
+                    : "Not a valid \(network.displayName) target."
+            }
+            if let other = session.directoryEntry(forNode: trimmed, network: network),
+                other.id != entry.id
+            {
                 return "Already saved as \u{201C}\(other.label)\u{201D}."
             }
             return nil

@@ -50,11 +50,15 @@ public enum ConfigMerge {
         return Result(merged: merged, added: added, updated: updated)
     }
 
-    /// Upsert the node directory, matching on **node number, not id**.
+    /// Upsert the node directory, matching on **network and target, not id**
+    /// (`NodeEntry.directoryKey`).
     ///
-    /// `recordRecent` upserts by node and `directorySetNode` refuses two entries
-    /// pointing at one node, so matching on id here would manufacture exactly
-    /// the duplicate those rules exist to prevent.
+    /// `recordRecent` upserts by network and target, and `directorySetNode`
+    /// refuses two entries pointing at one target, so matching on id here
+    /// would manufacture exactly the duplicate those rules exist to prevent.
+    /// The network is part of the match: an archive's EchoLink node 1234 is
+    /// not the local AllStar node 1234. An entry from a file written before
+    /// entries carried a network decodes as AllStar, which is what it was.
     ///
     /// On a match the LOCAL id survives — favorites and recents elsewhere
     /// reference it, and rewriting it from the archive would orphan them — and
@@ -64,14 +68,14 @@ public enum ConfigMerge {
         -> Result<NodeEntry>
     {
         var merged = existing
-        var byNode = [String: Int]()
-        for (i, entry) in merged.enumerated() { byNode[entry.node] = i }
+        var byKey = [String: Int]()
+        for (i, entry) in merged.enumerated() { byKey[entry.directoryKey] = i }
         var usedIDs = Set(merged.map(\.id))
 
         var added = 0
         var updated = 0
         for var entry in incoming {
-            if let i = byNode[entry.node] {
+            if let i = byKey[entry.directoryKey] {
                 let local = merged[i]
                 entry.id = local.id
                 entry.favorite = entry.favorite || local.favorite
@@ -80,11 +84,11 @@ public enum ConfigMerge {
                     updated += 1
                 }
             } else {
-                // A colliding id on a DIFFERENT node would give two entries one
+                // A colliding id on a DIFFERENT target would give two entries one
                 // identity; rebase rather than refuse the entry.
                 if usedIDs.contains(entry.id) { entry.id = UUID().uuidString }
                 usedIDs.insert(entry.id)
-                byNode[entry.node] = merged.count
+                byKey[entry.directoryKey] = merged.count
                 merged.append(entry)
                 added += 1
             }
@@ -170,8 +174,12 @@ public enum ConfigMerge {
             summary.directoryAdded = d.added
             summary.directoryUpdated = d.updated
         }
-        summary.settingsApplied = archive.settings?.count ?? 0
-        summary.interfaceApplied = archive.interface?.count ?? 0
+        // Counted as `ConfigTransfer.apply` writes them: machine-local keys a
+        // hand-edited file carries are refused, so they are not "applied".
+        summary.settingsApplied =
+            archive.settings?.keys.filter(ConfigArchive.isImportable(key:)).count ?? 0
+        summary.interfaceApplied =
+            archive.interface?.keys.filter(ConfigArchive.isImportable(key:)).count ?? 0
         summary.callsignApplied = archive.callsign?.isEmpty == false
         // One line for both numbers: the summary tells the operator their
         // identity landed, not which of the two fields did.

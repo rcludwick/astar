@@ -66,7 +66,7 @@ fn main() {
 
     let mut buf = Vec::with_capacity(RNNOISE_FRAME);
     let start = Instant::now();
-    for chunk in input.chunks_exact(RNNOISE_FRAME) {
+    for chunk in input.as_chunks::<RNNOISE_FRAME>().0 {
         buf.clear();
         buf.extend_from_slice(chunk);
         stage.process(&mut buf);

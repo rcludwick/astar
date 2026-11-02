@@ -2,12 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 //! Server-Sent-Events for live console state (iax-dd42 Phase 2). `sse_frame`
-//! formats one event; `SseReader` is a blocking `Read` that emits a frame at
-//! ~30 Hz for a long-lived `GET /events` response.
-
-use std::io::{self, Read};
-use std::sync::Arc;
-use std::time::Duration;
+//! formats one event; `next_frame_json` is the payload `GET /events` emits at
+//! ~30 Hz.
 
 use astar_console::ConsoleState;
 use astar_console::{ParrotShared, peak_to_dbfs};
@@ -32,70 +28,32 @@ pub(crate) fn parrot_view(shared: &ParrotShared) -> serde_json::Value {
     })
 }
 
-/// A blocking `Read` that yields one `ConsoleState` SSE frame per ~33 ms tick.
-/// `tiny_http` drives it by repeatedly calling `read`; it never returns 0 (the
-/// stream ends only when the client disconnects and the write side errors).
-pub struct SseReader {
-    state: Arc<ServerState>,
-    /// Last successful snapshot, re-emitted when the session lock is busy so
-    /// the stream never blocks (see `next_frame`).
-    last: ConsoleState,
-    residual: Vec<u8>,
-    pos: usize,
-    tick: Duration,
-}
-
-impl SseReader {
-    #[must_use]
-    pub fn new(state: Arc<ServerState>) -> Self {
-        Self {
-            state,
-            last: ConsoleState::default(),
-            residual: Vec::new(),
-            pos: 0,
-            tick: Duration::from_millis(33),
-        }
+/// The next `/events` payload, as JSON: the session snapshot, the parrot
+/// signals and the node status. `last` is the previous good snapshot.
+#[must_use]
+pub fn next_frame_json(state: &ServerState, last: &mut ConsoleState) -> String {
+    // Never block the live stream on the session lock. While connect /
+    // disconnect hold it for their (slow) audio open/teardown,
+    // `try_snapshot` returns None and we re-emit the last known state; the
+    // next tick picks up the fresh state once the lock frees. This keeps the
+    // UI responsive (it updates to "idle" right after teardown) instead of
+    // freezing. The station shares the same session, so this is the same
+    // non-blocking `try_lock`+snapshot the harness did inline before.
+    if let Some(snap) = state.station.try_snapshot() {
+        *last = snap;
     }
-
-    fn next_frame(&mut self) -> String {
-        // Never block the live stream on the session lock. While connect /
-        // disconnect hold it for their (slow) audio open/teardown,
-        // `try_snapshot` returns None and we re-emit the last known state; the
-        // next tick picks up the fresh state once the lock frees. This keeps the
-        // UI responsive (it updates to "idle" right after teardown) instead of
-        // freezing. The station shares the same session, so this is the same
-        // non-blocking `try_lock`+snapshot the harness did inline before.
-        if let Some(snap) = self.state.station.try_snapshot() {
-            self.last = snap;
-        }
-        let mut v = serde_json::to_value(&self.last).unwrap_or_else(|_| serde_json::json!({}));
-        v["parrot"] = parrot_view(&self.state.parrot_shared);
-        // Node-mode status (iax-64b6) read from the shared NodeStatus the event
-        // pump owns. `mode` is already in ConsoleState; echoed here for the UI.
-        let node = &self.state.node_status;
-        v["node"] = serde_json::json!({
-            "mode": self.last.mode,
-            "listening": *node.listening.lock().unwrap(),
-            "incoming_from": *node.incoming_from.lock().unwrap(),
-            "register": *node.register.lock().unwrap(),
-        });
-        format!("data: {v}\n\n")
-    }
-}
-
-impl Read for SseReader {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.pos >= self.residual.len() {
-            // Pace the stream, then produce the next frame.
-            std::thread::sleep(self.tick);
-            self.residual = self.next_frame().into_bytes();
-            self.pos = 0;
-        }
-        let n = (self.residual.len() - self.pos).min(buf.len());
-        buf[..n].copy_from_slice(&self.residual[self.pos..self.pos + n]);
-        self.pos += n;
-        Ok(n)
-    }
+    let mut v = serde_json::to_value(&*last).unwrap_or_else(|_| serde_json::json!({}));
+    v["parrot"] = parrot_view(&state.parrot_shared);
+    // Node-mode status (iax-64b6) read from the shared NodeStatus the event
+    // pump owns. `mode` is already in ConsoleState; echoed here for the UI.
+    let node = &state.node_status;
+    v["node"] = serde_json::json!({
+        "mode": last.mode,
+        "listening": *node.listening.lock().unwrap(),
+        "incoming_from": *node.incoming_from.lock().unwrap(),
+        "register": *node.register.lock().unwrap(),
+    });
+    v.to_string()
 }
 
 #[cfg(test)]

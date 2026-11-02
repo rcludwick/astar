@@ -12,7 +12,542 @@ inline. All 228 issues (164 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (107)
+## Open items (170)
+
+### iax-vtrust — DONE 2026-10-31: A D-Star connect could key a radio on an FT-X CAT/PTT cable
+*P1 high · safety · labels: dstar, ambe, thumbdv, serial, on-air-safety*
+
+**Closed.** `work/vocoder-trust` merged to main as `3e5fcde` on 2026-10-31, with every opener-safety test passing. The hardware checks in the last paragraph below are still owed by Rob; they are listed in his to-do note, not here.
+
+`SerialTransport::candidate_ports` in `vendor/ambe-thumbdv` accepted every FTDI `0403:6015` port, and `detect()` opened each in turn at 460800 and 230400 baud and wrote AMBE reset/PRODID bytes until one answered. That id covers FTDI's whole FT-X family (FT230X/FT231X), which many USB CAT/PTT cables use, and DVsticks enumerate as "FT230X Basic UART" with FTDI-assigned serials, so USB identity cannot tell a stick from a cable. Opening a tty on macOS raises DTR/RTS, so a D-Star connect could briefly key a radio wired to such a cable, twice, and write junk into its CAT port. `IAX_THUMBDV_PORT` only narrowed that same list. The test `detect_without_hardware_errors_not_hangs` ran that scan on every `just ci`.
+
+The fix on `work/vocoder-trust`: the engine opens a vocoder port only when its USB serial is on a trust list (`VocoderTrust`), passed explicitly into every AMBE opener; an empty list opens nothing and scans for nothing. `IAX_THUMBDV_PORT` narrows within the trusted ports and a pin outside them is refused. Every open drives DTR/RTS low straight away. The only pre-trust open is enrolment, a user action after a CAT-cable warning, which classifies the PRODID reply (AMBE3000 trusted, AMBE3003 recognised but not added, anything else refused). Surfaces: Settings → Vocoders in the macOS app (`vocoder.trusted`, never exported in `.astarconfig`), `node.toml` `[vocoder] trusted_serials` plus `astar-server vocoder list/add` and a settings-page card, and `ASTAR_VOCODER_SERIALS` for the `*-listen` CLI tools. User docs: `docs/site/macos/vocoders.md`.
+
+Closes on merge. Still owed after merge, by Rob on hardware: confirm a DVstick 30 enrols and decodes with DTR/RTS held low, that a DVstick 33 reports the "not supported yet" outcome, and the macOS app's full build and a visual check of Settings → Vocoders (not run by an agent: a Debug rebuild needs a keychain prompt only Rob can answer).
+
+### iax-ambe3003 — Support the AMBE-3003 (DVstick 33) as a vocoder
+*P2 medium · feature · labels: dstar, ambe, dvstick, cx:4*
+
+The DVMEGA DVstick 33 carries an AMBE-3003, a three-channel part. Enrolment (`iax-vtrust`) recognises its `AMBE3003*` PRODID and refuses to trust it with "recognised but not supported yet", because the vendored `ambe-thumbdv` driver speaks the AMBE-3000's single-channel packet protocol only. Rob has three DVstick 33s.
+
+Work: add AMBE-3003 support to the driver — channel-addressed packets, per-channel rate and init, and its baud/flow-control defaults — record the change in `vendor/ambe-thumbdv/VENDORED.md` (the crate keeps its own MIT/Apache licence fields), then let enrolment trust it with model "DVstick 33 / AMBE-3003". Decide whether astar uses one channel or exposes the other two (for example the transcoding bridge, `iax-e7c3`). Tests are hardware-free against a mock transport scripted with AMBE-3003 replies; the hardware-gated suite is Rob's to run.
+
+Done when: a DVstick 33 enrols as trusted, D-Star decodes and encodes through it, the macOS Vocoders page and `docs/site/macos/vocoders.md` stop calling it unsupported, and `docs/FEATURES.md` says so.
+
+### astar-echolink-incoming — accept incoming EchoLink calls, checked against the directory
+*P2 · feature · labels: echolink, app, server, cx:5*
+
+Both the app and astar-server only call out (Rob, 2026-10-26, "paused").
+A control or audio datagram from a station astar did not call is dropped
+without a reply. Accepting calls means: an "accept incoming calls" switch
+(off by default), an inbound SDES opening a call only when the sender's
+callsign is in the current directory list **and** the datagram's source IP
+matches the IP the directory lists for it (EchoLib's check), a busy reply
+while a call is up (the app holds one call; the server may hold several),
+and the UI for a ringing station. Calling in also needs UDP 5198–5199
+reachable from outside, so the docs must explain port forwarding, which
+today's pages say is not needed.
+
+### astar-echolink-proxy — EchoLink Proxy for stations behind carrier-grade NAT
+*P3 · feature · labels: echolink, app, server, cx:5*
+
+A station whose provider shares one public address among many customers
+(CGNAT, most mobile networks) may not get EchoLink audio through. EchoLink's
+answer is the [Proxy](https://echolink.org/proxy.htm): a TCP tunnel to a
+public proxy that relays the UDP. Add a proxy client (host, port, proxy
+password; the password is a secret, in-arguments only, like the login
+password), behind the same loopback guard in tests, and a field in the app's
+EchoLink pane and in `[echolink]`.
+
+### astar-echolink-mixminus — a mix that keeps EchoLink out of the Discord and listener feeds
+*P3 · feature · labels: echolink, server, discord, stream, cx:5*
+
+`[echolink]` refuses to load beside `[discord]`, `[web] public_bind` and
+`[stream] enabled = true`, because EchoLink's access policy forbids linking
+it to VoIP systems people reach directly from a computer. A conference mix
+that leaves EchoLink members' audio out of the Discord member's feed and out
+of the stream would let them coexist. Before building it, confirm with
+EchoLink support that a mix that never carries EchoLink audio to those
+systems satisfies the policy (the draft email is in the EchoLink design,
+notes `designs/astar/2026-10-26-echolink-design.md`). Only then relax the
+load-time refusal, with tests that a Discord or stream feed carries no
+EchoLink audio.
+
+### astar-echolink-nodebench — a sealed interop rig with chan_echolink and EchoLib
+*P3 · test · labels: echolink, nodebench, test, cx:5*
+
+Every EchoLink test today runs against astar's own fakes on 127.0.0.1. An
+interop rig would run a stock Asterisk `chan_echolink` node and an
+EchoLib-based station (SvxLink) in podman against a fake directory, and call
+between them and astar, so the wire format is checked against someone else's
+implementation without ever touching EchoLink's servers. EchoLink's fixed
+ports (5198/5199) mean each party needs its own address, so the rig would
+run on podman `--internal` networks, as the soak tier's `nat` topology does.
+**Needs Rob's OK** for that, as the soak exception did (CLAUDE.md,
+"nodebench … stays sealed"). The rig must never resolve or reach an
+`echolink.org` host.
+
+### astar-gsm-multiframe — accept IAX2 GSM payloads with more than one frame
+*P3 · task · labels: iax2, codec, gsm, cx:2*
+
+IAX2 GSM accepts exactly one 33-byte frame per voice frame (EchoLink plan
+D5). A 66-byte (two-frame) payload is dropped with the existing once-per-call
+warning, because `EdgeAudio` pops one bus frame per wire frame and a
+multi-frame payload would drift. If a node ever sends one (nodebench or a
+real GSM-only node), decode every 33-byte frame in the payload and feed the
+bus at the right rate.
+
+### astar-echolink-m17-gate — an M17 monitor talker does not open EchoLink stations' receive side
+*P2 · bug · labels: echolink, m17, server, conference, cx:2*
+
+On astar-server, each EchoLink station hears the conference only while
+another contributor is active: a non-link call's remote key, a link whose
+mode relays onward (its remote key), or another EchoLink station talking
+(EchoLink Task 10). The M17 monitor's conference member has no key flag, so
+a talker on a monitored M17 reflector is mixed into the conference but never
+opens an EchoLink station's receive gate; those stations hear silence. Give
+the M17 source member a "receiving" key flag (the monitor already knows,
+`m17.receiving` in `/status`) and include it in the gate, with a manager
+test beside the link-remote-keyed one.
+
+### astar-echolink-dns-deadline — directory host lookups have no deadline
+*P3 · bug · labels: echolink, app, server, cx:2*
+
+The presence thread resolves the directory host names with the system
+resolver, which has no timeout of its own (EchoLink Task 7). A resolver that
+hangs stalls the login, logout and list refresh behind it, and a logout can
+then take longer than the ~80 s the code budgets for. Resolve on a helper
+thread with a deadline (a few seconds), treat a timeout as a transport
+failure (back off, rotate servers), and test it with a stalling fake
+resolver under the loopback guard.
+
+### astar-gsm-etsi-official — DONE 2026-10-31: run the GSM gate against Rob's own ETSI download (Rob)
+*P2 · test · labels: codec, gsm, rob, cx:1*
+
+**Closed.** Rob downloaded ETSI's own zip on 2026-10-31. Unpacked to `~/Library/Caches/astar/etsi-en300961/`, `gsm_etsi` passed bit-exactly against it (3 tests, no skip line).
+
+`crates/astar-codec/tests/gsm_etsi.rs` ran green (EchoLink Task 1) against
+the provisional copy of the ETSI EN 300 961 vectors in the oxideav-gsm repo,
+every file matching `tests/fixtures/gsm/ETSI-SHA256SUMS`. The official check
+against ETSI's own zip is still owed. Rob: download the zip in a browser
+from ETSI, unpack it to `~/Library/Caches/astar/etsi-en300961/`, then run
+`ASTAR_GSM_ETSI_DIR=$HOME/Library/Caches/astar/etsi-en300961 cargo test -p
+astar-codec --features gsm --test gsm_etsi -- --nocapture`. Both tests must
+pass with no skip line. If either fails, the remedy is a clean-room GSM 06.10
+from EN 300 961, not a C fallback.
+
+### astar-gsm-nodebench — the nodebench GSM cell (Rob)
+*P2 · test · labels: iax2, gsm, nodebench, rob, cx:1*
+
+EchoLink Task 2 added `gsm` to nodebench's `NODE_CODECS` and policy codecs,
+but the rig was not run. Rob: `harness/nodebench/rig.sh build`, then
+`just nodebench`, and confirm the gsm cells pass: "node dials" negotiates
+GSM, and "server dials" is refused (no common codec), because astar
+accepts GSM on calls it answers and never offers it on calls it places.
+
+### astar-gsm-outbound — decide whether calls astar places should offer GSM
+*P3 · task · labels: iax2, gsm, nodebench, cx:1*
+
+The final EchoLink review took GSM out of every outbound NEW's CAPABILITY
+(`CodecPolicy::offer_order`), under every policy, so a node astar dials can
+never pick GSM over a better codec both ends have. The cost is that a
+GSM-only node (`disallow=all / allow=gsm`) cannot be dialled from astar; it
+has to dial in, where GSM is still accepted. Once `astar-gsm-nodebench` has
+run, look at how stock ASL3 ranks a GSM offer against µ-law, and decide
+whether offering GSM last outbound is safe. If it is, add it back to
+`offer_order` and flip nodebench's `Direction::ServerDials` codec set.
+
+### astar-echolink-tx-timeout — the app-wide transmit time-out must cover EchoLink
+*P2 · task · labels: echolink, ptt, safety, cx:2*
+
+EchoLink keying has its own hard engine cap today: the link stops sending
+after 10 minutes of continuous talk (`Timings::max_transmit`, both the app's
+call and the node leg's peer members), and the app's talk timer warns
+before that. The app-wide transmit time-out designed on `work/ble-ptt` (one
+global time-out across every source, 1–10 min, default 2, never off) must
+cover EchoLink keying when it lands, with the 10-minute cap staying as the
+backstop beneath it.
+
+### astar-console-all-features — `cargo test -p astar-console --all-features` does not compile
+*P3 · bug · labels: console, ci, cx:1*
+
+Pre-existing on main. With the `serde` feature on, `ConsoleState` derives
+`Serialize`, but its `denoise_status: astar_audio::DenoiseStatus` field does
+not implement it:
+
+```
+error[E0277]: the trait bound `DenoiseStatus: serde::Serialize` is not satisfied
+    --> crates/astar-console/src/state.rs:48:38
+```
+
+`just ci` never builds that combination, so nothing caught it. Derive
+`Serialize` on `DenoiseStatus` behind astar-audio's own `serde` feature (or
+skip the field), and consider an `--all-features` build of the leaf crates
+in CI.
+
+### astar-echolink-minors — small EchoLink follow-ups found in review
+*P3 · task · labels: echolink, cx:2*
+
+Each was judged too small to hold up the EchoLink branch:
+
+- **Outbound chat and info text** are not stripped of `>` or CR before they
+  go out (`chat_datagram` / `info_datagram`), and an empty sender yields a
+  chat line from `""`.
+- **Login reply parsing:** `parse_login_reply` accepts any reply that starts
+  `OK`, and checks `OK`/`INCORRECT` before skipping leading CR/LF, so
+  `"\r\nOK"` reads as a refusal quoting `OK`. A BOM or space before `@@@`
+  gives a misleading inflate error.
+- **TX packet timing:** packets leave on a 50 ms grid, so 80 ms of GSM goes
+  out unevenly. Watch it on the node leg.
+- **"Directory unreachable" hint:** once logged in, a directory that stays
+  down keeps the state `LoggedIn` indefinitely (by design, to avoid a
+  misleading "log in first"); the app could say the list is stale.
+- **Spawn failure in `start_replacing`** blocks and loses the old login
+  (very unlikely).
+- **Downstream test builds** (cli, inspect, gui) build
+  astar-console's `echolink` without `echolink-loopback-only`; harmless until
+  one of their tests exercises EchoLink.
+- **`ci/guard-echolink.sh`'s socket scan** does not scan `crates/*/tests`.
+- **`just gsm-check`** is now redundant with astar-iax enabling `gsm`, but
+  harmless.
+- **The `[echolink]` block in `deploy/node.toml.example`** has no parse test
+  of its own, unlike `[m17]` (`m17_example_block_parses`).
+
+### astar-dns-ns — Look up a zone's nameservers so DNS-01 asks them directly
+
+*P3 low · task · labels: server, web, dns, cx:3*
+
+DNS-01 with Porkbun asks Porkbun's nameservers directly whether the challenge
+record is visible. Every other provider waits until the provider lists the
+record and then a blind 60 seconds, because the node does not know their
+nameservers. Look up the zone's NS records, ask those servers, and drop the
+fixed wait.
+
+### astar-dns-more — Providers that need RFC 2136/TSIG or two credentials
+
+*P3 low · feature · labels: server, web, dns, cx:5*
+
+The ten providers wired today each take one API token. Add RFC 2136 dynamic
+update with TSIG keys, and the providers that need two credentials: GoDaddy,
+DNSimple, Name.com, Route 53 and similar. A new provider is a row in
+`DNS_UPDATE_PROVIDERS` and an arm in `public::dns_update::build_updater`; a
+two-credential one also needs the credential store to hold a pair.
+
+### astar-dns-ui — Settings page fields for DNS provider tokens
+
+*P3 low · task · labels: server, web, dns, ui, cx:3*
+
+The `dns:<provider>` tokens can be set by environment variable, in the
+credentials file, or with `POST /secrets`, but the settings page has no field
+for them (only Porkbun has one). Add credential fields for the `dns:<provider>`
+keys, shown for the provider chosen in `[web.dns]`, set-only like the other
+credentials.
+
+### astar-sec-review — DONE 2026-10-13: security review of the web-facing code, and its fixes
+*P1 · task · labels: server, web, auth, security, cx:4*
+
+**Closed.** A four-part read-only review (public bind and streams; sign-in;
+control port and settings; ACME, Porkbun, DNS and the pages) found nothing
+critical. Every finding was fixed test-first on `work/sec-public`,
+`work/sec-auth`, `work/sec-control` and `work/sec-acme`, merged as
+`work/sec-fixes`:
+
+- one deadline for the whole request (TLS handshake, head, body); per-address
+  connection caps (IPv6 per /64); port 80 has its own pool so ACME http-01 is
+  never starved;
+- per-address cap on long-lived streams (4) and a global cap on event feeds;
+- HSTS over TLS;
+- open streams end within 5 s of sign-out, removal, demotion or expiry;
+- invites die with the admin who made them;
+- a stranger can no longer lock an app-only account out (per-source lockout);
+- the TOTP attempt is checked, evaluated and counted atomically;
+- unknown names answer like real ones (lockout and `key_begin` decoys);
+- limits keyed per IPv4 address / IPv6 /64; ceremony table capped per client;
+  anonymous failures rolled up in the audit ring;
+- removing a credential ends the sessions it signed in;
+- `announce.tts.binary` needs an acknowledgement and an absolute path;
+- `/link` `addr` accepts loopback literals only;
+- a wildcard `[control] bind` needs `allow_wildcard_bind = true`; "local" is
+  judged by the socket peer, never `Host`;
+- `POST /secrets` never echoes the body;
+- `credentials.file` set from the page stays beside the config or in the
+  state directory;
+- the certificate is saved as one file and a key that does not match its chain
+  is refused; an issued certificate is never re-ordered for a failed save
+  (at most 3 orders a week per name set);
+- DNS-01 TXT records are cleaned up even when the create's answer is lost;
+  the propagation check uses a random id, matches the question, and has one
+  deadline.
+
+Leftovers are the `astar-sec-*` items below.
+
+### astar-sec-totp-bound — decide the TOTP guess bound across many addresses — DONE 2026-10-13
+*P2 · decision · labels: server, auth, security, cx:2*
+
+Since `astar-sec-review`, the per-user lockout is per source (IPv4 address or
+IPv6 /64) plus a strangers' lockout that never escalates past 15 minutes, so a
+stranger cannot keep the owner out. The cost: an attacker with many addresses
+gets about 100 guesses a day against one name, roughly a 10% chance of a hit
+in a sustained year (the design said under 1%). Options: let the strangers'
+lockout escalate (the owner's trusted sources already ignore it, so only an
+owner on a new network would be kept out); or require a passkey for admins
+and accept the bound for viewers. Rob to decide.
+
+**Closed 2026-10-13 (Rob): admins sign in only with a passkey or security
+key; codes sign in viewers only.** An admin's code at `/auth/totp` fails
+inside the same `attempt()` write exactly as a wrong one (status, body,
+lockout, audit), and TOTP step-up in an existing session stays. An admin
+always keeps a key: admin (and admin re-enrol) invites refuse an app, nobody
+without a key is promoted, and an admin's last key can't be removed. An admin
+from before the rule with only codes keeps them until they add a key, with a
+start-up warning naming them; the hostname guard rail no longer counts an
+admin's app once they have a key.
+
+### astar-sec-decoy-timing — `key_begin` timing for unknown names is not equalised
+*P3 · task · labels: server, auth, security, cx:2*
+
+Decoy answers now match real ones in shape, but their latency is not
+equalised, and the decoy lockout map is in memory (4096 names; a restart or
+a flood forgets it). Measure, then pad or precompute if the gap is visible.
+
+### astar-sec-ceremony-churn — more than 1024 /64s can still churn the ceremony table
+*P3 · task · labels: server, auth, security, cx:2*
+
+The table is 1024 entries, 8 per client, evicting from the heaviest holder.
+An attacker with more than 1024 IPv6 /64s can still evict legitimate
+in-flight ceremonies inside the 5-minute TTL. A per-/48 tier or a cookie
+proof-of-work on `begin` would close it.
+
+### astar-sec-expiry-test — no test that an open stream ends at session expiry
+*P3 · test · labels: server, auth, test, cx:1*
+
+The stream recheck ends a stream at sign-out, removal and demotion (tested),
+and at expiry (not tested: the rigs use the real clock). Inject the clock into
+`AuthService` for this test.
+
+### astar-http-total-write — one deadline for writing a whole answer
+*P3 · task · labels: server, http, security, cx:2*
+
+astar-http bounds the request phase with one deadline, but an answer is
+written under only a 30 s stall limit per write. A client that reads one
+byte every 29 s never stalls long enough to be dropped, so it can hold a
+connection (and its slot) for as long as the answer is large. The per-IP cap
+of 16 bounds the damage but does not remove it. A total deadline for the
+whole answer, sized to the largest body, would close it; streams (SSE, audio)
+keep their own rules.
+
+### astar-http-accept-poll — the accept loop polls every 50 ms
+*P3 · task · labels: server, http, cx:1*
+
+The astar-http accept loop polls a non-blocking listener every 50 ms. That is
+new on the control port, which used to block in tiny_http, and adds about
+25 ms of latency on average to each new connection. Switching to a blocking
+accept, woken on stop by a connection the server makes to itself, would
+remove both the polling and the added latency.
+
+### astar-ddns-aaaa — DDNS manages only A records; apex DDNS rewrites every A
+*P3 · task · labels: server, dns, cx:2*
+
+`ddns = true` rewrites every A record at the name (`editByNameType`), so on an
+apex it overwrites a website's records; and AAAA is never managed, so a stale
+AAAA sends IPv6 clients (and Let's Encrypt's http-01, which prefers IPv6)
+elsewhere. Document the apex behaviour in `listening.md`, and either manage
+AAAA or warn at start-up when one exists.
+
+### astar-auth-webauthn-rp — evaluate `webauthn_rp` to drop OpenSSL from release
+*P4 · research · labels: server, auth, cx:3*
+
+OpenSSL is in the release build only because webauthn-rs requires it. Rob
+chose (2026-10-13) to keep the audited webauthn-rs. If OpenSSL ever needs to
+go, `webauthn_rp` (RustCrypto: p256, p384, rsa, ed25519-dalek; unaudited)
+is the candidate; the library-specific code is `auth/webauthn.rs` plus the
+ceremony state. An evaluation must cover attestation, counters, no-PIN keys,
+and a fuzzing pass over malformed authenticator data.
+
+### astar-features-md — `docs/FEATURES.md` is missing on main
+*P2 · docs · labels: docs, cx:2*
+
+CLAUDE.md requires every user-visible change to update `docs/FEATURES.md`,
+but it exists only on the unmerged `work/ambe3003` branch (commits d935331,
+6b00593, c67393d). The listener, auth and security-review changes documented
+themselves under `docs/site/server/` instead. Land the file on main and add
+their rows.
+
+`work/recording` and `work/echolink` each created the file with their own
+rows only (recording; EchoLink), and merging main into `work/echolink`
+(2026-10-30) put both sets under one header. The rest is
+`astar-features-list`.
+
+### astar-listener-signin — DONE 2026-10-12: `/admin` on the public page becomes the passkey sign-in
+*P2 · feature · labels: server, web, auth, cx:3*
+
+**Closed.** Done in `work/server-auth` (design: notes
+`designs/astar/2026-10-12-server-auth-design.md`). With the `auth` feature
+(in `release`) and `[web] admin_on_public`, `/admin` leads to
+`/admin/signin`. The public router's sign-in groups are explicit
+(`SIGNED_IN_GROUPS` beside `PUBLIC_ROUTES`): `/auth/*` and the sign-in
+pages are answered by the sign-in code, and `/admin/<route>` reaches the
+admin router only for a route in `access::ADMIN_ROUTES` and an admin
+session (step-up by class). Unprefixed admin routes stay 404 there, tested.
+Operator docs: `docs/site/server/admin.md`. Original text follows.
+
+The public listener page (`docs/site/server/listening.md`) links to `/admin`, which today is a placeholder explaining the SSH tunnel to the loopback control port. When the operating model's passkey sign-in ships (`notes: designs/astar/2026-10-11-server-operating-model-design.md`), `/admin` becomes the sign-in page on the public bind. The seam is `PUBLIC_ROUTES` in `crates/astar-server/src/public/http.rs`: add each signed-in route there explicitly, behind its session check. Never forward the public bind to the admin router.
+
+### astar-auth-browser-ci — the sign-in pages' browser run belongs in CI
+*P2 · test · labels: server, auth, web, cx:3*
+
+The sign-in pages were checked once by hand (2026-10-12, `work/server-auth`):
+Playwright with Chromium's virtual authenticator against a local node on
+`127.0.0.1` with `[control] loopback_login = true` — invite → passkey →
+add an authenticator app → sign out → discoverable sign-in (autofill) →
+code sign-in → "Confirm it's you" → remove a method → users and invites,
+light and dark, desktop and phone. Every flow is also tested in Rust through
+the handlers with software authenticators, but the JavaScript (WebAuthn JSON
+conversion, the step-up retry, autofill abort) is not tested in CI. Make that
+run a script in the repo (`just auth-browser-test`, skipped without a
+Chromium) and run it in CI. It ran on the control port because
+`localhost` is not accepted as a `[web] public_hostnames` entry (it can
+carry no certificate); a test-only escape for that would let it cover the
+public bind too.
+
+### astar-auth-psl — `[web] rp_id` refuses shared parents from a short list, not the public suffix list
+*P3 · task · labels: server, auth, cx:2*
+
+`config::rp_id_problem` refuses a single label, and a built-in list of
+shared wildcard-DNS and dynamic-DNS parents (`sslip.io`, `nip.io`,
+`duckdns.org`, `co.uk`, …). The design asks for "anything on the public
+suffix list". Vendoring the PSL (MPL-2.0 data) or a crate that embeds it
+would make the refusal complete; the list covers the parents a node is
+likely to sit under.
+
+### astar-auth-guard-defaults — the hostname guard cannot see DNS-derived hostnames
+*P3 · task · labels: server, auth, settings, cx:2*
+
+`auth::guard` checks a settings save that names `web.public_hostnames` (as
+a list) or `web.rp_id`. A save that removes the list, so the hostname falls
+back to `[web.dns] host`/`domain`, or that changes only `web.dns.*` or
+`web.public_bind`, is not checked, because the guard does not run the
+loader's expansion. Run the patched file through `NodeFileConfig` and take
+`WebCfg::hostnames()` instead.
+
+### nodebench-stream — nodebench scenario: the stream carries link audio, not announcements
+*P2 · test · labels: server, stream, nodebench, cx:2*
+
+Plan Task 13 of the listener work, deferred until `work/nodebench` merges. In the ASL3-in-podman bench, enable `[stream]` and `[web] public_bind` on the rig's astar-server (publish `127.0.0.1:28743`, `public_hostnames = ["nodebench.invalid"]`), have the ASL3 node play a 1 kHz tone into the link, read `/stream.ws` (and `/stream.mp3` with `stream-mp3`), and require the tone 20 dB over the floor within 3 s; then trigger an announcement on that link and require RMS under −50 dBFS for 2 s while the tone is stopped.
+
+### astar-listener-features — add the public page's row to `docs/FEATURES.md`
+*P3 · docs · labels: server, docs, cx:1*
+
+`docs/FEATURES.md` exists only on `work/ambe3003`, so the listener work could not add its row. When both have merged: one astar-server row, "Public read-only listener page: status, graphs, live Opus and MP3 streams, HTTPS by built-in ACME, Porkbun dynamic DNS and DNS-01", macOS and Windows/Linux "n/a (server feature)", linking `docs/site/server/listening.md`.
+
+Add the sign-in rows from `work/server-auth` at the same time, each macOS and
+Windows/Linux "n/a (server feature)", linking `docs/site/server/admin.md`:
+"Admin sign-in with passkeys, security keys (with or without a PIN) and
+authenticator apps, on the public page and the control port"; "Invites,
+roles (admin, listener), re-enrol links and the activity log"; "`astar-server
+admin` invites, users and sign-outs from the console"; "A private listener
+page (`anonymous_status = false`)"; and, under the control port, "Browser
+form posts refused (the Origin rule, iax-ctlcsrf)".
+
+### iax-cnlink — astar-server drops its link to a ClearNode
+*P1 high · bug · labels: server, iax2, allstar, link, cx:5*
+
+Reported 2026-10-10 (Rob): `astar-server` disconnects from his ClearNode. The link comes up and later goes away without anyone dropping it. We don't yet know how long it stays up, which side tears it down, or whether it re-links by itself. Find those out first, in the rig from `iax-nodelab`, before any change.
+
+What to capture on both ends of one failing link:
+
+- IAX2 on the server's 4569 (tshark), plus the node's Asterisk log at `iax2 set debug on` / `rpt debug level` verbosity. That shows the last frames before the drop and who sent the HANGUP, or whether the call just stopped answering.
+- Timings: link up to drop, gaps in PING/PONG and LAGRQ/LAGRP, the app_rpt keepalive text frames, and registration refreshes.
+- Whether the home side is behind NAT, and its router's UDP mapping timeout. An idle UDP mapping that expires is the first suspect: one side stops hearing the other, and the far end retransmits until it gives up.
+
+Candidate causes to rule in or out, in order: a NAT mapping expiring because the server sends nothing while idle; a missing or late reply to POKE/PING/LAGRQ; app_rpt's link keepalive not being answered; registration expiry; and the call's own retransmit or timeout logic hanging up.
+
+Done when: the cause is named with evidence from a capture; a loopback test (127.0.0.1 only) reproduces it and fails before the fix; and the rig holds a link to a stock ASL3 node for 24 hours with zero drops. `key_refusal` and the transmit time-out are untouched. The test node has no transmitter, and keying in the rig stays a manual action.
+
+**Rob, 2026-10-11:** the ClearNode drops the link after **one or two seconds**. That rules out NAT idle expiry as the first suspect, because that takes minutes; look at call setup and the first exchange instead.
+
+**What nodebench has shown so far (2026-10-11).** nodebench is the local rig: a stock ASL3 node and astar-server in podman (`harness/nodebench/`, findings in `harness/nodebench/RIG.md`). These are leads, not a confirmed cause. Rob still has to say whether his drop follows a reconnect and which side dials.
+
+- **Best lead: a re-link drops in 1.2–2.5 s, every time** (`relink_after_drop`, RIG.md finding 4). astar-server ACKs a frame with `iseqno` equal to its `oseqno`, where Asterisk expects `oseqno + 1`. So the node's HANGUP that ends one link is never acknowledged, and Asterisk retransmits it 2 s later. By then astar-server has reused IAX call number 1 for the node's next link. It takes the stale HANGUP, whose source call is the OLD call, as belonging to the new link and tears that down. After that it answers the node's voice with INVAL, while the node still lists the link as ESTABLISHED. Two fixes are implied: ACK with `oseqno + 1`, and reject full frames whose source call number is not the call's peer.
+- **About 6 % of inbound links never come up** (finding 5). astar-server's 16-byte random binary call tokens can contain a NUL byte. Asterisk echoes the token as a C string, so it comes back truncated, and astar-server answers with REJECT "Call Token Invalid".
+- **From 2 s into every node-dialled link, the node ignores astar-server's audio** (finding 6). astar-server never answers app_rpt's `!NEWKEY1!` and never sends RADIO_KEY, so app_rpt's 2 s `newkeytimer` expires. This is not a drop, but to a listener on the node it would sound like one.
+- **A link astar-server dials is hung up 0.6 ms after ACCEPT** (finding 1). The NEW carries no CALLING NUMBER, and app_rpt logs "Caller ID is not numeric".
+- **Not reproduced:** a plain first-time `ilink 3` from the node held 90 s in the hand gates, and for the whole hold in the quick tier's 10 s runs, with ulaw only and with slin. A full quick-tier run with 60 s holds has not finished yet.
+- Also found, and not the drop: after `/link disconnect` the node keeps the link for about 8–10 s, because astar-server's HANGUP has timestamp 0 (finding 3). Registration against ASL3 storms and exhausts the node's call numbers (findings 2 and 8). A monitor link's unkeyed audio is bridged (finding 7).
+
+**Fixed on `work/nodebench` (2026-10-11), pending Rob's real-ClearNode check.** This item stays open until a real ClearNode holds a link to astar-server, in whichever direction Rob's drop happens.
+
+- **Re-link drop, cause confirmed and fixed** (`626df4d`). The listener consumed the node's opening NEW without counting it: through the demux, and again through the CALLTOKEN reset after the token NEW. Every ACK on an inbound leg was therefore one behind. Separately, the demux routed in-call frames by destination call number alone. Inbound legs now count the NEW (`Reliability::restart_after_peer_new`), and the token NEW bypasses dedupe. A frame whose source call is not the leg's peer gets INVAL, the way chan_iax2 answers a call it does not know. Mini frames now route by (address, source call). The loopback tests are in `crates/astar-iax/tests/inbound_seqno_loopback.rs`: 4 tests, all failing before the fix. `relink_after_drop` now passes 6 of 6 runs; the node's HANGUP is sent once and ACKed with `iseqno` = `oseqno` + 1. The duplicated DTMF `#` went away with it: `dtmf_link_command` passes.
+- **NUL call tokens fixed** (`fb17eb8`). Tokens are now 16 printable bytes.
+- **Server-dialled links fixed** (`3c34307`). New `CallMode::NodeLink` sends our node number as CALLING NUMBER, as app_rpt's own link dials do. `server_links_to_node` now holds 60 s without the `--fill-callerid` workaround, against slin16 and against a ulaw-only node.
+- **Bench after the fixes** (60 s holds; slin16 node, then ulaw-only):
+  - Pass: both dial directions hold 60 s, `ulaw_only_node`, `relink_after_drop`, all 24 `codec_matrix` cells, `dtmf_link_command` and `keepalive_exchange`.
+  - Still failing then, and not drops: NEWKEY (finding 6), and the slow clear after `/link disconnect` (finding 3).
+- **The rest fixed on `work/iax-fixes` (2026-10-12), each with a loopback test that failed first and a bench scenario that checks it.** Details and evidence are in RIG.md "Fix status".
+  - Findings 2 and 8, registration storm (`18eed6b`): the token REGREQ now restarts at `oseqno` 0, retry timers no longer enqueue fresh REGREQs, and a VNAK from an unknown call is not answered. `register_with_node` registers with one call number.
+  - Finding 6, NEWKEY (`564d091`, `306bd92`): app_rpt's TEXT strings carry their C NUL, so `!NEWKEY1!` never matched. Once it was answered, the bridge's continuous silence held the node keyed, so a member is now sent the mix only while someone it hears is talking. Server → node audio passes.
+  - Finding 7, monitor bridging (`dbeeeb6`): app_rpt's keying rule per leg (`link_keying`).
+  - Finding 3, slow clear (`a77f81b`): app_rpt holds a link that hangs up without `!!DISCONNECT!!` for `DISC_TIME` (10 s). astar now says it first, to app_rpt peers, and stamps the call clock on control, TEXT and HANGUP. Clears in 0.2 s.
+  - Token-less NEW retransmit (`ca622a2`): now answered with CALLTOKEN, not REJECT. New scenario `calltoken_retransmit`.
+  - The three debug-noise lines were small state-machine gaps, now closed (`2506816`, `9292841`).
+- **Not done:** the 24-hour soak from "Done when", and Rob's check against a real ClearNode.
+
+### iax-nodelab — a cloud test rig: astar-server on a VPS, with an AllStarLink node at home linked to it
+*P1 high · infra · labels: server, testing, allstar, deploy, cx:5*
+
+There is no real-world rig for `astar-server` linking. Bugs like `iax-cnlink` only show up across the internet, through NAT, against a stock app_rpt node, over hours. Build one that stays up and can be soaked.
+
+- **Server side:** `astar-server` on a spare cloud VPS, deployed the way the production node is. That means the Ansible in the infrastructure repo as a role or host entry, not by hand: same image, same unit, its own node number and secrets supplied at deploy time and never committed. Firewall: 4569/udp in, and the control port reachable only from home.
+- **Node side:** a stock AllStarLink 3 node on a box at home (a Pi or a VM), set to link to the VPS node at boot and re-link on drop. **No radio and no transmitter attached**: a dummy channel or a USB sound device with nothing keyed. The rig must be unable to put RF on the air.
+- **Observability:** a soak script that records link up and down events with timestamps from both sides (the server's `/status` and the node's `rpt stats`), keeps a rolling IAX2 capture on the VPS, and writes a daily summary: drops, durations and who hung up.
+- **Docs:** a page under `docs/` on how to bring the rig up and tear it down, and how to read the soak summary. Node numbers, addresses and secrets go in the private infrastructure notes, not here.
+
+Done when: the VPS node and the home node link automatically after a reboot of either; the soak runs for 24 hours and produces its summary; and `iax-cnlink` can be reproduced, or ruled out, on it.
+
+**The local half exists (2026-10-11): nodebench.** A stock ASL3 node (1999) and astar-server (1998) run in podman on the Mac, with no radio, on 127.0.0.1 inside one pod. The code is `harness/nodebench/` and `crates/astar-nodebench`, run with `just nodebench`, and documented in `harness/nodebench/README.md` and `docs/nodebench.md`.
+
+- **What it has:**
+  - a quick tier of 15 scenarios: link both ways, holds, NEWKEY, codecs, auth, audio both ways, monitor links, disconnects, keepalives, DTMF, the CALLTOKEN round and registration;
+  - a soak tier (`nodebench soak`) that includes a `nat` topology on podman `--internal` networks with a settable conntrack UDP timeout;
+  - a results page on 127.0.0.1:8740.
+- **What it does not replace:** this item's real-world half. That is the VPS server, a home node through a real router, an internet round trip and a 24-hour soak. A real ClearNode, too, since the ulaw-only ASL3 node is only a stand-in.
+- **CI:** `ci.yml` has a `nodebench` job that is off by default. The IONOS runner needs nested rootless podman first, and README.md "CI" lists exactly what the runner needs.
+
+### iax-wglink — An outgoing WireGuard link mode: 44link, plain WireGuard, later Tailscale
+*P2 medium · feature · labels: server, wireguard, link, network, cx:5*
+
+Requested 2026-10-11 (Rob): "we also want an outgoing wireguard link mode. This should work with 44link, wireguard, and eventually tailcat/tailscale."
+
+**What exists.** `[wireguard]` (iax-580b) is one userspace WireGuard stack to one VPS peer. When the section is present, it selects `LinkTransport::Wireguard` for the **whole** engine: outgoing calls, the registrar and the inbound listener. Its purpose is a reachable inbound port behind CGNAT.
+
+**What is asked for.** An outgoing link that reaches its far node through a WireGuard tunnel, presumably chosen per link rather than for the whole engine. It must work with:
+
+- 44link, the AMPRNet / 44Net WireGuard service;
+- a plain WireGuard peer;
+- later, Tailscale.
+
+**Not yet designed.** It needs a brainstorming pass first. Questions for it:
+
+- per-link versus per-engine transport;
+- several tunnels at once;
+- how a link names its tunnel;
+- whether Tailscale means `tsnet`/userspace or the system daemon;
+- how 44Net addressing and DNS interact with node lookup.
+
+Secrets stay as they are in iax-580b: references only, resolved at build time, never in config or logs. nodebench can test it locally with a WireGuard peer container on a podman `--internal` network.
+
+### iax-deploygate — post-deploy verification: wire the rest of the pipeline to `deploy/verify.sh`
+*P2 medium · infra · labels: server, deploy, testing, cx:2*
+
+Built 2026-10-12 on `work/deploy-gate`: `deploy/verify.sh` (`just deploy-verify`) is an observation-only gate for the node VPS. It checks the container, image tag, restart, image count, disk, `/status` registration, secrets in the log and UDP 4569 over ssh, and DNS, TLS and the public routes once `ASTAR_PUBLIC_HOST` is set. `deploy/deploy-vps.sh` runs it after the restart, prints the rollback command on a FAIL, and prunes old images only after it passes. Its hermetic tests are `just deploy-verify-test`, part of `just ci`. See `deploy/README.md#verify`.
+
+Left to do:
+
+- **gh-runners' `deploy-node` workflow should call the same script** (a follow-up in that repo). `ci/deploy-node-vps.sh` has its own inline `registered` poll and checks nothing else. It also runs `podman image prune -f` straight after the restart, *before* that gate, so a failed deploy there loses its fallback image: the bug `deploy-vps.sh` just fixed. The workflow also still checks out `rcludwick/iaxclient-rs` and builds `iaxclient-node`, so it needs repointing at this repo before it can run at all.
+- **Turn the public checks on when the listener deploys** (`2026-10-12-listener-design`): set `ASTAR_PUBLIC_HOST` (the sslip.io name first) in the deploy's environment, and confirm all fourteen public checks pass against the real box. Until then they SKIP.
+- Consider running `verify.sh` on a timer from the runner box, not only at deploy time, so a node that stops registering is noticed within the hour rather than at the next deploy (the 2026-08-22..30 gap).
+
+Done when gh-runners' deploy calls `deploy/verify.sh`, prunes only after it passes, and a deploy with `ASTAR_PUBLIC_HOST` set goes green.
 
 ### astar-uid — Audio devices need a stable identity, not their name
 *P2 medium · bug · labels: audio, macos, migration, cx:5*
@@ -95,6 +630,34 @@ largely unexercised. Revisit before anything is described as production-ready.
 Also outstanding from the same scan, all lower: `ring 0.16.20` unmaintained
 (NOT in the macOS app's graph), the gtk-rs GTK3 stack unmaintained (Linux
 client only), and `lru`/`glib` unsoundness warnings.
+
+### astar-discord-tls — the Discord bridge pins rustls 0.22 and rustls-webpki 0.102 (Dependabot)
+*P2 medium · security · labels: deps, server, discord, tls, cx:2*
+
+Dependabot alerts #4–#11 (2026-11-01; two high, three moderate, three low) are all
+on the Discord bridge's dependency graph, not on the macOS app.
+`serenity` 0.12.5 pulls in `tokio-tungstenite` 0.21 → `tokio-rustls` 0.25 →
+`rustls` 0.22.4 → `rustls-webpki` 0.102.8, an old line with no patched
+release, and the HPKE path pulls in `libcrux-chacha20poly1305` 0.0.7 (fixed
+in 0.0.8). The rest of the workspace is already on `rustls` 0.23.46 and
+`rustls-webpki` 0.103.15. `cargo update` cannot move them because `serenity`
+pins the versions. It reaches the static `astar-server` release through the
+`discord` feature, where it is the client side of the bot's connection to
+Discord's gateway. The fix is a `serenity` (and `songbird`) release on
+tungstenite 0.2x with `rustls` 0.23, or a `[patch]` if upstream lags.
+Re-check `cargo tree -p astar-server --features release -i rustls@0.22.4`
+and `-i libcrux-chacha20poly1305` after any bump.
+
+### astar-glib-unsound — glib 0.18 is unsound (Dependabot alert #2), Linux client only
+*P3 low · security · labels: deps, gui, linux, cx:1*
+
+Dependabot alert #2: `glib` 0.18's `VariantStrIter` is unsound; the fix is in
+`glib` 0.20. It reaches the workspace only through `tray-icon` → `gtk` 0.18 in
+the Iced client (`apps/gui`), which is paused and not published, so nothing
+astar ships today contains it. The macOS app and `astar-server` do not link
+it. The fix is a `tray-icon` release built on gtk-rs 0.20+, or dropping the
+tray icon on Linux. It goes away with `astar-uiclone` if that lands first.
+Until then, dismissing the alert as "vulnerable code not used" is accurate.
 
 ### iax-c7e1 — Finish removing the CH34x dext: ONE HARDWARE STEP LEFT
 *P1 high · task · labels: ptt, hardware, macos, docs, cx:1*
@@ -348,6 +911,14 @@ error mapping found reproducing this: an M17 connect resolve failure maps to
 matching StationError. Pairs with astar-0217 (friendly connect-failure
 messages), which should consume the new text. Also fold in (review-parked 2026-08-04): the m17 connect candidate-iteration loop discards the real io::Error on the all-candidates-fail path (m17.rs connect_udp_socket), synthesizing a misleading could-not-resolve message — surface the last real failure instead.
 
+PARTIALLY ADDRESSED by the node's M17 monitor work: the fold-in is fixed.
+`connect_udp_socket` (now in `crates/astar-console/src/m17/rx.rs`) returns
+the resolver's own error, else the last real bind/connect error, instead of a
+synthesized "could not resolve", and the monitor reports it as
+`could not resolve <host>: <error>`. Still open: (1) the last-error-text
+accessor across the C ABI, and (2) the `ConsoleError::Resolve` →
+`StationError::Iax("resolve")` mapping in `map_console_err`.
+
 ### iax-a4e7 — Output AGC: auto gain for quiet stations on RX
 *P2 med · feature · labels: audio, dsp, cx:3*
 
@@ -417,6 +988,17 @@ while M17 active so VOX can drive M17 PTT (astar UI half rides
 astar-6f1b); (7) distinguish NACK-refused vs link-timeout in status text;
 (8) key-while-Connecting sends pre-link stream packets (note); (9) m17 teardown joins the run-loop thread under the session lock on the disconnect hot path (bounded ~50-100 ms; split off-lock like the IAX2 detach/hangup convention — parked from the fix-wave re-review 2026-08-03).
 
+Item (1) is now user-visible: astar-server's M17 monitor
+(`crates/astar-console/src/m17/monitor.rs`) shares the client's receive path,
+so a Discord channel bridged to a reflector hears late and out-of-order
+packets in the order they arrive, with no reorder stage there either. The
+operator docs say so. Item (7) is done for the monitor only: its end reason
+tells `reflector refused the link` apart from `no reply for 30 s`, while
+`M17Session` still does not. (10) adopt `StreamGate`
+(`crates/astar-console/src/m17/rx.rs`, the monitor's flood guard: one stream
+at a time, paced to real time with at most 200 ms lead) in `M17Session`'s
+receive path, which today decodes every stream packet the reflector relays.
+
 ### iax-d3b6 — M17 reflector daemon hardening
 *P4 backlog · task · labels: m17, cx:3*
 
@@ -449,9 +1031,11 @@ assets**, alongside astar's source, not just referenced.
 
 ALREADY TRUE — do not redo this:
 
-* `Cargo.lock` is committed and pins `codec2 0.3.1` with checksum
-  `3c3c8ba70382a99c0b5ebadf6ad50e7d98fb6eb9bcc4c0e30d422f6321798d99`. That is
-  already a cryptographic link from the release to the exact upstream source.
+* Codec 2 is vendored at `vendor/codec2` (`vendor-codec2`, 2026-10-12), so the
+  exact library source is in the tagged tree itself. Its `VENDORED.md` records
+  the crates.io checksum it was taken from
+  (`3c3c8ba70382a99c0b5ebadf6ad50e7d98fb6eb9bcc4c0e30d422f6321798d99`); a path
+  dependency has no checksum in `Cargo.lock`, so that file is the link now.
 * Every release is tagged, so `git checkout v<version>` yields the exact tree.
 * MEASURED 2026-08-17: the `codec2` rlib built `--release` is **byte-identical
   across two separate `CARGO_TARGET_DIR`s** on one machine
@@ -480,6 +1064,26 @@ OPEN QUESTIONS, in the order worth answering:
 
 Related: the App Store exception and the LGPL written offer in
 `LICENSE-EXCEPTIONS.md`; `iax-e5d9` for why Codec 2's licence matters on iOS.
+
+### vendor-codec2 — DONE 2026-10-12: Codec 2's source lives in this repository
+*P3 low · chore · labels: licensing, codec, m17, vendor, cx:2*
+
+**Closed.** Done in `work/vendor-codec2`. Rob decided 2026-10-12 that the LGPL
+source the macOS app links statically (`codec2-static`) should be in astar's
+own repo, not only a crates.io reference. The published `codec2` 0.3.1 crate is
+vendored at `vendor/codec2`, the same way `vendor/ambe-thumbdv` is an island:
+source byte-for-byte upstream, manifest keys hard-coded to upstream's values
+(never `.workspace = true`), provenance in its `VENDORED.md`. Upstream ships no
+licence file, so astar added the GNU LGPL-2.1 text beside it.
+
+The workspace dependency is now `codec2 = { path = "vendor/codec2", version =
+"0.3.1" }`, and the crate is in the workspace `exclude` so `fmt` and `clippy`
+never touch it. Feature gating is unchanged: `cargo tree -p astar-codec` shows
+no codec2, `--features codec2-static` shows the path copy, and
+`ci/guard-codec2-licensing.sh` still holds. `ci/guard-no-git-deps.sh` now also
+fails if the vendored crate, its licence text or its hard-coded licence goes
+missing. `LICENSE-EXCEPTIONS.md` §2, `README.md` and the site's licence page
+say the source ships here.
 
 ### iax-e5d9 — Clean-room Rust Codec 2 (permissively licensed) — the iOS M17 gate
 *P4 backlog · feature · labels: m17, codec, cx:5*
@@ -1067,6 +1671,13 @@ OPEN: confirm the core exposes negotiated format + cap mask; if not, add accesso
 
 ### iax-12fb — Node inbound authentication (auth=Required + per-caller secret map): the deployed hub runs listener auth=off …
 *P2 medium · task · labels: cx:2, node, security*
+
+STATUS 2026-09-27 — **advanced, not closed.** Per-caller inbound secrets now
+have a durable, secret-free-config home: a bare-username key in
+`credentials.toml` (`"55553" = "…"`, `allstar-public = "…"`), loaded under
+`[secrets] source = "file"` and settable from the settings page as
+`peer:<user>` (`work/astar-slash`). What remains is the item itself: wire
+`auth = "required"` to that map on the deployed hub and flip it from `off`.
 
 Node inbound authentication (auth=Required + per-caller secret map): the deployed hub runs listener auth=off. iax-8baf implemented server-side MD5 challenge/validate, but node.toml has no credentials-map wiring and the estate default is open. Add a [listener] credentials/secret surface to node config (secret-free: runtime/vault only, never in the config struct/export/logs), wire it to IncomingCallPolicy auth=Required, and flip the gh-runners hub to authenticated. This is the last unbuilt piece of the iax-6461 asterisk-lite MVP (D2).
 
@@ -1819,54 +2430,673 @@ the omission.
 never runs that combination, so it went unnoticed. Fix is one line in
 `crates/astar-console/Cargo.toml`.
 
-### astar-discord — A Discord voice channel as a bridge member of astar-server
-*P3 low · feature · labels: server, audio, discord, safety, cx:8*
+### iax-resample1-leadin — `Resampler1::with_chunk`'s doc comment is wrong on the first pass
+*P4 backlog · bug · labels: audio, docs, cx:1*
 
-Bridge a Discord voice channel into a node: the channel hears the net, and —
-only while an operator arms it — the channel reaches the net. Designed
-2026-09-13, deferred; this entry is the design so it is not re-derived.
+`crates/astar-audio/src/resample.rs` says of `with_chunk` that callers with
+fixed-size framing "pass their frame size so one frame in yields exactly one
+rate-converted frame out". That is false for the FIRST pass through a freshly
+built resampler: rubato's polynomial interpolator has a lead-in, and the first
+pass comes up short. Measured while building the Discord bridge's
+`FramePipeline`: **948 of 960 samples at 8 kHz → 48 kHz, 954 of 960 at
+16 kHz → 48 kHz**, settling to exactly 960 from the second pass on.
+
+The behaviour is fine and the wording is not — it already misled one
+implementer into assuming the first Discord frame would be full-length, which
+it was not (the fix there is a warm-up pass on silence in
+`FramePipeline::new`). Correct the comment to say that steady state is
+one-in/one-out and that the first pass is short by the interpolator's lead-in.
+
+Left out of the Discord branch deliberately: `Resampler1` sits on the LIVE IAX
+codec edge (iax-62ac), so anything touched there wants its own change and its
+own test run, not a drive-by edit inside a feature branch. Nothing about the
+codec edge is believed wrong — it primes differently — but that needs checking
+before the comment is rewritten to describe it.
+
+### iax-ctlcsrf — DONE 2026-10-12: The control port has no cross-origin defence on any pre-existing route
+*P1 high · bug · labels: node, http, security, safety, cx:3*
+
+**Closed.** Step 2 done in `work/server-auth` ("server: the Origin rule on
+every mutating control route"): every non-GET route refuses an `Origin`
+that does not match `Host` (`Origin: null` included), and a request a
+browser sent (`Origin` or `Sec-Fetch-Site` present) unless it is
+`application/json`. `curl` sends neither header, so its contract is
+unchanged; the release note is in the pending changelog. Tests: every
+mutating route refuses a foreign Origin, `null` and the three form content
+types; a curl-shaped request still works; over a socket, a cross-site
+`text/plain` POST to `/key` is a 415. Original text follows.
+
+STATUS 2026-09-27 — **step 1 is DONE** (`work/astar-slash`, "server: refuse a
+foreign Host on every route of the control port"). `host_is_this_node` runs
+at the top of `handle_request_with_headers` and in `server.rs::dispatch`
+before the `/events` branch, so SSE is covered too; every route answers
+`403 {"error":"cross-origin requests are not accepted on this port"}` to a
+`Host` that is not `localhost`, a loopback literal or the bound address; the
+next commit on the branch ("server: cap request bodies at 64 KiB") caps every
+body at 64 KiB. **Step 2 stays open**:
+`Content-Type: application/json` (or a token) on the legacy mutating routes —
+`/key`, `/unkey`, `/dial`, `/link`, `/hangup`, `/bridge`, `/discord`,
+`/secrets`, `/shutdown` — is a contract change for every `curl` client and
+still wants its own item and release note. The settings routes shipped
+behind `same_origin_json` from day one, so step 2 is only about the routes
+that predate them. Original text follows.
+
+`POST /key` (`crates/astar-server/src/http.rs`) is
+`execute_and_render(ctrl, NodeCommand::Key)`: it takes an **empty body** and
+consults **no header**. So a bare cross-origin form on any page the operator
+has open in the same browser keys the transmitter:
+
+```html
+<form method="POST" action="http://127.0.0.1:8730/key"><button>click me</button></form>
+```
+
+No script, no CORS, no preflight — a form post is a "simple request" and the
+browser sends it. The same shape reaches `/unkey`, `/dial`, `/link`,
+`/hangup`, `/bridge`, `/discord`, `/secrets` and `/shutdown`; the ones that
+want JSON are reachable with `enctype="text/plain"`, which lets a form body
+begin with `{`.
+
+Two things limit it and neither closes it. **Reads are not exposed**: no route
+ever sends an `Access-Control-Allow-*` header, so the attacker never sees a
+response — this is write-only, which for `/key` and `/shutdown` is quite
+enough. And **loopback binding is not a boundary**: DNS rebinding points a
+name the browser trusts at `127.0.0.1`, after which `Origin` and `Host` agree
+with each other and are both the attacker's.
+
+`POST /discord/admin` is the only guarded route (`same_origin_json`, same
+file): Host allow-list, `Origin` must match `Host`, and
+`Content-Type: application/json`.
+
+**First step, and it breaks no `curl` client:** apply the **Host allow-list**
+(`host_is_this_node`, already written and tested in `http.rs`) **port-wide**.
+Nothing that posts to this port today sends a `Host` other than `localhost`,
+a loopback literal or the node's own bind address, and anything that can set
+arbitrary headers could talk to the port directly anyway. That alone closes
+rebinding. Requiring `Content-Type: application/json`, or a token, on the
+mutating routes is the second step and is a contract change for every existing
+client — it wants its own item and its own release note.
+
+### iax-pumpdead — A dead pump thread should take the process down
+*P2 medium · bug · labels: node, http, discord, cx:2*
+
+`run_serve` (`crates/astar-server/src/run.rs`) spawns the 50 ms pump ticker and
+then drops its `JoinHandle` on the floor — the only use is
+`let _ = pump_handle.join();` at shutdown, where a panic is discarded. Nothing
+watches the thread while the node is running.
+
+If `pump()` panics, the HTTP accept loop keeps answering: `/status` returns
+200, the page looks alive, and **audio, DTMF, announcements and SSE stop
+forever**. With the Discord bridge configured it is worse — the gateway's
+event channel is drained on the pump, so it grows unbounded with nothing
+reading it.
+
+A pump that has died is not a degraded node, it is a node that is lying. Watch
+the handle (or a heartbeat the accept loop checks) and exit non-zero so the
+supervisor restarts it.
+
+Interim mitigation (2026-09-27): the settings page's **Restart node**
+re-execs the daemon, and the restart path spawns a 30 s watchdog that
+performs the exec itself if teardown wedges — a `Gateway::drop` that never
+returns, say. That gives an operator a way out of a lying node once they
+notice it; it does not notice for them. The pump watch this item asks for is
+still the fix, and a bounded `Gateway::drop` belongs here too.
+
+### iax-pumpdial — A `/dial` handled on the pump stalls the 50 ms tick
+*P2 medium · bug · labels: node, discord, linking, cx:2*
+
+A Discord `/dial` is executed on the pump thread, so the tick blocks for the
+whole of the dial: DNS resolution for the target, and an HTTPS round trip to
+the AllStarLink portal if a token has to be minted. That is hundreds of
+milliseconds at best and a DNS timeout at worst, during which no audio moves.
+
+It is the same shape as the pre-existing DTMF-initiated dial, which blocks the
+pump for the same reasons — so this is one fix, not two: move the dial onto a
+worker thread and let the pump observe the result. Both paths then stop being
+able to stall audio, and the Discord half gets a "dialling…" state it can
+already render.
+
+### iax-dischangup — `/hangup` from Discord drops the node's entire link roster
+*P2 medium · task · labels: discord, linking, safety, cx:2*
+
+`Commander::hangup_targets` (`crates/astar-discord/src/commander.rs`) asks the
+node for `links()` and hangs up **all** of them, falling back to the link it
+believes it made only when the roster is empty. The admin page's **Hang up**
+button does the same.
+
+So an approved Discord user can drop a link an operator made with `POST /link`
+or someone made over the air with DTMF. On a node whose only job is feeding a
+Discord channel that is the right behaviour — the roster and "the Discord
+link" are the same thing, and a Discord user who can see a link they cannot
+clear is worse. On a node that does more, it is a bigger hammer than it looks,
+and documented as such in `docs/site/server/discord.md`.
+
+Decide it deliberately: either keep it and say so in the refusal strings too,
+or narrow `/hangup` to the link the Commander recorded and give admins a
+separate verb for the rest. Hanging up is the safe direction, which is why
+this is a design question and not a hole.
+
+Since the M17 monitor landed, the roster `/hangup` drops also includes the
+node's M17 leg while it is linked, whether Discord or `POST /m17` started it.
+
+### iax-discphase23 — Discord `/dial m17` and `/dial dstar`, and reflector autocomplete
+*P3 low · feature · labels: discord, m17, dstar, cx:5*
+
+`/dial dstar` is registered, parsed and validated, and refuses honestly:
+*"D-Star isn't wired into this node's conference yet."* `/dial m17` works.
+
+* **Phase 2 — M17 RX as a conference member: shipped.** The node links to one
+  M17 reflector module as a receive-only monitor: `M17Monitor` in
+  astar-console, enrolled through `Manager::add_source_member`, which can only
+  contribute. `/dial m17` is a second `NodeOps` verb beside
+  `dial_allstar_monitor`, receive-only by the same contract, and
+  `LinkInfo::network` is a `Network` enum. `POST /m17` is the control-port
+  twin. The operator opts in with `[m17]`; see
+  `docs/site/server/discord.md`.
+* **Phase 3 — D-Star**, still open. It additionally waits on a software AMBE
+  decoder: the bridge's natural home is a cloud VPS, and there is no ThumbDV
+  on a cloud box. Hardware-only D-Star and a Discord bridge are mutually
+  exclusive deployments.
+
+Then **reflector-name autocomplete**, still open. `/dial m17` and
+`/dial dstar` take a free-text reflector and a module letter. The node now
+carries a bundled M17 snapshot (`crates/astar-server/data/m17-reflectors.json`,
+used by `[m17] directory = "bundled"`), which is exactly the list Discord's
+autocomplete wants for `/dial m17`; D-Star would need its own. Autocomplete is
+a separate interaction type from the command itself, so it is additive — the
+commands work without it.
+
+### iax-discarm — Prerequisites for an ARMED Discord bridge, recorded now
+*P3 low · task · labels: discord, safety, transmit, cx:5*
+
+Not a proposal to arm anything. These are the conclusions the listen-only
+build reached, written down while the reasoning is fresh, so that a later
+Discord → radio bridge starts from them instead of rediscovering them.
+
+**The server mute must NOT be the gate.** It is the enforcement mechanism for
+the one-open-mic rule today and it is not strong enough to be a safety
+boundary: there is a window between a member joining and the mute landing;
+nothing is enforced at all while the node is down (whoever held the mic keeps
+their unmute and nobody who joins is muted); a moderator can unmute anyone by
+hand; and a mute is guild-wide, so it is shared with every other use of that
+server.
+
+**The node itself must accept audio only from the current mic holder.** The
+gate belongs on the receive side, inside the process that would key the
+transmitter, keyed on the Commander's own idea of who holds the mic. Anything
+Discord reports is advisory.
+
+**The signal needed for that already exists.** The silence unkey learns "the
+holder is sending audio right now" from voice-packet timing per SSRC, and the
+holder's SSRC is already tracked. An armed bridge needs the same fact, for a
+stricter purpose.
+
+**Forced PTT on the channel was considered and declined** (Rob, 2026-09-19):
+denying *Use Voice Activity* on the bridged channel would make Discord's own
+client require push-to-talk, which pairs well with an armed bridge but is a
+worse experience for a listen-only one. Worth revisiting at arming time, not
+before.
+
+### iax-ctlstyle-light — DONE 2026-09-27: the control-port pages follow the system appearance
+*P3 low · task · labels: node, http, ui, cx:3*
+
+**Closed.** Done in `work/astar-slash` ("server: light theme for the
+control-port pages, plus form controls"), because the settings page was the
+first stylesheet change that added form controls and a third page, and a
+retrofit after it would have been strictly larger. Every literal colour in
+`crates/astar-server/src/assets/style.css` is a custom property on `:root`,
+redefined under `prefers-color-scheme: light`; `color-scheme` is
+`light dark`; `/`, `/discord/admin` and `/settings` were checked together in
+both appearances. A unit test in `crates/astar-server/src/http.rs`
+(`style_css_carries_a_light_theme_on_root_tokens`) pins the media query,
+the `color-scheme` value and the no-literal-colours rule so the branch
+cannot quietly disappear.
+
+Original text follows.
+
+### iax-ctlstyle-light — The control-port pages are dark-only
+*P3 low · task · labels: node, http, ui, cx:3*
+
+`crates/astar-server/src/assets/style.css` is a single dark theme, shared by
+the status page and the Discord admin page. There is no
+`prefers-color-scheme: light` branch and no palette indirection to add one to
+— colours are literals at their use sites.
+
+So this is a whole-stylesheet job for both pages at once: lift the colours to
+custom properties on `:root`, redefine them under the light media query, and
+check both pages. It is not a bug — a dark tool page is a defensible choice —
+but "the node's web UI ignores my system setting" is the kind of thing that
+reads as unfinished, and both pages have to move together or they will not
+match.
+
+### iax-panelrate — Panel redraws are coalesced but have no minimum interval
+*P3 low · bug · labels: discord, cx:2*
+
+`crates/astar-discord/src/panel.rs` coalesces redraws correctly: at most one
+Discord edit is in flight, and exactly one more afterwards carrying the newest
+state. What it does not do is *space them out*. A sustained handover storm —
+`/mic`, another `/mic`, `/unmic`, a time-out, repeatedly — produces a
+back-to-back edit per settled state, and Discord's edit bucket is roughly
+five per five seconds per channel.
+
+Coalescing bounds the burst, not the rate. Past the bucket, serenity's
+ratelimiter queues, and the panel shows something that stopped being true
+seconds ago — the exact failure coalescing was added to prevent. A minimum
+interval between renders (with the trailing render still carrying the latest
+state) is the missing half.
+
+### iax-botownid — The bot's own-user-id race
+*P3 low · bug · labels: discord, cx:1*
+
+`own_id` in `crates/astar-discord/src/gateway.rs` is learned from READY and is
+zero until then. READY precedes `GUILD_CREATE` on the wire, but serenity
+0.12.5 dispatches every event handler on its own tokio task, so the
+`guild_create` handler that READS `own_id` is not ordered after the `ready`
+handler that STORES it: it can see zero for a guild whose voice states have
+already arrived.
+
+The consequence is bounded and the reasoning is written out at `is_own_bot`.
+It bites only for **this bot's own** voice state, delivered in that window,
+with no member resolvable from the event or the guild's member list — a
+resolvable member still answers `user.bot`. If it did bite, the node would
+server-mute its own bridge, and there is no path back: the bridge is not
+approved, cannot be given the mic, and the mute is recorded as the node's own.
+
+Both obvious closes are worse: there is no serenity `cache` in this build (on
+purpose — a cache is a copy of a guild this node has no business keeping), and
+`get_current_user()` is a REST round trip that would sit between a reconnect
+and the `Ready` the Commander rebuilds from. The honest fix is to **gate the
+`Ready` emission on `own_id` being non-zero**, so the rule engine never sees an
+event it cannot classify.
+
+### iax-discdeadaudio — An audio-only gateway has no channel to report a dead track through
+*P3 low · bug · labels: discord, cx:1*
+
+A dead audio track is now detected and surfaced: the channel is told the feed
+stopped, and the reason goes to the admin view and `/status`.
+
+Except the channel half. On a bridge with **no `approvers`** — the audio-only
+configuration — there is no rule engine and no Commander to call `announce`,
+so `TrackSupervisor::events` is `None` and no line reaches Discord. The
+failure is still recorded: one `eprintln!` to the daemon's stderr and
+`AudioHealth`, which `/status` and `POST /discord` render. But the people in
+the channel hear silence and are told nothing, and an operator who is not
+watching the log or polling `/status` finds out when somebody asks.
+
+The gateway can post to the channel without a Commander — it already posts
+join / leave / failed and the hourly "still connected" that way — so the fix is
+to route the dead-track notice through that path when there is no rule engine,
+rather than to make a failure notice depend on `approvers`.
+
+### iax-gwidlepoll — An idle persistent gateway that dies is never replaced
+*P2 medium · bug · labels: discord, node, cx:2*
+
+`ensure_discord_gateway` replaces a gateway whose runtime thread has died —
+but only when something calls it, and the only callers are a `Join` and a
+`ProvideSecret`. A persistent gateway exists precisely so the bot can sit in
+the channel answering slash commands with nobody joining anything, so on an
+idle node a dead gateway is never noticed: the bot is offline, `/status`
+reports `commands: false`, and it stays that way until the daemon restarts or
+somebody dials.
+
+The pump already runs every 50 ms and already knows whether the gateway is
+persistent. Poll `Gateway::is_failed()` there and reconnect, with backoff —
+seconds at first, minutes after repeated failures — so a node that cannot
+reach Discord at all does not spend its life spawning runtime threads. The
+backoff state is one `Option<Instant>` plus a counter beside the existing
+`discord_*_due` timers. Take `discord_op` for the reconnect itself, the way
+`start_discord_gateway` does, and never block the pump on it.
+
+### iax-gwsplit — `gateway.rs` is ~4200 lines and wants splitting
+*P3 low · chore · labels: discord, cx:3*
+
+One file holds the runtime thread, the serenity event handler, the panel's
+REST bookkeeping, the join/leave machinery and the track supervision. It is
+about 3000 lines of production code and the rest tests, and every one of those
+five concerns is separately testable already.
+
+A mechanical split — `runtime` (the command loop and teardown), `handler` (the
+serenity `EventHandler`), `panel_rest`, `join`, `tracks` — moves code and
+nothing else. It was deliberately NOT done before this branch merged: the file
+holds the listen-only glue, and a 3000-line move in the same diff as the
+behaviour changes would have made the review that mattered unreadable. Do it
+first thing afterwards, as its own commit with no behaviour change in it.
+
+### iax-sbeventstore — songbird re-registers a track with an empty event store
+*P3 low · bug · labels: discord, audio, upstream, cx:2*
+
+`TrackWatch` is attached to `Track.events` before `play_only`, which is what
+makes track supervision survive songbird's own handling — the earlier form,
+`TrackHandle::add_event` after the fact, was lost whenever songbird rebuilt
+the track's registration.
+
+One case still loses it. When the driver rebuilds its interconnect
+(`rebuild_tracks` in songbird 0.6.0's `src/driver/tasks/mixer/mod.rs`), it
+re-registers every live track with a **fresh, empty** `EventStore` — literally
+`let evts = EventStore::default();` per track — so handlers attached to the
+track go the same way `add_event`'s did. A track dying after an
+interconnect rebuild is therefore unsupervised: no `AudioFailed`, no line in
+the channel, no `audio_error`.
+
+It needs an upstream fix or a workaround that re-attaches after a rebuild is
+observed; nothing in this crate can see the rebuild happen today. Recorded so
+the pre-attach is not mistaken for complete coverage.
+
+### iax-adminaudio — The admin page does not render `audio_ok`
+*P4 backlog · task · labels: discord, http, ui, cx:1*
+
+`/status` and the `AdminView` both carry the audio fault — `audio_error` wins
+over `last_error` in the view for exactly this reason — but the admin page has
+no element for it. An operator looking at the page sees approvals, tiers, the
+mic and the link, and nothing that says the feed into the channel is dead.
+
+One indicator beside the link state, reading the same field the channel's
+"the audio feed into this channel stopped" line reads.
+
+### iax-mutescope — Other bots are never muted, and a moderator's mute is yielded to
+*P4 backlog · task · labels: discord, cx:1*
+
+Two deliberate limits of the one-mic rule, written down so nobody "fixes"
+them without deciding to.
+
+**Other bots in the voice channel are never muted.** Every voice event with
+`is_bot` set is dropped before the rule engine sees it — the bridge's own mute
+echoes come back that way, and a bot that reacted to them would fight itself.
+So a music bot in the same channel plays over the net unmuted. The one-mic
+rule is about people.
+
+**A moderator's mute of the mic holder is yielded to, not fought.** A holder
+who arrives `server_muted: true` is read as "a moderator took the mic away by
+hand": the node clears the holder rather than re-issuing an unmute, and never
+records that mute as its own, so it never lifts it either. A node that argued
+with a moderator would be worse than one that steps back.
+
+### iax-gwevent-exh — `GatewayEvent` is public and not `#[non_exhaustive]`
+*P4 backlog · chore · labels: discord, api, cx:1*
+
+`astar_discord::GatewayEvent` is re-exported from the crate root and is a
+plain enum. Every consumer that matches on it is in this workspace today, so
+adding a variant is a compile error we would see immediately — but the type is
+part of a published crate's surface, and the next variant (an M17 dial, an
+armed-bridge event) is a semver break for anyone outside it.
+
+`#[non_exhaustive]` now costs one line and a wildcard arm in the two matches
+that exist. Later it costs a major version.
+
+### astar-discord — A Discord voice channel as a conference member
+
+*P3 low · feature · labels: server, audio, discord, unamblify, safety, cx:8*
+
+A Discord voice channel hears the net. Designed 2026-09-13, narrowed and
+settled 2026-09-17; full design in
+`docs/superpowers/specs/2026-09-17-astar-discord-design.md` (gitignored, so the
+reasoning below is the durable record).
+
+**v1 is listen-only.** Discord hears the net; the net never hears Discord — not
+by configuration, because no transmit path is built. Two-way was the original
+design and is deferred for one specific reason: Discord has never documented
+voice *receive*, songbird implements it by reverse engineering, and it is the
+half a two-way bridge depends on. Sending is the documented half, which is why
+listen-only is not merely a subset but the low-risk three-quarters.
+
+**It runs inside astar-server**, as a `[discord]` section in `node.toml` behind
+a `discord` feature off by default — not as a standalone binary. A standalone
+binary dialling in over IAX2 was designed first and rejected: astar-server
+already runs on the node VPS, so a second container is more to deploy, not
+less.
+
+**The blast-radius argument was originally "v1 never executes the
+reverse-engineered code path". That stopped being true with the silence
+unkey, and the decision was re-taken on it.** songbird's `receive` feature is
+on, so its UDP receive task runs **in-process**, in every `DecodeMode`: it
+demuxes and parses incoming RTP and RTCP straight off the network and runs a
+per-SSRC jitter buffer over them. `DecodeMode::Pass` skips the cipher and the
+Opus decoder — it does not skip the parser. Packets from the network are
+parsed inside the node daemon, and no configuration makes that not so.
+
+Rob accepted that on 2026-09-19/20, for the silence unkey, with the cost
+stated: it is memory-safe Rust with no `unsafe` parsing surface of our own;
+the traffic only arrives on an established Discord voice session, so it is not
+an unauthenticated path from the open internet; songbird's threads cannot
+unwind into the node, so the realistic worst case is a contained panic that
+takes the bridge down and leaves the node on the air; and the Commander's hard
+time-out timer is a separate clock that depends on none of it, so a receive
+path that dies does not leave a mic open. The cost of *not* accepting it is
+that there is no other signal at all for "the holder stopped talking" —
+Discord publishes no such event.
 
 **The attachment point is already there.** `Conference::add_member(rx, tx)`
 (`crates/astar-audio/src/conference.rs`) takes a pair of PCM channels — nothing
-about a member is IAX — and `set_member_relay(id, contributes, receives)` is
-exactly the arm gate: disarmed is `contributes: false, receives: true`, so
-Discord hears everything and reaches nothing. Mix-minus and
+about a member is IAX — and `set_member_relay(id, false, true)` is exactly
+listen-only: contributes nothing, receives everything. Mix-minus and
 `announce_to_member` need no change, which is why this is a `[discord]` section
 rather than a fourth `[bridge] mode`: a Discord bridge *plus* a local radio
 would otherwise need a mode name per pairing.
 
 **Shape:**
 
-* New `crates/astar-discord`, behind a `discord` feature **off by default** and
-  the only crate in the workspace that knows about tokio: it owns a runtime on
-  its own thread and speaks `std::sync::mpsc` to everything else. Inside,
-  songbird for the gateway / voice WS / AEAD / RTP; per-SSRC Opus decode at
-  48 kHz stereo; downmix to mono; `rubato` to the pipeline rate; 20 ms
-  `RxFrame`s out, the reverse in. Songbird sits behind a `VoiceLink` trait so
-  tests drive PCM fixtures and CI never touches Discord.
-* `[discord]` in `node.toml` — `guild_id`, `channel_id`, `arm_timeout_secs`,
-  `announce_speakers` — and **no token**: it arrives as `DISCORD_BOT_TOKEN` or
+* New `crates/astar-discord`, library only, the only crate in the workspace
+  that knows about tokio: it owns a runtime on its own thread and speaks
+  `std::sync::mpsc` to everything else. Inside, songbird for the gateway /
+  voice WS / AEAD / RTP behind a `VoiceLink` trait, so tests drive PCM fixtures
+  and CI never touches Discord.
+* The bridge core is written against a `NetLink` trait — a channel pair, 20 ms
+  mono i16 frames — not against the conference. A conference member's
+  `(Sender<RxFrame>, Receiver<Vec<i16>>)` and `RawDial`'s `rx_frames`/
+  `tx_frames` are the same shape, so an IAX-peer host (which would bridge ASL3
+  and HamVoIP nodes too, unlike the in-process one) stays a small later
+  addition. Note `raw_dial` has no callers in the workspace yet.
+* Audio out: 20 ms mono i16 at 8 kHz → post-filter seam → `rubato` 8k→48k →
+  mono duplicated to stereo → 1920 interleaved i16 → Opus.
+* `[discord]` in `node.toml` — `guild_id`, `channel_id`, `join_at_start`,
+  `announce_on_join` — and **no token**: it arrives as `DISCORD_BOT_TOKEN` or
   over `POST /secrets` under a `discord` username, the namespacing
-  `link:<node>` already uses.
-* `POST /discord {"action":"join"|"leave"|"arm"|"disarm"}`, mirroring
-  `/bridge`, with the armed state in `/status`, SSE and the TUI. There is no
-  `armed_at_start`; arming lapses after `arm_timeout_secs` without Discord
-  speech.
-* Identity reuses `[announce]`: periodic CW/TTS ID for the bridge, plus an
-  optional spoken display name on speaker change, never mid-over.
-* Refuses to contribute while `dstar_active`, following `key_refusal` in
-  `crates/astar-server/src/controller.rs`.
+  `link:<node>` already uses. No `arm`, `key`, `transmit` or `contributes` key
+  exists, so the TOML offers nothing that could turn on a transmit path.
+* `POST /discord {"action":"join"|"leave"}`, mirroring `/bridge`, with state in
+  `/status`, SSE and the TUI. No arm/disarm verbs — there is nothing to arm.
+* Identity reuses `[announce]`: `id_interval_secs` drives a periodic ID spoken
+  into the Discord channel only, via `Manager::announce_to_member`.
+* Supervised tokio thread: a songbird panic marks the link failed and surfaces
+  in `/status`; it must not take the node down.
 
-**Two things that do not go away.** Discord has never documented voice
-*receive* — songbird implements it by reverse engineering, and it is the half
-this feature depends on, so it can break without notice; the `VoiceLink` trait
-keeps that blast radius in one crate. And relaying a voice channel onto a
-public radio network is disclosure-and-consent territory under Discord's
-developer policy as well as third-party-traffic rules: the bot description and
-channel topic have to say so, and the bridge should speak a notice into the
-channel when it joins.
+**unamblify gets its first home here.** A `PostFilter` trait shaped to
+`~/dev/unamblify`'s `docs/design/realtime.md` — `push_frame` / `pull_frame`,
+ONNX, `ll5`/`ll20` lookahead — with **bypass as the only shipped
+implementation**, because that project's real-time inference is still
+"planned. Nothing built." Running an unproven AMBE post-filter here means it
+cannot degrade on-air audio; only Discord listeners hear it. `output_rate()` is
+on the trait from the start because the `full` profile emits 16 kHz from 8 kHz
+input, and retrofitting that would mean touching the resampler.
 
-Licensing is clear: libopus is BSD-3-Clause (one row in
-`LICENSE-EXCEPTIONS.md` beside `nnnoiseless`), songbird/serenity/tokio are
-MIT/Apache, and a default-features build pulls none of it — pin that with a
-test the way `codec2` is pinned.
+**Disclosure is a requirement, not a nicety.** Relaying a radio net into a
+voice channel is disclosure-and-consent territory under Discord's developer
+policy as well as third-party-traffic courtesy: the bot description and channel
+topic have to say so, the bridge speaks a notice into the channel when it
+joins, and it posts its own state — connected, disconnected, failed, and an
+hourly "still connected" — as text in the voice channel's built-in chat, so
+the disclosure persists for anyone scrolling back instead of being heard once.
+The bot is registered with **no privileged gateway intents**, so Discord never
+sends it message content and it receives no message events at all — which
+keeps that disclosure a small claim. Five permissions since slash commands
+landed: View Channel, Send Messages, Connect, Speak, Mute Members
+(`permissions=7343104`). The one thing it reads is message *ids*: at most once
+a minute it fetches the ids of the newest 20 messages in the voice channel's
+chat to see whether its own PTT panel is still among them, comparing ids and
+never reading, storing or logging content. That needs Read Message History,
+usually inherited from `@everyone`; without it the check is skipped and the
+panel is simply not re-posted.
+
+Licensing is clear: libopus is BSD-3-Clause, songbird is ISC, tokio is MIT
+(rows in `LICENSE-EXCEPTIONS.md` §4 beside `nnnoiseless`). It is not ALL
+permissive — seven crates are MPL-2.0 (hpke-rs and symphonia with their
+sub-crates; `symphonia-codec-pcm` is asked for directly, for its `pcm` feature)
+— but MPL-2.0 §3.3 explicitly allows
+distribution in a Larger Work under a secondary licence such as AGPL, so there
+is no conflict and nothing to relink.
+No LGPL, so none of the relink obligation `codec2` carries. A default-features
+build pulls none of it — pin that with a test the way `codec2` is pinned —
+but a released server container is built with `--features discord` and so ships
+tokio and songbird to operators who never configure a channel, accepted
+deliberately on the `codec2-static` precedent.
+
+**Deferred, deliberately:** Discord → radio audio (the undocumented half);
+Twitch and YouTube streaming (both need a video track, so that is a rendered
+visualisation plus H.264 plus RTMP — a subsystem, not a variation on this);
+multi-node fan-out.
+
+### iax-bodydrain — DONE 2026-10-14: an oversize `Content-Length` no longer costs an allocation of that size
+*P2 medium · bug · labels: node, http, security, cx:2*
+
+**Closed.** Every HTTP server in the workspace now runs on `crates/astar-http`,
+which refuses an announced body over the cap before reading a byte of it and
+drains nothing beyond its lingering close's bounded read. tiny_http is out of
+the lockfile, and `ci/guard-no-tiny-http.sh` keeps it out. The original report
+follows.
+
+The control port caps request bodies at `MAX_BODY_BYTES` (64 KiB): `dispatch`
+answers 413 to a `Content-Length` over the cap before reading a byte of body,
+reads an unannounced (chunked) body at most one byte past it with
+`Read::take`, and the router refuses anything over it. That bounds what
+`astar-server` holds. It does not bound what tiny_http does with the unread
+remainder.
+
+A body announced with a `Content-Length` over 1024 bytes is read through an
+`EqualReader` (`tiny_http-0.12.0/src/request.rs:215`). When the `Request`
+drops — inside `respond`, after the response is written — `impl Drop for
+EqualReader` (`src/util/equal_reader.rs:62-84`) drains the remainder, and it
+starts with `vec![0; remaining_to_read]`: a zeroed buffer the size of
+everything announced and not yet read. So:
+
+- every 413 on an announced body, and every 403 on a foreign `Host` that
+  carried one, allocates the announced remainder on the worker thread;
+- `Content-Length: 9000000000000000000` asks for more than the allocator can
+  give, and a failed allocation aborts the daemon — from one unauthenticated
+  request.
+
+This predates the cap: an unbounded `read_to_end` whose client closed early
+dropped the same reader with the same remainder. The cap made the path
+routine; it did not create it.
+
+Candidate directions, none tried yet: a tiny_http whose drain reads through a
+fixed-size buffer (a newer release, or a patch offered upstream with a
+reproducer first); or refusing an oversize `Content-Length` before tiny_http
+builds the `Request`, which means a listener in front of it. Either way the
+test is the one `serve_wiring` already has for the 413 — announce a large
+body, send none of it — plus a check that the worker's peak allocation does
+not scale with the announcement.
+
+### record-echolink-gsm — wire EchoLink GSM frame taps to CaptureMode::Gsm
+
+`CaptureMode::Gsm` (`"gsm"`, 33-byte frames) exists in `astar-record`, but nothing emits it. Whichever of `work/recording` / `work/echolink` merges second wires the EchoLink session to emit `Start/Frame/Pcm/End` frame events for it.
+
+### clock-dedupe — fold nodebench's civil_from_days into astar_record::clock
+
+`harness/nodebench` `time.rs` carries its own copy of Howard Hinnant's `civil_from_days`, and `astar-server`'s `acme.rs` has the inverse (`days_from_civil`). `astar_record::clock` now holds both directions plus RFC 3339 formatting and parsing, and Task 17's logger uses it. Fold the nodebench copy (and the `acme.rs` inverse) into it so the workspace has one civil-time implementation.
+
+### astar-features-list — fill docs/FEATURES.md with every shipped feature
+*P2 · docs · labels: docs, cx:3*
+
+`docs/FEATURES.md` was created by the recording work (`work/recording`) with
+only its own two rows: recording in the macOS app and recording on the node.
+Every other feature astar ships today still needs a row, one each, with its
+platforms marked (Windows/Linux "paused" for client features, per CLAUDE.md)
+and a link to its page under `docs/site/`. The listener and sign-in rows are
+spelled out in `astar-listener-features`. `work/echolink` added its EchoLink
+rows when it merged main (2026-10-30).
+
+### dstar-unkey-flake — `losing_the_link_while_keyed_forces_an_unkey_and_stops_transmitting` fails about 1 run in 60
+*P2 · bug · labels: dstar, test, flaky, cx:2*
+
+Pre-existing on main, seen while building recording (Task 9).
+`crates/astar-console/tests/dstar_session_pipeline.rs` fails about once in
+60 runs: `key_up` clears `ptt` before the end-of-transmission frame goes out,
+so the test can observe the unkey and the EOT in the wrong order. Decide
+which order is right, make the session keep it, and loop the test a few
+hundred times to prove the flake is gone.
+
+### console-all-features — `cargo build -p astar-console --all-features` fails
+*P3 · bug · labels: console, build, cx:1*
+
+Pre-existing on main. With every feature on, `astar-console`'s `state.rs`
+serialises a struct holding `astar_audio::DenoiseStatus`, which does not
+derive `Serialize`. `just ci` never builds that combination, so it went
+unnoticed. Derive `Serialize` on `DenoiseStatus` (behind the same feature)
+or skip the field, and add the combination to a check.
+
+### server-auth-without-stream — the auth-only build fails two ws golden fixtures
+*P3 · test · labels: server, auth, stream, cx:1*
+
+Pre-existing (seen at 201757e). `cargo test -p astar-server
+--no-default-features --features auth` fails `ws_stream_429` and
+`ws_no_upgrade_400` in `golden_tests.rs`: without the `stream` feature
+`/stream.ws` answers 503, and the fixtures expect the stream build's 429 and
+400. Gate those two cases on `feature = "stream"`, or give the auth-only
+build its own fixtures.
+
+### record-disconnect-join — `disconnect()` joins the recorder on the caller's thread
+*P3 · task · labels: record, station, macos, cx:2*
+
+`Station::disconnect()` stops a running recording, which joins the recorder
+thread and syncs its files. The macOS app calls `disconnect()` from the main
+thread, so on a slow folder (a network volume, a sleeping disk) hang-up can
+stall the UI while the file is flushed. Move that stop off the caller's
+thread (the app's recording queue already exists), or have `disconnect()`
+hand the finish to a background thread.
+
+### record-contended-late — contended-tap counters are read only when a recording starts
+*P3 · task · labels: record, station, cx:2*
+
+`Station::record_start` gathers `record_contended_counters()` once. A tap
+slot opened later in the recording (a new output bus, a mic lane that
+appears mid-call) has its contended drops left out of `dropped_frames`. Read
+the counters through the slots on each state read, or register new slots
+with the running recorder.
+
+### record-folder-toctou — the capture-folder checks can be raced by a folder swap
+*P3 · task · labels: record, server, security, cx:3*
+
+The node logger and the tarball refuse symlinked capture folders and open
+files with `O_NOFOLLOW|O_NONBLOCK` (`open_regular` in
+`crates/astar-record/src/tarball.rs`), but they check the folder path and
+then open by path. Someone who can write to the recordings folder could
+swap a checked folder for a symlink in between. Close it by walking with
+`openat` from a held directory descriptor. Also: duplicate ledger rows
+produce duplicate tar entries.
+
+### record-buffer-pool — a full recording tap still allocates on the audio thread
+*P3 · task · labels: record, audio, performance, cx:2*
+
+`OutputBus.heard` and `MicLane.sent` copy each callback's samples into a
+fresh `Vec` before `try_send`, so a full tap allocates and then drops the
+chunk on every callback. Recycle chunks through a small pool that the
+recorder returns them to, so a full channel costs nothing on the audio
+thread.
+
+### record-minors — smaller follow-ups from the recording work
+*P4 · task · labels: record, cx:3*
+
+Deferred during review of `work/recording`; each is small and none is known
+to lose a recording:
+
+- `iax_station_record_state_json` falls back to `"{}"` if serialising fails
+  (only reachable with a non-UTF-8 file path). Emit a full idle state with
+  an error instead, so Swift decodes it.
+- `LayoutWriter::write_tick` checks the two directions' lengths with
+  `debug_assert` only; in release a mismatch could desync Two mono files.
+- A `FrameWriter::finish` failure at stop is logged but not counted in
+  `dropped_frames`.
+- The PCM aligner measures a gap from the real arrival time, rounded per
+  frame, so jitter can add or omit a silent frame. A nominal cursor would
+  fix it.
+- A partial priming cushion (under three frames) left queued plays stale at
+  the next key-up.
+- A recorder abandoned in its start window can leave a near-empty file, and
+  a stop inside that window can return a stale final state.
+- `naming::unique_base` checks then creates (a documented race);
+  `index::drop_torn_tail` reads the whole manifest on every append.
+- `sanitize_label`'s doc still says 64 characters; it keeps 120.
+- The settings page's **Keep at most** row has no inline size check; a bad
+  value is caught only when the whole file is validated, as with `[stream]`.
+- Tests not yet written: FLAC mid-stream encode failure, drop after
+  priming, the 480–500 ms splitter boundary, DMR rotation flush and
+  `pump_tx` trim, a later-lane sent tap.

@@ -1,0 +1,4 @@
+2026-10-11T20:37:40.080597Z DEBUG tiny_http: Server listening on 0.0.0.0:8730
+astar-server: HTTP control listening on http://0.0.0.0:8730
+2026-10-11T20:37:40.080858Z DEBUG tiny_http: Running accept thread
+2026-10-11T20:38:26.082330Z DEBUG astar_iax::client: reason="unexpected_frame_in_new_resent"

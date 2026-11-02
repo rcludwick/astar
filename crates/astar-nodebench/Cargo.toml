@@ -1,0 +1,37 @@
+[package]
+name = "astar-nodebench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+description = "nodebench: astar-server regression bench against a real ASL3 node in podman (no radio, loopback only)."
+
+[[bin]]
+name = "nodebench"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde.workspace = true
+serde_json.workspace = true
+ureq = "2"
+# `nodebench serve`: the same HTTP server astar-server's control channel uses.
+astar-http = { path = "../astar-http", version = "0.1.18-beta" }
+# `nodebench soak`: Ctrl-C stops a soak and still writes its summary.
+ctrlc = { version = "3", features = ["termination"] }
+# Config overlays: parse the rig's astar-server node.toml, change keys, re-emit.
+toml = "0.8"
+# `test-support` exposes `dial_raw_with_profile`, so the IAX probe can present
+# CALLING_NUMBER the way an app_rpt node does on a link.
+astar-iax = { path = "../astar-iax", version = "0.1.18-beta", features = ["test-support"] }
+astar-iax-core = { path = "../astar-iax-core", version = "0.1.18-beta" }
+astar-audio = { path = "../astar-audio", version = "0.1.18-beta" }
+
+[dev-dependencies]
+astar-http = { path = "../astar-http", version = "0.1.18-beta", features = ["testing"] }
+
+[lints]
+workspace = true

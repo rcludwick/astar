@@ -17,11 +17,18 @@ final class FakeKeychainBackend: KeychainBackend {
     }
     var items: [Key: Data] = [:]
     var writeFails = false
+    /// When set, `readChecked` throws: a Keychain that would not say.
+    var readFails = false
     var writes: [Key] = []
     var deletes: [Key] = []
 
     func read(service: String, account: String) -> Data? {
         items[Key(service: service, account: account)]
+    }
+
+    func readChecked(service: String, account: String) throws -> Data? {
+        if readFails { throw KeychainError(status: errSecInteractionNotAllowed) }
+        return items[Key(service: service, account: account)]
     }
 
     func write(service: String, account: String, data: Data) throws {
@@ -145,5 +152,73 @@ final class KeychainItemTests: XCTestCase {
             Set(backend.items.keys.map(\.account)), ["allstar-portal", "dmr-passwords"])
         XCTAssertEqual(creds.load()?.portalUser, "AJ7HR")
         XCTAssertEqual(dmr.password(system: "brandmeister"), "dmrpw")
+    }
+
+    // MARK: - SecItemBackend.write
+
+    /// The `SecItem` calls one `write` makes, recorded instead of reaching
+    /// the login Keychain.
+    private final class SecItemCalls {
+        var updates: [(query: [String: Any], attributes: [String: Any])] = []
+        var adds: [[String: Any]] = []
+        var updateStatus: OSStatus = errSecSuccess
+        var addStatus: OSStatus = errSecSuccess
+
+        var backend: SecItemBackend {
+            SecItemBackend(
+                update: { query, attributes in
+                    self.updates.append(
+                        (query as! [String: Any], attributes as! [String: Any]))
+                    return self.updateStatus
+                },
+                add: { attributes in
+                    self.adds.append(attributes as! [String: Any])
+                    return self.addStatus
+                })
+        }
+    }
+
+    /// An existing item is updated in place — never deleted first, so a
+    /// write that fails cannot lose it — and matched by the same three
+    /// attributes it was always written with.
+    func testWriteUpdatesAnExistingItemInPlace() throws {
+        let calls = SecItemCalls()
+        try calls.backend.write(service: "com.astar.app", account: "echolink-passwords", data: blob)
+        XCTAssertEqual(calls.updates.count, 1)
+        XCTAssertTrue(calls.adds.isEmpty, "nothing added when the update found the item")
+        let query = try XCTUnwrap(calls.updates.first?.query)
+        XCTAssertEqual(query.count, 3, "class, service and account, as before")
+        XCTAssertEqual(query[kSecClass as String] as? String, kSecClassGenericPassword as String)
+        XCTAssertEqual(query[kSecAttrService as String] as? String, "com.astar.app")
+        XCTAssertEqual(query[kSecAttrAccount as String] as? String, "echolink-passwords")
+        let attributes = try XCTUnwrap(calls.updates.first?.attributes)
+        XCTAssertEqual(attributes.count, 1)
+        XCTAssertEqual(attributes[kSecValueData as String] as? Data, blob)
+    }
+
+    func testWriteAddsAnItemThatIsNotThereYet() throws {
+        let calls = SecItemCalls()
+        calls.updateStatus = errSecItemNotFound
+        try calls.backend.write(service: "com.astar.app", account: "allstar-portal", data: blob)
+        XCTAssertEqual(calls.adds.count, 1)
+        let added = try XCTUnwrap(calls.adds.first)
+        XCTAssertEqual(added.count, 4, "the three matching attributes plus the data")
+        XCTAssertEqual(added[kSecAttrAccount as String] as? String, "allstar-portal")
+        XCTAssertEqual(added[kSecValueData as String] as? Data, blob)
+    }
+
+    func testAFailedUpdateThrowsAndAddsNothing() {
+        let calls = SecItemCalls()
+        calls.updateStatus = errSecInteractionNotAllowed
+        XCTAssertThrowsError(
+            try calls.backend.write(service: "com.astar.app", account: "dmr-passwords", data: blob))
+        XCTAssertTrue(calls.adds.isEmpty)
+
+        let adding = SecItemCalls()
+        adding.updateStatus = errSecItemNotFound
+        adding.addStatus = errSecDuplicateItem
+        XCTAssertThrowsError(
+            try adding.backend.write(service: "com.astar.app", account: "dmr-passwords", data: blob)
+        )
     }
 }

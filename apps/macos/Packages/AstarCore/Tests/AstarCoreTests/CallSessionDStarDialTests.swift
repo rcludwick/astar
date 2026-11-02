@@ -192,6 +192,9 @@ final class CallSessionDStarDialTests: XCTestCase {
         let session = CallSession(station: fake, userDefaults: scratchDefaults())
         session.operatorCallsign = "AJ7HR"
         session.reflectorIndex = dstarIndex
+        // A trusted stick that is not plugged in. Nothing trusted at all is
+        // `noTrustedVocoder` — see VocoderTrustSessionTests.
+        session.applyVocoderTrust(["TESTSER1"])
         session.poll()
         XCTAssertFalse(session.dstarAvailable)
 

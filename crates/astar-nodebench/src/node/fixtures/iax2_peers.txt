@@ -1,0 +1,6 @@
+Name/Username    Host                                           Mask                                      Port           Status      Description                     
+1998             127.0.0.1                                (S)  255.255.255.255                           4570           OK (1 ms)   astar-server                    
+radio/radio      (null)                                   (D)  0.0.0.0                                   0              Unmonitored                                 
+trunky           10.0.0.9                                 (S)  255.255.255.255                           4569  (T) (E)  UNREACHABLE                                 
+lagger           127.0.0.1                                (S)  255.255.255.255                           4571           LAGGED (2500 ms) slow one                        
+4 iax2 peers [2 online, 1 offline, 1 unmonitored]

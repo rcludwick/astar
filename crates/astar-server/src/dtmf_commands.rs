@@ -163,7 +163,10 @@ mod tests {
             feed(&mut a, 1, "*355553", t0).is_empty(),
             "not finalized yet"
         );
-        assert!(a.tick(t0 + Duration::from_millis(2999)).is_empty());
+        assert_eq!(
+            a.tick(t0 + Duration::from_millis(2999)),
+            [] as [(crate::command::LinkAction, std::string::String); 0]
+        );
         assert_eq!(
             a.tick(t0 + Duration::from_millis(3001)),
             vec![(LinkAction::Connect, "55553".to_string())]
@@ -188,8 +191,14 @@ mod tests {
     fn unknown_action_digit_discards() {
         let mut a = DtmfCommandAssembler::new(T);
         let t0 = Instant::now();
-        assert!(feed(&mut a, 1, "*955553#", t0).is_empty());
-        assert!(a.tick(t0 + Duration::from_secs(10)).is_empty());
+        assert_eq!(
+            feed(&mut a, 1, "*955553#", t0),
+            [] as [(crate::command::LinkAction, std::string::String); 0]
+        );
+        assert_eq!(
+            a.tick(t0 + Duration::from_secs(10)),
+            [] as [(crate::command::LinkAction, std::string::String); 0]
+        );
     }
 
     #[test]
@@ -210,16 +219,28 @@ mod tests {
     fn non_command_digits_outside_a_sequence_are_ignored() {
         let mut a = DtmfCommandAssembler::new(T);
         let t0 = Instant::now();
-        assert!(feed(&mut a, 1, "5551999#", t0).is_empty());
-        assert!(a.tick(t0 + Duration::from_secs(10)).is_empty());
+        assert_eq!(
+            feed(&mut a, 1, "5551999#", t0),
+            [] as [(crate::command::LinkAction, std::string::String); 0]
+        );
+        assert_eq!(
+            a.tick(t0 + Duration::from_secs(10)),
+            [] as [(crate::command::LinkAction, std::string::String); 0]
+        );
     }
 
     #[test]
     fn letters_abort_a_pending_sequence() {
         let mut a = DtmfCommandAssembler::new(T);
         let t0 = Instant::now();
-        assert!(feed(&mut a, 1, "*355A553#", t0).is_empty());
-        assert!(a.tick(t0 + Duration::from_secs(10)).is_empty());
+        assert_eq!(
+            feed(&mut a, 1, "*355A553#", t0),
+            [] as [(crate::command::LinkAction, std::string::String); 0]
+        );
+        assert_eq!(
+            a.tick(t0 + Duration::from_secs(10)),
+            [] as [(crate::command::LinkAction, std::string::String); 0]
+        );
     }
 
     #[test]

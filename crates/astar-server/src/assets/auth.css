@@ -1,0 +1,142 @@
+/* Sign-in, invite, account and users pages, the step-up sheet and the user
+   chip. Loaded after style.css and built on its tokens; the only colours of
+   its own are the QR code's, which must stay dark-on-light in both schemes
+   for a phone camera to read it. */
+:root { --qr-fg: #000; --qr-bg: #fff; --scrim: rgba(0, 0, 0, 0.55);
+  --sheet-bg: rgba(28, 28, 32, 0.97); }
+@media (prefers-color-scheme: light) {
+  :root { --scrim: rgba(30, 30, 60, 0.28); --sheet-bg: rgba(255, 255, 255, 0.97); }
+}
+/* ---- end of tokens ---- */
+
+/* ---- the user chip in every top bar --------------------------------------- */
+.auth-chip { position: relative; }
+.auth-chip > summary { list-style: none; cursor: pointer; display: inline-flex;
+  align-items: center; gap: 8px; min-height: 32px; padding: 0 12px; border-radius: 999px;
+  border: 1px solid var(--edge); background: var(--btn-bg); font-size: 12.5px; font-weight: 600;
+  transition: background 0.15s ease, border-color 0.15s ease; }
+.auth-chip > summary::-webkit-details-marker { display: none; }
+.auth-chip > summary:hover { background: var(--btn-hover); border-color: var(--edge-hover); }
+.auth-chip > summary::after { content: ""; width: 5px; height: 5px; margin-left: 2px;
+  border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg) translateY(-2px); opacity: 0.6; }
+.auth-chip .role { color: var(--text-dim); font-weight: 500; }
+.auth-chip nav { position: absolute; right: 0; top: calc(100% + 6px); z-index: 20;
+  min-width: 180px; display: flex; flex-direction: column; padding: 6px;
+  background: var(--card); -webkit-backdrop-filter: blur(24px) saturate(150%);
+  backdrop-filter: blur(24px) saturate(150%); border: 1px solid var(--edge); border-radius: 12px;
+  box-shadow: inset 0 1px 0 var(--edge-glow), 0 16px 40px var(--card-shadow); }
+.auth-chip nav a, .auth-chip nav button { display: flex; align-items: center; min-height: 34px;
+  padding: 0 10px; border-radius: 8px; border: 0; background: none; color: var(--text);
+  font: 500 13px/1 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  text-decoration: none; text-align: left; cursor: pointer; }
+.auth-chip nav a:hover, .auth-chip nav button:hover { background: var(--btn-hover); }
+
+/* ---- the centred sign-in card -------------------------------------------- */
+main.auth-narrow { max-width: 440px; padding-top: 10vh; }
+.auth-card { display: flex; flex-direction: column; gap: 16px; padding: 28px 26px; }
+.auth-card h1 { font-size: 24px; }
+.auth-host { color: var(--text-dim); font-size: 13px; overflow-wrap: anywhere; }
+.btn.primary { min-height: 44px; font-size: 15px; border-radius: 12px;
+  color: var(--text); border-color: rgba(var(--blue-rgb), 0.55);
+  background: rgba(var(--blue-rgb), 0.22); }
+.btn.primary:hover { background: rgba(var(--blue-rgb), 0.32); border-color: rgba(var(--blue-rgb), 0.75); }
+.btn.wide { width: 100%; }
+.btn .glyph { font-size: 17px; margin-right: 8px; line-height: 1; }
+.auth-form { display: flex; flex-direction: column; gap: 10px; }
+.auth-form label { font-size: 12px; font-weight: 600; color: var(--text-dim); }
+.auth-form input { min-height: 40px; font-size: 15px; }
+.auth-form input.code { font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  letter-spacing: 0.3em; font-variant-numeric: tabular-nums; }
+.auth-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.auth-row > input { flex: 1 1 140px; width: auto; }
+.check { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-dim);
+  cursor: pointer; min-height: 32px; }
+.divider { display: flex; align-items: center; gap: 10px; color: var(--text-dim); font-size: 12px; }
+.divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--row-edge); }
+.auth-msg { font-size: 13px; min-height: 0; }
+.auth-msg:empty { display: none; }
+.auth-msg.err { color: var(--err-text); }
+.auth-msg.ok { color: var(--green); }
+.auth-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  flex-wrap: wrap; font-size: 12px; color: var(--text-dim); }
+.auth-foot a { color: var(--blue); text-decoration: none; }
+.auth-foot a:hover { text-decoration: underline; }
+
+/* ---- choice tiles on the invite page --------------------------------------- */
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+.tile { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; text-align: left;
+  padding: 14px; border-radius: 14px; border: 1px solid var(--edge); background: var(--btn-bg);
+  color: var(--text); font: inherit; cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease; }
+.tile:hover { background: var(--btn-hover); border-color: var(--edge-hover); }
+.tile.on { border-color: rgba(var(--blue-rgb), 0.6); background: rgba(var(--blue-rgb), 0.14); }
+.tile .glyph { font-size: 22px; line-height: 1; }
+.tile .t { font-size: 14px; font-weight: 600; }
+.tile .d { font-size: 12px; color: var(--text-dim); }
+
+/* ---- QR codes, drawn as DOM cells (no image, nothing at a URL) ------------- */
+.qr { display: inline-flex; flex-direction: column; padding: 14px; border-radius: 12px;
+  background: var(--qr-bg); align-self: center; }
+.qr-row { display: flex; }
+.qr-cell { width: 5px; height: 5px; }
+.qr-cell.on { background: var(--qr-fg); }
+.secret { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px;
+  letter-spacing: 0.08em; overflow-wrap: anywhere; user-select: all; }
+.once { display: flex; flex-direction: column; gap: 10px; align-items: stretch;
+  border: 1px solid rgba(var(--green-rgb), 0.35); background: rgba(var(--green-rgb), 0.07);
+  border-radius: 14px; padding: 14px; }
+.once .link { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
+  overflow-wrap: anywhere; user-select: all; }
+
+/* ---- account and users lists ------------------------------------------------ */
+.group-title { font-size: 12px; font-weight: 600; color: var(--text-dim); margin: 12px 0 2px; }
+.group-title:first-child { margin-top: 0; }
+.cred-glyph { flex: none; width: 34px; height: 34px; border-radius: 10px; display: inline-flex;
+  align-items: center; justify-content: center; font-size: 17px; border: 1px solid var(--edge);
+  background: var(--banner-bg); }
+.cred { display: flex; align-items: center; gap: 12px; padding: 10px 2px;
+  border-bottom: 1px solid var(--row-edge); flex-wrap: wrap; }
+.cred:last-child { border-bottom: none; }
+.cred .who { flex: 1 1 200px; }
+.nick { font: 600 15px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  border: 0; background: none; color: var(--text); padding: 2px 4px; margin-left: -4px;
+  border-radius: 6px; cursor: text; text-align: left; overflow-wrap: anywhere; }
+.nick:hover { background: var(--btn-bg); }
+input.nick-edit { max-width: 260px; min-height: 30px; }
+.adds { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 14px;
+  padding-top: 12px; border-top: 1px solid var(--row-edge); }
+.panel { margin-top: 12px; display: flex; flex-direction: column; gap: 10px; }
+.role-pill { font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px;
+  border: 1px solid var(--edge); color: var(--text-dim); }
+.role-pill.admin { color: var(--blue); border-color: rgba(var(--blue-rgb), 0.45);
+  background: rgba(var(--blue-rgb), 0.12); }
+.audit { list-style: none; max-height: 420px; overflow-y: auto; }
+.audit li { display: grid; grid-template-columns: 12.5em minmax(0, 1fr); gap: 4px 12px; padding: 8px 2px;
+  border-bottom: 1px solid var(--row-edge); font-size: 13px; }
+.audit li:last-child { border-bottom: none; }
+.audit .t { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.audit .e { font-weight: 600; }
+.audit .d { grid-column: 2; color: var(--text-dim); font-size: 12px; overflow-wrap: anywhere; }
+.presets { display: flex; gap: 6px; flex-wrap: wrap; }
+
+/* ---- the step-up sheet ------------------------------------------------------ */
+.sheet-backdrop { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center;
+  justify-content: center; padding: 16px; background: var(--scrim);
+  -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); }
+.sheet { width: 100%; max-width: 400px; display: flex; flex-direction: column; gap: 14px;
+  background: var(--sheet-bg);
+  animation: rise 0.18s ease-out; }
+.sheet h2 { font-size: 17px; text-transform: none; letter-spacing: -0.01em; color: var(--text); }
+@keyframes rise { from { transform: translateY(12px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+@media (max-width: 460px) {
+  main.auth-narrow { padding-top: 24px; }
+  .auth-card { padding: 22px 18px; }
+  .audit li { grid-template-columns: 1fr; }
+  .audit .d { grid-column: 1; }
+  .auth-chip nav { right: auto; left: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sheet { animation: none; }
+}

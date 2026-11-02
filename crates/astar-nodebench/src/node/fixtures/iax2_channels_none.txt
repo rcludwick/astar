@@ -1,0 +1,2 @@
+Channel               Peer                                      Username    ID (Lo/Rem)  Seq (Tx/Rx)  Lag      Jitter  JitBuf  Format  FirstMsg    LastMsg
+0 active IAX channels

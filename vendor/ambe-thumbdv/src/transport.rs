@@ -22,6 +22,22 @@ pub trait Transport: Send {
     /// # Errors
     /// Returns an `io::Error` if a receive error occurs.
     fn recv_some(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize>;
+
+    /// Drive DTR and RTS low.
+    ///
+    /// Opening a tty on macOS (and on most POSIX systems) raises DTR and RTS.
+    /// On a USB radio interface or CAT/PTT cable either line can key a
+    /// transmitter, so every opener calls this straight after open and before
+    /// the first byte is written. [`SerialTransport`] does it inside
+    /// [`SerialTransport::open`] as well. Transports without modem-control
+    /// lines (mocks, sockets) keep the default no-op.
+    ///
+    /// # Errors
+    /// Returns an `io::Error` if the lines could not be set; callers treat
+    /// that as a failed open.
+    fn deassert_control_lines(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Mock transport for testing: scripted request/response pairs.
@@ -170,52 +186,142 @@ impl SerialTransport {
             .open()
             .map_err(map_serialport_error)?;
 
-        Ok(SerialTransport { port })
+        let mut transport = SerialTransport { port };
+        // The OS raised DTR/RTS as part of open(). Drop them before anything
+        // else happens; a port whose lines cannot be driven is not used.
+        transport.deassert_control_lines()?;
+        Ok(transport)
     }
 
-    /// Get available serial ports that look like ThumbDV devices.
+    /// Every FT-X-class port present, by USB serial number and path, for
+    /// the enrolment picker. **Enumeration only: nothing is opened.**
     ///
-    /// Filters for USB devices with VID 0x0403 (FTDI) and PID 0x6015 (FT230X),
-    /// or product string containing "ThumbDV" (§6 of ambe3000-protocol.md).
-    /// On macOS, deduplicates the `/dev/cu.*` and `/dev/tty.*` twins and keeps
-    /// only the `/dev/cu.*` form to avoid blocking on carrier detect (per plan brief).
+    /// Ports without a USB serial number are left out, because they can
+    /// never be trusted (see [`trusted_ports_from`]).
+    pub fn list_candidates() -> Vec<VocoderCandidate> {
+        candidates_from(&enumerate())
+    }
+
+    /// The port paths of attached FT-X-class devices whose USB serial number
+    /// is in `trusted`. **Enumeration only: nothing is opened.**
     ///
-    /// Returns an empty vector if no suitable ports are found.
-    pub fn candidate_ports() -> Vec<String> {
-        let ports = match serialport::available_ports() {
-            Ok(p) => p,
-            Err(_) => return Vec::new(),
-        };
-
-        let mut candidates = Vec::new();
-
-        for port_info in ports {
-            let port_name = port_info.port_name.clone();
-            let is_thumbdv = match &port_info.port_type {
-                serialport::SerialPortType::UsbPort(usb) => {
-                    (usb.vid == 0x0403 && usb.pid == 0x6015)
-                        || usb
-                            .product
-                            .as_ref()
-                            .map(|p| p.contains("ThumbDV"))
-                            .unwrap_or(false)
-                }
-                _ => false,
-            };
-
-            if is_thumbdv {
-                candidates.push(port_name);
-            }
+    /// This is the only list any opener outside enrolment may walk. An empty
+    /// `trusted` yields an empty list.
+    pub fn candidate_ports_trusted(trusted: &[String]) -> Vec<String> {
+        if trusted.iter().all(|t| t.trim().is_empty()) {
+            return Vec::new();
         }
+        trusted_ports_from(&enumerate(), trusted)
+    }
+}
 
-        // On macOS, deduplicate cu/tty twins.
-        #[cfg(target_os = "macos")]
-        {
-            dedup_cu_tty_twins(candidates)
-        }
+/// FTDI's USB vendor id.
+pub const FTDI_VID: u16 = 0x0403;
+/// The FT-X family (FT230X / FT231X) product id: DVsticks, ThumbDVs, and a
+/// great many CAT/PTT cables. USB identity alone cannot tell them apart.
+pub const FT_X_PID: u16 = 0x6015;
 
-        #[cfg(not(target_os = "macos"))]
-        candidates
+/// One USB serial port as enumeration reports it. A plain mirror of the
+/// fields of `serialport::UsbPortInfo` this crate reads, so the trust policy
+/// is testable with synthetic listings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsbListing {
+    /// The OS path (`/dev/cu.usbserial-…`, `COM7`, …).
+    pub port_name: String,
+    /// USB vendor id.
+    pub vid: u16,
+    /// USB product id.
+    pub pid: u16,
+    /// USB serial number, when the device reports one.
+    pub serial_number: Option<String>,
+    /// USB product string, when the device reports one.
+    pub product: Option<String>,
+}
+
+/// An FT-X-class port offered for enrolment. Never opened by listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VocoderCandidate {
+    /// USB serial number: the identity trust is recorded against.
+    pub serial: String,
+    /// The OS port path it enumerates as right now.
+    pub port: String,
+    /// USB product string, for display.
+    pub product: Option<String>,
+}
+
+fn enumerate() -> Vec<UsbListing> {
+    let Ok(ports) = serialport::available_ports() else {
+        return Vec::new();
+    };
+    ports
+        .into_iter()
+        .filter_map(|info| match info.port_type {
+            serialport::SerialPortType::UsbPort(usb) => Some(UsbListing {
+                port_name: info.port_name,
+                vid: usb.vid,
+                pid: usb.pid,
+                serial_number: usb.serial_number,
+                product: usb.product,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// FT-X VID/PID, or a product string naming a ThumbDV.
+fn is_vocoder_class(l: &UsbListing) -> bool {
+    (l.vid == FTDI_VID && l.pid == FT_X_PID)
+        || l.product.as_deref().is_some_and(|p| p.contains("ThumbDV"))
+}
+
+fn usable_serial(l: &UsbListing) -> Option<&str> {
+    l.serial_number
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// The trust policy: paths of vocoder-class ports whose serial number is in
+/// `trusted` (exact match after trimming). Pure; the seam for tests.
+///
+/// A port with no serial number never matches, and neither does a trusted
+/// serial on a device of another USB class.
+pub fn trusted_ports_from(ports: &[UsbListing], trusted: &[String]) -> Vec<String> {
+    let paths: Vec<String> = ports
+        .iter()
+        .filter(|l| is_vocoder_class(l))
+        .filter(|l| usable_serial(l).is_some_and(|s| trusted.iter().any(|t| t.trim() == s)))
+        .map(|l| l.port_name.clone())
+        .collect();
+    dedup_paths(paths)
+}
+
+/// Every vocoder-class port with a serial number, one entry per port after
+/// cu/tty de-duplication. Pure; the seam for tests.
+pub fn candidates_from(ports: &[UsbListing]) -> Vec<VocoderCandidate> {
+    let keep = dedup_paths(ports.iter().map(|l| l.port_name.clone()).collect());
+    ports
+        .iter()
+        .filter(|l| is_vocoder_class(l) && keep.contains(&l.port_name))
+        .filter_map(|l| {
+            usable_serial(l).map(|s| VocoderCandidate {
+                serial: s.to_string(),
+                port: l.port_name.clone(),
+                product: l.product.clone(),
+            })
+        })
+        .collect()
+}
+
+fn dedup_paths(paths: Vec<String>) -> Vec<String> {
+    // On macOS, deduplicate cu/tty twins.
+    #[cfg(target_os = "macos")]
+    {
+        dedup_cu_tty_twins(paths)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        paths
     }
 }
 
@@ -264,6 +370,15 @@ fn dedup_cu_tty_twins(ports: Vec<String>) -> Vec<String> {
 }
 
 impl Transport for SerialTransport {
+    fn deassert_control_lines(&mut self) -> io::Result<()> {
+        self.port
+            .write_data_terminal_ready(false)
+            .map_err(map_serialport_error)?;
+        self.port
+            .write_request_to_send(false)
+            .map_err(map_serialport_error)
+    }
+
     fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
         use std::io::Write;
         self.port.write_all(bytes)?;
@@ -326,10 +441,172 @@ mod tests {
         );
     }
 
+    // ---- Trust filter (vocoder trust, on-air safety) ----------------------
+    //
+    // Every listing below is synthetic. Nothing here enumerates, let alone
+    // opens, a real serial port.
+
+    fn ftx(port: &str, serial: Option<&str>, product: &str) -> UsbListing {
+        UsbListing {
+            port_name: port.to_string(),
+            vid: FTDI_VID,
+            pid: FT_X_PID,
+            serial_number: serial.map(str::to_string),
+            product: Some(product.to_string()),
+        }
+    }
+
+    fn trust(serials: &[&str]) -> Vec<String> {
+        serials.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
-    fn candidate_ports_does_not_panic() {
-        // Should return without panicking, even if no ports are present.
-        let _ = SerialTransport::candidate_ports();
+    fn untrusted_cat_cable_is_never_a_candidate_even_when_alone() {
+        // An FT231X CAT/PTT cable: same VID/PID as a DVstick. It is the only
+        // FT-X device present, and it is still not a candidate.
+        let ports = [ftx(
+            "/dev/cu.usbserial-CATCABLE",
+            Some("CATCABLE"),
+            "FT231X USB UART",
+        )];
+        assert!(trusted_ports_from(&ports, &trust(&["TESTSER1"])).is_empty());
+    }
+
+    #[test]
+    fn empty_trust_list_yields_no_candidates() {
+        let ports = [
+            ftx(
+                "/dev/cu.usbserial-TESTSER1",
+                Some("TESTSER1"),
+                "FT230X Basic UART",
+            ),
+            ftx(
+                "/dev/cu.usbserial-TESTSER2",
+                Some("TESTSER2"),
+                "FT230X Basic UART",
+            ),
+        ];
+        assert!(trusted_ports_from(&ports, &[]).is_empty());
+    }
+
+    #[test]
+    fn only_trusted_serials_are_candidates() {
+        let ports = [
+            ftx(
+                "/dev/cu.usbserial-TESTSER1",
+                Some("TESTSER1"),
+                "FT230X Basic UART",
+            ),
+            ftx(
+                "/dev/cu.usbserial-CATCABLE",
+                Some("CATCABLE"),
+                "FT231X USB UART",
+            ),
+            ftx(
+                "/dev/cu.usbserial-TESTSER2",
+                Some("TESTSER2"),
+                "FT230X Basic UART",
+            ),
+        ];
+        assert_eq!(
+            trusted_ports_from(&ports, &trust(&["TESTSER2", "TESTSER1"])),
+            vec![
+                "/dev/cu.usbserial-TESTSER1".to_string(),
+                "/dev/cu.usbserial-TESTSER2".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_trusted_serial_on_a_non_ftx_device_is_refused() {
+        // The serial matches, the USB identity does not: a WCH radio
+        // interface that happens to report the same serial string.
+        let ports = [UsbListing {
+            port_name: "/dev/cu.wchusbserialTESTSER1".to_string(),
+            vid: 0x1a86,
+            pid: 0x55d3,
+            serial_number: Some("TESTSER1".to_string()),
+            product: Some("USB Single Serial".to_string()),
+        }];
+        assert!(trusted_ports_from(&ports, &trust(&["TESTSER1"])).is_empty());
+    }
+
+    #[test]
+    fn a_port_with_no_serial_number_is_never_trusted() {
+        let ports = [ftx("/dev/cu.usbserial-NOSERIAL", None, "FT230X Basic UART")];
+        assert!(trusted_ports_from(&ports, &trust(&[""])).is_empty());
+        assert!(candidates_from(&ports).is_empty());
+    }
+
+    #[test]
+    fn candidates_list_every_ftx_port_by_serial_and_path() {
+        let ports = [
+            ftx(
+                "/dev/cu.usbserial-TESTSER1",
+                Some("TESTSER1"),
+                "FT230X Basic UART",
+            ),
+            UsbListing {
+                port_name: "/dev/cu.wchusbserialRADIO".to_string(),
+                vid: 0x1a86,
+                pid: 0x55d3,
+                serial_number: Some("RADIO".to_string()),
+                product: None,
+            },
+            ftx(
+                "/dev/cu.usbserial-CATCABLE",
+                Some("CATCABLE"),
+                "FT231X USB UART",
+            ),
+        ];
+        let got = candidates_from(&ports);
+        assert_eq!(
+            got,
+            vec![
+                VocoderCandidate {
+                    serial: "TESTSER1".into(),
+                    port: "/dev/cu.usbserial-TESTSER1".into(),
+                    product: Some("FT230X Basic UART".into()),
+                },
+                VocoderCandidate {
+                    serial: "CATCABLE".into(),
+                    port: "/dev/cu.usbserial-CATCABLE".into(),
+                    product: Some("FT231X USB UART".into()),
+                },
+            ],
+            "every FT-X port is listed for enrolment, the WCH radio interface is not"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn cu_tty_twins_collapse_to_one_cu_port() {
+        let ports = [
+            ftx(
+                "/dev/tty.usbserial-TESTSER1",
+                Some("TESTSER1"),
+                "FT230X Basic UART",
+            ),
+            ftx(
+                "/dev/cu.usbserial-TESTSER1",
+                Some("TESTSER1"),
+                "FT230X Basic UART",
+            ),
+        ];
+        assert_eq!(
+            trusted_ports_from(&ports, &trust(&["TESTSER1"])),
+            vec!["/dev/cu.usbserial-TESTSER1".to_string()]
+        );
+        let c = candidates_from(&ports);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].port, "/dev/cu.usbserial-TESTSER1");
+    }
+
+    #[test]
+    fn mock_transport_deassert_is_a_no_op_by_default() {
+        let mut m = MockTransport::new();
+        m.deassert_control_lines().unwrap();
+        assert!(m.done());
     }
 
     #[test]

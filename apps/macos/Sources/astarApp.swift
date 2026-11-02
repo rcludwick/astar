@@ -5,6 +5,7 @@
 import AstarCore
 import Combine
 import SwiftUI
+import os
 
 /// astar — a native AllStarLink client.
 ///
@@ -112,6 +113,13 @@ struct AstarApp: App {
         // Which pane the main window shows. Owned here because BOTH the popover's
         // footer button and the main menu's Settings… item drive it (astar-1f7d).
         let navigation = AppNavigation()
+        /// Settings → Vocoders (vocoder trust): the AMBE sticks this Mac may
+        /// open. A change is handed straight to the session's station, so the
+        /// next D-Star/YSF/NXDN/DMR connect sees it; the session read the same
+        /// stored list at launch, so the two start out agreeing.
+        lazy var vocoders = VocoderSettings(onTrustChanged: { [weak self] serials in
+            self?.session.applyVocoderTrust(serials)
+        })
         private var statusController: StatusItemController?
         // Posts VoiceOver announcements for call-session events (astar-b167,
         // accessibility-audit F6) — a sibling of `statusController`, not owned
@@ -146,7 +154,8 @@ struct AstarApp: App {
             setups.attach(session: session, serial: serial)
             statusController = StatusItemController(
                 session: session, serial: serial, setups: setups, micAnalyzer: micAnalyzer,
-                deviceMonitor: deviceMonitor, navigation: navigation, reflectors: reflectors)
+                deviceMonitor: deviceMonitor, navigation: navigation, reflectors: reflectors,
+                vocoders: vocoders)
             // Replace SwiftUI's placeholder menu (whose Settings… item opened the
             // empty `Settings { EmptyView() }` scene) with a real one — astar-1f7d.
             MainMenu.install(target: self)
@@ -156,6 +165,10 @@ struct AstarApp: App {
             // The popover pauses this only while Settings is open (to avoid the device
             // pickers re-rendering at 20 Hz) — see MenuPopover.
             session.start()
+            // EchoLink logs in at launch only when the operator logged in by
+            // hand once with "Log in automatically" ticked, which also saved
+            // the password; otherwise this does nothing. Never a call.
+            session.startEchoLinkIfRemembered()
             // Apply the persisted app-global "Spectrum decay" preference at launch
             // (astar-68a6) so the engine + the inactive fade use it before the first
             // spectrum renders. Re-asserted later whenever a new analyzer appears.
@@ -197,6 +210,30 @@ struct AstarApp: App {
             welcome.markShown()
             statusController?.showSettings()
         }
+
+        /// Finish an open recording before the process goes, so its FLAC
+        /// headers carry the real length (a file cut off mid-write still
+        /// plays, but reports no duration). The stop itself runs on the
+        /// recording queue; this waits for it at most three seconds, so a
+        /// wedged recorder cannot hold quit.
+        ///
+        /// Then hang up any EchoLink call and log off the directory, so the
+        /// far station hears a BYE and the listing goes at once rather than
+        /// when the directory notices the status refreshes stopped. The
+        /// recording goes first so the call it records is still up while its
+        /// file is finished. That work also runs off the main thread, and its
+        /// wait is capped at 2 s, so a logoff stuck behind a slow directory
+        /// never holds the quit either.
+        func applicationWillTerminate(_ notification: Notification) {
+            if !session.finishRecordingBeforeQuit(timeout: 3) {
+                Self.log.error(
+                    "Quit did not wait for the recording to finish: the stop took longer than 3 s, so its files may lack a final length"
+                )
+            }
+            session.echolinkShutdownForQuit(timeout: 2)
+        }
+
+        private static let log = Logger(subsystem: "astar", category: "recording")
 
         /// Clicking the Dock icon opens the main window (astar-7c31). AppKit only
         /// calls this when the app is already running; the return value tells AppKit

@@ -21,8 +21,8 @@ fn test_station(cfg: StationConfig) -> Station {
 fn new_station_lists_devices() {
     let s = test_station(StationConfig::default());
     let (inputs, outputs) = s.list_devices().expect("devices");
-    assert!(!inputs.is_empty());
-    assert!(!outputs.is_empty());
+    assert_ne!(inputs, [] as [std::string::String; 0]);
+    assert_ne!(outputs, [] as [std::string::String; 0]);
 }
 
 // --- Task 1.3: connect / disconnect / snapshot (offline shape) ---

@@ -1,0 +1,158 @@
+# nodebench nat topology (soak tier only): the ASL3 node 1999 sits behind a
+# NAT router, the way a ClearNode sits behind a home router, and links out to
+# astar-server 1998 on the far side.
+#
+#     node pod                router pod                     server pod
+#   asl3 10.89.71.2  ──  10.89.71.254 | 10.89.72.254  ──  astar-server 10.89.72.3
+#   (nodebench-nat-in)     MASQUERADE + conntrack       (nodebench-nat-out)
+#
+# Both networks are podman --internal networks: no default route, no way out
+# of the podman VM (Rob approved this exception to the one-pod rule on
+# 2026-10-11). The node's only route to 10.89.72.0/24 is the router, and
+# astar-server has no route to 10.89.71.0/24 at all, so every packet between
+# the two crosses the NAT. Unsolicited UDP arriving on the router's outside
+# address is dropped, as a home router drops it: once conntrack forgets the
+# flow, astar-server's packets go nowhere until the node sends again.
+#
+# Not played with `rig.sh`. `nodebench soak --topology nat` creates the two
+# networks, then plays each Pod document on its own, passing the
+# `nodebench.astar/networks` annotation as `podman kube play --network`
+# arguments (kube play has no per-pod network field, and one `--network
+# name:ip=` for a multi-pod file would hand every pod the same address).
+# `@UDP_TIMEOUT@` sets both nf_conntrack_udp_timeout and
+# nf_conntrack_udp_timeout_stream in the router's network namespace.
+#
+# Host ports: 127.0.0.1 only, and offset by 30000 so the nat rig can run
+# beside the loopback pod (which uses the 20000 offsets): 35038 AMI,
+# 38730 astar-server control.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nodebench-nat-server
+  labels:
+    app: nodebench-nat
+  annotations:
+    nodebench.astar/networks: "nodebench-nat-out:ip=10.89.72.3"
+spec:
+  restartPolicy: Never
+  containers:
+    - name: astar-server
+      image: localhost/nodebench-astar-server:latest
+      args: ["serve", "--config", "/etc/nodebench/@CONFIG@"]
+      env:
+        - name: RUST_LOG
+          value: "@RUST_LOG@"
+        # Loopback-only test secret, shared with iax.conf [1998] on the node.
+        - { name: ALLSTAR_NODE, value: "1998" }
+        - { name: ALLSTAR_SECRET, value: "nodebench-loopback-only" }
+        - { name: ALLSTAR_LINK_1999, value: "nodebench-loopback-only" }
+      ports:
+        - { containerPort: 8730, hostPort: 38730, hostIP: 127.0.0.1, protocol: TCP }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nodebench-nat-router
+  labels:
+    app: nodebench-nat
+  annotations:
+    # Order matters: the first network is eth0 (inside), the second eth1.
+    nodebench.astar/networks: "nodebench-nat-in:ip=10.89.71.254 nodebench-nat-out:ip=10.89.72.254"
+spec:
+  restartPolicy: Never
+  securityContext:
+    sysctls:
+      - { name: net.ipv4.ip_forward, value: "1" }
+      - { name: net.netfilter.nf_conntrack_udp_timeout, value: "@UDP_TIMEOUT@" }
+      - { name: net.netfilter.nf_conntrack_udp_timeout_stream, value: "@UDP_TIMEOUT@" }
+  containers:
+    - name: nat
+      image: docker.io/nicolaka/netshoot:v0.13
+      command: ["sh", "-c"]
+      args:
+        - >-
+          set -e;
+          out=$(ip -o -4 addr show | awk '/ 10\.89\.72\.254\//{print $2}');
+          in=$(ip -o -4 addr show | awk '/ 10\.89\.71\.254\//{print $2}');
+          iptables -t nat -A POSTROUTING -s 10.89.71.0/24 -o "$out" -j MASQUERADE;
+          iptables -A INPUT -i "$out" -p udp -m conntrack --ctstate NEW -j DROP;
+          iptables -A FORWARD -i "$out" -o "$in" -m conntrack --ctstate NEW -j DROP;
+          echo "nat: in=$in out=$out";
+          sysctl net.netfilter.nf_conntrack_udp_timeout net.netfilter.nf_conntrack_udp_timeout_stream;
+          echo "nat: ready";
+          exec sleep infinity
+      securityContext:
+        capabilities:
+          add: ["NET_ADMIN", "NET_RAW"]
+    # Every UDP packet on both router interfaces (so each forwarded packet
+    # appears twice: before and after translation). Ring buffer as in pod.yaml.
+    - name: capture
+      image: docker.io/nicolaka/netshoot:v0.13
+      command: ["tshark"]
+      args:
+        - "-i"
+        - "any"
+        - "-f"
+        - "udp"
+        - "-q"
+        - "-b"
+        - "filesize:20480"
+        - "-b"
+        - "files:50"
+        - "-w"
+        - "/captures/nodebench.pcapng"
+      securityContext:
+        capabilities:
+          add: ["NET_RAW", "NET_ADMIN"]
+      volumeMounts:
+        - { name: captures, mountPath: /captures }
+  volumes:
+    - name: captures
+      hostPath:
+        path: "@CAPTURES@"
+        type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nodebench-nat-node
+  labels:
+    app: nodebench-nat
+  annotations:
+    nodebench.astar/networks: "nodebench-nat-in:ip=10.89.71.2"
+spec:
+  restartPolicy: Never
+  containers:
+    # The stock bench node, with rpt.conf's 1998 entry pointed across the NAT
+    # at astar-server instead of at 127.0.0.1.
+    - name: asl3
+      image: localhost/nodebench-asl3:latest
+      command: ["sh", "-c"]
+      args:
+        - >-
+          sed -i 's|^1998 = .*|1998 = radio@10.89.72.3:4570/1998,NONE|' /etc/asterisk/rpt.conf &&
+          grep '^1998 = ' /etc/asterisk/rpt.conf &&
+          exec /usr/local/bin/nodebench-asl3-entrypoint
+      env:
+        - name: NODEBENCH_CODECS
+          value: "@CODECS@"
+        - name: NODEBENCH_DEBUG
+          value: "@DEBUG@"
+        - name: NODEBENCH_FILL_CALLERID
+          value: "@FILLCID@"
+      ports:
+        - { containerPort: 5038, hostPort: 35038, hostIP: 127.0.0.1, protocol: TCP }
+    # The node's route to the far side, via the router. A sidecar sets it so
+    # the asl3 container needs neither NET_ADMIN nor iproute2.
+    - name: route
+      image: docker.io/nicolaka/netshoot:v0.13
+      command: ["sh", "-c"]
+      args:
+        - >-
+          ip route add 10.89.72.0/24 via 10.89.71.254 &&
+          ip route &&
+          echo "route: ready" &&
+          exec sleep infinity
+      securityContext:
+        capabilities:
+          add: ["NET_ADMIN"]

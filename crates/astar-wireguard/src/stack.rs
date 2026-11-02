@@ -710,8 +710,8 @@ mod tests {
         tcp[10] = 0;
         tcp[11] = 0;
         let mut sum = 0u32;
-        for w in tcp[..20].chunks_exact(2) {
-            sum += u32::from(u16::from_be_bytes([w[0], w[1]]));
+        for w in tcp[..20].as_chunks::<2>().0 {
+            sum += u32::from(u16::from_be_bytes(*w));
         }
         while sum > 0xFFFF {
             sum = (sum & 0xFFFF) + (sum >> 16);

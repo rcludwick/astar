@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# astar — Copyright (c) 2026 Rob Ludwick.
+# SPDX-License-Identifier: AGPL-3.0-only
+# Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
+# Canned podman for the fake box. Read-only subcommands only; anything else
+# is a bug in verify.sh and fails loudly.
+case "$1 ${2:-}" in
+  "inspect -f")
+    [ "${FAKE_CONTAINER:-yes}" = yes ] || exit 125
+    echo "${FAKE_RUNNING:-true}|${FAKE_STARTED:-$(($(date +%s) - 30))}|${FAKE_IMAGE_NAME:-localhost/iaxclient-node:latest}|${FAKE_IMAGE_ID:-aaaa1111bbbb2222}" ;;
+  "image inspect")
+    [ -n "${FAKE_TAG_ID-aaaa1111bbbb2222}" ] || exit 125
+    echo "${FAKE_TAG_ID-aaaa1111bbbb2222}" ;;
+  "images -q")
+    if [ "${3:-}" = -f ]; then n=${FAKE_DANGLING:-0}; else n=${FAKE_IMAGES:-3}; fi
+    i=0; while [ $i -lt $n ]; do echo "img$i"; i=$((i + 1)); done ;;
+  "logs --tail")
+    cat "${FAKE_LOG:-/dev/null}" ;;
+  *) echo "fake podman: refusing '$*'" >&2; exit 99 ;;
+esac

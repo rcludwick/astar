@@ -321,18 +321,15 @@ pub fn mint_wt_token(creds: &PortalCredentials) -> Result<String, Asl3Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use astar_http::Response;
+    use astar_http::testing::{Recorded, serve};
 
-    /// Read a request's body and its content type.
-    fn body_and_type(rq: &mut tiny_http::Request) -> (String, String) {
-        let ctype = rq
-            .headers()
-            .iter()
-            .find(|h| h.field.equiv("Content-Type"))
-            .map(|h| h.value.as_str().to_string())
-            .unwrap_or_default();
-        let mut body = String::new();
-        let _ = rq.as_reader().read_to_string(&mut body);
-        (body, ctype)
+    fn creds(user: &str, password: &str, node: &str) -> PortalCredentials {
+        PortalCredentials {
+            user: user.into(),
+            password: password.into(),
+            node: node.into(),
+        }
     }
 
     #[test]
@@ -371,123 +368,95 @@ mod tests {
     }
 
     /// The documented API is the primary path: one JSON POST, a token back,
-    /// and neither portal page is ever fetched (the stub serves exactly one
-    /// request, so a scrape would hang the join on a closed server).
+    /// and neither portal page is ever fetched.
     #[test]
     fn api_mint_succeeds_and_never_touches_the_portal_pages() {
-        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub");
-        let base = format!("http://{}", server.server_addr());
-        let handle = std::thread::spawn(move || {
-            let Ok(mut rq) = server.recv() else { return };
-            assert_eq!(rq.url(), "/api/v2/auth-wt-legacy", "API path");
-            assert_eq!(rq.method().as_str(), "POST");
-            let (body, ctype) = body_and_type(&mut rq);
-            assert!(
-                ctype.starts_with("application/json"),
-                "content type: {ctype}"
-            );
-            let sent: serde_json::Value = serde_json::from_str(&body).expect("JSON body");
-            assert_eq!(
-                sent,
-                serde_json::json!({
-                    "username": "AJ7HR",
-                    "password": "not-a-real-password",
-                }),
-                "exactly the two documented fields"
-            );
-            let _ = rq.respond(tiny_http::Response::from_string(
+        let stub = serve(|_| {
+            Response::text(
+                200,
                 r#"{"status":"OK","auth":1,"token":"tok-api-1234","msg":"ok"}"#,
-            ));
+            )
         });
-        let creds = PortalCredentials {
-            user: "AJ7HR".into(),
-            password: "not-a-real-password".into(),
-            node: String::new(),
-        };
-        let token = mint_wt_token_at(&base, &creds).expect("API mint succeeds");
+        let token = mint_wt_token_at(&stub.url(), &creds("AJ7HR", "not-a-real-password", ""))
+            .expect("API mint succeeds");
         assert_eq!(token, "tok-api-1234");
-        handle.join().unwrap();
+        let seen = stub.requests();
+        assert_eq!(seen.len(), 1, "no portal page was fetched: {seen:?}");
+        assert_eq!(seen[0].target, "/api/v2/auth-wt-legacy", "API path");
+        assert_eq!(seen[0].method, "POST");
+        let ctype = seen[0].header("Content-Type").unwrap_or_default();
+        assert!(
+            ctype.starts_with("application/json"),
+            "content type: {ctype}"
+        );
+        let sent: serde_json::Value = serde_json::from_str(seen[0].body_str()).expect("JSON body");
+        assert_eq!(
+            sent,
+            serde_json::json!({
+                "username": "AJ7HR",
+                "password": "not-a-real-password",
+            }),
+            "exactly the two documented fields"
+        );
     }
 
     /// A refused login is refused on both paths: the scrape is NOT tried, so
-    /// the stub serves exactly one request (a fallback would be a second).
+    /// the stub sees exactly one request (a fallback would be a second).
     #[test]
     fn api_refusal_is_login_and_does_not_fall_back() {
-        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub");
-        let base = format!("http://{}", server.server_addr());
-        let handle = std::thread::spawn(move || {
-            let Ok(rq) = server.recv() else { return };
-            assert_eq!(rq.url(), "/api/v2/auth-wt-legacy");
-            // The live refusal shape, probed 2026-09-08.
-            let _ = rq.respond(
-                tiny_http::Response::from_string(
-                    r#"{"status":"ERR","auth":0,"token":"","msg":"login failed"}"#,
-                )
-                .with_status_code(401),
-            );
+        // The live refusal shape, probed 2026-09-08.
+        let stub = serve(|_| {
+            Response::text(
+                401,
+                r#"{"status":"ERR","auth":0,"token":"","msg":"login failed"}"#,
+            )
         });
-        let creds = PortalCredentials {
-            user: "AJ7HR".into(),
-            password: "wrong".into(),
-            node: "77777".into(),
-        };
         assert!(matches!(
-            mint_wt_token_at(&base, &creds),
+            mint_wt_token_at(&stub.url(), &creds("AJ7HR", "wrong", "77777")),
             Err(Asl3Error::Login)
         ));
-        handle.join().unwrap();
+        let seen = stub.requests();
+        assert_eq!(seen.len(), 1, "no fallback: {seen:?}");
+        assert_eq!(seen[0].target, "/api/v2/auth-wt-legacy");
     }
 
     /// The endpoint gone (404) with a node configured: fall back to the
-    /// scrape, exactly as before the API existed. Note the request count is a
-    /// ceiling, not an assertion: if a change made the engine send FEWER
-    /// requests than the stub is waiting for, this test hangs at
-    /// `handle.join()` rather than failing with a message.
+    /// scrape, exactly as before the API existed.
     #[test]
     fn api_missing_falls_back_to_the_scrape_when_a_node_is_configured() {
-        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub");
-        let base = format!("http://{}", server.server_addr());
-        let handle = std::thread::spawn(move || {
-            for _ in 0..3 {
-                let Ok(mut rq) = server.recv() else { return };
-                let url = rq.url().to_string();
-                if url.starts_with(API_PATH) {
-                    let _ = rq.respond(
-                        tiny_http::Response::from_string("not found").with_status_code(404),
-                    );
-                } else if url.starts_with("/login.php") {
-                    let mut body = String::new();
-                    let _ = rq.as_reader().read_to_string(&mut body);
-                    assert!(body.contains("user=AJ7HR"), "form-encoded login: {body}");
-                    let resp = tiny_http::Response::from_string("ok").with_header(
-                        tiny_http::Header::from_bytes(
-                            &b"Set-Cookie"[..],
-                            &b"PHPSESSID=stubfb; path=/"[..],
-                        )
-                        .unwrap(),
-                    );
-                    let _ = rq.respond(resp);
-                } else {
-                    let has_cookie = rq.headers().iter().any(|h| {
-                        h.field.equiv("Cookie") && h.value.as_str().contains("PHPSESSID=stubfb")
-                    });
-                    let body = if has_cookie && url.contains("node=77777") {
+        let stub = serve(|rq: &Recorded| {
+            if rq.target.starts_with(API_PATH) {
+                Response::text(404, "not found")
+            } else if rq.target.starts_with("/login.php") {
+                Response::text(200, "ok").header("Set-Cookie", "PHPSESSID=stubfb; path=/")
+            } else {
+                let has_cookie = rq
+                    .header("Cookie")
+                    .is_some_and(|c| c.contains("PHPSESSID=stubfb"));
+                Response::text(
+                    200,
+                    if has_cookie && rq.target.contains("node=77777") {
                         r#"<param name="callingName" value="tok-scraped"/>"#
                     } else {
                         "Node not found"
-                    };
-                    let _ = rq.respond(tiny_http::Response::from_string(body));
-                }
+                    },
+                )
             }
         });
-        let creds = PortalCredentials {
-            user: "AJ7HR".into(),
-            password: "not-a-real-password".into(),
-            node: "77777".into(),
-        };
-        let token = mint_wt_token_at(&base, &creds).expect("falls back to the scrape");
+        let token = mint_wt_token_at(&stub.url(), &creds("AJ7HR", "not-a-real-password", "77777"))
+            .expect("falls back to the scrape");
         assert_eq!(token, "tok-scraped");
-        handle.join().unwrap();
+        let seen = stub.requests();
+        assert_eq!(seen.len(), 3, "API, login, page: {seen:?}");
+        let login = seen
+            .iter()
+            .find(|r| r.target.starts_with("/login.php"))
+            .expect("login request");
+        assert!(
+            login.body_str().contains("user=AJ7HR"),
+            "form-encoded login: {}",
+            login.body_str()
+        );
     }
 
     /// The endpoint gone and NO node: the scrape cannot work without one, so
@@ -495,19 +464,9 @@ mod tests {
     /// request, no fallback attempt.
     #[test]
     fn api_missing_without_a_node_is_an_http_error() {
-        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub");
-        let base = format!("http://{}", server.server_addr());
-        let handle = std::thread::spawn(move || {
-            let Ok(rq) = server.recv() else { return };
-            assert_eq!(rq.url(), "/api/v2/auth-wt-legacy");
-            let _ = rq.respond(tiny_http::Response::from_string("not found").with_status_code(404));
-        });
-        let creds = PortalCredentials {
-            user: "AJ7HR".into(),
-            password: "not-a-real-password".into(),
-            node: String::new(),
-        };
-        let err = mint_wt_token_at(&base, &creds).expect_err("no node, no fallback");
+        let stub = serve(|_| Response::text(404, "not found"));
+        let err = mint_wt_token_at(&stub.url(), &creds("AJ7HR", "not-a-real-password", ""))
+            .expect_err("no node, no fallback");
         match err {
             Asl3Error::Http(msg) => {
                 assert!(msg.contains(API_PATH), "names the API path: {msg}");
@@ -515,35 +474,25 @@ mod tests {
             }
             other => panic!("expected Http, got {other:?}"),
         }
-        handle.join().unwrap();
+        let seen = stub.requests();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].target, "/api/v2/auth-wt-legacy");
     }
 
     /// A 401 is a refusal whatever wrapping it arrives in: an nginx/WAF page
     /// in front of the API must not read as "unavailable" and send the
-    /// password off to the scrape. One request served — a fallback would be a
+    /// password off to the scrape. One request seen — a fallback would be a
     /// second.
     #[test]
     fn api_401_with_an_html_body_is_still_login() {
-        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub");
-        let base = format!("http://{}", server.server_addr());
-        let handle = std::thread::spawn(move || {
-            let Ok(rq) = server.recv() else { return };
-            assert_eq!(rq.url(), "/api/v2/auth-wt-legacy");
-            let _ = rq.respond(
-                tiny_http::Response::from_string("<html><body>401 Unauthorized</body></html>")
-                    .with_status_code(401),
-            );
-        });
-        let creds = PortalCredentials {
-            user: "AJ7HR".into(),
-            password: "wrong".into(),
-            node: "77777".into(),
-        };
+        let stub = serve(|_| Response::text(401, "<html><body>401 Unauthorized</body></html>"));
         assert!(matches!(
-            mint_wt_token_at(&base, &creds),
+            mint_wt_token_at(&stub.url(), &creds("AJ7HR", "wrong", "77777")),
             Err(Asl3Error::Login)
         ));
-        handle.join().unwrap();
+        let seen = stub.requests();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].target, "/api/v2/auth-wt-legacy");
     }
 
     /// A 2xx that carried no token is deliberately SOFT (see `mint_via_api`):
@@ -551,64 +500,36 @@ mod tests {
     /// still mints through the scrape rather than failing outright.
     #[test]
     fn api_ok_with_empty_token_falls_back_to_the_scrape() {
-        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub");
-        let base = format!("http://{}", server.server_addr());
-        let handle = std::thread::spawn(move || {
-            for _ in 0..3 {
-                let Ok(rq) = server.recv() else { return };
-                let url = rq.url().to_string();
-                if url.starts_with(API_PATH) {
-                    let _ = rq.respond(tiny_http::Response::from_string(
-                        r#"{"status":"OK","auth":1,"token":"","msg":"ok"}"#,
-                    ));
-                } else if url.starts_with("/login.php") {
-                    let resp = tiny_http::Response::from_string("ok").with_header(
-                        tiny_http::Header::from_bytes(
-                            &b"Set-Cookie"[..],
-                            &b"PHPSESSID=stubsoft; path=/"[..],
-                        )
-                        .unwrap(),
-                    );
-                    let _ = rq.respond(resp);
-                } else {
-                    let body = if url.contains("node=77777") {
+        let stub = serve(|rq: &Recorded| {
+            if rq.target.starts_with(API_PATH) {
+                Response::text(200, r#"{"status":"OK","auth":1,"token":"","msg":"ok"}"#)
+            } else if rq.target.starts_with("/login.php") {
+                Response::text(200, "ok").header("Set-Cookie", "PHPSESSID=stubsoft; path=/")
+            } else {
+                Response::text(
+                    200,
+                    if rq.target.contains("node=77777") {
                         r#"<param name="callingName" value="tok-soft"/>"#
                     } else {
                         "Node not found"
-                    };
-                    let _ = rq.respond(tiny_http::Response::from_string(body));
-                }
+                    },
+                )
             }
         });
-        let creds = PortalCredentials {
-            user: "AJ7HR".into(),
-            password: "not-a-real-password".into(),
-            node: "77777".into(),
-        };
-        let token = mint_wt_token_at(&base, &creds).expect("falls back to the scrape");
+        let token = mint_wt_token_at(&stub.url(), &creds("AJ7HR", "not-a-real-password", "77777"))
+            .expect("falls back to the scrape");
         assert_eq!(token, "tok-soft");
-        handle.join().unwrap();
+        assert_eq!(stub.requests().len(), 3);
     }
 
     /// The same empty-token answer with no node to fall back with: `Http`
     /// naming the API path and why, not a silent `TokenNotFound`.
     #[test]
     fn api_ok_with_empty_token_without_a_node_is_an_http_error() {
-        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub");
-        let base = format!("http://{}", server.server_addr());
-        let handle = std::thread::spawn(move || {
-            let Ok(rq) = server.recv() else { return };
-            assert_eq!(rq.url(), "/api/v2/auth-wt-legacy");
-            let _ = rq.respond(tiny_http::Response::from_string(
-                r#"{"status":"OK","auth":1,"token":"","msg":"ok"}"#,
-            ));
-        });
-        let creds = PortalCredentials {
-            user: "AJ7HR".into(),
-            password: "not-a-real-password".into(),
-            node: String::new(),
-        };
-        let err = mint_wt_token_at(&base, &creds).expect_err("no node, no fallback");
+        let stub =
+            serve(|_| Response::text(200, r#"{"status":"OK","auth":1,"token":"","msg":"ok"}"#));
+        let err = mint_wt_token_at(&stub.url(), &creds("AJ7HR", "not-a-real-password", ""))
+            .expect_err("no node, no fallback");
         match err {
             Asl3Error::Http(msg) => {
                 assert!(msg.contains(API_PATH), "names the API path: {msg}");
@@ -616,182 +537,131 @@ mod tests {
             }
             other => panic!("expected Http, got {other:?}"),
         }
-        handle.join().unwrap();
+        let seen = stub.requests();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0].target, "/api/v2/auth-wt-legacy");
     }
 
-    /// Offline integration: a `tiny_http` stub plays the portal. Login sets
-    /// the cookie; the WT page requires it and embeds the token.
+    /// Offline integration: a stub plays the portal. Login sets the cookie;
+    /// the WT page requires it and embeds the token.
     #[test]
     fn mint_flow_against_local_portal_stub() {
-        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub");
-        let base = format!("http://{}", server.server_addr());
-        let handle = std::thread::spawn(move || {
-            for _ in 0..2 {
-                let Ok(mut rq) = server.recv() else { return };
-                let url = rq.url().to_string();
-                if url.starts_with("/login.php") {
-                    let mut body = String::new();
-                    let _ = rq.as_reader().read_to_string(&mut body);
-                    assert!(body.contains("user=AJ7HR"), "form-encoded login: {body}");
-                    // Mirror the LIVE portal (verified 2026-06-12): login sets
-                    // the session id, an auth JWT, AND expires a stale cookie.
-                    let cookie =
-                        |v: &[u8]| tiny_http::Header::from_bytes(&b"Set-Cookie"[..], v).unwrap();
-                    let resp = tiny_http::Response::from_string("ok")
-                        .with_header(cookie(b"PHPSESSID=stub123; path=/"))
-                        .with_header(cookie(b"allstar_token=jwt-abc; path=/"))
-                        .with_header(cookie(
-                            b"allstar_become=deleted; expires=Thu, 01 Jan 1970 00:00:01 GMT; Max-Age=0; path=/",
-                        ));
-                    let _ = rq.respond(resp);
-                } else {
-                    // The WT page authenticates on the FULL cookie set: both
-                    // the session id and the JWT must arrive (only PHPSESSID
-                    // renders an unauthenticated page on the live portal),
-                    // and the expired cookie must NOT be echoed back.
-                    let cookie_hdr = rq
-                        .headers()
-                        .iter()
-                        .find(|h| h.field.equiv("Cookie"))
-                        .map(|h| h.value.as_str().to_string())
-                        .unwrap_or_default();
-                    let authed = cookie_hdr.contains("PHPSESSID=stub123")
-                        && cookie_hdr.contains("allstar_token=jwt-abc")
-                        && !cookie_hdr.contains("allstar_become");
-                    let body = if authed && url.contains("node=77777") {
+        let stub = serve(|rq: &Recorded| {
+            if rq.target.starts_with("/login.php") {
+                // Mirror the LIVE portal (verified 2026-06-12): login sets
+                // the session id, an auth JWT, AND expires a stale cookie.
+                Response::text(200, "ok")
+                    .header("Set-Cookie", "PHPSESSID=stub123; path=/")
+                    .header("Set-Cookie", "allstar_token=jwt-abc; path=/")
+                    .header(
+                        "Set-Cookie",
+                        "allstar_become=deleted; expires=Thu, 01 Jan 1970 00:00:01 GMT; Max-Age=0; path=/",
+                    )
+            } else {
+                // The WT page authenticates on the FULL cookie set: both
+                // the session id and the JWT must arrive (only PHPSESSID
+                // renders an unauthenticated page on the live portal),
+                // and the expired cookie must NOT be echoed back.
+                let cookie_hdr = rq.header("Cookie").unwrap_or_default();
+                let authed = cookie_hdr.contains("PHPSESSID=stub123")
+                    && cookie_hdr.contains("allstar_token=jwt-abc")
+                    && !cookie_hdr.contains("allstar_become");
+                Response::text(
+                    200,
+                    if authed && rq.target.contains("node=77777") {
                         r#"<param name="callingName" value="tok-456789"/>"#
                     } else {
                         "Node not found"
-                    };
-                    let _ = rq.respond(tiny_http::Response::from_string(body));
-                }
+                    },
+                )
             }
         });
-        let creds = PortalCredentials {
-            user: "AJ7HR".into(),
-            password: "not-a-real-password".into(),
-            node: "77777".into(),
-        };
-        let token = mint_wt_token_legacy_at(&base, &creds).expect("mint succeeds");
+        let token =
+            mint_wt_token_legacy_at(&stub.url(), &creds("AJ7HR", "not-a-real-password", "77777"))
+                .expect("mint succeeds");
         assert_eq!(token, "tok-456789");
-        handle.join().unwrap();
+        let seen = stub.requests();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(
+            seen[0].body_str().contains("user=AJ7HR"),
+            "form-encoded login: {}",
+            seen[0].body_str()
+        );
     }
 
     /// Real PHP portals answer login.php with a 302 that carries BOTH the
     /// session cookie and a Location. With `.redirects(0)` the cookie must be
     /// read off the 302 itself and `/portal/` must never be fetched: the stub
-    /// serves exactly two requests, so a stray redirect-follow would consume
-    /// the WT slot and the mint would fail.
+    /// must see exactly two requests, the second the WT page.
     #[test]
     fn mint_flow_with_302_login_redirect() {
-        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub");
-        let base = format!("http://{}", server.server_addr());
-        let handle = std::thread::spawn(move || {
-            for _ in 0..2 {
-                let Ok(mut rq) = server.recv() else { return };
-                let url = rq.url().to_string();
-                if url.starts_with("/login.php") {
-                    let mut body = String::new();
-                    let _ = rq.as_reader().read_to_string(&mut body);
-                    assert!(body.contains("user=AJ7HR"), "form-encoded login: {body}");
-                    let resp = tiny_http::Response::empty(302)
-                        .with_header(
-                            tiny_http::Header::from_bytes(&b"Location"[..], &b"/portal/"[..])
-                                .unwrap(),
-                        )
-                        .with_header(
-                            tiny_http::Header::from_bytes(
-                                &b"Set-Cookie"[..],
-                                &b"PHPSESSID=stub302; path=/"[..],
-                            )
-                            .unwrap(),
-                        );
-                    let _ = rq.respond(resp);
-                } else {
-                    assert!(
-                        url.starts_with("/webtransceiver.php"),
-                        "redirect must not be followed, got {url}"
-                    );
-                    let has_cookie = rq.headers().iter().any(|h| {
-                        h.field.equiv("Cookie") && h.value.as_str().contains("PHPSESSID=stub302")
-                    });
-                    let body = if has_cookie && url.contains("node=77777") {
+        let stub = serve(|rq: &Recorded| {
+            if rq.target.starts_with("/login.php") {
+                Response::new(302)
+                    .header("Location", "/portal/")
+                    .header("Set-Cookie", "PHPSESSID=stub302; path=/")
+            } else {
+                let has_cookie = rq
+                    .header("Cookie")
+                    .is_some_and(|c| c.contains("PHPSESSID=stub302"));
+                Response::text(
+                    200,
+                    if has_cookie && rq.target.contains("node=77777") {
                         r#"<param name="callingName" value="tok-302302"/>"#
                     } else {
                         "Node not found"
-                    };
-                    let _ = rq.respond(tiny_http::Response::from_string(body));
-                }
+                    },
+                )
             }
         });
-        let creds = PortalCredentials {
-            user: "AJ7HR".into(),
-            password: "not-a-real-password".into(),
-            node: "77777".into(),
-        };
         let token =
-            mint_wt_token_legacy_at(&base, &creds).expect("mint succeeds despite 302 login");
+            mint_wt_token_legacy_at(&stub.url(), &creds("AJ7HR", "not-a-real-password", "77777"))
+                .expect("mint succeeds despite 302 login");
         assert_eq!(token, "tok-302302");
-        handle.join().unwrap();
+        let seen = stub.requests();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert!(
+            seen[0].body_str().contains("user=AJ7HR"),
+            "form-encoded login: {}",
+            seen[0].body_str()
+        );
+        assert!(
+            seen[1].target.starts_with("/webtransceiver.php"),
+            "redirect must not be followed, got {}",
+            seen[1].target
+        );
     }
 
     /// An empty node sends no `node` query at all (the portal mints without
     /// one); the stub refuses any request that still carries the parameter.
     #[test]
     fn empty_node_is_left_off_the_query() {
-        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub");
-        let base = format!("http://{}", server.server_addr());
-        let handle = std::thread::spawn(move || {
-            for _ in 0..2 {
-                let Ok(rq) = server.recv() else { return };
-                let url = rq.url().to_string();
-                if url.starts_with("/login.php") {
-                    let resp = tiny_http::Response::from_string("ok").with_header(
-                        tiny_http::Header::from_bytes(
-                            &b"Set-Cookie"[..],
-                            &b"PHPSESSID=stubnode; path=/"[..],
-                        )
-                        .unwrap(),
-                    );
-                    let _ = rq.respond(resp);
-                } else {
-                    let body = if url == "/webtransceiver.php" {
+        let stub = serve(|rq: &Recorded| {
+            if rq.target.starts_with("/login.php") {
+                Response::text(200, "ok").header("Set-Cookie", "PHPSESSID=stubnode; path=/")
+            } else {
+                Response::text(
+                    200,
+                    if rq.target == "/webtransceiver.php" {
                         r#"<param name="callingName" value="tok-nonode"/>"#
                     } else {
                         "unexpected query"
-                    };
-                    let _ = rq.respond(tiny_http::Response::from_string(body));
-                }
+                    },
+                )
             }
         });
-        let creds = PortalCredentials {
-            user: "AJ7HR".into(),
-            password: "not-a-real-password".into(),
-            node: String::new(),
-        };
-        let token = mint_wt_token_legacy_at(&base, &creds).expect("mint succeeds without a node");
+        let token =
+            mint_wt_token_legacy_at(&stub.url(), &creds("AJ7HR", "not-a-real-password", ""))
+                .expect("mint succeeds without a node");
         assert_eq!(token, "tok-nonode");
-        handle.join().unwrap();
     }
 
     #[test]
     fn no_cookie_means_login_error() {
-        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind stub");
-        let base = format!("http://{}", server.server_addr());
-        let handle = std::thread::spawn(move || {
-            if let Ok(rq) = server.recv() {
-                let _ = rq.respond(tiny_http::Response::from_string("nope"));
-            }
-        });
-        let creds = PortalCredentials {
-            user: "AJ7HR".into(),
-            password: "wrong".into(),
-            node: "1".into(),
-        };
+        let stub = serve(|_| Response::text(200, "nope"));
         assert!(matches!(
-            mint_wt_token_legacy_at(&base, &creds),
+            mint_wt_token_legacy_at(&stub.url(), &creds("AJ7HR", "wrong", "1")),
             Err(Asl3Error::Login)
         ));
-        handle.join().unwrap();
     }
 }

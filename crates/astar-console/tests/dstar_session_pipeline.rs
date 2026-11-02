@@ -35,6 +35,8 @@ use astar_audio::{
 use astar_codec::ambe::{AMBE_STREAM_MAX_IN_FLIGHT, AmbeBackend, AmbeStream};
 use astar_console::{DstarConfig, DstarSession};
 use astar_dstar::{DsvtPacket, LinkState, NULL_AMBE, Reflector, RfHeader};
+use astar_record::frames::{CaptureMode, Dir, FrameEvent, Seq};
+use astar_record::tap::{FRAME_TAP_CAPACITY, tap_channel};
 
 // ---- the injected vocoder ---------------------------------------------------
 
@@ -54,6 +56,9 @@ struct VocoderStats {
     /// Mic frames offered to a full encode pipeline — 20 ms of the
     /// operator's own transmitted audio thrown away each.
     encode_dropped: usize,
+    /// Every PCM frame the encoder accepted, in order — what a recording's
+    /// `Pcm{Tx}` events must reproduce.
+    encode_inputs: Vec<[i16; 160]>,
 }
 
 /// An in-process stand-in for the pipelined `ThumbDV` worker: same bounded
@@ -190,7 +195,11 @@ impl AmbeStream for FakeVocoder {
             self.stats.lock().unwrap().encode_dropped += 1;
             return;
         }
-        self.stats.lock().unwrap().encode_submitted += 1;
+        {
+            let mut stats = self.stats.lock().unwrap();
+            stats.encode_submitted += 1;
+            stats.encode_inputs.push(pcm);
+        }
         let b = pcm[0].to_be_bytes();
         self.encode_queue.push_back((
             Instant::now() + self.encode_latency,
@@ -1887,4 +1896,349 @@ fn the_console_snapshot_tracks_a_dstar_session_and_its_link() {
     assert_eq!(after.status, CallStatus::Idle);
 
     handle.shutdown();
+}
+
+// ---- recording taps -------------------------------------------------------
+
+/// Drain `events` until `done` says the collected list is complete, or
+/// `timeout_ms` passes. Uses `try_recv` only, as the tap contract asks.
+fn collect_events(
+    events: &std::sync::mpsc::Receiver<FrameEvent>,
+    done: impl Fn(&[FrameEvent]) -> bool,
+    timeout_ms: u64,
+) -> Vec<FrameEvent> {
+    let mut got = Vec::new();
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        while let Ok(ev) = events.try_recv() {
+            got.push(ev);
+        }
+        if done(&got) || Instant::now() >= deadline {
+            return got;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn dir_of(ev: &FrameEvent) -> Dir {
+    match ev {
+        FrameEvent::Start { dir, .. }
+        | FrameEvent::Frame { dir, .. }
+        | FrameEvent::Pcm { dir, .. }
+        | FrameEvent::End { dir } => *dir,
+    }
+}
+
+fn ends(events: &[FrameEvent], dir: Dir) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, FrameEvent::End { dir: d } if *d == dir))
+        .count()
+}
+
+/// Every `Pcm` must come after the `Frame` it decodes from (or encodes to):
+/// the frame writer pairs them by arrival and drops a `Pcm` with no frame
+/// waiting for it.
+fn assert_frames_lead_pcm(events: &[FrameEvent], dir: Dir) {
+    let (mut frames, mut pcms) = (0usize, 0usize);
+    for ev in events.iter().filter(|e| dir_of(e) == dir) {
+        match ev {
+            FrameEvent::Frame { .. } => frames += 1,
+            FrameEvent::Pcm { .. } => {
+                pcms += 1;
+                assert!(
+                    pcms <= frames,
+                    "Pcm #{pcms} arrived before its Frame: {events:?}"
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A recorded over is the reflector's stream, frame for frame: the `.ambe`
+/// side holds exactly the AMBE the talker sent, with its DSVT sequence
+/// numbers, and the `.flac` side exactly what the vocoder made of each one.
+#[test]
+fn a_recorded_dstar_over_matches_what_the_reflector_sent() {
+    const FRAMES: u8 = 30;
+
+    let f = Fixture::start(|s| FakeVocoder::new(Duration::from_millis(2), s));
+    let (tap, events) = tap_channel(FRAME_TAP_CAPACITY);
+    f.session().frame_tap().set(Some(tap));
+    let talker = f.talker("W1ABC");
+
+    talker.header(0x5151, "W1ABC");
+    let mut sent = Vec::new();
+    for i in 0..FRAMES {
+        let level = 1_000 + i16::from(i) * 100;
+        let pkt = voice_frame(0x5151, i % 21, level, i == FRAMES - 1);
+        if let DsvtPacket::Voice { ambe, .. } = &pkt {
+            sent.push((*ambe, level, i % 21));
+        }
+        talker.send(&pkt);
+        thread::sleep(Duration::from_millis(2));
+    }
+
+    let got = collect_events(&events, |e| ends(e, Dir::Rx) >= 1, 4_000);
+    let rx: Vec<&FrameEvent> = got.iter().filter(|e| dir_of(e) == Dir::Rx).collect();
+
+    match rx.first() {
+        Some(FrameEvent::Start {
+            network,
+            mode,
+            talker,
+            vocoder,
+            ..
+        }) => {
+            assert_eq!(*network, "dstar");
+            assert_eq!(*mode, CaptureMode::Dstar);
+            assert_eq!(talker.as_deref(), Some("W1ABC"));
+            assert_eq!(*vocoder, "thumbdv");
+        }
+        other => panic!("the stream must open with Start{{Rx}}, got {other:?}"),
+    }
+    assert!(
+        matches!(rx.last(), Some(FrameEvent::End { .. })),
+        "the stream must close with End{{Rx}}, got {rx:?}"
+    );
+
+    let frames: Vec<(Vec<u8>, Option<Seq>)> = rx
+        .iter()
+        .filter_map(|e| match e {
+            FrameEvent::Frame { bytes, seq, .. } => Some((bytes.clone(), *seq)),
+            _ => None,
+        })
+        .collect();
+    let want_frames: Vec<(Vec<u8>, Option<Seq>)> = sent
+        .iter()
+        .map(|(ambe, _, seq)| {
+            (
+                ambe.to_vec(),
+                Some(Seq {
+                    value: u16::from(*seq),
+                    modulus: 21,
+                }),
+            )
+        })
+        .collect();
+    assert_eq!(
+        frames, want_frames,
+        "Frame{{Rx}} must be the sent AMBE, in order"
+    );
+
+    let pcms: Vec<[i16; 160]> = rx
+        .iter()
+        .filter_map(|e| match e {
+            FrameEvent::Pcm { pcm, .. } => Some(*pcm),
+            _ => None,
+        })
+        .collect();
+    let want_pcm: Vec<[i16; 160]> = sent.iter().map(|(_, level, _)| [*level; 160]).collect();
+    assert_eq!(
+        pcms, want_pcm,
+        "Pcm{{Rx}} must be the vocoder's decodes, in order"
+    );
+    assert_frames_lead_pcm(&got, Dir::Rx);
+}
+
+/// D-Star streams routinely end with no `end` frame. A fresh header must
+/// close the old recording before it opens the new one, so two talkers never
+/// share one file.
+#[test]
+fn a_new_header_without_end_closes_the_old_stream() {
+    let f = Fixture::start(|s| FakeVocoder::new(Duration::from_millis(2), s));
+    let (tap, events) = tap_channel(FRAME_TAP_CAPACITY);
+    f.session().frame_tap().set(Some(tap));
+    let talker = f.talker("W1ABC");
+
+    talker.header(0x1111, "W1ABC");
+    for seq in 0..5 {
+        talker.send(&voice_frame(0x1111, seq, 2_000, false));
+        thread::sleep(Duration::from_millis(2));
+    }
+    talker.header(0x2222, "K2DEF");
+    for seq in 0..5 {
+        talker.send(&voice_frame(0x2222, seq, 3_000, seq == 4));
+        thread::sleep(Duration::from_millis(2));
+    }
+
+    let got = collect_events(&events, |e| ends(e, Dir::Rx) >= 2, 4_000);
+    let edges: Vec<String> = got
+        .iter()
+        .filter_map(|e| match e {
+            FrameEvent::Start {
+                dir: Dir::Rx,
+                talker,
+                ..
+            } => Some(format!("start {}", talker.as_deref().unwrap_or("?"))),
+            FrameEvent::End { dir: Dir::Rx } => Some("end".to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        edges,
+        ["start W1ABC", "end", "start K2DEF", "end"],
+        "the second header must close the first stream: {got:?}"
+    );
+    // The first stream's tail was decoded while the second header flushed
+    // it: it is not played, but it is recorded, so its `.flac` keeps one
+    // block per `.ambe` frame.
+    let first = &got[..got
+        .iter()
+        .position(|e| matches!(e, FrameEvent::End { dir: Dir::Rx }))
+        .expect("first End")];
+    let frames = first
+        .iter()
+        .filter(|e| matches!(e, FrameEvent::Frame { dir: Dir::Rx, .. }))
+        .count();
+    let pcms = first
+        .iter()
+        .filter(|e| matches!(e, FrameEvent::Pcm { dir: Dir::Rx, .. }))
+        .count();
+    assert_eq!(
+        (frames, pcms),
+        (5, 5),
+        "every frame of the cut-off stream has its audio"
+    );
+}
+
+/// Keying up mid-stream hands the vocoder to the encoder: the received
+/// stream is flushed and its recording closed right there, after our own
+/// transmit opened.
+#[test]
+fn keying_mid_stream_closes_the_received_recording() {
+    let mut f = Fixture::start(|s| FakeVocoder::new(Duration::from_millis(2), s));
+    let (tap, events) = tap_channel(FRAME_TAP_CAPACITY);
+    f.session().frame_tap().set(Some(tap));
+    let talker = f.talker("W1ABC");
+
+    talker.header(0x3333, "W1ABC");
+    for seq in 0..5 {
+        talker.send(&voice_frame(0x3333, seq, 2_000, false));
+        thread::sleep(Duration::from_millis(2));
+    }
+    // Wait for the frames to arrive (no `end`), then key well inside the
+    // 400 ms abandoned-stream window.
+    let mut got = collect_events(
+        &events,
+        |e| {
+            e.iter()
+                .filter(|e| matches!(e, FrameEvent::Frame { dir: Dir::Rx, .. }))
+                .count()
+                >= 5
+        },
+        2_000,
+    );
+    f.key(true);
+    got.extend(collect_events(&events, |e| ends(e, Dir::Rx) >= 1, 2_000));
+
+    let start_tx = got
+        .iter()
+        .position(|e| matches!(e, FrameEvent::Start { dir: Dir::Tx, .. }))
+        .expect("Start{Tx}");
+    let end_rx = got
+        .iter()
+        .position(|e| matches!(e, FrameEvent::End { dir: Dir::Rx }))
+        .expect("End{Rx} at the handoff");
+    assert!(
+        start_tx < end_rx,
+        "End{{Rx}} must come from the key-down handoff, after Start{{Tx}}: {got:?}"
+    );
+    f.key(false);
+}
+
+/// A keyed over is recorded from the encoder's side: `Pcm{Tx}` is exactly
+/// what the encoder was fed, and `Frame{Tx}` exactly what reached the
+/// reflector, each frame ahead of the audio it came from.
+#[test]
+fn keyed_transmit_emits_tx_frames_after_encode() {
+    const LEVEL: i16 = 9_000;
+    const FRAMES: usize = 10;
+
+    let mut f = Fixture::start(|s| FakeVocoder::new(Duration::from_millis(2), s));
+    let (tap, events) = tap_channel(FRAME_TAP_CAPACITY);
+    f.session().frame_tap().set(Some(tap));
+    let listener = f.talker("N7WIRE");
+
+    f.key(true);
+    assert!(wait_until(|| f.session().state().ptt, 1_000), "keyed");
+    let header = listener.recv_packet();
+    assert!(matches!(
+        DsvtPacket::parse(&header),
+        Ok(DsvtPacket::Header { .. })
+    ));
+    push_mic_level(&f.mic_sink, LEVEL, 200);
+    f.key(false);
+    assert!(wait_until(|| !f.session().state().ptt, 1_000), "unkeyed");
+    let wire = listener.drain_quiet(300);
+    assert_eq!(wire.len(), FRAMES, "every mic frame reaches the wire");
+
+    let got = collect_events(&events, |e| ends(e, Dir::Tx) >= 1, 2_000);
+    let tx: Vec<&FrameEvent> = got.iter().filter(|e| dir_of(e) == Dir::Tx).collect();
+
+    match tx.first() {
+        Some(FrameEvent::Start {
+            network,
+            mode,
+            talker,
+            vocoder,
+            ..
+        }) => {
+            assert_eq!(*network, "dstar");
+            assert_eq!(*mode, CaptureMode::Dstar);
+            assert_eq!(talker.as_deref(), Some("N0CALL"), "our own callsign");
+            assert_eq!(*vocoder, "thumbdv");
+        }
+        other => panic!("the over must open with Start{{Tx}}, got {other:?}"),
+    }
+    assert!(
+        matches!(tx.last(), Some(FrameEvent::End { .. })),
+        "the over must close with End{{Tx}}, got {tx:?}"
+    );
+
+    let frames: Vec<(Vec<u8>, Option<Seq>)> = tx
+        .iter()
+        .filter_map(|e| match e {
+            FrameEvent::Frame { bytes, seq, .. } => Some((bytes.clone(), *seq)),
+            _ => None,
+        })
+        .collect();
+    let on_wire: Vec<(Vec<u8>, Option<Seq>)> = wire
+        .iter()
+        .map(|b| {
+            let (_, seq, _, ambe) = as_voice(b);
+            (
+                ambe.to_vec(),
+                Some(Seq {
+                    value: u16::from(seq),
+                    modulus: 21,
+                }),
+            )
+        })
+        .collect();
+    assert_eq!(
+        frames, on_wire,
+        "Frame{{Tx}} must be what reached the reflector"
+    );
+
+    let pcms: Vec<[i16; 160]> = tx
+        .iter()
+        .filter_map(|e| match e {
+            FrameEvent::Pcm { pcm, .. } => Some(*pcm),
+            _ => None,
+        })
+        .collect();
+    let fed = f.stats.lock().unwrap().encode_inputs.clone();
+    assert_eq!(pcms, fed, "Pcm{{Tx}} must be the encoder's input");
+
+    // Strictly Frame, Pcm, Frame, Pcm ... between Start and End.
+    for (i, ev) in tx[1..tx.len() - 1].iter().enumerate() {
+        let want_frame = i % 2 == 0;
+        assert_eq!(
+            matches!(ev, FrameEvent::Frame { .. }),
+            want_frame,
+            "event {i} out of Frame/Pcm order: {tx:?}"
+        );
+    }
 }

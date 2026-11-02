@@ -1,7 +1,7 @@
 // astar — Copyright (c) 2026 Rob Ludwick.
 // SPDX-License-Identifier: AGPL-3.0-only
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
-//! Smoke test: the `tiny_http` server binds, routes a real request, and stops
+//! Smoke test: the `astar-http` server binds, routes a real request, and stops
 //! cleanly (iax-dd42 Phase 2). Uses a stub backend (no real audio devices).
 
 use std::io::{Read, Write};
@@ -84,6 +84,44 @@ fn server_binds_and_serves_devices() {
 
     assert!(resp.starts_with("HTTP/1.1 200"), "200 OK: {resp}");
     assert!(resp.contains("Smoke Mic"), "device JSON present: {resp}");
+
+    state_for_stop.stop.store(true, Ordering::Relaxed);
+    server_thread.join().expect("server thread joined");
+}
+
+#[test]
+fn events_stream_emits_frames_and_ends_at_stop() {
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let state = ServerState::new(Box::new(|| Box::new(StubBackend) as Box<dyn AudioBackend>));
+    let state_for_stop = Arc::clone(&state);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let server_thread = thread::spawn(move || {
+        serve(addr, &state, Some(tx)).expect("serve");
+    });
+    let bound: SocketAddr = rx.recv_timeout(Duration::from_secs(2)).expect("bound addr");
+
+    let mut conn = TcpStream::connect(bound).unwrap();
+    conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    conn.write_all(b"GET /events HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    let mut seen = Vec::new();
+    let mut buf = [0u8; 1024];
+    while !String::from_utf8_lossy(&seen).contains("data: {") {
+        let n = conn.read(&mut buf).unwrap();
+        assert!(
+            n > 0,
+            "stream ended early: {}",
+            String::from_utf8_lossy(&seen)
+        );
+        seen.extend_from_slice(&buf[..n]);
+    }
+    let text = String::from_utf8_lossy(&seen);
+    assert!(text.starts_with("HTTP/1.1 200"), "{text}");
+    assert!(text.contains("text/event-stream"), "{text}");
+    assert!(
+        text.contains("\"parrot\""),
+        "frame carries the parrot view: {text}"
+    );
 
     state_for_stop.stop.store(true, Ordering::Relaxed);
     server_thread.join().expect("server thread joined");

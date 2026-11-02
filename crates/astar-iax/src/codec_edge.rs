@@ -6,6 +6,9 @@
 //! RX decodes on the received frame's own format.
 
 use astar_codec::g711::{alaw_decode, alaw_encode, ulaw_decode, ulaw_encode};
+use astar_codec::gsm::{
+    FRAME_BYTES as GSM_BYTES, FRAME_SAMPLES as GSM_SAMPLES, GsmDecoder, GsmEncoder,
+};
 use astar_codec::slin;
 use astar_iax_core::VoiceFormat;
 
@@ -63,6 +66,46 @@ pub(crate) struct EdgeAudio {
     /// propagating short frames onto a fixed-cadence wire/bus.
     tx_fifo: Vec<i16>,
     rx_fifo: Vec<i16>,
+    /// GSM 06.10 is stateful (predictor and filter memory carry across
+    /// frames), so each call keeps its own encoder and decoder, built on
+    /// first use.
+    gsm_tx: Option<GsmEncoder>,
+    gsm_rx: Option<GsmDecoder>,
+}
+
+/// Encode one 8 kHz wire frame, GSM through the call's stateful encoder and
+/// everything else through the stateless path. A GSM frame is exactly 160
+/// samples; a short one is padded with silence and a long one truncated.
+fn encode_wire(gsm_tx: &mut Option<GsmEncoder>, format: VoiceFormat, pcm: &[i16]) -> Vec<u8> {
+    if format != VoiceFormat::Gsm {
+        return encode_voice(format, pcm);
+    }
+    let mut frame = [0i16; GSM_SAMPLES];
+    let n = pcm.len().min(GSM_SAMPLES);
+    frame[..n].copy_from_slice(&pcm[..n]);
+    gsm_tx
+        .get_or_insert_with(GsmEncoder::new)
+        .encode(&frame)
+        .to_vec()
+}
+
+/// Decode one wire payload, GSM through the call's stateful decoder. A GSM
+/// payload must be exactly one 33-byte frame; anything else is dropped.
+fn decode_wire(
+    gsm_rx: &mut Option<GsmDecoder>,
+    format: VoiceFormat,
+    payload: &[u8],
+) -> Option<Vec<i16>> {
+    if format != VoiceFormat::Gsm {
+        return decode_voice(format, payload);
+    }
+    let frame: &[u8; GSM_BYTES] = payload.try_into().ok()?;
+    Some(
+        gsm_rx
+            .get_or_insert_with(GsmDecoder::new)
+            .decode(frame)
+            .to_vec(),
+    )
 }
 
 /// Pop exactly `frame` samples from `fifo`, left-padding with silence when the
@@ -102,6 +145,8 @@ impl EdgeAudio {
             rx: None,
             tx_fifo: Vec::new(),
             rx_fifo: Vec::new(),
+            gsm_tx: None,
+            gsm_rx: None,
         }
     }
 
@@ -114,7 +159,7 @@ impl EdgeAudio {
     pub(crate) fn encode(&mut self, format: VoiceFormat, pcm: &[i16]) -> Vec<u8> {
         let wire_rate = format.sample_rate().unwrap_or(self.bus_rate);
         if wire_rate == self.bus_rate {
-            return encode_voice(format, pcm);
+            return encode_wire(&mut self.gsm_tx, format, pcm);
         }
         let mut f: Vec<f32> = pcm.iter().map(|&s| f32::from(s) / 32768.0).collect();
         // Anti-alias BEFORE a downsample (iax-a9b9): the linear resampler has no
@@ -150,7 +195,7 @@ impl EdgeAudio {
         // Resampler push only errors on internal rubato failure; drop the
         // frame's contribution rather than poison the call.
         if rs.push(&f).is_err() {
-            return encode_voice(format, &[]);
+            return encode_wire(&mut self.gsm_tx, format, &[]);
         }
         let out = rs.drain_all();
         self.tx_fifo
@@ -159,12 +204,12 @@ impl EdgeAudio {
         // timestamp cadence (iax-62ac).
         let frame = (wire_rate / 50) as usize;
         let pcm_wire = pop_frame(&mut self.tx_fifo, frame);
-        encode_voice(format, &pcm_wire)
+        encode_wire(&mut self.gsm_tx, format, &pcm_wire)
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub(crate) fn decode(&mut self, format: VoiceFormat, payload: &[u8]) -> Option<Vec<i16>> {
-        let pcm_wire = decode_voice(format, payload)?;
+        let pcm_wire = decode_wire(&mut self.gsm_rx, format, payload)?;
         let wire_rate = format.sample_rate().unwrap_or(self.bus_rate);
         if wire_rate == self.bus_rate {
             return Some(pcm_wire);
@@ -224,6 +269,43 @@ mod tests {
                 .expect("decodes");
             assert_eq!(pcm.len(), 320, "frame {n}: expected 320 bus samples");
         }
+    }
+
+    fn tone(n: usize) -> Vec<i16> {
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+        (0..n)
+            .map(|i| (8000.0 * (std::f64::consts::TAU * 1000.0 * i as f64 / 8000.0).sin()) as i16)
+            .collect()
+    }
+
+    #[test]
+    fn gsm_tx_emits_one_33_byte_frame_per_8k_bus_frame() {
+        let mut edge = EdgeAudio::new(8_000);
+        let pcm = tone(160);
+        for n in 0..10 {
+            let wire = edge.encode(VoiceFormat::Gsm, &pcm);
+            assert_eq!(wire.len(), 33, "frame {n}");
+            assert_eq!(wire[0] >> 4, 0xD, "frame {n}: GSM magic nibble");
+        }
+    }
+
+    #[test]
+    fn gsm_round_trip_on_a_16k_bus_keeps_one_bus_frame_per_wire_frame() {
+        let mut edge = EdgeAudio::new(16_000);
+        let pcm = tone(320);
+        for n in 0..50 {
+            let wire = edge.encode(VoiceFormat::Gsm, &pcm);
+            assert_eq!(wire.len(), 33, "frame {n}: wire size");
+            let back = edge.decode(VoiceFormat::Gsm, &wire).expect("decodes");
+            assert_eq!(back.len(), 320, "frame {n}: bus size");
+        }
+    }
+
+    #[test]
+    fn a_two_frame_gsm_payload_is_dropped() {
+        let mut edge = EdgeAudio::new(8_000);
+        assert_eq!(edge.decode(VoiceFormat::Gsm, &[0xD0; 66]), None);
+        assert_eq!(edge.decode(VoiceFormat::Gsm, &[0xD0; 3]), None);
     }
 
     #[test]

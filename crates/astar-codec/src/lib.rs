@@ -8,6 +8,12 @@ pub mod dtmf;
 #[cfg(feature = "g711")]
 pub mod g711;
 
+/// GSM 06.10 full-rate — EchoLink's voice codec and IAX2's GSM format. A
+/// thin wrapper over the pure-Rust, MIT `oxideav-gsm`; see
+/// `LICENSE-EXCEPTIONS.md` §8.
+#[cfg(feature = "gsm")]
+pub mod gsm;
+
 /// Codec 2 speech vocoder — runtime `dlopen` loader + static linked backend
 /// (iax-f2b8). Neither backend is in this crate's default features; see the
 /// licensing note at the top of the module for why.
@@ -19,6 +25,10 @@ pub mod codec2;
 /// licensing/feature note at the top of the module for why.
 #[cfg(feature = "ambe-hw")]
 pub mod ambe;
+
+/// Vocoder trust and enrolment: which AMBE sticks may be opened. Always
+/// compiled, so configuration can carry it in every build.
+pub mod vocoder_trust;
 
 /// System Fusion DN voice: the AMBE+2 half-rate frames inside a YSF
 /// payload, and the AMBE-3000 words that decode them (`iax-e8a4` §1). Pure

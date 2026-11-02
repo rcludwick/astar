@@ -72,6 +72,22 @@ pub enum StationError {
     /// while a DMR link is live (see `astar_console::dmr`'s Transmit
     /// section).
     Dmr(String),
+    /// An `EchoLink` error — secret-free, human-readable, and as with
+    /// [`Self::Dmr`] that is load-bearing: `EchoLink` logs in with a
+    /// password, and no message this variant carries interpolates one.
+    ///
+    /// Returned when the `echolink` feature isn't compiled in (`"echolink
+    /// support not compiled"`), when a login is refused before it starts (no
+    /// callsign, no password, no directory server), when a call or node-leg
+    /// dial names no station or is made before logging in, when the node has
+    /// no conference to dial a station into, and when the UDP ports cannot be
+    /// opened. A login the directory refuses is not an error here: it shows
+    /// as a failed login in `Station::echolink_state`, with its sentence in
+    /// `Station::echolink_last_error`.
+    EchoLink(String),
+    /// A call-recording error — secret-free, human-readable: "already
+    /// recording", "frame tap in use", or why the folder or disk refused.
+    Record(String),
 }
 
 impl std::fmt::Display for StationError {
@@ -102,6 +118,8 @@ impl std::fmt::Display for StationError {
             Self::Ysf(msg) => write!(f, "ysf error: {msg}"),
             Self::Nxdn(msg) => write!(f, "nxdn error: {msg}"),
             Self::Dmr(msg) => write!(f, "dmr error: {msg}"),
+            Self::EchoLink(msg) => write!(f, "echolink error: {msg}"),
+            Self::Record(msg) => write!(f, "recording: {msg}"),
         }
     }
 }

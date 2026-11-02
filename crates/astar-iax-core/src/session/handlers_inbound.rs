@@ -42,6 +42,7 @@ const QUALITY_ORDER: &[VoiceFormat] = &[
     VoiceFormat::Slin,
     VoiceFormat::G711U,
     VoiceFormat::G711A,
+    VoiceFormat::Gsm,
 ];
 
 /// Pick the codec for the ACCEPT FORMAT IE, or `None` when the peer stated a
@@ -55,8 +56,8 @@ const QUALITY_ORDER: &[VoiceFormat] = &[
 /// codec in our preference order common to both.
 ///
 /// `None` means the intersection is empty and there is nothing honest to name
-/// in an ACCEPT (a `disallow=all / allow=gsm` ASL node, say — astar implements
-/// no GSM). The caller REJECTs with "Unable to negotiate codec"; naming a
+/// in an ACCEPT (a peer offering only G.729, say — astar carries ulaw, alaw,
+/// slin, slin16 and GSM, and nothing else). The caller REJECTs with "Unable to negotiate codec"; naming a
 /// format the peer never offered just moves the failure somewhere unreadable.
 ///
 /// One wrinkle worth stating: an explicit `CAPABILITY = 0` is indistinguishable
@@ -405,11 +406,38 @@ impl Fsm {
                 {
                     let ies = Ies::parse(&ies_bytes).unwrap_or_else(|_| Ies::empty());
                     let received = ies.calltoken.unwrap_or(&[]);
+                    if received.is_empty() {
+                        // A retransmit of the opening NEW: our CALLTOKEN was
+                        // lost or is still in flight. `chan_iax2` answers
+                        // every token-less NEW with CALLTOKEN, statelessly
+                        // (oseqno 0, iseqno 1); do the same with the token
+                        // already issued, and keep waiting. Rejecting it
+                        // killed the call.
+                        let mut again = build_calltoken(our_call, peer_call, token.as_bytes());
+                        again.oseqno = 0;
+                        again.iseqno = 1;
+                        out.push(Action::SendUnreliable(crate::frame::encode_owned_full(
+                            &again,
+                        )));
+                        return (
+                            SessionState::CallTokenIssued(CallTokenIssuedData {
+                                peer_call,
+                                our_call,
+                                offered,
+                                token,
+                                issued_at,
+                            }),
+                            out,
+                        );
+                    }
                     if super::auth::token_eq(token.as_bytes(), received) {
                         // Valid resent NEW: the real call leg begins. Reset the
                         // runtime's Reliability seqno bookkeeping (single-use:
                         // the token is consumed by not re-storing it). Re-parse
                         // the offer from this NEW so the post-token IEs win.
+                        // The token's expiry timer is done with: left armed it
+                        // fired into Active 10 s later ("invalid_transition").
+                        out.push(Action::CancelTimer(TimerKind::InboundTokenExpiry));
                         out.push(Action::ResetReliability);
                         let offer = IncomingOffer::from_new_ies(&ies).unwrap_or(offered);
                         if self.inbound_policy.auth_required {
@@ -417,7 +445,7 @@ impl Fsm {
                         }
                         self.emit_accept(our_call, peer_call, offer, now, &mut out)
                     } else {
-                        // Mismatched/absent token: anti-spoof reject.
+                        // Mismatched token: anti-spoof reject.
                         let cause = "Call Token Invalid";
                         out.push(Action::SendReliable(build_reject(
                             our_call,
@@ -1222,13 +1250,10 @@ mod inbound_handler_tests {
         );
     }
 
-    /// A peer whose CAPABILITY shares nothing with ours yields no codec at
-    /// all, under every policy. astar implements no GSM, so a
-    /// `disallow=all / allow=gsm` ASL node is exactly this case; the caller
-    /// (`emit_accept`) turns the `None` into a REJECT with a readable CAUSE
-    /// instead of an ACCEPT naming a codec the peer never offered.
+    /// A `disallow=all / allow=gsm` ASL node used to be refused; astar now
+    /// carries GSM under every policy, so it links.
     #[test]
-    fn choose_codec_is_none_when_nothing_is_in_common() {
+    fn choose_codec_takes_gsm_from_a_gsm_only_peer() {
         use crate::session::CodecPolicy;
         const GSM: u32 = 0x2;
         let gsm_only = CodecMask::from_u32(GSM);
@@ -1240,13 +1265,41 @@ mod inbound_handler_tests {
         ] {
             assert_eq!(
                 choose_codec(gsm_only, None, policy),
-                None,
-                "gsm-only CAPABILITY has nothing in common with {policy:?}"
+                Some(VoiceFormat::Gsm),
+                "gsm-only CAPABILITY links under {policy:?}"
             );
             assert_eq!(
                 choose_codec(gsm_only, VoiceFormat::from_u32(GSM), policy),
+                Some(VoiceFormat::Gsm),
+                "...and so does a stated gsm FORMAT ({policy:?})"
+            );
+        }
+    }
+
+    /// A peer whose CAPABILITY shares nothing with ours yields no codec at
+    /// all, under every policy. A G.729-only peer is that case; the caller
+    /// (`emit_accept`) turns the `None` into a REJECT with a readable CAUSE
+    /// instead of an ACCEPT naming a codec the peer never offered.
+    #[test]
+    fn choose_codec_is_none_when_nothing_is_in_common() {
+        use crate::session::CodecPolicy;
+        const G729: u32 = 0x100;
+        let g729_only = CodecMask::from_u32(G729);
+        for policy in [
+            CodecPolicy::UlawOnly,
+            CodecPolicy::AllowSlin,
+            CodecPolicy::PreferSlin,
+            CodecPolicy::PreferSlin16,
+        ] {
+            assert_eq!(
+                choose_codec(g729_only, None, policy),
                 None,
-                "...and a stated gsm FORMAT does not conjure one either ({policy:?})"
+                "g729-only CAPABILITY has nothing in common with {policy:?}"
+            );
+            assert_eq!(
+                choose_codec(g729_only, VoiceFormat::from_u32(G729), policy),
+                None,
+                "...and a stated g729 FORMAT does not conjure one either ({policy:?})"
             );
         }
         // A peer that states NO capability is not this case: an empty
@@ -1314,9 +1367,41 @@ mod inbound_handler_tests {
                 .iter()
                 .any(|a| matches!(a, Action::ResetReliability))
         );
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::CancelTimer(TimerKind::InboundTokenExpiry))),
+            "the token expiry is cancelled once the token checks out"
+        );
         assert!(actions.iter().any(|a| matches!(a, Action::SendReliable(fr)
             if matches!(fr.subclass, Subclass::Iax(IaxCommand::Accept)))));
         assert!(matches!(f.state(), SessionState::AcceptSent(_)));
+    }
+
+    #[test]
+    fn calltoken_issued_tokenless_new_retransmit_reissues_the_token() {
+        let (mut f, now) = drive_to_calltoken_issued();
+        let actions = f.handle(Event::Frame {
+            frame: new_frame_with_token(b""),
+            now,
+        });
+        let again = actions
+            .iter()
+            .find_map(|a| match a {
+                Action::SendUnreliable(b) => crate::frame::parse(b).ok(),
+                _ => None,
+            })
+            .expect("CALLTOKEN re-sent");
+        let crate::frame::Frame::Full(again) = again else {
+            panic!("full frame")
+        };
+        assert_eq!(again.subclass, Subclass::Iax(IaxCommand::CallToken));
+        assert_eq!(again.ies.calltoken, Some(&[0xAB; 16][..]), "the same token");
+        assert!(
+            !actions.iter().any(|a| matches!(a, Action::SendReliable(_))),
+            "no REJECT, nothing new in flight"
+        );
+        assert!(matches!(f.state(), SessionState::CallTokenIssued(_)));
     }
 
     #[test]

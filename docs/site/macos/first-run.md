@@ -199,6 +199,8 @@ one near you.
 Nodes you connect to are saved automatically as **recents**, and you can star
 one to make it a **favorite** and give it your own name — "Local 2m", not
 `51234`. Favorites are unlimited; the recents list shows the ten most recent.
+Both live in the list button beside the dial field, for every network at once;
+see [Favorites and recents](favorites.md).
 
 Listen first, then key up and identify.
 
@@ -232,7 +234,8 @@ AllStarLink identifies by node number instead.
 
 **D-Star** needs a hardware vocoder dongle — its voice codec has no software
 implementation in astar — so it appears in the network picker only while one is
-attached. See [Digital voice](hardware.md#digital-voice).
+attached, and only once you have added it in
+[Settings → Vocoders](vocoders.md). See [Digital voice](hardware.md#digital-voice).
 
 **Bluetooth and AirPods.** They work — they appear in the Mic and Speaker menus
 like any other device. Two caveats. First, the moment macOS starts using a

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# astar — Copyright (c) 2026 Rob Ludwick.
+# SPDX-License-Identifier: AGPL-3.0-only
+# Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
+# Never root, so verify.sh's root-to-service-user hop (su) is never taken here.
+[ "${1:-}" = -u ] && { echo 1000; exit 0; }
+exec /usr/bin/id "$@"

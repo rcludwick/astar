@@ -39,17 +39,19 @@ by per-file headers.
 
 ## Third-party components
 
-Three paths in the repository, and two upstream dependencies, are **not**
+Four paths in the repository, and two upstream dependencies (plus a system
+`libcodec2`, if the opt-in `codec2-runtime` feature loads one), are **not**
 AGPL-3.0. This list matches the table in the repository's `README.md`; if the
 two ever disagree, the licence files shipped alongside the code win.
 
 | Path or crate | Component | Licence |
 |---|---|---|
 | `vendor/ambe-thumbdv` | ThumbDV / DV3000 AMBE driver | MIT **OR** Apache-2.0 |
+| `vendor/codec2` / system `libcodec2` | Codec 2 — the M17 voice codec (the `codec2` crate, vendored unmodified). Opt-in features only | `LGPL-2.1-only AND MIT` / LGPL-2.1 |
 | `apps/gui/assets/fonts` | The Inter typeface, bundled with the Iced client | SIL Open Font License 1.1 (`LICENSE-Inter.txt`) |
 | `harness/asterisk_parity/c_iaxclient/vendored/libiax2` | The historical C libiax2, used only as a parity reference by the test harness — never linked into a shipped binary | GPL v2 (`COPYING`) / LGPL v2 (`COPYING.LIB`) |
-| `codec2` crate / system `libcodec2` | Codec 2 — the M17 voice codec. Opt-in features only | `LGPL-2.1-only AND MIT` / LGPL-2.1 |
 | `nnnoiseless` crate | RNNoise — mic noise reduction, compiled into every build | BSD-3-Clause |
+| `oxideav-gsm` crate | GSM 06.10 — the EchoLink voice codec, also used for GSM-only AllStar nodes | MIT |
 
 ### `nnnoiseless` (RNNoise)
 
@@ -81,6 +83,24 @@ explicitly rather than inheriting the workspace's. Its notices ship with it:
 
 Copyright for that crate is also Rob Ludwick's; it is permissively licensed on
 purpose, so it can be reused outside an AGPL project.
+
+### `vendor/codec2`
+
+`vendor/codec2` is Codec 2, the M17 voice codec, as the pure-Rust `codec2`
+crate (version 0.3.1). It is licensed **LGPL-2.1-only AND MIT** and keeps those
+terms. Its source files are exactly as upstream published them; what astar
+added, and why, is listed in its `VENDORED.md`.
+
+It is only built when the opt-in `codec2-static` feature asks for it — the
+macOS app and astar-server's static release (`just server-release`) do, a
+plain `cargo build` does not. Because both link it statically, the library's
+source ships in this repository next to astar's, so anyone can change it and
+rebuild. Its notices:
+
+* `vendor/codec2/LICENSE-LGPL-2.1`
+* `vendor/codec2/VENDORED.md` — provenance: upstream crate and repository, the
+  exact version, commit and checksum vendored, and how to update it.
+* `LICENSE-EXCEPTIONS.md` §2 — the LGPL notices and the relink offer.
 
 ### `apps/gui/assets/fonts`
 

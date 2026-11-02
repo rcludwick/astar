@@ -40,21 +40,38 @@ mod error;
 mod event;
 mod station;
 
+/// Vocoder trust and enrolment (on-air safety): which AMBE sticks may be
+/// opened, and the one user action that adds one.
+pub use astar_codec::vocoder_trust::{
+    MODEL_AMBE3000, MODEL_AMBE3003, NO_TRUSTED_VOCODER, VOCODER_SERIALS_ENV, VocoderCandidate,
+    VocoderEnrolment, VocoderTrust, enrol_vocoder, list_vocoder_candidates,
+};
 pub use config::{AnswerPolicy, InboundConfig, NodeConfig, RegisterConfig, StationConfig};
 pub use error::StationError;
 pub use event::StationEvent;
-pub use station::{DEFAULT_DTMF_GAP_MS, DEFAULT_DTMF_MS, DtmfMode, SecretResolver, Station};
+pub use station::{
+    DEFAULT_DTMF_GAP_MS, DEFAULT_DTMF_MS, DtmfMode, ECHOLINK_PASSWORD_UNSENDABLE, EchoLinkNodeEdge,
+    EchoLinkPeerStatus, EchoLinkState, EchoLinkStationInfo, M17MonitorRequest, RecordRequest,
+    SecretResolver, Station, echolink_password_is_sendable,
+};
+// The recording surface: what `Station::record_start` takes and
+// `record_state` returns, so a consumer needs no direct `astar-record` dep.
+pub use astar_record::{Layout, RecordState};
 
 // Re-export the consumer surface behind one dependency.
 pub use astar_asl3::{Asl3Error, PortalCredentials};
 // Policy types referenced by `NodeConfig::policy`, so a consumer can tune
 // inbound auth without depending on `astar-iax` directly.
+#[cfg(feature = "device-audio")]
+pub use astar_audio::CpalBackend;
 pub use astar_audio::{
-    CharacterizeOpts, CpalBackend, DenoiseChain, DenoiseStatus, DeviceInfo, MicProfile, NotchSpec,
-    SPECTRUM_BINS,
+    CharacterizeOpts, DenoiseChain, DenoiseStatus, DeviceInfo, MicProfile, NotchSpec, SPECTRUM_BINS,
 };
+// The monitor's status and edge types are feature-independent in
+// astar-console, so a consumer (astar-server) names them in every build.
 pub use astar_console::{
-    CallStatus, ConsoleConfig, ConsoleSession, ConsoleState, HeardEntry, OperatingMode, VoiceFormat,
+    CallStatus, ConsoleConfig, ConsoleSession, ConsoleState, HeardEntry, M17MonitorEdge,
+    M17MonitorStatus, OperatingMode, VoiceFormat,
 };
 pub use astar_iax::{
     CallMode, CodecPolicy, IncomingAuthPolicy, IncomingCallPolicy, IncomingCallTokenPolicy,
@@ -73,6 +90,16 @@ pub use astar_console::{AmbeBackend, DstarLinkState, DstarSnapshotState};
 // taking `astar-console` as a direct dependency.
 #[cfg(feature = "dmr")]
 pub use astar_console::DmrSnapshot;
+// The parts of [`EchoLinkState`], re-exported for the same reason: the C
+// ABI renders them and builds them in its tests.
+/// The sentence an `EchoLink` call carries in its `notice` once the 10-minute
+/// transmit cap has stopped an over.
+#[cfg(feature = "echolink")]
+pub use astar_console::echolink::TX_CAP_NOTICE as ECHOLINK_TX_CAP_NOTICE;
+#[cfg(feature = "echolink")]
+pub use astar_console::echolink::{
+    CallLink, ChatLine, EchoLinkCallState, LoginState, PresenceSnapshot,
+};
 
 /// Common imports for a station consumer.
 pub mod prelude {

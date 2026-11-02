@@ -15,6 +15,7 @@ mod codec_edge;
 mod error;
 pub mod link;
 pub mod link_control;
+mod link_keying;
 pub mod listener;
 pub mod manager;
 mod parrot;
@@ -45,10 +46,15 @@ pub use listener::{
     IncomingCallListenerBuilder, IncomingCallPolicy, IncomingCallTokenPolicy,
     IncomingDecisionPolicy,
 };
-pub use manager::{BridgeConfig, BridgeMode, DialSpec, LinkTransport, Manager, ManagerSnapshot};
+pub use manager::{
+    BridgeConfig, BridgeMemberHandle, BridgeMode, DialSpec, LinkTransport, Manager,
+    ManagerSnapshot, PeerMemberHandle, SourceMemberHandle,
+};
 pub use parrot::{ParrotConfig, run_parrot};
 pub use raw_dial::{RawDial, TxFrames, dial_raw, dial_raw_with_policy};
 pub use registration::{Registrar, Registration, RegistrationEvent};
 pub use routing_config::{ConnectionId, ConnectionSpec, RoutingConfig};
 pub use trace::{Direction, TracedFrame};
 pub use transport::{LinkSocket, NetStack, OsNetStack, WgNetStack};
+#[cfg(feature = "test-support")]
+pub use {astar_iax_core::session::CallProfile, raw_dial::dial_raw_with_profile};

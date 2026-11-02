@@ -11,12 +11,18 @@ pub mod dmr;
 #[cfg(feature = "dstar")]
 pub mod dstar;
 pub mod dtmf;
+#[cfg(feature = "echolink")]
+pub mod echolink;
 pub mod heard;
 #[cfg(feature = "m17")]
 pub mod m17;
+/// Status and edges of the receive-only M17 monitor, present in every build.
+mod m17_monitor_status;
 pub mod metering;
 #[cfg(feature = "nxdn")]
 pub mod nxdn;
+#[cfg(any(feature = "ysf", feature = "nxdn", feature = "dmr"))]
+mod over_tap;
 pub mod parrot;
 pub mod session;
 pub mod state;
@@ -45,10 +51,14 @@ pub use heard::{HEARD_CAPACITY, HeardEntry, HeardLog};
 // a consumer that uses both would be ambiguous.
 #[cfg(feature = "dstar")]
 pub use astar_codec::ambe::AmbeBackend;
+/// The vocoder trust list every AMBE connect takes (see
+/// [`astar_codec::vocoder_trust::VocoderTrust`]).
+pub use astar_codec::vocoder_trust::VocoderTrust;
 #[cfg(feature = "dstar")]
 pub use astar_dstar::LinkState as DstarLinkState;
 #[cfg(feature = "m17")]
-pub use m17::{M17Config, M17Session, M17SnapshotState};
+pub use m17::{M17Config, M17Monitor, M17MonitorConfig, M17Session, M17SnapshotState, SourceSink};
+pub use m17_monitor_status::{M17MonitorEdge, M17MonitorStatus};
 pub use metering::{Gain, Level, MeteringBackend, peak_to_dbfs};
 #[cfg(feature = "nxdn")]
 pub use nxdn::{NxdnConfig, NxdnLink, NxdnSnapshot};
@@ -63,9 +73,15 @@ pub use session::nxdn_available;
 pub use session::ysf_available;
 pub use session::{
     AnswerPolicy, ConsoleConfig, ConsoleError, ConsoleSession, LinkConnectSpec, LinkKeyResolver,
-    RegisterOutcome, list_devices, m17_available, resolve_device,
+    RecordTaps, RegisterOutcome, list_devices, m17_available, resolve_device,
 };
 pub use state::{CallSnapshot, CallStatus, ConsoleState, OperatingMode, VoiceFormat};
 pub use tracer::{TimelineEvent, Tracer};
 #[cfg(feature = "ysf")]
 pub use ysf::{YsfConfig, YsfLink, YsfSnapshot};
+
+/// Whether this build carries `EchoLink` (the `echolink` feature).
+#[must_use]
+pub fn echolink_available() -> bool {
+    cfg!(feature = "echolink")
+}

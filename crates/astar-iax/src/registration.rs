@@ -276,6 +276,10 @@ fn run_loop(
                     let Ok(frame) = parse_lenient(&bytes) else {
                         continue;
                     };
+                    let from_call = match &frame {
+                        astar_iax_core::frame::Frame::Full(f) => Some(f.source_call),
+                        astar_iax_core::frame::Frame::Mini(_) => None,
+                    };
                     match rel.on_frame_in(frame, Instant::now()) {
                         RxOutcome::Deliver { frame, send_ack } => {
                             if let Some(ack) = send_ack {
@@ -306,8 +310,25 @@ fn run_loop(
                             // iax-a307): answer it — this used to map to
                             // DeliveryFailed and killed the
                             // registration on a VNAK.
-                            for bytes in rel.resend_from(iseqno) {
-                                let _ = sock.send_to(&bytes, registrar);
+                            //
+                            // Only from the registrar call we learned. A VNAK
+                            // before that comes from a call chan_iax2 opened
+                            // for one `dest_call = 0` REGREQ, and resending to
+                            // it opens another call that VNAKs again: that
+                            // loop took all 2048 of a node's call numbers in
+                            // 2 s (nodebench finding 2). The retry timers
+                            // and `Reliability` cover the lost frame instead.
+                            let known = rel.peer_call().map(CallNo::value);
+                            if known.is_some() && known == from_call {
+                                for bytes in rel.resend_from(iseqno) {
+                                    let _ = sock.send_to(&bytes, registrar);
+                                }
+                            } else {
+                                tracing::debug!(
+                                    target: "astar_iax::registration",
+                                    from_call,
+                                    "VNAK from a call we never learned, not resending"
+                                );
                             }
                         }
                         RxOutcome::GaveUp { oseqno } => {

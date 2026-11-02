@@ -124,7 +124,10 @@ mod tests {
 
     #[test]
     fn an_empty_log_snapshots_to_nothing() {
-        assert!(HeardLog::new().snapshot().is_empty());
+        assert_eq!(
+            HeardLog::new().snapshot(),
+            [] as [crate::heard::HeardEntry; 0]
+        );
     }
 
     #[test]
@@ -159,7 +162,7 @@ mod tests {
         let log = HeardLog::new();
         log.note("dstar", "");
         log.note("dstar", "   ");
-        assert!(log.snapshot().is_empty());
+        assert_eq!(log.snapshot(), [] as [crate::heard::HeardEntry; 0]);
     }
 
     #[test]

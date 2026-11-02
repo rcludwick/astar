@@ -120,6 +120,10 @@ pub struct Reliability {
     next_iseqno: u8,
     in_flight: BTreeMap<u8, InFlight>,
     config: ReliabilityConfig,
+    /// The call's clock origin: control, TEXT and HANGUP frames the FSM
+    /// built with timestamp 0 are stamped with milliseconds since this.
+    /// Set by [`Self::set_epoch`], else the first [`Self::enqueue`].
+    epoch: Option<Instant>,
 }
 
 impl Reliability {
@@ -132,7 +136,14 @@ impl Reliability {
             next_iseqno: 0,
             in_flight: BTreeMap::new(),
             config,
+            epoch: None,
         }
+    }
+
+    /// Set the call's clock origin, the same one its voice timestamps count
+    /// from, so every frame of the call reads one clock.
+    pub fn set_epoch(&mut self, at: Instant) {
+        self.epoch = Some(at);
     }
 
     /// Record the peer's chosen call number after AUTHREQ / ACCEPT is seen.
@@ -163,6 +174,23 @@ impl Reliability {
         self.in_flight.clear();
     }
 
+    /// Restart numbering for an inbound call whose opening NEW (the peer's
+    /// `oseqno` 0) has already been consumed outside [`Self::on_frame_in`]:
+    /// our `OSeqno` restarts at 0, in-flight tracking is dropped, and the
+    /// NEW counts as received, so the next `ISeqno` we expect (and stamp on
+    /// every frame and ACK) is 1.
+    ///
+    /// The listener consumes the first NEW to demux it, and the CALLTOKEN
+    /// round restarts the peer's numbering at 0 with the token-bearing NEW
+    /// (`chan_iax2` `resend_with_token`). Counting from 0 instead left every
+    /// ACK one behind: the peer's final HANGUP was never acknowledged, it
+    /// was retransmitted, and the retransmit tore down the next call
+    /// (iax-cnlink).
+    pub fn restart_after_peer_new(&mut self) {
+        self.reset();
+        self.next_iseqno = 1;
+    }
+
     /// Reset for a brand-new transaction: seqnos, in-flight tracking AND the
     /// learned peer call (the next reliable frame goes out with `dest_call=0`).
     ///
@@ -177,7 +205,17 @@ impl Reliability {
 
     /// Allocate the next `OSeqno`, stamp it into the frame, serialize, track
     /// the in-flight entry, and return the wire bytes.
+    ///
+    /// A control, TEXT or HANGUP frame with timestamp 0 is stamped with the
+    /// call's clock (ms since [`Self::set_epoch`]). The builders leave those
+    /// at 0, and `chan_iax2` read astar's ts-0 `RADIO_UNKEY` and HANGUP as out of
+    /// order and resynced its jitter buffer on them (nodebench finding 3).
     pub fn enqueue(&mut self, mut frame: OwnedFullFrame, now: Instant) -> Vec<u8> {
+        let epoch = *self.epoch.get_or_insert(now);
+        if frame.timestamp == 0 && stamps_call_clock(&frame) {
+            frame.timestamp =
+                u32::try_from(now.saturating_duration_since(epoch).as_millis()).unwrap_or(u32::MAX);
+        }
         let oseqno = self.next_oseqno;
         frame.oseqno = oseqno;
         frame.iseqno = self.next_iseqno;
@@ -374,6 +412,15 @@ impl Reliability {
     }
 }
 
+/// Frames the session builders leave at timestamp 0 that must carry the
+/// call's clock: control (ANSWER, `RADIO_KEY`/`UNKEY`), TEXT and HANGUP.
+/// Requests and replies that carry a meaningful timestamp of their own
+/// (PING/LAGRQ and their echoes, DTMF, voice) are left alone.
+fn stamps_call_clock(frame: &OwnedFullFrame) -> bool {
+    matches!(frame.frame_type, FrameType::Control | FrameType::Text)
+        || matches!(frame.subclass, Subclass::Iax(IaxCommand::Hangup))
+}
+
 fn next_rto(initial: Duration, max_rto: Duration, backoff: f32, attempts: u8) -> Duration {
     let multiplier = backoff.powi(i32::from(attempts.saturating_sub(1)));
     let scaled = initial.mul_f32(multiplier);
@@ -467,6 +514,36 @@ mod enqueue_tests {
             },
             payload: Vec::new(),
         }
+    }
+
+    #[test]
+    fn hangup_control_and_text_carry_the_call_clock_not_zero() {
+        // nodebench finding 3: chan_iax2 read ts-0 RADIO_UNKEY and HANGUP as
+        // out of order. Other frames keep the timestamp they were built with.
+        let t0 = Instant::now();
+        let mut rel = Reliability::new(CallNo::new(1).unwrap(), ReliabilityConfig::default());
+        rel.set_epoch(t0);
+        let at = t0 + Duration::from_millis(1500);
+        let mut hangup = frame_for(0);
+        hangup.subclass = Subclass::Iax(IaxCommand::Hangup);
+        let mut unkey = frame_for(0);
+        unkey.frame_type = FrameType::Control;
+        unkey.subclass = Subclass::Control(crate::subclass::ControlSubclass::RadioUnkey);
+        let mut text = frame_for(0);
+        text.frame_type = FrameType::Text;
+        text.subclass = Subclass::Raw(0);
+        text.ie_bytes.clear();
+        text.payload = b"!!DISCONNECT!!".to_vec();
+        for f in [hangup, unkey, text] {
+            let wire = rel.enqueue(f, at);
+            let ts = u32::from_be_bytes([wire[4], wire[5], wire[6], wire[7]]);
+            assert_eq!(ts, 1500);
+        }
+        // A PONG echoes its PING's timestamp, even 0: left alone.
+        let mut pong = frame_for(0);
+        pong.subclass = Subclass::Iax(IaxCommand::Pong);
+        let wire = rel.enqueue(pong, at);
+        assert_eq!(u32::from_be_bytes([wire[4], wire[5], wire[6], wire[7]]), 0);
     }
 
     #[test]
@@ -678,8 +755,8 @@ mod tick_tests {
         let now = Instant::now();
         let _ = r.enqueue(super::enqueue_tests::frame_for(0), now);
         let outcome = r.tick(now);
-        assert!(outcome.retransmit.is_empty());
-        assert!(outcome.gave_up.is_empty());
+        assert_eq!(outcome.retransmit, [] as [std::vec::Vec<u8>; 0]);
+        assert_eq!(outcome.gave_up, [] as [u8; 0]);
     }
 
     #[test]
@@ -978,7 +1055,7 @@ mod resend_tests {
     fn resend_from_is_empty_when_nothing_pending() {
         let mut r = rel_with_inflight(2);
         let _ = r.on_frame_in(ack_from_peer(2), Instant::now()); // acks 0 and 1
-        assert!(r.resend_from(2).is_empty());
+        assert_eq!(r.resend_from(2), [] as [std::vec::Vec<u8>; 0]);
     }
 
     #[test]

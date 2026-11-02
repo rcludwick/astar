@@ -22,11 +22,29 @@ public enum KeychainService {
 /// a unit test ever touching the login Keychain.
 protocol KeychainBackend {
     func read(service: String, account: String) -> Data?
+    /// Like `read`, but tells "no such item" (`nil`) from a read that failed
+    /// (throws) — what a store that writes its whole map back needs, since
+    /// writing after a failed read would wipe what it could not see.
+    func readChecked(service: String, account: String) throws -> Data?
     func write(service: String, account: String, data: Data) throws
     func delete(service: String, account: String) throws
 }
 
+extension KeychainBackend {
+    /// For a backend that cannot tell the two apart: every miss is "no item".
+    func readChecked(service: String, account: String) throws -> Data? {
+        read(service: service, account: account)
+    }
+}
+
 struct SecItemBackend: KeychainBackend {
+    /// `SecItemUpdate` and `SecItemAdd`, as values so a test can see which
+    /// `write` called and with what, without touching the login Keychain.
+    var update: (CFDictionary, CFDictionary) -> OSStatus = { query, attributes in
+        SecItemUpdate(query, attributes)
+    }
+    var add: (CFDictionary) -> OSStatus = { attributes in SecItemAdd(attributes, nil) }
+
     private func baseQuery(service: String, account: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
@@ -47,12 +65,38 @@ struct SecItemBackend: KeychainBackend {
         return data
     }
 
+    func readChecked(service: String, account: String) throws -> Data? {
+        var query = baseQuery(service: service, account: account)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        switch status {
+        case errSecSuccess:
+            guard let data = item as? Data else { throw KeychainError(status: errSecDecode) }
+            return data
+        case errSecItemNotFound:
+            return nil
+        default:
+            throw KeychainError(status: status)
+        }
+    }
+
+    /// Update the item in place, adding it only when there is none. Never
+    /// delete-then-add: an add that failed after the delete went through
+    /// would lose the whole item. The item is matched by exactly the three
+    /// attributes every earlier release wrote it with, so existing items are
+    /// found.
     func write(service: String, account: String, data: Data) throws {
         let base = baseQuery(service: service, account: account)
-        SecItemDelete(base as CFDictionary)  // upsert: clear then add
-        var add = base
-        add[kSecValueData as String] = data
-        let status = SecItemAdd(add as CFDictionary, nil)
+        var status = update(
+            base as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if status == errSecItemNotFound {
+            var attributes = base
+            attributes[kSecValueData as String] = data
+            status = add(attributes as CFDictionary)
+        }
         guard status == errSecSuccess else { throw KeychainError(status: status) }
     }
 
@@ -102,6 +146,21 @@ struct KeychainItem {
         }
         guard let legacy = legacyService, legacy != service,
             let data = backend.read(service: legacy, account: account)
+        else { return nil }
+        if (try? backend.write(service: service, account: account, data: data)) != nil {
+            try? backend.delete(service: legacy, account: account)
+        }
+        return data
+    }
+
+    /// `read`, but throwing when the Keychain would not answer rather than
+    /// reporting no item. The legacy fallback and move are the same.
+    func readChecked() throws -> Data? {
+        if let data = try backend.readChecked(service: service, account: account) {
+            return data
+        }
+        guard let legacy = legacyService, legacy != service,
+            let data = try backend.readChecked(service: legacy, account: account)
         else { return nil }
         if (try? backend.write(service: service, account: account, data: data)) != nil {
             try? backend.delete(service: legacy, account: account)

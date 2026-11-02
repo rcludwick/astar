@@ -185,7 +185,7 @@ ASL_USER=<callsign> ASL_PASS='<portal password>' ASL_NODE=<owned node> \
 
 `ASL_NODE` now only matters for the fallback: the API path mints without one.
 The offline tests in `crates/astar-asl3/src/mint.rs` play both halves with a
-`tiny_http` stub — the API's success/refusal/absent shapes, and the scrape's
+`astar_http::testing` stub — the API's success/refusal/absent shapes, and the scrape's
 `302`-with-cookies login and full-jar requirement — so the sequence above is
 pinned without touching the live site.
 

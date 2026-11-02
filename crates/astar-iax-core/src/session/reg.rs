@@ -218,6 +218,40 @@ impl RegFsm {
         &self.state
     }
 
+    /// Answer a CALLTOKEN: send the REGREQ again carrying `token`, as a
+    /// brand-new transaction. `chan_iax2`'s `resend_with_token` restarts every
+    /// sequence number at 0, and the registrar allocates a fresh call for the
+    /// token REGREQ that expects `oseqno` 0. Anything else is `VNAKed`, and the
+    /// call number is never freed (nodebench findings 2 and 8).
+    fn send_token_regreq(
+        &self,
+        out: &mut SmallVec<[RegAction; 4]>,
+        our_call: CallNo,
+        refresh_request: Duration,
+        token: &CallToken,
+    ) {
+        #[allow(clippy::cast_possible_truncation)]
+        let refresh_secs = refresh_request.as_secs().min(u64::from(u16::MAX)) as u16;
+        let regreq = build_regreq(
+            our_call,
+            &self.credentials.username,
+            refresh_secs,
+            Some(token.as_bytes()),
+            None,
+            None,
+        );
+        out.push(RegAction::ResetReliability);
+        out.push(RegAction::SendReliable(regreq));
+        out.push(RegAction::SetTimer(
+            TimerKind::RegTokenExpiry,
+            Duration::from_secs(10),
+        ));
+        out.push(RegAction::SetTimer(
+            TimerKind::RegReqRetry,
+            Duration::from_secs(1),
+        ));
+    }
+
     /// Test-only constructor. Not part of the stable API.
     #[doc(hidden)]
     #[must_use]
@@ -420,25 +454,7 @@ impl RegFsm {
                     // Wire CALLTOKEN already fits a u8 length prefix; cannot fail.
                     let token = CallToken::new(ies.calltoken.unwrap_or(&[]))
                         .expect("wire CALLTOKEN IE <= 255 bytes");
-                    #[allow(clippy::cast_possible_truncation)]
-                    let refresh_secs = refresh_request.as_secs().min(u64::from(u16::MAX)) as u16;
-                    let regreq = build_regreq(
-                        our_call,
-                        &self.credentials.username,
-                        refresh_secs,
-                        Some(token.as_bytes()),
-                        None,
-                        None,
-                    );
-                    out.push(RegAction::SendReliable(regreq));
-                    out.push(RegAction::SetTimer(
-                        TimerKind::RegTokenExpiry,
-                        Duration::from_secs(10),
-                    ));
-                    out.push(RegAction::SetTimer(
-                        TimerKind::RegReqRetry,
-                        Duration::from_secs(1),
-                    ));
+                    self.send_token_regreq(&mut out, our_call, refresh_request, &token);
                     self.state = RegState::RegReqResent {
                         sent_at: now,
                         our_call,
@@ -456,6 +472,95 @@ impl RegFsm {
                     };
                     out.push(RegAction::LogInvalid {
                         reason: "unexpected_frame_in_regreq_sent",
+                    });
+                }
+            },
+            (
+                RegState::RegReqResent {
+                    sent_at,
+                    our_call,
+                    token,
+                    attempts,
+                    refresh_request,
+                },
+                RegEvent::Frame { frame, now },
+            ) => match full_subclass(&frame) {
+                // The token REGREQ was answered: REGAUTH, REGACK or REGREJ
+                // are handled exactly as in `RegReqSent`. This arm was
+                // missing, so a registrar that requires call tokens (every
+                // chan_iax2 with the default `requirecalltoken`) could never
+                // get past the token round.
+                Some((
+                    crate::frame::Subclass::Iax(
+                        crate::subclass::IaxCommand::RegAck
+                        | crate::subclass::IaxCommand::RegRej
+                        | crate::subclass::IaxCommand::RegAuth,
+                    ),
+                    _,
+                    _,
+                )) => {
+                    out.push(RegAction::CancelTimer(TimerKind::RegTokenExpiry));
+                    self.state = RegState::RegReqSent {
+                        sent_at,
+                        our_call,
+                        attempts,
+                        refresh_request,
+                    };
+                    out.extend(self.handle(RegEvent::Frame { frame, now }));
+                }
+                // A fresh CALLTOKEN: the registrar did not take ours (expired,
+                // or it restarted). Retry with the new one, inside the same
+                // retry budget. The same token again is a duplicate of a
+                // reply we already acted on.
+                Some((
+                    crate::frame::Subclass::Iax(crate::subclass::IaxCommand::CallToken),
+                    _,
+                    ies_bytes,
+                )) => {
+                    let ies = crate::ie::Ies::parse(&ies_bytes)
+                        .unwrap_or_else(|_| crate::ie::Ies::empty());
+                    let fresh = ies.calltoken.unwrap_or(&[]);
+                    if fresh == token.as_bytes() || fresh.is_empty() {
+                        self.state = RegState::RegReqResent {
+                            sent_at,
+                            our_call,
+                            token,
+                            attempts,
+                            refresh_request,
+                        };
+                        out.push(RegAction::LogInvalid {
+                            reason: "duplicate_calltoken_in_regreq_resent",
+                        });
+                    } else if attempts >= self.options.max_retries {
+                        let reason = RegFailReason::Timeout {
+                            in_state: "RegReqResent",
+                        };
+                        out.push(RegAction::CancelTimer(TimerKind::RegReqRetry));
+                        out.push(RegAction::CancelTimer(TimerKind::RegTokenExpiry));
+                        out.push(RegAction::AppEvent(RegAppEvent::Failed(reason.clone())));
+                        self.state = RegState::Failed(reason);
+                    } else {
+                        let token = CallToken::new(fresh).expect("wire CALLTOKEN IE <= 255 bytes");
+                        self.send_token_regreq(&mut out, our_call, refresh_request, &token);
+                        self.state = RegState::RegReqResent {
+                            sent_at: now,
+                            our_call,
+                            token,
+                            attempts: attempts + 1,
+                            refresh_request,
+                        };
+                    }
+                }
+                _ => {
+                    self.state = RegState::RegReqResent {
+                        sent_at,
+                        our_call,
+                        token,
+                        attempts,
+                        refresh_request,
+                    };
+                    out.push(RegAction::LogInvalid {
+                        reason: "unexpected_frame_in_regreq_resent",
                     });
                 }
             },
@@ -647,17 +752,12 @@ impl RegFsm {
                     out.push(RegAction::AppEvent(RegAppEvent::Failed(reason.clone())));
                     self.state = RegState::Failed(reason);
                 } else {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let refresh_secs = refresh_request.as_secs().min(u64::from(u16::MAX)) as u16;
-                    let regreq = build_regreq(
-                        our_call,
-                        &self.credentials.username,
-                        refresh_secs,
-                        None,
-                        None,
-                        None,
-                    );
-                    out.push(RegAction::SendReliable(regreq));
+                    // No new frame: the REGREQ in flight is retransmitted by
+                    // `Reliability`, same bytes and `oseqno`, retransmission
+                    // bit set. Enqueueing a fresh copy here gave each retry
+                    // the next `oseqno`, so the token REGREQ that followed a
+                    // late registrar went out with `oseqno` 3 and was VNAKed
+                    // (nodebench finding 2). This timer only bounds the wait.
                     let backoff = Duration::from_secs(1 << u32::from(attempts.min(3)));
                     out.push(RegAction::SetTimer(TimerKind::RegReqRetry, backoff));
                     self.state = RegState::RegReqSent {
@@ -708,17 +808,9 @@ impl RegFsm {
                     out.push(RegAction::AppEvent(RegAppEvent::Failed(reason.clone())));
                     self.state = RegState::Failed(reason);
                 } else {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let refresh_secs = refresh_request.as_secs().min(u64::from(u16::MAX)) as u16;
-                    let regreq = build_regreq(
-                        our_call,
-                        &self.credentials.username,
-                        refresh_secs,
-                        Some(token.as_bytes()),
-                        None,
-                        None,
-                    );
-                    out.push(RegAction::SendReliable(regreq));
+                    // As in `RegReqSent`: `Reliability` retransmits the token
+                    // REGREQ itself; a fresh copy would carry the next
+                    // `oseqno`, and chan_iax2 VNAKs that on the new call.
                     let backoff = Duration::from_secs(1 << u32::from(attempts.min(3)));
                     out.push(RegAction::SetTimer(TimerKind::RegReqRetry, backoff));
                     self.state = RegState::RegReqResent {
@@ -750,26 +842,8 @@ impl RegFsm {
                     out.push(RegAction::AppEvent(RegAppEvent::Failed(reason.clone())));
                     self.state = RegState::Failed(reason);
                 } else {
-                    let challenge_str = std::str::from_utf8(&challenge).unwrap_or("");
-                    let response = crate::session::auth::md5_response(
-                        challenge_str,
-                        self.credentials.password.expose(),
-                    );
-                    #[allow(clippy::cast_possible_truncation)]
-                    let refresh_secs = self
-                        .options
-                        .refresh_request
-                        .as_secs()
-                        .min(u64::from(u16::MAX)) as u16;
-                    let regreq = build_regreq(
-                        our_call,
-                        &self.credentials.username,
-                        refresh_secs,
-                        None,
-                        Some(&response),
-                        None,
-                    );
-                    out.push(RegAction::SendReliable(regreq));
+                    // `Reliability` retransmits the MD5 REGREQ under its own
+                    // `oseqno`; a second copy would skip one.
                     let backoff = Duration::from_secs(1 << u32::from(attempts.min(3)));
                     out.push(RegAction::SetTimer(TimerKind::RegAuthRetry, backoff));
                     self.state = RegState::RegPending {
@@ -810,9 +884,19 @@ impl RegFsm {
                 }
             }
             // Decision §4: Deregister on Failed/Closed/Idle is a silent no-op.
+            //
+            // And Reliability giving up on a REGREQ is not news while waiting
+            // for a reply: the retry timer owns the budget and fails the
+            // registration on its own schedule (both run out about 15 s in).
             (state @ RegState::Failed(_), RegEvent::App(RegAppCommand::Deregister { .. }))
             | (state @ RegState::Closed, RegEvent::App(RegAppCommand::Deregister { .. }))
-            | (state @ RegState::Idle, RegEvent::App(RegAppCommand::Deregister { .. })) => {
+            | (state @ RegState::Idle, RegEvent::App(RegAppCommand::Deregister { .. }))
+            | (
+                state @ (RegState::RegReqSent { .. }
+                | RegState::RegReqResent { .. }
+                | RegState::RegPending { .. }),
+                RegEvent::DeliveryFailed { .. },
+            ) => {
                 self.state = state;
             }
             (state, _event) => {
@@ -1105,6 +1189,112 @@ mod reg_tests {
             set_peer_idx < regreq_idx,
             "SetPeerCall must precede the post-auth REGREQ so enqueue stamps dest_call",
         );
+    }
+
+    #[test]
+    fn calltoken_resets_reliability_before_the_token_regreq() {
+        // chan_iax2 expects the token REGREQ at oseqno 0 on the call it
+        // allocates for it; ResetReliability must come first (finding 2).
+        let (mut f, now) = drive_to_regreqsent();
+        let ies = Ies {
+            calltoken: Some(b"opaque-token"),
+            ..Ies::empty()
+        };
+        let actions = f.handle(RegEvent::Frame {
+            frame: peer_frame(0, 1, Subclass::Iax(IaxCommand::CallToken), ies),
+            now: now + Duration::from_millis(50),
+        });
+        let reset = actions
+            .iter()
+            .position(|a| matches!(a, RegAction::ResetReliability))
+            .expect("ResetReliability on the token round");
+        let send = actions
+            .iter()
+            .position(|a| matches!(a, RegAction::SendReliable(_)))
+            .expect("token REGREQ");
+        assert!(reset < send);
+    }
+
+    fn drive_to_regreqresent() -> (RegFsm, Instant) {
+        let (mut f, now) = drive_to_regreqsent();
+        let ies = Ies {
+            calltoken: Some(b"tok-1"),
+            ..Ies::empty()
+        };
+        let _ = f.handle(RegEvent::Frame {
+            frame: peer_frame(0, 1, Subclass::Iax(IaxCommand::CallToken), ies),
+            now,
+        });
+        (f, now)
+    }
+
+    #[test]
+    fn regreqresent_regauth_proceeds_to_regpending() {
+        let (mut f, now) = drive_to_regreqresent();
+        let ies = Ies {
+            authmethods: Some(2),
+            challenge: Some("c0ffee"),
+            ..Ies::empty()
+        };
+        let actions = f.handle(RegEvent::Frame {
+            frame: peer_frame(0, 1, Subclass::Iax(IaxCommand::RegAuth), ies),
+            now: now + Duration::from_millis(5),
+        });
+        assert!(matches!(f.state(), RegState::RegPending { .. }));
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, RegAction::CancelTimer(TimerKind::RegTokenExpiry)))
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, RegAction::SetPeerCall(c) if *c == CallNo::new(7).unwrap()))
+        );
+    }
+
+    #[test]
+    fn regreqresent_duplicate_calltoken_sends_nothing() {
+        let (mut f, now) = drive_to_regreqresent();
+        let ies = Ies {
+            calltoken: Some(b"tok-1"),
+            ..Ies::empty()
+        };
+        let actions = f.handle(RegEvent::Frame {
+            frame: peer_frame(0, 1, Subclass::Iax(IaxCommand::CallToken), ies),
+            now: now + Duration::from_millis(5),
+        });
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, RegAction::SendReliable(_)))
+        );
+        assert!(matches!(
+            f.state(),
+            RegState::RegReqResent { attempts: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn regreqresent_fresh_calltokens_are_bounded() {
+        let (mut f, now) = drive_to_regreqresent();
+        for i in 0..10u8 {
+            let tok: &'static [u8] = Box::leak(Box::new([b't', i]));
+            let ies = Ies {
+                calltoken: Some(tok),
+                ..Ies::empty()
+            };
+            let _ = f.handle(RegEvent::Frame {
+                frame: peer_frame(0, 1, Subclass::Iax(IaxCommand::CallToken), ies),
+                now: now + Duration::from_millis(u64::from(i)),
+            });
+        }
+        assert!(matches!(
+            f.state(),
+            RegState::Failed(RegFailReason::Timeout {
+                in_state: "RegReqResent"
+            })
+        ));
     }
 
     #[test]
@@ -1485,21 +1675,38 @@ mod reg_tests {
     }
 
     #[test]
-    fn regreq_retry_within_budget_resends_and_increments_attempts() {
+    fn regreq_retry_within_budget_rearms_without_a_new_frame() {
+        // Reliability retransmits the REGREQ in flight under its own oseqno;
+        // a fresh copy from the FSM would take the next one (finding 2).
         let (mut f, now) = drive_to_regreqsent();
         let actions = f.handle(RegEvent::Timer {
             kind: TimerKind::RegReqRetry,
             now: now + Duration::from_secs(1),
             jitter_salt: 0,
         });
-        assert!(actions.iter().any(|a| matches!(
-            a,
-            RegAction::SendReliable(frame) if matches!(frame.subclass, Subclass::Iax(IaxCommand::RegReq))
-        )));
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, RegAction::SendReliable(_))),
+            "retry timer must not enqueue a second REGREQ"
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, RegAction::SetTimer(TimerKind::RegReqRetry, _)))
+        );
         assert!(matches!(
             f.state(),
             RegState::RegReqSent { attempts: 2, .. }
         ));
+    }
+
+    #[test]
+    fn delivery_failed_while_waiting_is_left_to_the_retry_timer() {
+        let (mut f, _now) = drive_to_regreqsent();
+        let actions = f.handle(RegEvent::DeliveryFailed { oseqno: 0 });
+        assert!(actions.is_empty(), "{actions:?}");
+        assert!(matches!(f.state(), RegState::RegReqSent { .. }));
     }
 
     #[test]

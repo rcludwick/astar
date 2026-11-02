@@ -6,8 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-astar-iax = { path = "../astar-iax" }
-astar-audio = { path = "../astar-audio" }
+astar-iax = { path = "../astar-iax", default-features = false }
+astar-audio = { path = "../astar-audio", default-features = false }
 astar-codec = { path = "../astar-codec" }
 astar-iax-core = { path = "../astar-iax-core" }
 # M17 protocol primitives (iax-f2b8 Task 3): pure, I/O-free, no extra deps of
@@ -22,15 +22,18 @@ astar-ysf = { path = "../astar-ysf", optional = true }
 # 33-byte network frame and a link FSM, plus a loopback reflector to test
 # against. Pure but for that reflector; optional + gated behind the `nxdn`
 # feature (OFF by default — see below).
-astar-nxdn = { path = "../astar-nxdn", version = "0.1.16-beta", optional = true }
+astar-nxdn = { path = "../astar-nxdn", version = "0.1.18-beta", optional = true }
 # DMR protocol primitives (iax-d4f7): the homebrew/MMDVM wire, the 33-byte
 # burst, a link FSM and a loopback master to test against. Pure but for that
 # master; optional + gated behind the `dmr` feature (OFF by default — see
 # below).
-astar-dmr = { path = "../astar-dmr", version = "0.1.16-beta", optional = true }
+astar-dmr = { path = "../astar-dmr", version = "0.1.18-beta", optional = true }
 # Underlay socket for applying a deferred `WireGuard` link transport when the
 # engine is first built (iax-5bbd); config/status types come via `astar-iax`.
 astar-wireguard = { path = "../astar-wireguard" }
+# Recording taps only (`Tap`, `TapSlot`, `FrameEvent`): no writer, so no
+# FLAC/tar code is linked into the console.
+astar-record = { path = "../astar-record", version = "0.1.18-beta", default-features = false }
 # StreamID generation for the M17 TX path (iax-f2b8 Task 3); optional, only
 # pulled in by the `m17` feature.
 rand = { workspace = true, optional = true }
@@ -40,8 +43,20 @@ serde = { version = "1", features = ["derive"], optional = true }
 # unconditional `tracing` dependency even though its call sites are all
 # feature-gated.
 tracing = { workspace = true }
+# EchoLink protocol primitives (sans-IO); the sockets live in `src/echolink/`.
+astar-echolink = { path = "../astar-echolink", optional = true }
+# The EchoLink password is held as `Zeroizing` and zeroed after each write.
+zeroize.workspace = true
+# The local wall-clock `hh:mm` an EchoLink status line carries. Safe Rust; on
+# Unix it reads the system zone from /etc/localtime and /usr/share/zoneinfo.
+jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"], optional = true }
 
 [dev-dependencies]
+# Every test build of this crate turns on `echolink-loopback-only`, so every
+# EchoLink socket refuses a non-loopback address (see `src/echolink/net.rs`).
+astar-console = { path = ".", features = ["echolink", "echolink-loopback-only"] }
+astar-echolink = { path = "../astar-echolink", features = ["loopback-fakes"] }
+tracing-subscriber.workspace = true
 astar-asl3 = { path = "../astar-asl3" }
 astar-audio = { path = "../astar-audio", features = ["test-backend"] }
 # Forces the LGPL `codec2-static` backend on for every TEST/bench build of
@@ -58,7 +73,11 @@ astar-ptt = { path = "../astar-ptt" }
 serde_json = "1"
 
 [features]
-default = ["m17"]
+default = ["m17", "device-audio", "echolink"]
+# `default-features = false` on astar-audio (and on every astar crate that
+# reaches it) so astar-server's release can drop cpal; `device-audio` below
+# puts it back, and it is on by default.
+device-audio = ["astar-audio/device-audio", "astar-iax/device-audio"]
 serde = ["dep:serde", "astar-iax-core/serde", "astar-iax/serde"]
 # M17 digital-voice client runtime (iax-f2b8 Task 3), default ON. Pulls in
 # `astar-m17` (pure protocol code, no I/O, no extra deps) and enables
@@ -114,6 +133,15 @@ nxdn = ["dep:astar-nxdn", "astar-codec/ambe-hw"]
 # sound. Receive only for now: see this crate's `dmr` module docs for the gate
 # transmit is behind.
 dmr = ["dep:astar-dmr", "astar-codec/ambe-hw"]
+
+# EchoLink (calling out only), default ON. Pulls in `astar-echolink` (pure
+# protocol code) and `astar-codec`'s pure-Rust GSM 06.10.
+echolink = ["dep:astar-echolink", "dep:jiff", "astar-codec/gsm"]
+# Test builds only: every EchoLink bind, connect, send and server lookup
+# refuses a non-loopback address with `PermissionDenied`. Turned on by the
+# self dev-dependency above; it must never reach `default`
+# (`ci/guard-echolink.sh`).
+echolink-loopback-only = ["echolink"]
 
 [lints]
 workspace = true

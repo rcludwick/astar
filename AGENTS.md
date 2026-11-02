@@ -2,7 +2,8 @@
 
 Native multi-network ham-radio client and node: AllStarLink (IAX2), M17, and
 D-Star. One cargo workspace, one git history. AGPL-3.0-only throughout, except
-the vendored `vendor/ambe-thumbdv` (MIT/Apache-2.0).
+the two vendored islands: `vendor/ambe-thumbdv` (MIT/Apache-2.0) and
+`vendor/codec2` (LGPL-2.1-only AND MIT).
 
 Design polish is a first-class requirement: astar should be pretty and easy to
 use, not just functional.
@@ -39,6 +40,7 @@ bindings/        The engine's own bindings: swift (AstarStation),
 apps/macos/      The SwiftUI app (macOS menu-bar; iOS targeted).
 apps/gui/        The Iced client for Windows/Linux (crate astar-gui).
 vendor/          ambe-thumbdv — the ThumbDV vocoder driver, MIT/Apache island.
+                 codec2 — the M17 voice codec (pure Rust), LGPL-2.1/MIT island.
 docs/            Engine docs + docs/app/ for the app's own backlog/design.
 ```
 
@@ -95,9 +97,12 @@ or described here — not in code, docs, comments, backlog or commit messages.
 The vendored driver is the whole AMBE story. `astar-codec`'s `ambe-hw` feature
 is off by default.
 
-`vendor/ambe-thumbdv/Cargo.toml` hard-codes `license`/`version`/`edition`/
-`repository` on purpose. Do not convert them to `.workspace = true` — that would
-relicense someone else's MIT/Apache code as AGPL. See its `VENDORED.md`.
+`vendor/ambe-thumbdv/Cargo.toml` and `vendor/codec2/Cargo.toml` hard-code
+`license`/`version`/`edition`/`repository` (and `codec2` its `authors`) on
+purpose. Do not convert them to `.workspace = true` — that would relicense
+someone else's MIT/Apache or LGPL code as AGPL. See each one's `VENDORED.md`.
+`vendor/codec2` is also in the workspace `exclude`, so fmt/clippy never touch
+it: it stays byte-for-byte upstream.
 
 ## Distribution reality
 

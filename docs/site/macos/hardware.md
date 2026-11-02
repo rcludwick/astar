@@ -89,9 +89,10 @@ install the driver above.
 ## Digital voice
 
 **D-Star needs a hardware vocoder dongle.** That is not a recommendation — it
-is the only way astar does D-Star voice at all. The D-Star option appears in
-the network picker while a dongle is attached and disappears when you unplug
-it.
+is the only way astar does D-Star voice at all. Add the dongle once in
+**Settings → Vocoders** (see [Vocoders](vocoders.md)); after that the D-Star
+option appears in the network picker while it is attached and disappears when
+you unplug it.
 
 ### Why the hardware is required
 
@@ -125,15 +126,16 @@ developed against day to day.
 
 !!! note "Why both work, and what would not"
 
-    astar finds a dongle by scanning for the FTDI id **`0x0403:0x6015`** — an
-    FT230X — and it opens nothing else. Both dongles above present that id, so
-    both are found. A dongle built around a different USB-serial chip would
-    not be, however good the vocoder inside it is.
+    astar offers a dongle for adding when it presents the FTDI id
+    **`0x0403:0x6015`** — an FT230X — and it opens only dongles whose USB
+    serial number you have added in [Settings → Vocoders](vocoders.md). Both
+    dongles above present that id, so both can be added. A dongle built
+    around a different USB-serial chip could not be, however good the vocoder
+    inside it is.
 
-    That narrowness is deliberate rather than lazy. See the safety note at the
-    end of this section: a scan that would open any serial port could be
-    pointed at a radio interface, and opening one of those keys a
-    transmitter.
+    The id alone is not enough, because many radio CAT/PTT cables use the
+    same chip and look identical on USB, and opening one of those can key a
+    transmitter. That is why each stick is added by hand.
 
 ### Which modes this covers
 
@@ -147,17 +149,19 @@ developed against day to day.
 | **AllStarLink** | not needed | Works. |
 
 Detection is hotplug rather than latched at launch, so the capability follows
-the hardware — unplug the dongle mid-session and the D-Star option leaves the
-network picker. If you are working from the Rust crates rather than the app, see
+the hardware — unplug a trusted dongle mid-session and the D-Star option leaves
+the network picker. If you are working from the Rust crates rather than the app, see
 [A vocoder dongle](../build/prerequisites.md#a-vocoder-dongle-only-for-d-star)
 for which builds include D-Star at all.
 
-!!! danger "`IAX_THUMBDV_PORT` narrows the scan — it never replaces it"
+!!! danger "astar opens only the dongles you added"
 
     The rule governing the dongle is a safety rule rather than a convenience:
-    `IAX_THUMBDV_PORT` only ever **narrows** the USB VID/PID scan and can never
-    point the opener at an arbitrary serial port. Opening a USB radio
-    interface's tty asserts RTS, which keys a transmitter. See
+    astar opens a vocoder port only when its USB serial number is on the list
+    in [Settings → Vocoders](vocoders.md). `IAX_THUMBDV_PORT` only ever
+    **narrows** the choice among those trusted dongles and can never point the
+    opener at another serial port. Opening a USB radio interface's tty
+    asserts RTS, which keys a transmitter. See
     [On-air safety](../about/safety.md).
 
 ## Audio devices

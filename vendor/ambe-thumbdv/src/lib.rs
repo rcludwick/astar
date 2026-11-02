@@ -9,6 +9,7 @@
 //! See [`packet`] for the codec interface.
 
 pub mod device;
+pub mod enrol;
 pub mod packet;
 pub mod transport;
 
@@ -18,8 +19,12 @@ pub use packet::{
     RawPacket, Response, FRAME_BYTES, FRAME_SAMPLES,
 };
 
-pub use device::{detect, DeviceError, ThumbDv};
-pub use transport::{MockTransport, SerialTransport, Transport};
+pub use device::{detect_trusted, DeviceError, ThumbDv};
+pub use enrol::{probe_with, ChipClass, ProbeOutcome, PROBE_BAUDS};
+pub use transport::{
+    candidates_from, trusted_ports_from, MockTransport, SerialTransport, Transport, UsbListing,
+    VocoderCandidate, FTDI_VID, FT_X_PID,
+};
 
 /// Test utilities (hex helper for tests).
 #[cfg(test)]

@@ -3,15 +3,20 @@
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 //! Server-Sent-Events stream for the astar-server control channel (iax-35b1).
 //!
-//! `sse_frame` formats one `NodeEvent` as an SSE data line; `SseReader` is a
-//! blocking `Read` that drains the controller's event subscription and emits a
-//! periodic `Snapshot` heartbeat when no event is pending.
+//! `sse_frame` formats one `NodeEvent` as an SSE data line; `pump_events`
+//! drains the controller's event subscription onto an
+//! [`astar_http::sse::Writer`], with a `Snapshot` heartbeat whenever no
+//! event is pending.
 
-use std::io::{self, Read};
+use std::io::{self, Write};
 use std::sync::{Arc, mpsc::Receiver};
 use std::time::Duration;
 
 use crate::{command::NodeEvent, controller::NodeController};
+
+/// How often an event stream sends a frame: an event when one is pending,
+/// a snapshot heartbeat when not.
+pub const EVENT_TICK: Duration = Duration::from_millis(33);
 
 /// Format a `NodeEvent` as one SSE frame: `data: <json>\n\n`.
 ///
@@ -19,86 +24,43 @@ use crate::{command::NodeEvent, controller::NodeController};
 /// design), so the returned string is always credential-free.
 #[must_use]
 pub fn sse_frame(ev: &NodeEvent) -> String {
-    let json = serde_json::to_string(ev).unwrap_or_else(|_| "{}".to_string());
-    format!("data: {json}\n\n")
+    format!("data: {}\n\n", event_json(ev))
 }
 
-/// A blocking `Read` that yields SSE frames from the controller's event
-/// subscription, with a heartbeat `Snapshot` when no event is pending.
+fn event_json(ev: &NodeEvent) -> String {
+    serde_json::to_string(ev).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// The next event's JSON: the one pending in `rx`, or a heartbeat
+/// `Snapshot` when none is, so the stream never stalls.
+#[must_use]
+pub fn next_event_json(rx: &Receiver<NodeEvent>, ctrl: &NodeController) -> String {
+    match rx.try_recv() {
+        Ok(ev) => event_json(&ev),
+        Err(_) => event_json(&NodeEvent::Snapshot(ctrl.snapshot())),
+    }
+}
+
+/// Copy the controller's events to `w`, one frame every `tick`, until
+/// `keep_going` says no, the controller stops (so an open stream never
+/// holds up a shutdown), or a write fails (the client left, or stalled past
+/// the write timeout). Subscribes on entry.
 ///
-/// `tiny_http` (Task 8) drives this by repeatedly calling `read`.  During
-/// normal operation it never returns 0 — the stream ends only when the client
-/// disconnects and the write side errors.  When the controller's stop flag is
-/// set (shutdown), `read` returns `Ok(0)` (EOF) so `respond` finishes and the
-/// SSE worker thread exits; otherwise an open SSE stream would keep its worker
-/// thread alive forever and block graceful teardown.
-pub struct SseReader {
-    rx: Receiver<NodeEvent>,
-    ctrl: Arc<NodeController>,
-    residual: Vec<u8>,
-    pos: usize,
+/// # Errors
+/// The write that failed.
+pub fn pump_events<W: Write>(
+    w: &mut astar_http::sse::Writer<W>,
+    ctrl: &Arc<NodeController>,
     tick: Duration,
-}
-
-impl SseReader {
-    /// Build an `SseReader` from the controller's subscriber channel and an
-    /// `Arc` to the controller for heartbeat snapshots.
-    ///
-    /// `rx` should come from `NodeController::subscribe()`.
-    #[must_use]
-    pub fn new(rx: Receiver<NodeEvent>, ctrl: Arc<NodeController>) -> Self {
-        Self {
-            rx,
-            ctrl,
-            residual: Vec::new(),
-            pos: 0,
-            tick: Duration::from_millis(33),
+    mut keep_going: impl FnMut() -> bool,
+) -> io::Result<()> {
+    let rx = ctrl.subscribe();
+    loop {
+        if !keep_going() || ctrl.should_stop() {
+            return Ok(());
         }
-    }
-
-    /// Build with an explicit tick (useful for tests to avoid sleeping).
-    #[cfg(test)]
-    pub fn with_tick(rx: Receiver<NodeEvent>, ctrl: Arc<NodeController>, tick: Duration) -> Self {
-        Self {
-            rx,
-            ctrl,
-            residual: Vec::new(),
-            pos: 0,
-            tick,
-        }
-    }
-
-    /// Produce the next SSE frame.
-    ///
-    /// If an event is pending in `rx`, format it immediately.  Otherwise emit
-    /// a heartbeat `Snapshot` so the stream never stalls.
-    fn next_frame(&self) -> String {
-        match self.rx.try_recv() {
-            Ok(ev) => sse_frame(&ev),
-            Err(_) => sse_frame(&NodeEvent::Snapshot(self.ctrl.snapshot())),
-        }
-    }
-}
-
-impl Read for SseReader {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.pos >= self.residual.len() {
-            // On shutdown, return EOF so `respond` finishes and this SSE worker
-            // thread exits.  Returning 0 only when stop is set is correct: it
-            // closes the stream at teardown, and during normal operation the
-            // reader still never returns 0.
-            if self.ctrl.should_stop() {
-                return Ok(0);
-            }
-            // Pace the stream, then produce the next frame.
-            std::thread::sleep(self.tick);
-            self.residual = self.next_frame().into_bytes();
-            self.pos = 0;
-        }
-        let n = (self.residual.len() - self.pos).min(buf.len());
-        buf[..n].copy_from_slice(&self.residual[self.pos..self.pos + n]);
-        self.pos += n;
-        Ok(n)
+        std::thread::sleep(tick);
+        w.data(&next_event_json(&rx, ctrl))?;
     }
 }
 
@@ -146,24 +108,31 @@ mod tests {
     }
 
     #[test]
-    fn sse_reader_emits_valid_sse_frame() {
+    fn pump_events_writes_a_valid_frame() {
         let ctrl = test_controller();
-        let rx = ctrl.subscribe();
-        // Use a zero tick so the test doesn't sleep.
-        let mut reader = SseReader::with_tick(rx, Arc::clone(&ctrl), Duration::from_nanos(0));
-
-        // Read just enough bytes for at least one heartbeat frame.
-        let mut buf = vec![0u8; 1024];
-        let n = reader.read(&mut buf).expect("read should not fail");
-        assert!(n > 0, "SseReader must return > 0 bytes");
-        let text = std::str::from_utf8(&buf[..n]).expect("frame must be UTF-8");
+        let mut w = astar_http::sse::Writer::new(Vec::new());
+        let mut once = true;
+        pump_events(&mut w, &ctrl, Duration::ZERO, || std::mem::take(&mut once))
+            .expect("a Vec never fails a write");
+        let text = String::from_utf8(w.into_inner()).expect("frame must be UTF-8");
         assert!(
-            text.starts_with("data: "),
+            text.starts_with("data: {"),
             "must start with SSE prefix: {text:?}"
         );
-        assert!(
-            text.ends_with("\n\n") || text.contains("\n\n"),
-            "must contain SSE terminator: {text:?}"
-        );
+        assert!(text.ends_with("\n\n"), "one whole frame: {text:?}");
+        assert_eq!(text.matches("\n\n").count(), 1, "exactly one: {text:?}");
+        let v: serde_json::Value =
+            serde_json::from_str(text.trim_start_matches("data: ").trim_end()).expect("JSON");
+        assert_eq!(v["event"], "snapshot", "the heartbeat: {text}");
+    }
+
+    #[test]
+    fn pump_events_ends_when_the_node_stops() {
+        let ctrl = test_controller();
+        let _ = ctrl.execute(crate::command::NodeCommand::Shutdown);
+        assert!(ctrl.should_stop());
+        let mut w = astar_http::sse::Writer::new(Vec::new());
+        pump_events(&mut w, &ctrl, Duration::ZERO, || true).expect("ends cleanly");
+        assert!(w.into_inner().is_empty(), "nothing after stop");
     }
 }

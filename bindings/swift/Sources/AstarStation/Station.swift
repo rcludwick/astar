@@ -318,6 +318,18 @@ public struct Snapshot: Sendable, Equatable {
     /// RECEIVE ONLY. There is no DMR transmit path: a key-down is refused,
     /// not queued, so a UI must not offer a PTT affordance while this is set.
     public let dmrActive: Bool
+    /// `true` when the library was built with EchoLink, so the `echolink…`
+    /// calls do something. EchoLink needs no hardware, so nothing else goes
+    /// into it.
+    public let echolinkAvailable: Bool
+    /// `true` while an EchoLink call is connecting or connected, or while any
+    /// station is on the node's EchoLink leg — mutually exclusive with every
+    /// other network.
+    public let echolinkActive: Bool
+    /// `true` while logged in to the EchoLink directory. A login still
+    /// running, or one that failed, reads `false`; ``Station/echolinkState()``
+    /// says which.
+    public let echolinkLoggedIn: Bool
 }
 
 /// The YSF-shaped state of a live link, from ``Station/ysfState()``.
@@ -652,6 +664,217 @@ public struct DMRState: Equatable, Sendable {
     }
 }
 
+/// Where the EchoLink directory login stands.
+///
+/// Each raw value is the exact string the engine's state JSON carries in
+/// `login`.
+public enum EchoLinkLoginState: String, Sendable {
+    case loggedOut = "logged_out"
+    case loggingIn = "logging_in"
+    case loggedIn = "logged_in"
+    case failed
+}
+
+/// Where an EchoLink call stands. Each raw value is the engine's `link`
+/// string.
+public enum EchoLinkLink: String, Sendable {
+    case connecting, connected, closed
+}
+
+/// What kind of station a directory entry is, read from its callsign: a
+/// `-L` suffix is a link, `-R` a repeater, and a callsign in stars (like
+/// `*ECHOTEST*`) a conference. ``unknown`` is what a string this binding does
+/// not recognise decodes to.
+public enum EchoLinkStationKind: String, Sendable {
+    case user, link, repeater, conference, unknown
+}
+
+/// Whether a directory entry is free to call. ``online`` is free, ``busy`` is
+/// in a contact, and ``unknown`` is both the directory's own "can't say" and
+/// what an unrecognised string decodes to — the grey dot.
+public enum EchoLinkStationStatus: String, Sendable {
+    case online, busy, unknown
+}
+
+/// One line of an EchoLink call's text chat.
+///
+/// `from` and `text` come from the far station: render them as text, never as
+/// markup.
+public struct EchoLinkChatLine: Equatable, Sendable {
+    /// The callsign that sent the line.
+    public let from: String
+    /// The line itself.
+    public let text: String
+    /// `true` for a line this station sent.
+    public let mine: Bool
+
+    public init(from: String, text: String, mine: Bool) {
+        self.from = from
+        self.text = text
+        self.mine = mine
+    }
+}
+
+/// The EchoLink login and call, from ``Station/echolinkState()``.
+///
+/// There is no password field. The password given to
+/// ``Station/echolinkLogin(callsign:password:servers:)`` is not here and never
+/// comes back out of the engine.
+///
+/// The call fields (``link`` through ``chat``) are filled only while a call is
+/// in hand; otherwise they are `nil`, `false` or empty.
+public struct EchoLinkState: Equatable, Sendable {
+    /// Where the directory login stands.
+    public let login: EchoLinkLoginState
+    /// The callsign the login is for.
+    public let callsign: String
+    /// The sentence saying why the login failed, for the status line, or
+    /// `nil` when it has not.
+    public let error: String?
+    /// `true` while the login is backing off after no server answered and
+    /// will try again by itself — ``login`` reads ``EchoLinkLoginState/loggingIn``
+    /// or ``EchoLinkLoginState/failed`` meanwhile. `false` for a refusal,
+    /// which only a new login can get past, and while logged in or out. This
+    /// is what says whether "Log in again" would do anything.
+    public let retrying: Bool
+    /// Where the call stands, or `nil` with no call in hand.
+    public let link: EchoLinkLink?
+    /// The far station's callsign.
+    ///
+    /// Comes from the far station: render it as text, never as markup.
+    public let peer: String?
+    /// The far station's node number.
+    public let node: UInt32?
+    /// `true` while this station is transmitting, as the link applied it.
+    public let ptt: Bool
+    /// `true` while the far end is talking.
+    public let receiving: Bool
+    /// The far station's information text, or `nil` until it sends one.
+    ///
+    /// Comes from the far station: render it as text, never as markup.
+    public let info: String?
+    /// The call's text chat, oldest first.
+    public let chat: [EchoLinkChatLine]
+    /// Why the engine stopped transmitting on its own, a plain sentence for
+    /// the status line: the 10-minute transmit cap ends an over that runs
+    /// that long. `nil` otherwise; the next over clears it.
+    public let notice: String?
+
+    /// Construct one directly, for a SwiftUI preview or a client test that has
+    /// no directory to hand.
+    public init(
+        login: EchoLinkLoginState, callsign: String, error: String? = nil,
+        retrying: Bool = false, link: EchoLinkLink? = nil, peer: String? = nil, node: UInt32? = nil,
+        ptt: Bool = false, receiving: Bool = false, info: String? = nil,
+        chat: [EchoLinkChatLine] = [], notice: String? = nil
+    ) {
+        self.login = login
+        self.callsign = callsign
+        self.error = error
+        self.retrying = retrying
+        self.link = link
+        self.peer = peer
+        self.node = node
+        self.ptt = ptt
+        self.receiving = receiving
+        self.info = info
+        self.chat = chat
+        self.notice = notice
+    }
+
+    /// Decode the engine's state JSON. Returns `nil` for the `{}` document
+    /// (logged out with nothing to say) and for anything that is not a JSON
+    /// object with a `login` string.
+    ///
+    /// Public, unlike the other networks' decoders, so AstarCore's tests can
+    /// feed it real documents.
+    ///
+    /// A `login` string this binding does not know decodes to
+    /// ``EchoLinkLoginState/loggedOut``, and an unknown `link` to
+    /// ``EchoLinkLink/closed``: both are the safe direction, since a UI that
+    /// believes there is no login or no call offers nothing on it, PTT
+    /// included.
+    public init?(json: String) {
+        guard let data = json.data(using: .utf8),
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let loginString = obj["login"] as? String
+        else { return nil }
+        login = EchoLinkLoginState(rawValue: loginString) ?? .loggedOut
+        callsign = obj["callsign"] as? String ?? ""
+        error = obj["error"] as? String
+        // Absent reads as `false`: a document without the field never says
+        // the engine will retry, so a UI offers "Log in again" rather than
+        // waiting on something that is not happening.
+        retrying = obj["retrying"] as? Bool ?? false
+        link = (obj["link"] as? String).map { EchoLinkLink(rawValue: $0) ?? .closed }
+        peer = obj["peer"] as? String
+        node = (obj["node"] as? NSNumber)?.uint32Value
+        ptt = obj["ptt"] as? Bool ?? false
+        receiving = obj["receiving"] as? Bool ?? false
+        info = obj["info"] as? String
+        chat = (obj["chat"] as? [[String: Any]] ?? []).compactMap { line in
+            guard let from = line["from"] as? String, let text = line["text"] as? String
+            else { return nil }
+            return EchoLinkChatLine(from: from, text: text, mine: line["mine"] as? Bool ?? false)
+        }
+        notice = obj["notice"] as? String
+    }
+}
+
+/// One station in the EchoLink directory's list, from
+/// ``Station/echolinkStations()``. No IP address: the engine keeps those to
+/// itself.
+public struct EchoLinkStationEntry: Equatable, Sendable, Identifiable {
+    /// The station's callsign, as the directory lists it.
+    public let call: String
+    /// The station's location or description text.
+    ///
+    /// Written by whoever runs that station: render it as text, never as
+    /// markup.
+    public let description: String
+    /// The station's node number, which is also its identity in a list.
+    public let node: UInt32
+    public let kind: EchoLinkStationKind
+    public let status: EchoLinkStationStatus
+
+    public var id: UInt32 { node }
+
+    public init(
+        call: String, description: String, node: UInt32, kind: EchoLinkStationKind,
+        status: EchoLinkStationStatus
+    ) {
+        self.call = call
+        self.description = description
+        self.node = node
+        self.kind = kind
+        self.status = status
+    }
+
+    /// Decode the engine's station-list JSON array. Returns `nil` when the
+    /// document is not an array; an entry without a `call` or a `node` is
+    /// skipped. An unknown `kind` or `status` decodes to `.unknown`.
+    ///
+    /// Public so AstarCore's tests can feed it real documents.
+    public static func decodeStations(json: String) -> [EchoLinkStationEntry]? {
+        guard let data = json.data(using: .utf8),
+            let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return nil }
+        return rows.compactMap { row in
+            guard let call = row["call"] as? String,
+                let node = (row["node"] as? NSNumber)?.uint32Value
+            else { return nil }
+            return EchoLinkStationEntry(
+                call: call,
+                description: row["description"] as? String ?? "",
+                node: node,
+                kind: (row["kind"] as? String).flatMap(EchoLinkStationKind.init(rawValue:))
+                    ?? .unknown,
+                status: (row["status"] as? String).flatMap(EchoLinkStationStatus.init(rawValue:))
+                    ?? .unknown)
+        }
+    }
+}
+
 /// The M17-shaped state of a live session, from ``Station/m17State()``.
 ///
 /// Everything network-agnostic — the level meters, the call status, PTT as
@@ -884,6 +1107,46 @@ public enum Event: Sendable, Equatable {
     case registerFailed
 }
 
+// MARK: - Recording
+
+/// How a recording lays out receive and transmit audio. The raw values are
+/// the C ABI's `layout` argument to `iax_station_record_start`.
+public enum RecordingLayout: Int32, Sendable, CaseIterable {
+    /// One file: receive on the left channel, transmit on the right.
+    case stereo = 0
+    /// Two mono files, `… rx.flac` and `… tx.flac`, started and stopped
+    /// together.
+    case twoMono = 1
+    /// One mono file, receive and transmit summed.
+    case mixed = 2
+}
+
+/// What the recorder is doing, from ``Station/recordState()``. After a stop
+/// it is the last recording's final state; before any recording, idle.
+public struct RecordState: Decodable, Equatable, Sendable {
+    /// A recording is running.
+    public let recording: Bool
+    /// How long it has run, in milliseconds.
+    public let elapsedMS: UInt64
+    /// The files it writes (or wrote), as absolute paths.
+    public let files: [String]
+    /// Audio chunks or frames lost between the taps and the file.
+    public let droppedFrames: UInt64
+    /// Why the recording stopped by itself (low disk, folder gone), if it did.
+    public let error: String?
+    /// `"stereo"`, `"two-mono"` or `"mixed"`.
+    public let layout: String
+
+    enum CodingKeys: String, CodingKey {
+        case recording
+        case elapsedMS = "elapsed_ms"
+        case files
+        case droppedFrames = "dropped_frames"
+        case error
+        case layout
+    }
+}
+
 // MARK: - Error
 
 /// Thrown when an `iax_station_*` call returns a negative code.
@@ -933,6 +1196,95 @@ public struct StationError: Error, CustomStringConvertible, Equatable {
     }
 }
 
+// MARK: - Vocoder trust
+
+/// A vocoder-class USB serial port offered for enrolment. Listing never
+/// opens it.
+public struct VocoderCandidate: Codable, Equatable, Sendable, Hashable {
+    /// USB serial number: the identity trust is recorded against.
+    public let serial: String
+    /// The OS port path it enumerates as now, for display.
+    public let port: String
+
+    public init(serial: String, port: String) {
+        self.serial = serial
+        self.port = port
+    }
+}
+
+/// The outcome of ``Station/enrolVocoder(serial:)``. Raw values mirror the
+/// C ABI's `IaxVocoderEnrol` and must not be renumbered.
+public enum VocoderEnrolResult: Int32, Sendable {
+    /// An AMBE-3000 answered: trust it.
+    case trusted = 0
+    /// An AMBE-3003 (DVstick 33) answered: recognised, not supported yet.
+    /// Not trusted.
+    case unsupported = 1
+    /// Something answered with another PRODID. Refused.
+    case wrongDevice = 2
+    /// Nothing answered as a vocoder (timeout or garbage): possibly a CAT
+    /// cable. Refused.
+    case noAnswer = 3
+    /// The port would not open, or its DTR/RTS could not be driven low.
+    /// Refused; nothing was written.
+    case openFailed = 4
+    /// No vocoder-class USB device with that serial is attached.
+    case notFound = 5
+    /// The library has no hardware vocoder support.
+    case notCompiled = 6
+}
+
+/// What enrolment found, with an operator-facing message.
+public struct VocoderEnrolment: Equatable, Sendable {
+    public let result: VocoderEnrolResult
+    public let serial: String?
+    public let port: String?
+    /// PRODID as reported (e.g. `"AMBE3000R"`), when the chip answered.
+    public let prodid: String?
+    /// Model label (`"DVstick 30 / ThumbDV-class"`), for trusted and
+    /// unsupported sticks.
+    public let model: String?
+    /// One sentence saying what happened and why. Show it.
+    public let message: String
+
+    /// `true` only for ``VocoderEnrolResult/trusted``.
+    public var isTrusted: Bool { result == .trusted }
+
+    public init(
+        result: VocoderEnrolResult, serial: String?, port: String?, prodid: String?,
+        model: String?, message: String
+    ) {
+        self.result = result
+        self.serial = serial
+        self.port = port
+        self.prodid = prodid
+        self.model = model
+        self.message = message
+    }
+
+    private struct Wire: Decodable {
+        let serial: String?
+        let port: String?
+        let prodid: String?
+        let model: String?
+        let message: String?
+    }
+
+    /// Build from the C ABI's return code and JSON detail. The code is
+    /// authoritative; an unknown code reads as a refusal.
+    static func decode(code: Int32, json: String) -> VocoderEnrolment {
+        let wire = json.data(using: .utf8).flatMap { try? JSONDecoder().decode(Wire.self, from: $0) }
+        return VocoderEnrolment(
+            result: VocoderEnrolResult(rawValue: code) ?? .openFailed,
+            serial: wire?.serial,
+            port: wire?.port,
+            prodid: wire?.prodid,
+            model: wire?.model,
+            message: wire?.message ?? "Enrolment failed."
+        )
+    }
+}
+
 // MARK: - Configuration
 
 /// Configuration for `Station(config:)`.
@@ -964,6 +1316,12 @@ public struct StationConfig: Sendable {
     /// is pinned by this policy when the station engine is built, so there is
     /// no runtime setter; changing the policy means rebuilding the station.
     public var codecPolicy: String?
+    /// USB serial numbers of the enrolled AMBE vocoder sticks this station
+    /// may open (vocoder trust, on-air safety). Empty — the default — opens
+    /// no hardware vocoder at all: D-Star/YSF/NXDN/DMR connects fail with
+    /// ``Station/noTrustedVocoderMessage``. Applied at construction; change
+    /// it later with ``Station/setVocoderTrust(_:)``. Per-machine data.
+    public var vocoderSerials: [String]
 
     public init(
         input: String? = nil,
@@ -972,7 +1330,8 @@ public struct StationConfig: Sendable {
         portalPass: String? = nil,
         portalNode: String? = nil,
         secret: String? = nil,
-        codecPolicy: String? = nil
+        codecPolicy: String? = nil,
+        vocoderSerials: [String] = []
     ) {
         self.input = input
         self.output = output
@@ -981,6 +1340,7 @@ public struct StationConfig: Sendable {
         self.portalNode = portalNode
         self.secret = secret
         self.codecPolicy = codecPolicy
+        self.vocoderSerials = vocoderSerials
     }
 }
 
@@ -1109,6 +1469,7 @@ public final class Station {
     /// returns NULL (a caught panic, or an unknown `codecPolicy` string —
     /// construction is the only place the codec policy can be set).
     public init(config: StationConfig = StationConfig()) throws {
+        _ = Station.layoutChecked
         // withOptionalCString builds a NULL-or-borrowed `const char*` for the
         // duration of `iax_station_new` only. The C-ABI copies what it needs.
         let handle = Station.withConfigPointers(config) { cfg in
@@ -1119,6 +1480,41 @@ public final class Station {
             throw StationError.from(-1)
         }
         self.handle = handle
+        if !config.vocoderSerials.isEmpty {
+            try setVocoderTrust(config.vocoderSerials)
+        }
+    }
+
+    /// Checks, once per process, that the `IaxState` and `IaxEvent` this
+    /// binding was compiled against are the sizes the linked library writes.
+    ///
+    /// `snapshot()` and `nextEvent()` hand the library a Swift-allocated
+    /// struct to fill, and the library writes its own size into it. If the
+    /// header the binding was built from is older than the library (a stale
+    /// xcframework, say), that write runs past the end of the Swift value and
+    /// corrupts whatever memory follows. So a mismatch stops the process here,
+    /// before any station exists to snapshot, with a message naming both
+    /// sizes, rather than letting it overwrite memory quietly.
+    private static let layoutChecked: Void = {
+        let checks = [
+            ("IaxState", MemoryLayout<IaxState>.size, Int(iax_state_size())),
+            ("IaxEvent", MemoryLayout<IaxEvent>.size, Int(iax_event_size())),
+        ]
+        for (type, mirror, library) in checks {
+            if let problem = layoutProblem(type: type, mirror: mirror, library: library) {
+                fatalError(problem)
+            }
+        }
+    }()
+
+    /// The sentence describing a struct-size mismatch, or `nil` when the two
+    /// sizes agree. Separate from ``layoutChecked`` so a test can check the
+    /// wording without stopping the process.
+    static func layoutProblem(type: String, mirror: Int, library: Int) -> String? {
+        guard mirror != library else { return nil }
+        return "AstarStation was built against a \(type) of \(mirror) bytes, but the linked "
+            + "library writes \(library). The header and the library are out of step: "
+            + "rebuild the xcframework (`just xcframework`)."
     }
 
     deinit {
@@ -1968,6 +2364,64 @@ public final class Station {
         try check(withOptionalCString(joined) { iax_station_set_codec_dirs(handle, $0) })
     }
 
+    // MARK: Vocoder trust
+
+    /// What a refused AMBE connect says when nothing is trusted. Also the
+    /// tail of the thrown error's ``StationError/detail``.
+    public static let noTrustedVocoderMessage =
+        "No trusted vocoder — add one in Settings → Vocoders"
+
+    /// Replace the vocoder trust list: the USB serials of the AMBE sticks
+    /// later D-Star/YSF/NXDN/DMR connects may open. An empty array trusts
+    /// nothing. A live session keeps the stick it already opened. Call after
+    /// a successful ``enrolVocoder(serial:)`` and after a removal.
+    public func setVocoderTrust(_ serials: [String]) throws {
+        let joined = serials.isEmpty ? nil : serials.joined(separator: "\n")
+        try check(withOptionalCString(joined) { iax_station_set_vocoder_trust(handle, $0) })
+    }
+
+    /// The station's current vocoder trust list.
+    public func vocoderTrust() throws -> [String] {
+        try listDevices { h, buf, len in iax_station_vocoder_trust(h, buf, len) }
+    }
+
+    /// Every vocoder-class USB serial port that could be enrolled, by serial
+    /// number and port path. **Enumeration only: no port is opened.** Ports
+    /// with no USB serial are left out. Includes sticks already trusted.
+    public static func listVocoderCandidates() -> [VocoderCandidate] {
+        let needed = astar_vocoder_list_candidates(nil, 0)
+        guard needed > 0 else { return [] }
+        var buf = [CChar](repeating: 0, count: Int(needed) + 1)
+        let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+            astar_vocoder_list_candidates(ptr.baseAddress, UInt(ptr.count))
+        }
+        guard rc >= 0, let data = String(cString: buf).data(using: .utf8) else { return [] }
+        return (try? JSONDecoder().decode([VocoderCandidate].self, from: data)) ?? []
+    }
+
+    /// Enrol the stick with USB serial `serial`: open its port, drive DTR/RTS
+    /// low before writing anything, ask the chip for its PRODID (bounded),
+    /// close it, and say what it is. **The only call that opens a port that
+    /// is not yet trusted**: make it only from an explicit user action, after
+    /// the user confirms the device is not a radio's CAT/PTT cable.
+    ///
+    /// It changes no trust list. On ``VocoderEnrolResult/trusted`` the caller
+    /// persists the serial and calls ``setVocoderTrust(_:)``. Every other
+    /// result is a refusal whose ``VocoderEnrolment/message`` says why.
+    ///
+    /// Blocks for up to about two seconds: call it off the main thread.
+    /// Throws only for an invalid argument or a caught panic.
+    public static func enrolVocoder(serial: String) throws -> VocoderEnrolment {
+        var buf = [CChar](repeating: 0, count: 1024)
+        let rc = serial.withCString { s in
+            buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+                astar_vocoder_enrol(s, ptr.baseAddress, UInt(ptr.count))
+            }
+        }
+        if rc < 0 { throw StationError.from(rc) }
+        return VocoderEnrolment.decode(code: rc, json: String(cString: buf))
+    }
+
     // MARK: D-Star
 
     /// Connect to a D-Star `DExtra` reflector (iax-4c8e): resolves
@@ -2220,6 +2674,118 @@ public final class Station {
         return DMRState(json: String(cString: buf))
     }
 
+    // MARK: EchoLink
+
+    /// Start logging in to the EchoLink directory as `callsign`.
+    ///
+    /// `servers` are the directory servers to try in turn (`IP`, `IP:port`,
+    /// `name` or `name:port`). The library names no server of its own, so the
+    /// caller supplies the list. Returns at once: the login runs on its own
+    /// thread, and ``echolinkState()`` shows it finish or fail. A login
+    /// already running is replaced.
+    ///
+    /// The `password` argument is NOT retained by this binding. It crosses
+    /// the ABI as a temporary C string for the length of this call, and the
+    /// engine copies it into a buffer it zeroes when it is done. Nothing on
+    /// the station, in a snapshot, in an error or in ``echolinkState()`` ever
+    /// holds it.
+    ///
+    /// Throws `IAX_ERR_ECHOLINK` for an empty callsign or password, no
+    /// non-empty server, or a library built without EchoLink. All of those
+    /// are checked before anything starts, so a login already running stands.
+    public func echolinkLogin(callsign: String, password: String, servers: [String]) throws {
+        let joined = servers.joined(separator: "\n")
+        try check(
+            callsign.withCString { callsignPtr in
+                password.withCString { passwordPtr in
+                    joined.withCString { serversPtr in
+                        iax_station_echolink_login(handle, callsignPtr, passwordPtr, serversPtr)
+                    }
+                }
+            }
+        )
+    }
+
+    /// Hang up any EchoLink call and every station on the node's EchoLink
+    /// leg, then log off the directory. A no-op when not logged in.
+    ///
+    /// NOTE: the logoff waits on any directory exchange already in flight, so
+    /// this can block for over a minute at worst. Do not call it on the main
+    /// thread.
+    public func echolinkLogout() throws {
+        try check(iax_station_echolink_logout(handle))
+    }
+
+    /// Call an EchoLink station, named by node number or by callsign as the
+    /// directory lists it, over the selected audio devices. Calling out is
+    /// always a person's action: nothing should call this on its own.
+    ///
+    /// Returns once the first SDES is out; the answer shows in
+    /// ``echolinkState()``'s ``EchoLinkState/link`` and in
+    /// ``Snapshot/echolinkActive``.
+    ///
+    /// Throws `IAX_ERR_ECHOLINK` for an empty target, when not logged in, when
+    /// no listed station matches or when the UDP ports cannot be opened;
+    /// `IAX_ERR_ALREADY_CONNECTED` while any other network or another
+    /// EchoLink call holds the station; and `IAX_ERR_AUDIO` when the output
+    /// device cannot be opened.
+    ///
+    /// NOTE: this opens sockets and the output audio device before it
+    /// returns. Do not call it on the main thread.
+    public func echolinkConnect(_ target: String) throws {
+        try check(target.withCString { iax_station_echolink_connect(handle, $0) })
+    }
+
+    /// Hang up the EchoLink call, if any. The directory login stays up.
+    /// Idempotent.
+    public func echolinkDisconnect() throws {
+        try check(iax_station_echolink_disconnect(handle))
+    }
+
+    /// Ask the EchoLink directory for a fresh station list now, rather than at
+    /// the next 600 s refresh; ``echolinkStations()`` has it once it arrives.
+    ///
+    /// Returns `true` when it was asked, and `false` when nothing was asked
+    /// because the last list came less than 30 seconds ago — say "try again
+    /// in a moment". Throws `IAX_ERR_ECHOLINK` when not logged in, or in a
+    /// library built without EchoLink. It sends one short request to the
+    /// directory, so call it off the main thread.
+    @discardableResult
+    public func echolinkRefreshList() throws -> Bool {
+        try check(iax_station_echolink_refresh_list(handle)) == 1
+    }
+
+    /// Send one line of text chat to the station on the EchoLink call.
+    ///
+    /// Throws `IAX_ERR_NOT_CONNECTED` with no call in hand, and
+    /// `IAX_ERR_ECHOLINK` for an empty or all-blank line.
+    public func echolinkSendChat(_ text: String) throws {
+        try check(text.withCString { iax_station_echolink_send_chat(handle, $0) })
+    }
+
+    /// Set the location text other stations see beside the callsign. It may
+    /// come before a login, which then carries it; while logged in it goes
+    /// out with the next status refresh.
+    public func echolinkSetLocation(_ text: String) throws {
+        try check(text.withCString { iax_station_echolink_set_location(handle, $0) })
+    }
+
+    /// Where the EchoLink login and call stand, or `nil` when logged out with
+    /// nothing to say (and always in a library built without EchoLink).
+    ///
+    /// Crosses the ABI with a buffer and parses JSON, so poll it at UI rate,
+    /// not meter rate.
+    public func echolinkState() throws -> EchoLinkState? {
+        EchoLinkState(json: try readJSON(iax_station_echolink_state))
+    }
+
+    /// The directory's latest station list: empty when not logged in, before
+    /// the first list arrives, and in a library built without EchoLink.
+    public func echolinkStations() throws -> [EchoLinkStationEntry] {
+        EchoLinkStationEntry.decodeStations(json: try readJSON(iax_station_echolink_stations))
+            ?? []
+    }
+
     /// The live M17 session's own state, or `nil` when none is active.
     ///
     /// Cheap, but not as cheap as ``snapshot()`` — it crosses the ABI with a
@@ -2237,6 +2803,66 @@ public final class Station {
         }
         if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
         return M17State(json: String(cString: buf))
+    }
+
+    // MARK: Recording
+
+    /// Start recording the live call or digital session into `directory`
+    /// (created if missing). `label` is the `<network> <node or reflector>`
+    /// part of each file name, e.g. `"AllStar 2000"`; `utcOffsetSeconds` puts
+    /// the operator's local date and time in it. `frames` also writes the
+    /// codec-frame captures under `directory/captured/`.
+    ///
+    /// Throws `IAX_ERR_NOT_CONNECTED` with nothing live to record and
+    /// `IAX_ERR_RECORD` when already recording, the folder cannot be used or
+    /// the disk is short of space (the error's `detail` says which). Creates
+    /// files; call it off the main thread.
+    public func recordStart(
+        directory: String, layout: RecordingLayout, frames: Bool, label: String,
+        utcOffsetSeconds: Int32
+    ) throws {
+        try directory.withCString { dirPtr in
+            try label.withCString { labelPtr in
+                _ = try check(
+                    iax_station_record_start(
+                        handle, dirPtr, layout.rawValue, frames, labelPtr, utcOffsetSeconds))
+            }
+        }
+    }
+
+    /// Stop the recording, if one runs, and finish its files. Idempotent — a
+    /// no-op while idle. Joins the recorder; call it off the main thread.
+    public func recordStop() throws {
+        try check(iax_station_record_stop(handle))
+    }
+
+    /// The recorder's state. Cheap enough to poll at UI rate for the elapsed
+    /// time.
+    public func recordState() throws -> RecordState {
+        let needed = iax_station_record_state_json(handle, nil, 0)
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
+        var buf = [CChar](repeating: 0, count: Int(needed) + 1)
+        var rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+            iax_station_record_state_json(handle, ptr.baseAddress, UInt(ptr.count))
+        }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
+        // A new file can open between the sizing call and the fill (an over
+        // in two-mono adds two paths), so grow once and fill again — once
+        // only, as in ``heard()``.
+        if rc > Int32(buf.count - 1) {
+            buf = [CChar](repeating: 0, count: Int(rc) + 1)
+            rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+                iax_station_record_state_json(handle, ptr.baseAddress, UInt(ptr.count))
+            }
+            if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
+        }
+        let json = String(cString: buf)
+        guard let data = json.data(using: .utf8),
+            let state = try? JSONDecoder().decode(RecordState.self, from: data)
+        else {
+            throw StationError(code: -1, text: "undecodable record state json", detail: "")
+        }
+        return state
     }
 
     /// Disconnect the live D-Star session, if any (iax-4c8e). Idempotent — a
@@ -2306,7 +2932,10 @@ public final class Station {
             nxdnAvailable: out.nxdn_available,
             nxdnActive: out.nxdn_active,
             dmrAvailable: out.dmr_available,
-            dmrActive: out.dmr_active
+            dmrActive: out.dmr_active,
+            echolinkAvailable: out.echolink_available,
+            echolinkActive: out.echolink_active,
+            echolinkLoggedIn: out.echolink_logged_in
         )
     }
 
@@ -2380,6 +3009,23 @@ public final class Station {
             iax_station_last_error(handle, ptr.baseAddress, UInt(ptr.count))
         }
         guard rc >= 0 else { return "" }
+        return String(cString: buf)
+    }
+
+    /// Read one JSON document through a sizing query (`len == 0`) and a fill.
+    /// An empty document reads as `""`, which every decoder takes as "none".
+    private func readJSON(
+        _ fn: (OpaquePointer?, UnsafeMutablePointer<CChar>?, UInt) -> Int32
+    ) throws -> String {
+        let needed = fn(handle, nil, 0)
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
+        if needed == 0 { return "" }
+        // +1 for the NUL the C-ABI writes.
+        var buf = [CChar](repeating: 0, count: Int(needed) + 1)
+        let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+            fn(handle, ptr.baseAddress, UInt(ptr.count))
+        }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
         return String(cString: buf)
     }
 

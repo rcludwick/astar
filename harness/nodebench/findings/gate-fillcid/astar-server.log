@@ -1,0 +1,25 @@
+2026-10-11T20:29:03.589106Z DEBUG tiny_http: Server listening on 0.0.0.0:8730
+astar-server: HTTP control listening on http://0.0.0.0:8730
+2026-10-11T20:29:03.589382Z DEBUG tiny_http: Running accept thread
+2026-10-11T20:29:06.456440Z  INFO astar_iax::negotiate: inbound codec negotiated caller="1999" called="1998" capability=0x8044 requested=Some(Slin) policy=PreferSlin16 accepted=Slin
+2026-10-11T20:29:16.456295Z DEBUG astar_iax::listener: reason="invalid_transition"
+2026-10-11T20:29:18.600102Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:29:26.609810Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:29:26.609834Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:29:26.609836Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:29:56.717339Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:30:16.754858Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:30:24.762188Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:30:24.762201Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:30:24.762202Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:30:52.219184Z DEBUG astar_iax::client: reason="unhandled_subclass_in_active"
+2026-10-11T20:30:56.771238Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:30:57.219764Z DEBUG astar_iax::tx_audio: TX pacing (5s window) frames=2 reanchors=0 max_burst=1 max_send_gap_ms=21
+2026-10-11T20:31:04.779932Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:31:04.779946Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:31:04.779947Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:31:56.778792Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:32:04.787329Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:32:04.787345Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:32:04.787346Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:32:34.751181Z DEBUG astar_iax::client: reason="invalid_transition"

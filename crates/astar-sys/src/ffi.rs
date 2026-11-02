@@ -18,9 +18,9 @@ use zeroize::Zeroize;
 use astar_station::LinkMode;
 use astar_station::{
     AnswerPolicy, CallMode, CallStatus, CodecPolicy, DtmfMode, HeardEntry, InboundConfig,
-    IncomingAuthPolicy, IncomingCallPolicy, NodeConfig, OperatingMode, PortalCredentials,
-    RegisterConfig, Station, StationConfig, StationError, StationEvent, VoiceFormat, WgConfigError,
-    WgLinkConfig,
+    IncomingAuthPolicy, IncomingCallPolicy, Layout, NodeConfig, OperatingMode, PortalCredentials,
+    RecordRequest, RegisterConfig, Station, StationConfig, StationError, StationEvent,
+    VocoderEnrolment, VocoderTrust, VoiceFormat, WgConfigError, WgLinkConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -402,6 +402,23 @@ pub struct IaxState {
     /// refuses remote keying while a digital-voice link holds the dongle and
     /// must read that without compiling the feature.
     pub dmr_active: bool,
+    /// `true` when this library was built with its `echolink` feature, so
+    /// the `iax_station_echolink_*` calls do something. `EchoLink` needs no
+    /// hardware, so nothing else goes into it.
+    pub echolink_available: bool,
+    /// `true` while an `EchoLink` call is connecting or connected, or while
+    /// any station is on the node's `EchoLink` leg — mutually exclusive with
+    /// every other network (see [`iax_station_echolink_connect`]).
+    ///
+    /// Feature-INDEPENDENT, exactly as [`Self::dmr_active`] is: a reader
+    /// that must know whether `EchoLink` holds the station can read it
+    /// without compiling the feature.
+    pub echolink_active: bool,
+    /// `true` while logged in to the `EchoLink` directory (see
+    /// [`iax_station_echolink_login`]). A login still running or one that
+    /// failed is `false`; [`iax_station_echolink_state`] says which.
+    /// Feature-independent, like [`Self::echolink_active`].
+    pub echolink_logged_in: bool,
 }
 
 /// The kind of a drained lifecycle event (see [`iax_station_next_event`]).
@@ -515,6 +532,19 @@ pub const IAX_ERR_NXDN: c_int = -21;
 /// which — it never carries the password.
 pub const IAX_ERR_DMR: c_int = -22;
 
+/// Recording error: already recording, the server's frame tap in use, a
+/// recordings folder that cannot be used, or a disk with less than 500 MB
+/// free. Read `iax_station_last_error` for which.
+pub const IAX_ERR_RECORD: c_int = -23;
+
+/// `EchoLink` error: a login with an empty callsign, an empty password or no
+/// directory server; a call with an empty target, while not logged in, or to
+/// a station the directory does not list; an empty chat line; an empty node
+/// target or callsign; UDP ports that could not be opened; or the `echolink`
+/// feature not being compiled in. Read `iax_station_last_error` for which —
+/// it never carries the password.
+pub const IAX_ERR_ECHOLINK: c_int = -24;
+
 /// Number of log-spaced dBFS bins [`iax_station_mic_spectrum`] writes when
 /// monitoring (iax-e73e). Size the `out` array to (at least) this; a larger
 /// buffer is fine (the extra entries are left untouched). A literal here so
@@ -565,16 +595,21 @@ fn err_code(e: &StationError) -> c_int {
         StationError::AtCapacity => IAX_ERR_AT_CAPACITY,
         StationError::InvalidDigit => IAX_ERR_INVALID_DIGIT,
         StationError::Link(_) => IAX_ERR_LINK,
+        StationError::EchoLink(_) => IAX_ERR_ECHOLINK,
         StationError::DtmfBusy => IAX_ERR_DTMF_BUSY,
         StationError::M17(_) => IAX_ERR_M17,
         StationError::Dstar(_) => IAX_ERR_DSTAR,
         StationError::Ysf(_) => IAX_ERR_YSF,
         StationError::Nxdn(_) => IAX_ERR_NXDN,
         StationError::Dmr(_) => IAX_ERR_DMR,
+        StationError::Record(_) => IAX_ERR_RECORD,
     }
 }
 
-fn fill_state(s: &astar_station::ConsoleState) -> IaxState {
+/// `echolink_available` is passed in rather than read from `s`: see
+/// [`echolink_gate`] for why it must be this library's feature AND the
+/// station's.
+fn fill_state(s: &astar_station::ConsoleState, echolink_available: bool) -> IaxState {
     let status = match &s.status {
         CallStatus::Idle => IaxStatus::Idle,
         CallStatus::Dialing => IaxStatus::Dialing,
@@ -624,6 +659,9 @@ fn fill_state(s: &astar_station::ConsoleState) -> IaxState {
         nxdn_active: s.nxdn_active,
         dmr_available: s.dmr_available,
         dmr_active: s.dmr_active,
+        echolink_available,
+        echolink_active: s.echolink_active,
+        echolink_logged_in: s.echolink_logged_in,
     }
 }
 
@@ -1999,7 +2037,10 @@ pub unsafe extern "C" fn iax_station_snapshot(st: *mut IaxStation, out: *mut Iax
     catch_unwind(AssertUnwindSafe(|| {
         let snap = station.inner.snapshot();
         unsafe {
-            *out = fill_state(&snap);
+            *out = fill_state(
+                &snap,
+                cfg!(feature = "echolink") && station.inner.echolink_available(),
+            );
         }
         IAX_OK
     }))
@@ -2206,6 +2247,8 @@ pub unsafe extern "C" fn iax_error_text(code: c_int) -> *const c_char {
         IAX_ERR_YSF => b"ysf error\0",
         IAX_ERR_NXDN => b"nxdn error\0",
         IAX_ERR_DMR => b"dmr error\0",
+        IAX_ERR_RECORD => b"recording error\0",
+        IAX_ERR_ECHOLINK => b"echolink error\0",
         IAX_ERR_IAX => b"iax error\0",
         IAX_ERR_SERIAL => b"serial error\0",
         IAX_ERR_UTF8 => b"argument was not valid utf-8\0",
@@ -2232,11 +2275,15 @@ mod fill_state_tests {
     #[test]
     fn negotiated_format_maps_to_the_iax2_format_bit() {
         let mut s = ConsoleState::default();
-        assert_eq!(fill_state(&s).negotiated_format, 0, "idle → 0");
+        assert_eq!(fill_state(&s, false).negotiated_format, 0, "idle → 0");
         s.negotiated_format = Some(VoiceFormat::G711U);
-        assert_eq!(fill_state(&s).negotiated_format, 4, "µ-law → bit 2");
+        assert_eq!(fill_state(&s, false).negotiated_format, 4, "µ-law → bit 2");
         s.negotiated_format = Some(VoiceFormat::Slin16);
-        assert_eq!(fill_state(&s).negotiated_format, 32768, "slin16 → bit 15");
+        assert_eq!(
+            fill_state(&s, false).negotiated_format,
+            32768,
+            "slin16 → bit 15"
+        );
     }
 }
 
@@ -2975,6 +3022,115 @@ fn m17_state_json(station: &IaxStation) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Recording
+// ---------------------------------------------------------------------------
+
+/// Start recording the live call or digital session to `dir` (created if
+/// missing). `layout` is 0 stereo (receive left, transmit right), 1 two-mono
+/// (a receive file and a transmit file), or 2 mixed (one mono file). `frames`
+/// also writes codec-frame captures under `dir/captured/`. `label` is the
+/// `<network> <node or reflector>` part of the file name (e.g.
+/// `"AllStar 2000"`), and `utc_offset_secs` the operator's offset from UTC
+/// for the date and time in it.
+///
+/// Returns [`IAX_OK`]; [`IAX_ERR_NULL`] (NULL `st`, `dir` or `label`);
+/// [`IAX_ERR_UTF8`] (`dir` or `label` not UTF-8); [`IAX_ERR_UNSUPPORTED`]
+/// (any other `layout`); [`IAX_ERR_NOT_CONNECTED`] (nothing live to record);
+/// [`IAX_ERR_RECORD`] (already recording, the folder cannot be used, or the
+/// disk is short of space — [`iax_station_last_error`] says which); or
+/// [`IAX_ERR_PANIC`].
+///
+/// NOTE: this creates the folder and the first files; call it off any UI
+/// thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_record_start(
+    st: *mut IaxStation,
+    dir: *const c_char,
+    layout: c_int,
+    frames: bool,
+    label: *const c_char,
+    utc_offset_secs: c_int,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let dir = match unsafe { req_str(dir) } {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        let label = match unsafe { req_str(label) } {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        let Some(layout) = Layout::from_ffi(layout) else {
+            return IAX_ERR_UNSUPPORTED;
+        };
+        result_code(
+            station,
+            station.inner.record_start(RecordRequest {
+                dir: std::path::PathBuf::from(dir),
+                layout,
+                frames,
+                label: label.to_owned(),
+                utc_offset_secs,
+            }),
+        )
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Stop the recording, if one runs, and finish its files. Idempotent — a
+/// no-op while idle. The final state stays readable through
+/// [`iax_station_record_state_json`]. Returns [`IAX_OK`], [`IAX_ERR_NULL`],
+/// or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_record_stop(st: *mut IaxStation) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let _ = station.inner.record_stop();
+        IAX_OK
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Write the recording state as JSON into the caller buffer `buf` of `len`
+/// bytes (NUL-terminated, truncate-safe; returns the byte length the full
+/// JSON needs, excluding the NUL, so a `len == 0` call is a sizing query).
+///
+/// ```json
+/// {"recording":true,"elapsed_ms":42000,"files":["/x/2026-10-26 19-00-04 AllStar 2000.flac"],
+///  "dropped_frames":0,"error":null,"layout":"stereo"}
+/// ```
+///
+/// `layout` is `stereo`, `two-mono` or `mixed`. `error` says why a recording
+/// stopped by itself (low disk, folder gone), else `null`. After a stop the
+/// last recording's final state is reported; before any recording, the idle
+/// state. Always valid JSON. Returns [`IAX_ERR_NULL`] if `st` is NULL, or
+/// [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_record_state_json(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let json = serde_json::to_string(&station.inner.record_state())
+            .unwrap_or_else(|_| "{}".to_owned());
+        unsafe { fill_buf(&json, buf, len) }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
 /// Set extra directories to search for a runtime `libcodec2`, ahead of the
 /// hard-coded system paths (iax-f2b8 Task 4/5). `dirs` is a single
 /// NUL-terminated string of `':'`-separated filesystem paths (e.g.
@@ -3012,6 +3168,222 @@ pub unsafe extern "C" fn iax_station_set_codec_dirs(
         IAX_OK
     }))
     .unwrap_or(IAX_ERR_PANIC)
+}
+
+// ---------------------------------------------------------------------------
+// Vocoder trust (on-air safety)
+//
+// FTDI's 0403:6015 covers DVsticks and CAT/PTT cables alike, and opening a
+// tty raises DTR/RTS. The engine therefore opens an AMBE stick only when its
+// USB serial number is on the station's trust list. These entry points set
+// that list, list enrolment candidates (enumeration only), and enrol one —
+// the single operation that opens a port before it is trusted.
+// ---------------------------------------------------------------------------
+
+/// The outcome of [`astar_vocoder_enrol`]. Its value is the function's
+/// (non-negative) return code.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IaxVocoderEnrol {
+    /// An `AMBE3000*` chip answered: add the serial to the trust list.
+    Trusted = 0,
+    /// An `AMBE3003*` chip (`DVstick` 33) answered: recognised, not supported
+    /// yet. Do NOT add it.
+    Unsupported = 1,
+    /// Something answered with another PRODID. Refused.
+    WrongDevice = 2,
+    /// The port opened but nothing answered as a vocoder (timeout or
+    /// garbage) — possibly a CAT cable. Refused.
+    NoAnswer = 3,
+    /// The port would not open, or its DTR/RTS could not be driven low.
+    /// Refused; nothing was written.
+    OpenFailed = 4,
+    /// No vocoder-class USB device with that serial is attached.
+    NotFound = 5,
+    /// This library was built without hardware vocoder support.
+    NotCompiled = 6,
+}
+
+fn enrol_code(e: &VocoderEnrolment) -> IaxVocoderEnrol {
+    match e {
+        VocoderEnrolment::Trusted { .. } => IaxVocoderEnrol::Trusted,
+        VocoderEnrolment::Unsupported { .. } => IaxVocoderEnrol::Unsupported,
+        VocoderEnrolment::WrongDevice { .. } => IaxVocoderEnrol::WrongDevice,
+        VocoderEnrolment::NoAnswer { .. } => IaxVocoderEnrol::NoAnswer,
+        VocoderEnrolment::OpenFailed { .. } => IaxVocoderEnrol::OpenFailed,
+        VocoderEnrolment::NotFound { .. } => IaxVocoderEnrol::NotFound,
+        VocoderEnrolment::NotCompiled => IaxVocoderEnrol::NotCompiled,
+    }
+}
+
+/// The JSON detail [`astar_vocoder_enrol`] writes for `e`.
+fn enrol_json(e: &VocoderEnrolment) -> String {
+    serde_json::json!({
+        "result": e.as_str(),
+        "trusted": e.is_trusted(),
+        "serial": e.serial(),
+        "port": e.port(),
+        "prodid": e.prodid(),
+        "model": e.model(),
+        "message": e.message(),
+    })
+    .to_string()
+}
+
+/// Replace the station's vocoder trust list: the USB serial numbers of the
+/// AMBE sticks later D-Star/YSF/NXDN/DMR connects may open, separated by
+/// commas, whitespace or newlines. NULL or empty trusts nothing, so every
+/// such connect fails with "No trusted vocoder — add one in Settings →
+/// Vocoders" (read it from [`iax_station_last_error`]) and nothing is
+/// opened. A live session keeps the stick it already has. Call it right
+/// after [`iax_station_new`] with the persisted list, and again after a
+/// successful enrol or a removal.
+///
+/// Returns [`IAX_OK`], [`IAX_ERR_NULL`] (NULL `st`), [`IAX_ERR_UTF8`], or
+/// [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_set_vocoder_trust(
+    st: *mut IaxStation,
+    serials: *const c_char,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let list = if serials.is_null() {
+            ""
+        } else {
+            match unsafe { CStr::from_ptr(serials) }.to_str() {
+                Ok(s) => s,
+                Err(_) => return IAX_ERR_UTF8,
+            }
+        };
+        station
+            .inner
+            .set_vocoder_trust(VocoderTrust::parse_list(list));
+        IAX_OK
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Write the station's current trust list, newline-joined, into `buf`
+/// (NUL-terminated, truncate-safe). Returns the bytes the full list needs
+/// (excluding the NUL), or a negative `IAX_ERR_*`. `len == 0` sizes it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_vocoder_trust(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let joined = station.inner.vocoder_trust().serials.join("\n");
+        unsafe { fill_buf(&joined, buf, len) }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// List the vocoder-class USB serial ports that could be enrolled, as a JSON
+/// array `[{"serial":"…","port":"/dev/cu.…"}, …]`, into `buf`
+/// (NUL-terminated, truncate-safe). **Enumeration only: no port is opened.**
+/// Ports with no USB serial number are omitted (they can never be trusted).
+/// Includes sticks already trusted; the caller marks those. Empty (`[]`)
+/// without hardware vocoder support.
+///
+/// Returns the bytes the full JSON needs (excluding the NUL), or
+/// [`IAX_ERR_PANIC`]. Pass `len == 0` to size it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn astar_vocoder_list_candidates(buf: *mut c_char, len: usize) -> c_int {
+    catch_unwind(AssertUnwindSafe(|| {
+        let list: Vec<serde_json::Value> = astar_station::list_vocoder_candidates()
+            .into_iter()
+            .map(|c| serde_json::json!({ "serial": c.serial, "port": c.port }))
+            .collect();
+        let json = serde_json::Value::Array(list).to_string();
+        unsafe { fill_buf(&json, buf, len) }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Enrol the stick with USB serial `serial`: open its port, drive DTR/RTS
+/// low before writing anything, send RESET + PRODID (bounded), close it, and
+/// classify the reply. **The only call that opens a port that is not yet
+/// trusted** — make it only from an explicit user action, after the user has
+/// confirmed the device is not a radio's CAT/PTT cable. It does not modify
+/// any trust list: on [`IaxVocoderEnrol::Trusted`] the caller persists the
+/// serial and calls [`iax_station_set_vocoder_trust`].
+///
+/// Returns an [`IaxVocoderEnrol`] value (`>= 0`), or [`IAX_ERR_NULL`] (NULL
+/// `serial`), [`IAX_ERR_UTF8`], or [`IAX_ERR_PANIC`]. When `buf` is non-NULL
+/// and `len > 0`, also writes a JSON detail object (NUL-terminated,
+/// truncate-safe; 512 bytes is ample):
+/// `{"result":"trusted","trusted":true,"serial":"…","port":"…",
+/// "prodid":"AMBE3000R","model":"DVstick 30 / ThumbDV-class","message":"…"}`
+/// — `port`/`prodid`/`model` are `null` where they do not apply.
+///
+/// Blocks for up to about two seconds: call it off any UI thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn astar_vocoder_enrol(
+    serial: *const c_char,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    catch_unwind(AssertUnwindSafe(|| {
+        let serial = match unsafe { req_str(serial) } {
+            Ok(s) => s,
+            Err(code) => return code,
+        };
+        let outcome = astar_station::enrol_vocoder(serial);
+        if !buf.is_null() && len > 0 {
+            unsafe { fill_buf(&enrol_json(&outcome), buf, len) };
+        }
+        enrol_code(&outcome) as c_int
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+#[cfg(test)]
+mod vocoder_trust_tests {
+    use super::{IaxVocoderEnrol, enrol_code, enrol_json};
+    use astar_station::{MODEL_AMBE3003, VocoderEnrolment};
+
+    #[test]
+    fn enrolment_outcomes_map_to_codes_and_json() {
+        let t = VocoderEnrolment::Trusted {
+            serial: "TESTSER1".into(),
+            port: "/dev/cu.usbserial-TESTSER1".into(),
+            prodid: "AMBE3000R".into(),
+            model: astar_station::MODEL_AMBE3000.into(),
+        };
+        assert_eq!(enrol_code(&t), IaxVocoderEnrol::Trusted);
+        let v: serde_json::Value = serde_json::from_str(&enrol_json(&t)).unwrap();
+        assert_eq!(v["result"], "trusted");
+        assert_eq!(v["trusted"], true);
+        assert_eq!(v["serial"], "TESTSER1");
+        assert_eq!(v["prodid"], "AMBE3000R");
+
+        let u = VocoderEnrolment::Unsupported {
+            serial: "TESTSER3".into(),
+            port: "/dev/cu.usbserial-TESTSER3".into(),
+            prodid: "AMBE3003F".into(),
+            model: MODEL_AMBE3003.into(),
+        };
+        assert_eq!(enrol_code(&u), IaxVocoderEnrol::Unsupported);
+        let v: serde_json::Value = serde_json::from_str(&enrol_json(&u)).unwrap();
+        assert_eq!(v["trusted"], false);
+        assert_eq!(v["model"], MODEL_AMBE3003);
+
+        let n = VocoderEnrolment::NotFound {
+            serial: "TESTSER9".into(),
+        };
+        assert_eq!(enrol_code(&n) as i32, 5);
+        let v: serde_json::Value = serde_json::from_str(&enrol_json(&n)).unwrap();
+        assert!(v["port"].is_null() && v["prodid"].is_null());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3798,6 +4170,446 @@ fn dmr_snapshot_json(s: &astar_station::DmrSnapshot) -> serde_json::Value {
     })
 }
 
+// ---------------------------------------------------------------------------
+// EchoLink (calling out only)
+// ---------------------------------------------------------------------------
+
+/// The sentence the `EchoLink` entry points leave in
+/// `iax_station_last_error` in a build without this library's `echolink`
+/// feature.
+const ECHOLINK_NOT_COMPILED: &str = "echolink support not compiled in";
+
+/// `Some(IAX_ERR_ECHOLINK)`, with the last error set, when this library was
+/// built without its `echolink` feature; `None` when it has it.
+///
+/// Every `EchoLink` action entry point asks this first, before it reads a
+/// single argument. Cargo unifies features: astar-station takes `echolink`
+/// from its own defaults, so a build of this library without the feature
+/// would otherwise still log in and place calls through the facade while
+/// [`IaxState::echolink_available`] said `false` and the state document
+/// stayed `{}`. Off means off, all the way down — the password is not even
+/// copied.
+fn echolink_gate(station: &IaxStation) -> Option<c_int> {
+    if cfg!(feature = "echolink") {
+        None
+    } else {
+        Some(station.fail(&StationError::EchoLink(ECHOLINK_NOT_COMPILED.into())))
+    }
+}
+
+/// Start logging in to the `EchoLink` directory as `callsign`.
+///
+/// `servers` is a newline-separated list of directory servers, tried in turn
+/// (`IP`, `IP:port`, `name` or `name:port`; blank lines are skipped). This
+/// library names no server of its own: the caller supplies the list.
+///
+/// Returns at once; the login runs on its own thread. Poll
+/// [`iax_station_echolink_state`] to see it finish or fail, and
+/// [`IaxState::echolink_logged_in`] for the flag alone. The location last
+/// given to [`iax_station_echolink_set_location`] goes out beside the
+/// callsign. A login already running is replaced.
+///
+/// # The password
+/// `password` is copied out of the caller's buffer into an owned `String` at
+/// the top of this function and moved into the engine, which zeroes it when
+/// it is dropped. Nothing on the station, in a snapshot, in an error, in the
+/// state JSON or in a log ever holds it. The caller's own buffer is the
+/// caller's to scrub.
+///
+/// All three strings are required (NULL/non-UTF-8 → [`IAX_ERR_NULL`] /
+/// [`IAX_ERR_UTF8`]; a NULL password is a caller bug, not an empty password).
+/// Returns [`IAX_OK`], [`IAX_ERR_ECHOLINK`] for an empty callsign, an empty
+/// password, no non-empty server, or the `echolink` feature not being
+/// compiled in (all checked before anything starts, so a running login
+/// stands), or [`IAX_ERR_PANIC`].
+///
+/// In a build without this library's `echolink` feature, this and every
+/// other `EchoLink` action entry point returns [`IAX_ERR_ECHOLINK`] before
+/// reading any argument but `st`, with "echolink support not compiled in" in
+/// `iax_station_last_error` — so there a NULL string reports
+/// [`IAX_ERR_ECHOLINK`], not [`IAX_ERR_NULL`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_echolink_login(
+    st: *mut IaxStation,
+    callsign: *const c_char,
+    password: *const c_char,
+    servers: *const c_char,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        if let Some(code) = echolink_gate(station) {
+            return code;
+        }
+        let callsign = match unsafe { req_str(callsign) } {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        let servers: Vec<String> = match unsafe { req_str(servers) } {
+            Ok(s) => s.lines().map(str::to_owned).collect(),
+            Err(c) => return c,
+        };
+        // Copied here, once, and owned from here on: `echolink_login` takes
+        // it BY VALUE and wraps it in `Zeroizing` before anything else. The
+        // borrow is not held past this line.
+        let password = match unsafe { req_str(password) } {
+            Ok(s) => s.to_string(),
+            Err(c) => return c,
+        };
+        result_code(
+            station,
+            station.inner.echolink_login(callsign, password, &servers),
+        )
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Hang up any `EchoLink` call and every station on the node's `EchoLink`
+/// leg, then log off the directory. A no-op when not logged in.
+///
+/// NOTE: the logoff waits on any directory exchange already in flight, so
+/// this can block for over a minute at worst. Call it off any UI thread.
+/// Returns [`IAX_OK`], [`IAX_ERR_NULL`], [`IAX_ERR_ECHOLINK`] when the
+/// `echolink` feature isn't compiled in, or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_echolink_logout(st: *mut IaxStation) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        if let Some(code) = echolink_gate(station) {
+            return code;
+        }
+        station.inner.echolink_logout();
+        IAX_OK
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Call an `EchoLink` station, named by node number or callsign as the
+/// directory lists it, over the station's selected audio devices. Calling
+/// out is always a person's action; nothing calls this on its own.
+///
+/// Returns as soon as the first SDES is out; the answer shows in
+/// [`iax_station_echolink_state`]'s `link` and in
+/// [`IaxState::echolink_active`].
+///
+/// `target` is required (NULL/non-UTF-8 → [`IAX_ERR_NULL`] /
+/// [`IAX_ERR_UTF8`]). Returns [`IAX_OK`], [`IAX_ERR_ECHOLINK`] for an empty
+/// target, when not logged in, when no listed station matches, when the UDP
+/// ports cannot be opened, or when the feature isn't compiled in;
+/// [`IAX_ERR_ALREADY_CONNECTED`] while any other network, another `EchoLink`
+/// call or the node's `EchoLink` leg holds the station; [`IAX_ERR_AUDIO`]
+/// when the output device cannot be opened; or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_echolink_connect(
+    st: *mut IaxStation,
+    target: *const c_char,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        if let Some(code) = echolink_gate(station) {
+            return code;
+        }
+        let target = match unsafe { req_str(target) } {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        result_code(station, station.inner.echolink_connect(target))
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Hang up the `EchoLink` call, if any; the directory login stays up.
+/// Idempotent. Returns [`IAX_OK`], [`IAX_ERR_NULL`], [`IAX_ERR_ECHOLINK`]
+/// when the `echolink` feature isn't compiled in, or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_echolink_disconnect(st: *mut IaxStation) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        if let Some(code) = echolink_gate(station) {
+            return code;
+        }
+        station.inner.echolink_disconnect();
+        IAX_OK
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Ask the `EchoLink` directory for a fresh station list now, rather than at
+/// the next 600 s refresh. The new list shows in
+/// [`iax_station_echolink_stations`] once it arrives.
+///
+/// Returns `1` when a fresh list was asked for, and `0` ([`IAX_OK`]) when
+/// nothing was asked because the last list came less than 30 s ago: the
+/// caller says "try again in a moment". Otherwise [`IAX_ERR_NULL`],
+/// [`IAX_ERR_ECHOLINK`] when not logged in or when the `echolink` feature
+/// isn't compiled in, or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_echolink_refresh_list(st: *mut IaxStation) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        if let Some(code) = echolink_gate(station) {
+            return code;
+        }
+        match station.inner.echolink_refresh_list() {
+            Ok(true) => 1,
+            Ok(false) => IAX_OK,
+            Err(e) => station.fail(&e),
+        }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Send one line of text chat to the station on the `EchoLink` call.
+///
+/// `text` is required (NULL/non-UTF-8 → [`IAX_ERR_NULL`] / [`IAX_ERR_UTF8`]).
+/// Returns [`IAX_OK`], [`IAX_ERR_NOT_CONNECTED`] with no call in hand
+/// (checked first), [`IAX_ERR_ECHOLINK`] for an empty or all-blank line or
+/// when the feature isn't compiled in, or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_echolink_send_chat(
+    st: *mut IaxStation,
+    text: *const c_char,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        if let Some(code) = echolink_gate(station) {
+            return code;
+        }
+        let text = match unsafe { req_str(text) } {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        result_code(station, station.inner.echolink_send_chat(text))
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Set the location text other stations see beside the callsign. It may
+/// come before a login, which then carries it; while logged in it goes out
+/// with the next status refresh.
+///
+/// `text` is required (NULL/non-UTF-8 → [`IAX_ERR_NULL`] / [`IAX_ERR_UTF8`]).
+/// Returns [`IAX_OK`], [`IAX_ERR_ECHOLINK`] when the `echolink` feature
+/// isn't compiled in, or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_echolink_set_location(
+    st: *mut IaxStation,
+    text: *const c_char,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        if let Some(code) = echolink_gate(station) {
+            return code;
+        }
+        let text = match unsafe { req_str(text) } {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        station.inner.echolink_set_location(text);
+        IAX_OK
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Write where the `EchoLink` login and call stand, as JSON, into the caller
+/// buffer `buf` of `len` bytes (NUL-terminated, truncate-safe; returns the
+/// byte length the full JSON needs, excluding the NUL, so a `len == 0` call
+/// is a sizing query).
+///
+/// Logged in, with a call in hand:
+///
+/// ```json
+/// {"login":"logged_in","retrying":false,"callsign":"KX7ABC","error":null,
+///  "link":"connected","peer":"W1AW","node":1234,"ptt":false,
+///  "receiving":true,"info":"Newington",
+///  "chat":[{"from":"W1AW","text":"hi","mine":false}],"notice":null}
+/// ```
+///
+/// `login` is one of `logged_out`/`logging_in`/`logged_in`/`failed`. A
+/// failed login carries its sentence in `error`, for the status line:
+/// `{"login":"failed","retrying":false,"callsign":"KX7ABC","error":"EchoLink
+/// said the password is wrong"}`. `error` is `null` otherwise. `retrying` is
+/// `true` while the login is backing off after no server answered and will
+/// try again by itself (`logging_in`, or `failed` with the "couldn't reach"
+/// sentence); it is `false` for a refusal, which only a new login can get
+/// past, and while logged in or out.
+///
+/// The call fields (`link` through `chat`) are present only while a call is
+/// in hand. `link` is one of `connecting`/`connected`/`closed`. `ptt` is the
+/// key as the link applied it. `receiving` is true while the far end is
+/// talking. `info` is the far station's information text, `null` until it
+/// sends one. `chat` is the call's text chat, oldest first; `mine` marks a
+/// line this station sent. `notice` is a plain sentence saying why the link
+/// stopped transmitting on its own (the 10-minute transmit cap), `null`
+/// otherwise; the next over clears it.
+///
+/// `peer`, `info` and every chat line come from the far station, so the
+/// document is built with `serde_json`: a quote or brace in them stays inside
+/// its string. There is no password field, and the login's never reaches
+/// here.
+///
+/// Writes `{}` when logged out with no error, and always without the
+/// `echolink` feature. Returns [`IAX_ERR_NULL`] if `st` is NULL, or
+/// [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_echolink_state(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let json = echolink_state_json(station);
+        unsafe { fill_buf(&json, buf, len) }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Render the `EchoLink` state as JSON, or `"{}"` when there is none. Split
+/// out of [`iax_station_echolink_state`] so tests can reach it without an
+/// FFI buffer.
+fn echolink_state_json(station: &IaxStation) -> String {
+    #[cfg(feature = "echolink")]
+    {
+        station
+            .inner
+            .echolink_state()
+            .map_or_else(|| "{}".to_string(), |s| echolink_doc(&s).to_string())
+    }
+    #[cfg(not(feature = "echolink"))]
+    {
+        let _ = station;
+        "{}".to_string()
+    }
+}
+
+/// The document one `EchoLink` state renders as. Split from
+/// [`echolink_state_json`] so a test can render a state it built itself: a
+/// station that has never logged in renders `{}`.
+#[cfg(feature = "echolink")]
+fn echolink_doc(s: &astar_station::EchoLinkState) -> serde_json::Value {
+    use astar_station::{CallLink, LoginState};
+    let login = match s.login.state {
+        LoginState::LoggedOut => "logged_out",
+        LoginState::LoggingIn => "logging_in",
+        LoginState::LoggedIn => "logged_in",
+        LoginState::Failed => "failed",
+    };
+    let mut doc = serde_json::json!({
+        "login": login,
+        "retrying": s.login.retrying,
+        "callsign": s.login.callsign,
+        "error": s.login.error,
+    });
+    if let (Some(call), Some(object)) = (&s.call, doc.as_object_mut()) {
+        let link = match call.link {
+            CallLink::Connecting => "connecting",
+            CallLink::Connected => "connected",
+            CallLink::Closed => "closed",
+        };
+        let chat: Vec<serde_json::Value> = call
+            .chat
+            .iter()
+            .map(|line| {
+                serde_json::json!({
+                    "from": line.from,
+                    "text": line.text,
+                    "mine": line.mine,
+                })
+            })
+            .collect();
+        object.insert("link".into(), link.into());
+        object.insert("peer".into(), call.peer.clone().into());
+        object.insert("node".into(), call.node.into());
+        object.insert("ptt".into(), call.ptt.into());
+        object.insert("receiving".into(), call.receiving.into());
+        object.insert("info".into(), call.info.clone().into());
+        object.insert("chat".into(), chat.into());
+        object.insert("notice".into(), call.notice.clone().into());
+    }
+    doc
+}
+
+/// Write the `EchoLink` directory's latest station list as a JSON array into
+/// the caller buffer `buf` of `len` bytes (same buffer contract as
+/// [`iax_station_echolink_state`]):
+///
+/// ```json
+/// [{"call":"W1AW","description":"Newington","node":1234,
+///   "kind":"user","status":"online"}]
+/// ```
+///
+/// `kind` is one of `user`/`link`/`repeater`/`conference`; `status` is one of
+/// `online`/`busy`/`unknown`. No station's IP address is in it: the engine
+/// keeps those to itself.
+///
+/// Writes `[]` when not logged in, before the first list arrives, and without
+/// the `echolink` feature. Returns [`IAX_ERR_NULL`] if `st` is NULL, or
+/// [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_echolink_stations(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        // Off in this library means an empty list, whatever the facade
+        // below was built with (see `echolink_gate`).
+        let stations = if cfg!(feature = "echolink") {
+            station.inner.echolink_stations()
+        } else {
+            Vec::new()
+        };
+        let json = echolink_stations_doc(&stations).to_string();
+        unsafe { fill_buf(&json, buf, len) }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// The array a station list renders as. The directory's descriptions are
+/// free text anyone can set, so this goes through `serde_json` too.
+fn echolink_stations_doc(stations: &[astar_station::EchoLinkStationInfo]) -> serde_json::Value {
+    stations
+        .iter()
+        .map(|e| {
+            serde_json::json!({
+                "call": e.call,
+                "description": e.description,
+                "node": e.node,
+                "kind": e.kind,
+                "status": e.status,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod dmr_tests {
     //! Offline coverage of the DMR entry points (iax-d4f7): the no-link
@@ -3841,6 +4653,19 @@ mod dmr_tests {
         assert_ne!(IAX_ERR_DMR, IAX_ERR_NXDN);
         let text = unsafe { std::ffi::CStr::from_ptr(iax_error_text(IAX_ERR_DMR)) };
         assert_eq!(text.to_str().expect("utf8"), "dmr error");
+    }
+
+    #[test]
+    fn record_error_code_and_text() {
+        // -24 belongs to work/echolink; recording takes -23.
+        assert_eq!(IAX_ERR_RECORD, -23);
+        assert_ne!(IAX_ERR_RECORD, IAX_ERR_DMR);
+        let text = unsafe { std::ffi::CStr::from_ptr(iax_error_text(IAX_ERR_RECORD)) };
+        assert_eq!(text.to_str().expect("utf8"), "recording error");
+        assert_eq!(
+            err_code(&StationError::Record("already recording".into())),
+            IAX_ERR_RECORD
+        );
     }
 
     #[test]
@@ -3989,6 +4814,177 @@ mod dmr_tests {
             IAX_ERR_DMR
         );
         unsafe { iax_station_free(st) };
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "echolink")]
+mod echolink_tests {
+    //! The `EchoLink` state renderer, driven with states built here: a fresh
+    //! station is logged out and renders `{}`, so the documents a login and
+    //! a call produce can only be checked by building their states by hand.
+    //! Nothing here opens a socket.
+    use super::*;
+    use astar_station::{CallLink, ChatLine, EchoLinkCallState, LoginState, PresenceSnapshot};
+
+    fn logged_in_with_a_call(chat_text: &str) -> astar_station::EchoLinkState {
+        astar_station::EchoLinkState {
+            login: PresenceSnapshot {
+                state: LoginState::LoggedIn,
+                callsign: "KX7ABC".into(),
+                error: None,
+                retrying: false,
+                stations_age: None,
+            },
+            call: Some(EchoLinkCallState {
+                link: CallLink::Connected,
+                peer: "W1AW".into(),
+                node: 1234,
+                ptt: false,
+                receiving: true,
+                info: Some("Newington".into()),
+                chat: vec![ChatLine {
+                    from: "W1AW".into(),
+                    text: chat_text.into(),
+                    mine: false,
+                }],
+                notice: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn echolink_state_json_carries_the_transmit_cap_notice() {
+        let mut state = logged_in_with_a_call("hi");
+        let doc = echolink_doc(&state);
+        assert_eq!(doc["notice"], serde_json::Value::Null);
+        if let Some(call) = state.call.as_mut() {
+            call.notice = Some(astar_station::ECHOLINK_TX_CAP_NOTICE.into());
+        }
+        let doc = echolink_doc(&state);
+        assert_eq!(doc["notice"], astar_station::ECHOLINK_TX_CAP_NOTICE);
+    }
+
+    #[test]
+    fn echolink_state_json_escapes_attacker_text() {
+        // Chat text comes from whoever is on the far end. A quote and a brace
+        // in it must stay inside its string, not close it and add a key.
+        let evil = "\"},{\"x\":1";
+        let json = echolink_doc(&logged_in_with_a_call(evil)).to_string();
+        let back: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(back["chat"][0]["text"].as_str(), Some(evil));
+        assert_eq!(back["chat"].as_array().map(Vec::len), Some(1));
+        assert!(back.get("x").is_none());
+        assert_eq!(back["login"], "logged_in");
+        assert_eq!(back["callsign"], "KX7ABC");
+        assert_eq!(back["error"], serde_json::Value::Null);
+        assert_eq!(back["link"], "connected");
+        assert_eq!(back["peer"], "W1AW");
+        assert_eq!(back["node"], 1234);
+        assert_eq!(back["ptt"], false);
+        assert_eq!(back["receiving"], true);
+        assert_eq!(back["info"], "Newington");
+        assert_eq!(back["chat"][0]["from"], "W1AW");
+        assert_eq!(back["chat"][0]["mine"], false);
+    }
+
+    #[test]
+    fn echolink_failed_login_renders_the_error() {
+        let state = astar_station::EchoLinkState {
+            login: PresenceSnapshot {
+                state: LoginState::Failed,
+                callsign: "KX7ABC".into(),
+                error: Some("EchoLink said the password is wrong".into()),
+                retrying: false,
+                stations_age: None,
+            },
+            call: None,
+        };
+        let doc = echolink_doc(&state);
+        assert_eq!(
+            doc,
+            serde_json::json!({
+                "login": "failed",
+                "retrying": false,
+                "callsign": "KX7ABC",
+                "error": "EchoLink said the password is wrong",
+            })
+        );
+    }
+
+    #[test]
+    fn echolink_unreachable_login_renders_retrying() {
+        // "No server answered" is `failed` too, but the engine keeps trying;
+        // `retrying` is the field a client reads to tell the two apart.
+        let state = astar_station::EchoLinkState {
+            login: PresenceSnapshot {
+                state: LoginState::Failed,
+                callsign: "KX7ABC".into(),
+                error: Some("Couldn't reach any EchoLink server".into()),
+                retrying: true,
+                stations_age: None,
+            },
+            call: None,
+        };
+        let doc = echolink_doc(&state);
+        assert_eq!(doc["login"], "failed");
+        assert_eq!(doc["retrying"], true);
+    }
+
+    #[test]
+    fn every_login_and_link_state_has_its_string() {
+        // These strings are what the Swift binding's raw values must equal.
+        let mut state = logged_in_with_a_call("hi");
+        for (login, want) in [
+            (LoginState::LoggedOut, "logged_out"),
+            (LoginState::LoggingIn, "logging_in"),
+            (LoginState::LoggedIn, "logged_in"),
+            (LoginState::Failed, "failed"),
+        ] {
+            state.login.state = login;
+            assert_eq!(echolink_doc(&state)["login"], want);
+        }
+        for (link, want) in [
+            (CallLink::Connecting, "connecting"),
+            (CallLink::Connected, "connected"),
+            (CallLink::Closed, "closed"),
+        ] {
+            state.call.as_mut().expect("a call").link = link;
+            assert_eq!(echolink_doc(&state)["link"], want);
+        }
+    }
+
+    #[test]
+    fn the_state_json_has_no_field_that_could_hold_a_secret() {
+        let doc = echolink_doc(&logged_in_with_a_call("hi"));
+        let object = doc.as_object().expect("a JSON object");
+        for name in object.keys() {
+            let lowered = name.to_ascii_lowercase();
+            for forbidden in ["password", "passphrase", "secret", "pass"] {
+                assert!(!lowered.contains(forbidden), "field {name:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn stations_render_without_an_address() {
+        let doc = echolink_stations_doc(&[astar_station::EchoLinkStationInfo {
+            call: "W1AW".into(),
+            description: "Newington".into(),
+            node: 1234,
+            kind: "user",
+            status: "online",
+        }]);
+        assert_eq!(
+            doc,
+            serde_json::json!([{
+                "call": "W1AW",
+                "description": "Newington",
+                "node": 1234,
+                "kind": "user",
+                "status": "online",
+            }])
+        );
     }
 }
 

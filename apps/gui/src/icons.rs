@@ -90,7 +90,7 @@ fn decode(png: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
 /// Paint every pixel's RGB with `rgb`, leaving alpha untouched — how the Mac
 /// app colors its template asterisk, minus AppKit.
 fn tint(rgba: &mut [u8], rgb: [u8; 3]) {
-    for px in rgba.chunks_exact_mut(4) {
+    for px in rgba.as_chunks_mut::<4>().0 {
         px[0] = rgb[0];
         px[1] = rgb[1];
         px[2] = rgb[2];
@@ -156,8 +156,8 @@ mod tests {
                 StatusIcon::Transmitting,
             ] {
                 let (tinted, ..) = status_asterisk_rgba(state, hidpi).unwrap();
-                let idle_a: Vec<u8> = idle.chunks_exact(4).map(|p| p[3]).collect();
-                let tint_a: Vec<u8> = tinted.chunks_exact(4).map(|p| p[3]).collect();
+                let idle_a: Vec<u8> = idle.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
+                let tint_a: Vec<u8> = tinted.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
                 assert_eq!(
                     idle_a, tint_a,
                     "alpha mismatch for {state:?} (hidpi={hidpi})"

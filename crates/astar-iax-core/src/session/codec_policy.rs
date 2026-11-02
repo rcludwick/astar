@@ -29,25 +29,58 @@ pub enum CodecPolicy {
 }
 
 impl CodecPolicy {
-    /// Codecs advertised in the CAPABILITY IE and accepted from peers.
+    /// Codecs accepted from a peer that calls us: the inbound side, where
+    /// GSM is carried so a `disallow=all / allow=gsm` node can link.
     #[must_use]
     pub fn capability_mask(self) -> CodecMask {
         self.preference_order().iter().copied().collect()
     }
 
-    /// Our codec preference, best first. The first entry is what FORMAT IEs
-    /// name; the order breaks ties in codec selection.
+    /// Codecs advertised in the CAPABILITY IE of a NEW we send, and the only
+    /// ones a peer's ACCEPT may name: [`Self::offer_order`].
+    #[must_use]
+    pub fn offer_mask(self) -> CodecMask {
+        self.offer_order().iter().copied().collect()
+    }
+
+    /// What a call we place offers, best first: [`Self::preference_order`]
+    /// without GSM. GSM is accepted inbound but never offered outbound, so a
+    /// node we dial can never pick it over a better codec it also has; that
+    /// stays so until the nodebench GSM cell has run against a real node.
+    #[must_use]
+    pub fn offer_order(self) -> &'static [VoiceFormat] {
+        let order = self.preference_order();
+        match order.last() {
+            Some(VoiceFormat::Gsm) => &order[..order.len() - 1],
+            _ => order,
+        }
+    }
+
+    /// Our codec preference for calls we answer, best first, GSM last. The
+    /// first entry is what FORMAT IEs name; the order breaks ties in codec
+    /// selection. Calls we place offer [`Self::offer_order`] instead.
     #[must_use]
     pub fn preference_order(self) -> &'static [VoiceFormat] {
         match self {
-            Self::UlawOnly => &[VoiceFormat::G711U, VoiceFormat::G711A],
-            Self::AllowSlin => &[VoiceFormat::G711U, VoiceFormat::G711A, VoiceFormat::Slin],
-            Self::PreferSlin => &[VoiceFormat::Slin, VoiceFormat::G711U, VoiceFormat::G711A],
+            Self::UlawOnly => &[VoiceFormat::G711U, VoiceFormat::G711A, VoiceFormat::Gsm],
+            Self::AllowSlin => &[
+                VoiceFormat::G711U,
+                VoiceFormat::G711A,
+                VoiceFormat::Slin,
+                VoiceFormat::Gsm,
+            ],
+            Self::PreferSlin => &[
+                VoiceFormat::Slin,
+                VoiceFormat::G711U,
+                VoiceFormat::G711A,
+                VoiceFormat::Gsm,
+            ],
             Self::PreferSlin16 => &[
                 VoiceFormat::Slin16,
                 VoiceFormat::Slin,
                 VoiceFormat::G711U,
                 VoiceFormat::G711A,
+                VoiceFormat::Gsm,
             ],
         }
     }
@@ -118,6 +151,49 @@ mod tests {
     }
 
     #[test]
+    fn no_policy_offers_gsm_on_a_call_we_place() {
+        for p in [
+            CodecPolicy::UlawOnly,
+            CodecPolicy::AllowSlin,
+            CodecPolicy::PreferSlin,
+            CodecPolicy::PreferSlin16,
+        ] {
+            assert!(!p.offer_mask().contains(VoiceFormat::Gsm), "{p:?}");
+            assert!(!p.offer_order().contains(&VoiceFormat::Gsm), "{p:?}");
+            // Everything else the policy carries is still offered, in order.
+            let without_gsm: Vec<_> = p
+                .preference_order()
+                .iter()
+                .copied()
+                .filter(|f| *f != VoiceFormat::Gsm)
+                .collect();
+            assert_eq!(p.offer_order(), without_gsm.as_slice(), "{p:?}");
+            assert_eq!(p.offer_order()[0], p.preferred(), "{p:?}");
+        }
+        assert_eq!(
+            CodecPolicy::UlawOnly.offer_order(),
+            &[VoiceFormat::G711U, VoiceFormat::G711A]
+        );
+    }
+
+    #[test]
+    fn every_policy_accepts_gsm_last_on_a_call_we_answer() {
+        for p in [
+            CodecPolicy::UlawOnly,
+            CodecPolicy::AllowSlin,
+            CodecPolicy::PreferSlin,
+            CodecPolicy::PreferSlin16,
+        ] {
+            assert_eq!(
+                p.preference_order().last(),
+                Some(&VoiceFormat::Gsm),
+                "{p:?}"
+            );
+            assert_ne!(p.preferred(), VoiceFormat::Gsm, "{p:?}");
+        }
+    }
+
+    #[test]
     fn allow_slin_offers_but_does_not_prefer() {
         let p = CodecPolicy::AllowSlin;
         assert!(p.capability_mask().contains(VoiceFormat::Slin));
@@ -131,7 +207,12 @@ mod tests {
         assert_eq!(p.preferred(), VoiceFormat::Slin);
         assert_eq!(
             p.preference_order(),
-            &[VoiceFormat::Slin, VoiceFormat::G711U, VoiceFormat::G711A]
+            &[
+                VoiceFormat::Slin,
+                VoiceFormat::G711U,
+                VoiceFormat::G711A,
+                VoiceFormat::Gsm
+            ]
         );
     }
 
@@ -152,7 +233,8 @@ mod tests {
                 VoiceFormat::Slin16,
                 VoiceFormat::Slin,
                 VoiceFormat::G711U,
-                VoiceFormat::G711A
+                VoiceFormat::G711A,
+                VoiceFormat::Gsm
             ]
         );
         assert!(p.capability_mask().contains(VoiceFormat::Slin16));

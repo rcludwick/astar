@@ -1,0 +1,29 @@
+[package]
+name = "astar-record"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "astar-record: call recording — streaming FLAC writer, track layouts and the recorder thread."
+
+[features]
+default = ["writer"]
+writer = ["dep:flacenc", "dep:tar", "dep:sha2", "dep:serde", "dep:serde_json", "dep:libc", "dep:thiserror", "dep:tracing"]
+
+[dependencies]
+flacenc = { version = "=0.5.1", default-features = false, optional = true }
+tar = { version = "=0.4.46", optional = true }
+sha2 = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+claxon = "=0.4.3"
+
+[lints]
+workspace = true

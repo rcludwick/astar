@@ -13,6 +13,208 @@ pre-release to the patch number, which sorts wrongly: `0.1.10beta` is newer
 than `0.1.9beta` and a string comparison says the opposite. Shipped versions
 are left as they were spelled.
 
+## 0.1.18-beta — 2026-11-01
+
+Favorites shared across every network, EchoLink on the same dial row as the
+rest, an EchoLink section in Settings, sharp station text and even call
+buttons.
+
+**Updating from 0.1.16-beta?** 0.1.17-beta wasn't released on its own, so its
+notes apply to this update too (see the full changelog): EchoLink, recording, and the server's
+public page, sign-in and Discord bridge. One of them needs you to do something.
+If you use D-Star, System Fusion, NXDN or DMR, add your DVstick or ThumbDV
+once in **Settings → Vocoders**, because astar now opens only the vocoder
+sticks you've added.
+
+### Added
+
+- **Favorites shared across every network, and EchoLink on the same dial
+  row.** The saved-nodes menu beside the dial field now lists favorites and
+  recents from every network, whichever one is selected, each marked with its
+  network: pick a DMR talkgroup while on AllStar and the picker switches to
+  DMR with the network, talkgroup and timeslot filled in, ready for
+  **Connect**. Saved nodes are keyed by network and target, so EchoLink node
+  1234 and AllStar node 1234 are separate favorites, and Settings → Favorites
+  lists them all with a network tag. EchoLink no longer swaps the dial row
+  for a form of its own: type a callsign or node number in the same field,
+  or click the magnifying glass to browse the station list in its own pane
+  and choose a station into the field. One line under the row logs in or out
+  with what Settings → EchoLink saved, or points you there. Stars in the
+  station browser, on the dial row and on a call are the same favorite, and
+  the browser's **Favorites** filter shows them with their live free/busy
+  dot, still listing the ones that aren't online right now. They travel in
+  an exported config with the node directory.
+
+- **Settings → EchoLink.** The EchoLink callsign, password and **Log in
+  automatically** now have a section in Settings, beside the AllStarLink
+  account: the one place they are edited now that the dial card has no login
+  form. The eye button in the password field shows the saved
+  password. The section also holds the location text other stations see
+  beside your callsign, which had no control before, plus Log in / Log out
+  and a Clear that asks first. None of it goes into an exported
+  `.astarconfig`.
+
+### Fixed
+
+- **The EchoLink station list's text was blurry.** Switching the network to
+  EchoLink slid the station list in from the top. The list is an AppKit table,
+  and the slide left its scroll position on a fraction of a pixel, so every
+  row's text sat between pixels and came out soft, most visibly on a non-Retina
+  (1x) display. The list now fades in instead, and lands on whole pixels.
+- **The call controls are one height.** Hold to Talk and Record grew from
+  their text and symbol and stood 35 pt tall, while Disconnect, whose phone
+  symbol is short, stood 28 pt. All of them, including the VOX, listen-only and
+  receive-only blocks that take the push-to-talk button's place, now share
+  Disconnect's 28 pt, and the recording clock no longer changes it.
+
+## 0.1.17-beta — 2026-11-01
+
+EchoLink, recording, and a safety fix for D-Star. On the server side, the node
+gets a public page, sign-in, a settings page and a Discord bridge.
+
+### Before you update: add your vocoder stick
+
+If you use D-Star, System Fusion, NXDN or DMR, astar will not open your
+DVstick or ThumbDV after this update until you add it once in
+**Settings → Vocoders**. Until you do, those networks stay out of the picker.
+The call card offers an **Add Vocoder…** button while a stick is plugged in,
+and adding one takes a few seconds. The section on vocoder trust below says
+why. See [Vocoders](https://rcludwick.github.io/astar/macos/vocoders/).
+
+### Added
+
+- **EchoLink.** EchoLink is a new segment in the network picker. Sign in with
+  your validated callsign and EchoLink password, and the station list
+  appears where the dial field usually is. You can filter it, search it and
+  refresh it, and a dot beside each station shows whether it is free or busy.
+  Then pick a station to call it, and talk with the usual push to talk. Chat
+  works both ways. astar never signs in by itself unless you tick **Log in
+  automatically**, and even then it never calls anyone. EchoLink stops
+  transmitting after 10 minutes of continuous talk, and the talk timer warns
+  you before that. Calls are outgoing only for now. The audio is GSM 06.10,
+  in a pure-Rust codec that decodes the standard's official test vectors bit
+  for bit. See [EchoLink](https://rcludwick.github.io/astar/macos/echolink/).
+
+- **A Record button.** It sits beside the talk control, and **⌘R** does the
+  same. While it records, the button turns red with a running clock, and a
+  red dot appears on the menu-bar asterisk. Each recording is a FLAC file in
+  `~/Music/astar Recordings`, named for the time, network and node. The
+  default **Stereo** layout puts the other station in your left ear and your
+  own transmit in your right, and two more layouts are offered. **Always
+  record** starts a recording on every connect. Quitting astar mid-recording
+  finishes the file properly. See
+  [Recording](https://rcludwick.github.io/astar/macos/recording/).
+
+- **GSM on AllStarLink links.** astar now accepts GSM 06.10 calls from nodes
+  that offer nothing else.
+
+- **astar-server can join EchoLink.** With an `[echolink]` section and your
+  `-L` callsign, the node signs in to EchoLink, and you dial EchoLink
+  stations from its admin page. It stops sending the net to a station after
+  10 minutes without a pause. See
+  [astar-server → EchoLink](https://rcludwick.github.io/astar/server/echolink/).
+
+- **astar-server can record every transmission.** With `[recording] enabled
+  = true`, each over on any link becomes its own FLAC file. The admin page
+  plays, downloads and deletes them, and **Download all** packs them into
+  one `.tar` for [unamblify](https://github.com/rcludwick/unamblify), with
+  the M17 codec frames alongside. Size and age limits keep the folder from
+  growing without end. See
+  [astar-server → Recording](https://rcludwick.github.io/astar/server/recording/).
+
+- **A public page for the node.** Set `[web] public_bind` and the node
+  serves a read-only page on its own listener: what it is linked to, who is
+  talking, today's activity, a live spectrum and a level graph. If you turn
+  it on, the net's audio streams live too, as Opus to the page and as
+  `/stream.mp3` for anything that plays internet radio. The node gets its
+  own Let's Encrypt certificate. It can also keep a DNS name pointed at
+  itself, through Porkbun, Cloudflare, deSEC, Hetzner, DigitalOcean, Linode,
+  Gandi, Vultr, IONOS, bunny.net or Gcore. Nothing on the page can change
+  the node. See [The public page](https://rcludwick.github.io/astar/server/listening/).
+
+- **Signing in to the node's admin pages from anywhere.** People sign in
+  with a passkey, a security key or an authenticator app. There are no
+  passwords. Admins need a passkey or a security key. An authenticator app
+  signs in viewers only. Accounts come from invites, and a risky action asks
+  you to confirm it's you again. From the node itself, `curl` and the
+  `astar-server admin` command keep working without signing in. See
+  [Signing in](https://rcludwick.github.io/astar/server/admin/).
+
+- **A settings page for the node.** `/settings` edits every section of
+  `node.toml` in place, and comments and hand edits survive. Each section
+  has its own card with its own **Save**, and every field says whether it
+  applies live or waits for a restart. **Restart node** restarts the daemon
+  in place, and asks first while the node is on a net. The page also holds
+  the credentials, in a `credentials.toml` beside `node.toml` that only its
+  owner can read.
+
+- **A Discord voice channel can listen to the node.** The bridge joins the
+  node's conference as a listen-only member: the channel hears the net, and
+  the net never hears the channel. No setting can change that. Slash
+  commands let people in the channel link the node to an AllStar node or an
+  M17 reflector, ask what it is linked to, and take turns holding a shared
+  mic for the channel. Approvals have four tiers, and the bridge has its own
+  admin page. See [Discord bridge](https://rcludwick.github.io/astar/server/discord/).
+
+- **The node can monitor an M17 reflector, receive-only.** Dial one module
+  from Discord or the admin page, and whoever talks there is heard on the
+  node's conference. The node sends the reflector only what it takes to
+  hold the link open. It's off until `node.toml` has an `[m17]` section,
+  and the settings page edits that section.
+
+- **astar-server ships as one static executable.** It's a single file per
+  architecture, with the public page, the streams, sign-in, Discord and DNS
+  all built in. Codec 2 and LAME are compiled into it, and their source is
+  in this repository (see `LICENSE-EXCEPTIONS.md`).
+
+### Changed
+
+- **astar opens only the vocoder sticks you have added.** A vocoder stick
+  and many radio CAT/PTT cables use the same FTDI USB chip, and nothing on
+  the USB side tells them apart. Earlier builds found a stick by opening
+  every port with that chip's id. Opening a port raises its DTR and RTS
+  lines, so a D-Star connect could briefly key a radio plugged into such a
+  cable. Now astar opens a port only when its USB serial number is on your
+  list in **Settings → Vocoders**, and holds DTR and RTS low from the moment
+  it opens. Adding a stick warns you about cables first, then checks that
+  the device answers as a vocoder. A DVstick 33 is recognised but can't be
+  added yet. The list is never exported in a `.astarconfig`. astar-server
+  has the same rule, with `[vocoder] trusted_serials` and
+  `astar-server vocoder add`.
+
+- **The node's web pages run on astar's own HTTP server**, which reads each
+  request strictly and puts the same security headers on every answer. A
+  chunked upload to the control port is now refused with
+  `411 Length Required`. `curl -d` sends a `Content-Length` and isn't
+  affected.
+
+- **The control port refuses a request that names a foreign host**, on
+  every route, and caps request bodies at 64 KiB. This blocks a web page that
+  tries to reach the port by pointing its own DNS name at your machine.
+
+- **The node's pages follow the system appearance**, with a light theme
+  alongside the dark one.
+
+### Fixed
+
+- **The call-quality line said "buffer 0 ms" on a healthy call.** It was
+  showing the wrong figure. It now shows how much audio the jitter buffer
+  is actually holding.
+
+- **AllStarLink links to stock nodes were unreliable.** A new test bench
+  links astar-server to a real AllStarLink 3 node in containers, and it
+  found several problems, which are fixed:
+  - a link from a ClearNode dropped after a second or two (fixed on the
+    bench, not yet confirmed against a real ClearNode on the air);
+  - registration could flood the server after a restart;
+  - a link that never finished the key handshake was heard all the time;
+  - links didn't say goodbye the way `app_rpt` expects.
+
+- **The Discord bridge never delivered any audio.** The decoder it needs
+  wasn't compiled in, so the channel stayed silent while reporting itself
+  healthy. Now it works, and a feed that stops is reported in the channel
+  and on the admin page.
+
 ## 0.1.16-beta — 2026-09-15
 
 The macOS 27 release: the main window laid out again, and the frosted look

@@ -1,9 +1,13 @@
 # Runtime base for astar-server (iax-4703). Ships rarely — only when OS
 # deps, piper, or the voice change. Built --platform linux/amd64.
+# astar-server itself is one static executable (just server-release): Codec 2
+# and LAME are linked into it (LICENSE-EXCEPTIONS.md), it has no sound-device
+# stack, and it needs no shared library. This image is only for piper (TTS)
+# and the CA roots, so libasound and libcodec2 are gone.
 FROM docker.io/library/debian:13-slim
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libasound2t64 ca-certificates curl \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
 
 ARG PIPER_URL=https://github.com/rhasspy/piper/releases/download/2023.11.14-2/piper_linux_x86_64.tar.gz

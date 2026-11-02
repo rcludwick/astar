@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 
 use astar_audio::AudioBackend;
 use astar_console::YsfSnapshot;
-use astar_station::{Station, StationConfig};
+use astar_station::Station;
 
 use crate::cli::YSF_LISTEN_USAGE;
 use crate::wav_backend::WavBackend;
@@ -172,11 +172,11 @@ fn split_host_port(raw: &str) -> Result<(String, Option<u16>), String> {
 /// one whose decoded audio lands in a file.
 fn build_station(wav: Option<&Path>) -> Station {
     match wav {
-        None => Station::new(StationConfig::default()),
+        None => Station::new(crate::vocoder::listener_config()),
         Some(path) => {
             let path = path.to_path_buf();
             Station::with_backend_factory(
-                StationConfig::default(),
+                crate::vocoder::listener_config(),
                 Box::new(move || {
                     Box::new(WavBackend::new(path.clone(), "ysf-listen")) as Box<dyn AudioBackend>
                 }),

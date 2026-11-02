@@ -25,8 +25,9 @@ Use the comment syntax of the language (`#` for shell, justfile and Python).
 **Do not add the AGPL header to `vendor/ambe-thumbdv`.** That directory is an
 MIT/Apache-2.0 island with its own licence files, and relicensing it by
 accident is a real hazard — see its `VENDORED.md` before touching anything in
-there. The same goes for the Inter font files under `apps/gui/assets/fonts`
-and the vendored C libiax2 under `harness/`.
+there. The same goes for `vendor/codec2` (LGPL-2.1-only AND MIT, kept
+byte-for-byte as upstream published it), the Inter font files under
+`apps/gui/assets/fonts` and the vendored C libiax2 under `harness/`.
 
 If you are proposing to add a dependency, check its licence is AGPL-compatible
 first. Anything that cannot be distributed under the AGPL does not belong in a

@@ -63,6 +63,14 @@ public protocol StationDriving {
     /// `Station.setCodecDirs(_:)` 1:1.
     func setCodecDirs(_ dirs: [String]) throws
 
+    // MARK: Vocoder trust
+
+    /// Replace the vocoder trust list: the USB serials of the AMBE sticks a
+    /// D-Star/YSF/NXDN/DMR connect may open. Empty trusts nothing, and the
+    /// engine then opens no vocoder port at all. Mirrors
+    /// `Station.setVocoderTrust(_:)` 1:1.
+    func setVocoderTrust(_ serials: [String]) throws
+
     // MARK: D-Star (iax-4c8e)
 
     /// Connect to a D-Star reflector over DExtra and open a full-transceive
@@ -105,6 +113,24 @@ public protocol StationDriving {
     func m17State() throws -> M17State?
     /// Station.heard() 1:1.
     func heard() throws -> [HeardEntry]
+
+    // MARK: Recording
+
+    /// Start recording the live call or digital session into `directory`.
+    /// `label` is the `<network> <node or reflector>` part of each file name
+    /// and `utcOffsetSeconds` puts local time in it. Mirrors
+    /// `Station.recordStart(directory:layout:frames:label:utcOffsetSeconds:)`
+    /// 1:1. Creates files; call it off the main thread.
+    func recordStart(
+        directory: String, layout: RecordingLayout, frames: Bool, label: String,
+        utcOffsetSeconds: Int32
+    ) throws
+    /// Stop the recording, if one runs, and finish its files. Idempotent.
+    /// Joins the recorder; call it off the main thread.
+    func recordStop() throws
+    /// The recorder's state. Crosses the ABI with JSON, so the session reads
+    /// it at most twice a second.
+    func recordState() throws -> RecordState
 
     // MARK: System Fusion
 
@@ -200,6 +226,45 @@ public protocol StationDriving {
     /// Costlier than `readSnapshot()`: it crosses the ABI with a buffer and
     /// parses JSON. Poll the snapshot for meters; call this at UI rate.
     func dmrState() throws -> DMRState?
+
+    // MARK: EchoLink
+
+    /// Start logging in to the EchoLink directory as `callsign`, trying
+    /// `servers` in turn. Returns at once; `echolinkState()` shows the login
+    /// finish or fail. Mirrors `Station.echolinkLogin(callsign:password:
+    /// servers:)` 1:1.
+    ///
+    /// `password` is a SECRET and an in-arg only: read from the Keychain at
+    /// the moment of the login and handed straight here, never stored on the
+    /// session, published, exported or logged.
+    func echolinkLogin(callsign: String, password: String, servers: [String]) throws
+    /// Hang up any EchoLink call and log off the directory.
+    ///
+    /// BLOCKS: the logoff waits on any directory exchange already in flight,
+    /// which can take over a minute. Never call it on the main thread.
+    func echolinkLogout() throws
+    /// Call an EchoLink station by node number or listed callsign. Calling is
+    /// always a person's action. Opens sockets and the output audio device
+    /// before it returns, so call it off the main thread.
+    func echolinkConnect(_ target: String) throws
+    /// Hang up the EchoLink call, if any; the login stays up. Idempotent.
+    func echolinkDisconnect() throws
+    /// Send one line of text chat to the station on the call.
+    func echolinkSendChat(_ text: String) throws
+    /// Set the location text other stations see beside the callsign.
+    func echolinkSetLocation(_ text: String) throws
+    /// Where the login and the call stand, or `nil` when logged out with
+    /// nothing to say. Has no password field. Crosses the ABI with a buffer
+    /// and parses JSON: call it at UI rate.
+    func echolinkState() throws -> EchoLinkState?
+    /// The directory's latest station list; empty when not logged in.
+    func echolinkStations() throws -> [EchoLinkStationEntry]
+    /// Ask the directory for a fresh station list now. `true` when it was
+    /// asked; `false` when the last list came less than 30 s ago and nothing
+    /// was asked. Throws when not logged in. Sends a request to the
+    /// directory, so call it off the main thread.
+    @discardableResult
+    func echolinkRefreshList() throws -> Bool
 
     // Audio device selection + gain. Mirrors `Station`'s methods 1:1; a `nil`
     // device selects the system default for that direction.

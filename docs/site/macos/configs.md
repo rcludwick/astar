@@ -61,7 +61,7 @@ Settings → **Backup** → **Export…**. Choose what to include:
 | Section | What travels |
 |---|---|
 | **Saved configs** | Your rigs and the mic profiles they reference |
-| **Node directory** | Favorites and recents |
+| **Node directory** | Favorites and recents, from every network |
 | **Audio and serial settings** | Devices, gains, VOX, compression, serial PTT |
 | **Callsign** | Your M17 callsign |
 | **Window and panel state** | Which panels are open, Dock icon, selected network |
@@ -77,7 +77,9 @@ meant to be opened and read — you can check what is in one before trusting it.
     have been dialing.
 
 Credentials are **never** exported, whatever you tick. There is no option to
-include them.
+include them. None of the EchoLink settings travel either: not the password,
+and not the callsign, location or **Log in automatically**, so a file you hand
+to someone else can never log them in as you.
 
 ## Import
 
@@ -95,7 +97,7 @@ and leave their microphone, gains and serial wiring alone.
 | Section | How a match is decided |
 |---|---|
 | Saved configs, mic profiles | By id — a config edited elsewhere updates in place and keeps its position |
-| Node directory | By **node number** — the same node is never stored twice, your label and ★ are kept |
+| Node directory | By **network and target** — the same node is never stored twice, your label and ★ are kept |
 
 Afterwards astar reports what actually changed, e.g. *"2 configs added, 15 nodes
 added, 31 settings applied, callsign set."* Nothing is reported for a section

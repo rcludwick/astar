@@ -139,12 +139,14 @@ final class NodeDirectoryTests: XCTestCase {
         XCTAssertEqual(e?.network, .m17)
     }
 
-    func testRecordRecentUpdatesNetworkOnRedial() {
-        // Re-recording an existing node with a DIFFERENT network updates it —
-        // "the current network", not whatever it was dialed on originally.
+    func testRecordRecentOnAnotherNetworkIsAnotherEntry() {
+        // The directory is keyed on (network, target): the same text dialled
+        // on a different network is a different station, so it gets its own
+        // entry rather than re-stamping the first one.
         store.recordRecent(node: "77777", label: "AJ7HR", network: .allstar)
         store.recordRecent(node: "77777", label: "AJ7HR", network: .m17)
-        XCTAssertEqual(store.all().first { $0.node == "77777" }?.network, .m17)
+        XCTAssertEqual(
+            Set(store.all().filter { $0.node == "77777" }.map(\.network)), [.allstar, .m17])
     }
 
     func testRecordRecentNewNodeUsesProvidedLabel() {

@@ -39,6 +39,8 @@ use astar_m17::{
     BROADCAST, ControlPacket, LinkState, Lsf, Reflector, StreamPacket, decode_callsign,
     encode_callsign,
 };
+use astar_record::frames::{CaptureMode, Dir, FrameEvent, Seq};
+use astar_record::tap::{FRAME_TAP_CAPACITY, tap_channel};
 
 // ---- a push-capable audio backend for the TX ("hear yourself") test -----
 //
@@ -1288,4 +1290,185 @@ fn a_slin16_station_hears_itself_via_a_real_parrot_reflector() {
 
     session.m17_disconnect();
     handle.shutdown();
+}
+
+// ---- recording taps (Task 10) ----------------------------------------------
+
+/// A parrot that also keeps every stream packet it received, in arrival
+/// order, so a test can compare the recording with what actually went out.
+fn spawn_recording_parrot() -> (SocketAddr, RecordedPackets, thread::JoinHandle<()>) {
+    let sock = UdpSocket::bind("127.0.0.1:0").expect("bind fake reflector");
+    sock.set_read_timeout(Some(Duration::from_millis(100)))
+        .expect("set read timeout");
+    let addr = sock.local_addr().expect("local addr");
+    let recorded: RecordedPackets = Arc::new(Mutex::new(Vec::new()));
+    let recorded_thread = Arc::clone(&recorded);
+    let t = thread::spawn(move || {
+        let mut buf = [0u8; 4_096];
+        let mut acked = false;
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < deadline {
+            let Ok((n, src)) = sock.recv_from(&mut buf) else {
+                continue;
+            };
+            if !acked && n == 11 && &buf[0..4] == b"CONN" {
+                acked = true;
+                let _ = sock.send_to(b"ACKN", src);
+            } else if n == 54 && &buf[0..4] == b"M17 " {
+                recorded_thread.lock().unwrap().push(buf[..n].to_vec());
+                let _ = sock.send_to(&buf[..n], src);
+            }
+        }
+    });
+    (addr, recorded, t)
+}
+
+/// The 8-byte halves of `pkt` with the sequence number they record under.
+fn halves(pkt: &StreamPacket) -> [(Vec<u8>, Seq); 2] {
+    let seq = Seq {
+        value: pkt.frame_number & !StreamPacket::EOS_BIT,
+        modulus: 0x8000,
+    };
+    [
+        (pkt.payload[0..8].to_vec(), seq),
+        (pkt.payload[8..16].to_vec(), seq),
+    ]
+}
+
+/// Assert `events` (one direction's) is `Start`, then a `Frame` + `Pcm` per
+/// entry of `frames` in order, then `End`; returns the `Start`'s talker.
+fn assert_recorded(events: &[FrameEvent], dir: Dir, frames: &[(Vec<u8>, Seq)]) -> Option<String> {
+    assert_eq!(
+        events.len(),
+        2 + 2 * frames.len(),
+        "{dir:?}: Start + a Frame and a Pcm per half + End, got {events:#?}"
+    );
+    let FrameEvent::Start {
+        dir: d,
+        network,
+        mode,
+        talker,
+        vocoder,
+        ..
+    } = &events[0]
+    else {
+        panic!("{dir:?} opens with Start, got {:?}", events[0]);
+    };
+    assert_eq!(
+        (*d, *network, *mode, *vocoder),
+        (dir, "m17", CaptureMode::Codec2_3200, "codec2")
+    );
+    for (i, (bytes, seq)) in frames.iter().enumerate() {
+        assert_eq!(
+            events[1 + 2 * i],
+            FrameEvent::Frame {
+                dir,
+                bytes: bytes.clone(),
+                seq: Some(*seq),
+            },
+            "{dir:?} frame {i}"
+        );
+        assert!(
+            matches!(events[2 + 2 * i], FrameEvent::Pcm { dir: pd, .. } if pd == dir),
+            "{dir:?} frame {i} is followed by its Pcm, got {:?}",
+            events[2 + 2 * i]
+        );
+    }
+    assert_eq!(events.last(), Some(&FrameEvent::End { dir }));
+    talker.clone()
+}
+
+#[test]
+fn m17_transmit_and_parrot_echo_are_both_recorded() {
+    let (addr, recorded, _reflector) = spawn_recording_parrot();
+
+    let mic_sink: MicSink = Arc::new(Mutex::new(None));
+    let (router, audio, mic) = route(Box::new(PushBackend {
+        mic_sink: Arc::clone(&mic_sink),
+        output_tap: Arc::new(Mutex::new(None)),
+    }));
+
+    let mut s = M17Session::connect(cfg(addr), audio).expect("connect");
+    let (tap, events) = tap_channel(FRAME_TAP_CAPACITY);
+    s.frame_tap().set(Some(tap));
+    assert!(wait_until(|| s.state().link == LinkState::Linked, 2_000));
+
+    router.set_gate(&mic, true);
+    s.set_ptt(true);
+    assert!(wait_until(|| s.state().ptt, 1_000));
+    push_mic_tone(&mic_sink, 400.0, 400);
+    s.set_ptt(false);
+    router.set_gate(&mic, false);
+    assert!(wait_until(|| !s.state().ptt, 1_000));
+
+    // Collect until the echo's EOS closed the received recording.
+    let mut got: Vec<FrameEvent> = Vec::new();
+    assert!(
+        wait_until(
+            || {
+                got.extend(std::iter::from_fn(|| events.try_recv().ok()));
+                got.contains(&FrameEvent::End { dir: Dir::Rx })
+            },
+            3_000
+        ),
+        "the echoed stream's EOS must close the received recording, got {got:#?}"
+    );
+    s.disconnect();
+    got.extend(std::iter::from_fn(|| events.try_recv().ok()));
+
+    let sent: Vec<StreamPacket> = recorded
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|b| StreamPacket::parse(b).expect("a stream packet"))
+        .collect();
+    assert!(
+        sent.len() > 2,
+        "the tone went out, got {} packets",
+        sent.len()
+    );
+    let eos = sent.last().expect("packets");
+    assert!(eos.is_last(), "the EOS packet closes what was sent");
+
+    // Transmit: exactly the halves that carried audio. The EOS packet's
+    // zero-filled halves are padding and record nothing (F12).
+    let last = sent.len() - 1;
+    let tx_frames: Vec<(Vec<u8>, Seq)> = sent
+        .iter()
+        .enumerate()
+        .flat_map(|(i, pkt)| halves(pkt).map(|h| (i, h)))
+        .filter(|(i, (bytes, _))| *i != last || bytes.iter().any(|&b| b != 0))
+        .map(|(_, h)| h)
+        .collect();
+    let tx: Vec<FrameEvent> = got
+        .iter()
+        .filter(|e| dir_of(e) == Dir::Tx)
+        .cloned()
+        .collect();
+    assert_eq!(
+        assert_recorded(&tx, Dir::Tx, &tx_frames).as_deref(),
+        Some("N0CALL")
+    );
+
+    // Receive: every half the parrot echoed was decoded, padding included.
+    let rx_frames: Vec<(Vec<u8>, Seq)> = sent.iter().flat_map(halves).collect();
+    let rx: Vec<FrameEvent> = got
+        .iter()
+        .filter(|e| dir_of(e) == Dir::Rx)
+        .cloned()
+        .collect();
+    assert_eq!(
+        assert_recorded(&rx, Dir::Rx, &rx_frames).as_deref(),
+        Some("N0CALL"),
+        "the echo names the station's own callsign"
+    );
+}
+
+fn dir_of(e: &FrameEvent) -> Dir {
+    match e {
+        FrameEvent::Start { dir, .. }
+        | FrameEvent::Frame { dir, .. }
+        | FrameEvent::Pcm { dir, .. }
+        | FrameEvent::End { dir } => *dir,
+    }
 }

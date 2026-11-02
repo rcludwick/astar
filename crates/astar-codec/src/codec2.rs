@@ -54,10 +54,14 @@ pub enum Codec2Backend {
 ///
 /// Search order:
 /// 1. `IAX_CODEC2_PATH` env var, if set — a single file path override.
-/// 2. Each of `search_dirs`, joined with the platform library filename
-///    (`libcodec2.dylib` / `libcodec2.so`).
-/// 3. Hard-coded system paths (`/opt/homebrew/lib`, `/usr/local/lib`,
-///    `/usr/lib`, with the platform extension).
+/// 2. Each of `search_dirs`, joined with each platform library name in turn
+///    (`libcodec2.dylib` on macOS; elsewhere `libcodec2.so`, then the
+///    versioned `libcodec2.so.1.2`, `.1.1` and `.1.0` a distribution's
+///    runtime package installs without the unversioned symlink).
+/// 3. Hard-coded system directories (`/opt/homebrew/lib`, `/usr/local/lib`,
+///    `/usr/lib`, and on Linux the Debian multiarch
+///    `/usr/lib/x86_64-linux-gnu` and `/usr/lib/aarch64-linux-gnu`), with
+///    the same names.
 ///
 /// Each candidate is `dlopen`ed and sanity-checked (`codec2_samples_per_frame
 /// == 160 && codec2_bits_per_frame == 64` for mode 3200); a candidate that
@@ -174,44 +178,84 @@ mod runtime {
     type DecodeFn = unsafe extern "C" fn(*mut c_void, *mut i16, *const u8);
     type QueryFn = unsafe extern "C" fn(*mut c_void) -> c_int;
 
+    /// File names tried in every directory, in order. macOS has one
+    /// install name.
     #[cfg(target_os = "macos")]
-    fn platform_lib_name() -> &'static str {
-        "libcodec2.dylib"
+    pub(super) fn platform_lib_names() -> &'static [&'static str] {
+        &["libcodec2.dylib"]
     }
+    /// File names tried in every directory, in order. The unversioned name
+    /// exists only when a `-dev` package (or a source build) is installed;
+    /// a distribution's runtime package ships just the versioned soname, so
+    /// the known Codec 2 sonames follow, newest first.
     #[cfg(not(target_os = "macos"))]
-    fn platform_lib_name() -> &'static str {
-        "libcodec2.so"
-    }
-
-    #[cfg(target_os = "macos")]
-    fn default_lib_paths() -> &'static [&'static str] {
+    pub(super) fn platform_lib_names() -> &'static [&'static str] {
         &[
-            "/opt/homebrew/lib/libcodec2.dylib",
-            "/usr/local/lib/libcodec2.dylib",
-            "/usr/lib/libcodec2.dylib",
-        ]
-    }
-    #[cfg(not(target_os = "macos"))]
-    fn default_lib_paths() -> &'static [&'static str] {
-        &[
-            "/opt/homebrew/lib/libcodec2.so",
-            "/usr/local/lib/libcodec2.so",
-            "/usr/lib/libcodec2.so",
+            "libcodec2.so",
+            "libcodec2.so.1.2",
+            "libcodec2.so.1.1",
+            "libcodec2.so.1.0",
         ]
     }
 
-    /// Build the ordered candidate list: env override, then `search_dirs`
-    /// joined with the platform lib filename, then hard-coded system paths.
-    fn candidate_paths(search_dirs: &[PathBuf]) -> Vec<PathBuf> {
-        let mut candidates = Vec::new();
-        if let Ok(over) = std::env::var("IAX_CODEC2_PATH") {
-            candidates.push(PathBuf::from(over));
-        }
+    /// Directories always searched after the caller's own.
+    #[cfg(target_os = "macos")]
+    pub(super) fn default_lib_dirs() -> &'static [&'static str] {
+        &["/opt/homebrew/lib", "/usr/local/lib", "/usr/lib"]
+    }
+    /// Directories always searched after the caller's own. Debian and
+    /// Ubuntu install shared libraries under the multiarch directory, not
+    /// `/usr/lib`, so a stock node's `libcodec2` lives in one of the last
+    /// two.
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn default_lib_dirs() -> &'static [&'static str] {
+        &[
+            "/opt/homebrew/lib",
+            "/usr/local/lib",
+            "/usr/lib",
+            "/usr/lib/x86_64-linux-gnu",
+            "/usr/lib/aarch64-linux-gnu",
+        ]
+    }
+
+    /// Build the ordered candidate list from explicit inputs: the override
+    /// first, then every `search_dirs` entry joined with every name
+    /// (directory-major), then every `default_dirs` entry the same way.
+    ///
+    /// Pure, so the order is testable on any target without touching the
+    /// process environment. Every input is operator-controlled (env var,
+    /// configured directories, the fixed lists above); nothing derived from
+    /// network input may ever reach it, because `try_load` runs the chosen
+    /// file's initialisers.
+    pub(super) fn candidate_paths_from(
+        env_override: Option<PathBuf>,
+        search_dirs: &[PathBuf],
+        default_dirs: &[&str],
+        names: &[&str],
+    ) -> Vec<PathBuf> {
+        let mut candidates =
+            Vec::with_capacity(1 + (search_dirs.len() + default_dirs.len()) * names.len());
+        candidates.extend(env_override);
         for dir in search_dirs {
-            candidates.push(dir.join(platform_lib_name()));
+            candidates.extend(names.iter().map(|name| dir.join(name)));
         }
-        candidates.extend(default_lib_paths().iter().map(PathBuf::from));
+        for dir in default_dirs {
+            let dir = Path::new(dir);
+            candidates.extend(names.iter().map(|name| dir.join(name)));
+        }
         candidates
+    }
+
+    /// The real candidate list: `IAX_CODEC2_PATH` wins, then `search_dirs`,
+    /// then this platform's default directories, each with this platform's
+    /// names.
+    pub(super) fn candidate_paths(search_dirs: &[PathBuf]) -> Vec<PathBuf> {
+        candidate_paths_from(
+            std::env::var_os("IAX_CODEC2_PATH").map(PathBuf::from),
+            search_dirs,
+            default_lib_dirs(),
+            platform_lib_names(),
+        )
     }
 
     /// Runtime-loaded Codec 2 instance. Holds the `libloading::Library`
@@ -398,7 +442,8 @@ mod static_tests {
 
 #[cfg(all(test, feature = "codec2-runtime"))]
 mod runtime_tests {
-    use super::{Codec2Backend, open_codec2};
+    use super::{Codec2Backend, open_codec2, runtime};
+    use std::path::PathBuf;
     use std::sync::Mutex;
 
     /// `IAX_CODEC2_PATH` is process-global mutable state; serialize every
@@ -451,5 +496,129 @@ mod runtime_tests {
                 panic!("codec2-runtime-only build must never produce a Static backend");
             }
         }
+    }
+
+    /// The whole search order, pinned on synthetic inputs so it means the
+    /// same thing on every target: the operator's override first, then every
+    /// configured directory with every name (directory-major, so one
+    /// directory is exhausted before the next is tried), then the defaults
+    /// the same way.
+    #[test]
+    fn candidate_paths_from_orders_override_then_search_dirs_then_defaults() {
+        let got = runtime::candidate_paths_from(
+            Some(PathBuf::from("/env/libcodec2.so.9")),
+            &[PathBuf::from("/s1"), PathBuf::from("/s2")],
+            &["/d1", "/d2"],
+            &["libcodec2.so", "libcodec2.so.1.2"],
+        );
+        let want: Vec<PathBuf> = [
+            "/env/libcodec2.so.9",
+            "/s1/libcodec2.so",
+            "/s1/libcodec2.so.1.2",
+            "/s2/libcodec2.so",
+            "/s2/libcodec2.so.1.2",
+            "/d1/libcodec2.so",
+            "/d1/libcodec2.so.1.2",
+            "/d2/libcodec2.so",
+            "/d2/libcodec2.so.1.2",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        assert_eq!(got, want);
+    }
+
+    /// With no override the list starts at the first configured directory;
+    /// nothing is invented in its place.
+    #[test]
+    fn candidate_paths_from_without_override_starts_at_search_dirs() {
+        let got = runtime::candidate_paths_from(
+            None,
+            &[PathBuf::from("/s1")],
+            &["/d1"],
+            &["libcodec2.dylib"],
+        );
+        let want = vec![
+            PathBuf::from("/s1/libcodec2.dylib"),
+            PathBuf::from("/d1/libcodec2.dylib"),
+        ];
+        assert_eq!(got, want);
+    }
+
+    /// `candidate_paths` reads `IAX_CODEC2_PATH` and puts it ahead of
+    /// everything else, and adds nothing else when it is unset.
+    #[test]
+    fn candidate_paths_honours_iax_codec2_path_first() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        let over = PathBuf::from("/nonexistent/astar-codec2-test/override-libcodec2.so");
+        let dir = PathBuf::from("/nonexistent/astar-codec2-test/search-dir");
+
+        // SAFETY: serialized by `ENV_LOCK` above; no other thread reads or
+        // writes `IAX_CODEC2_PATH` while the guard is held.
+        unsafe {
+            std::env::set_var("IAX_CODEC2_PATH", &over);
+        }
+        let with_env = runtime::candidate_paths(std::slice::from_ref(&dir));
+        // SAFETY: same serialization as the `set_var` above.
+        unsafe {
+            std::env::remove_var("IAX_CODEC2_PATH");
+        }
+        let without_env = runtime::candidate_paths(std::slice::from_ref(&dir));
+
+        let first_name = runtime::platform_lib_names()[0];
+        assert_eq!(with_env[0], over);
+        assert_eq!(with_env[1], dir.join(first_name));
+        assert_eq!(without_env[0], dir.join(first_name));
+        assert_eq!(with_env[1..], without_env[..]);
+        // The real loader must hand the platform's default directories to
+        // `candidate_paths_from`: one search dir plus every default dir,
+        // each with every name, ending on the last default dir's last name.
+        let dirs = runtime::default_lib_dirs();
+        let names = runtime::platform_lib_names();
+        assert_eq!(without_env.len(), (1 + dirs.len()) * names.len());
+        assert_eq!(
+            without_env.last(),
+            Some(&std::path::Path::new(dirs[dirs.len() - 1]).join(names[names.len() - 1]))
+        );
+    }
+
+    /// Debian and Ubuntu put the runtime library under the multiarch
+    /// directory and ship only the versioned soname without the `-dev`
+    /// package; both must be on the list or a stock node never finds it.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn linux_search_covers_multiarch_dirs_and_versioned_sonames() {
+        assert_eq!(
+            runtime::platform_lib_names(),
+            &[
+                "libcodec2.so",
+                "libcodec2.so.1.2",
+                "libcodec2.so.1.1",
+                "libcodec2.so.1.0",
+            ]
+        );
+        assert_eq!(
+            runtime::default_lib_dirs(),
+            &[
+                "/opt/homebrew/lib",
+                "/usr/local/lib",
+                "/usr/lib",
+                "/usr/lib/x86_64-linux-gnu",
+                "/usr/lib/aarch64-linux-gnu",
+            ]
+        );
+    }
+
+    /// macOS keeps exactly the one `.dylib` name and the three directories
+    /// it always searched; the Linux additions do not leak here.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_search_keeps_the_dylib_and_three_dirs() {
+        assert_eq!(runtime::platform_lib_names(), &["libcodec2.dylib"]);
+        assert_eq!(
+            runtime::default_lib_dirs(),
+            &["/opt/homebrew/lib", "/usr/local/lib", "/usr/lib"]
+        );
     }
 }

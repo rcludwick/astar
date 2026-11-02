@@ -1,0 +1,15 @@
+# Build context is the repo root; send only what cargo needs.
+**/target
+.git
+.worktrees
+.idea
+.shots
+apps/macos
+docs
+harness/asterisk_parity/captures
+harness/nodebench/findings
+deploy/out
+deploy/sysroot-amd64
+fuzz/corpus
+fuzz/artifacts
+*.dmg

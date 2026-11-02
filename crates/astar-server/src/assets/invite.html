@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<title>Invitation — astar node</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="auth.css">
+</head>
+<body>
+<div class="ambient ambient-a"></div>
+<div class="ambient ambient-b"></div>
+<div class="ambient ambient-c"></div>
+<main class="auth-narrow">
+  <section class="card auth-card" aria-labelledby="title">
+    <div>
+      <h1 id="title">You're invited</h1>
+      <p class="auth-host" id="who">Checking the invitation…</p>
+    </div>
+
+    <div id="dead" hidden>
+      <p class="banner err" id="dead-text"></p>
+      <p class="hint">Ask whoever sent it for a new link. Each one works once, for a limited time.</p>
+    </div>
+
+    <div id="enrol" hidden>
+      <form class="auth-form" id="name-form">
+        <label for="name">Your name or callsign</label>
+        <input id="name" autocomplete="username" autocapitalize="characters" spellcheck="false" maxlength="32" required>
+        <label for="display">Display name <span class="role">(optional)</span></label>
+        <input id="display" autocomplete="name" maxlength="64">
+      </form>
+      <p class="lead" id="how">How will you sign in?</p>
+      <div class="tiles" role="group" aria-labelledby="how">
+        <button type="button" class="tile" id="t-passkey"><span class="glyph" aria-hidden="true">&#x1F511;&#xFE0E;</span><span class="t">Passkey</span><span class="d">on this phone or computer, or your password manager</span></button>
+        <button type="button" class="tile" id="t-key"><span class="glyph" aria-hidden="true">&#x1F50C;&#xFE0E;</span><span class="t">Security key</span><span class="d">a YubiKey or similar, plugged in or tapped</span></button>
+        <button type="button" class="tile" id="t-app"><span class="glyph" aria-hidden="true">&#x23F1;&#xFE0E;</span><span class="t">Authenticator app</span><span class="d">six-digit codes, works on any hostname</span></button>
+      </div>
+      <p class="hint" id="app-note" hidden></p>
+
+      <div class="panel" id="key-panel" hidden>
+        <label class="check"><input type="checkbox" id="nopin"> My key has no PIN (an older U2F key)</label>
+        <button type="button" class="btn primary" id="key-go">Register my key</button>
+      </div>
+
+      <div class="panel" id="app-panel" hidden>
+        <p class="hint">Scan this with your authenticator app, or type the key in. It is shown once.</p>
+        <div id="app-qr"></div>
+        <div class="auth-row"><span class="secret" id="app-secret"></span><button type="button" class="btn" id="app-copy">Copy key</button></div>
+        <form class="auth-form" id="app-form">
+          <label for="app-code">Then enter the code it shows</label>
+          <div class="auth-row">
+            <input id="app-code" class="code" autocomplete="one-time-code" inputmode="numeric" maxlength="6" placeholder="123456" required>
+            <button type="submit" class="btn primary" id="app-go">Finish</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <p class="auth-msg err" id="msg" role="alert"></p>
+
+    <div id="done" hidden>
+      <p class="banner" id="done-text"></p>
+      <a class="btn primary wide" id="done-go" href="/admin/">Continue</a>
+    </div>
+
+    <div class="auth-foot"><a href="/">&larr; Listen</a></div>
+  </section>
+</main>
+<script src="auth.js"></script>
+<script src="invite.js"></script>
+</body>
+</html>

@@ -1,0 +1,55 @@
+request: GET /recordings HTTP/1.1
+status: 200
+header: content-security-policy: default-src 'self'; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'
+header: content-type: text/html; charset=utf-8
+header: referrer-policy: no-referrer
+header: x-content-type-options: nosniff
+header: x-frame-options: DENY
+body: <!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Recordings — astar-server</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="auth.css">
+</head>
+<body>
+<div class="ambient ambient-a"></div>
+<div class="ambient ambient-b"></div>
+<div class="ambient ambient-c"></div>
+<main>
+  <header class="card header">
+    <div>
+      <a class="back" href="./">← node</a>
+      <h1>Recordings</h1>
+      <p class="subtitle" id="summary">every over this node carries</p>
+    </div>
+    <div class="badges">
+      <span class="badge off" id="badge-state"><i class="dot"></i><span id="badge-text">loading</span></span>
+      <a class="btn" id="download-all" href="recordings.tar" download hidden>Download all</a>
+      <div id="auth-chip"></div>
+    </div>
+  </header>
+
+  <p class="banner warn" id="offline" hidden>Can't reach the node — still trying.</p>
+  <p class="banner err" id="disk-low" hidden>Under 500 MB free on the recordings disk — nothing new is recorded until there is room again.</p>
+  <p class="banner warn" id="off" hidden>Recording is off on this node. Turn it on under <a href="settings#recording">Settings → Recordings</a>, then restart.</p>
+  <p class="banner err" id="error" hidden></p>
+
+  <section class="card" id="card-list" hidden>
+    <div class="card-head"><h2>Overs</h2><span class="count" id="count">0</span></div>
+    <table>
+      <thead><tr><th>time</th><th>length</th><th>talker</th><th>network</th><th>size</th><th><span class="sr-only">actions</span></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <p class="empty" id="empty">nothing recorded yet</p>
+  </section>
+  <audio id="player" preload="none"></audio>
+</main>
+<p class="sr-only" id="live" role="status" aria-live="polite"></p>
+<script src="auth.js"></script>
+<script src="recordings.js"></script>
+</body>
+</html>
+

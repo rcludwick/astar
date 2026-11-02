@@ -131,9 +131,13 @@ code linked in.
 **Everything else resolves a system `libcodec2` at runtime** — a plain
 `cargo build` of the engine, `astar-server` or the Iced client `dlopen`s it,
 never links it. It tries `IAX_CODEC2_PATH` first, then any configured search
-directories, then `/opt/homebrew/lib`, `/usr/local/lib` and `/usr/lib`. Each
-candidate is sanity-checked before use, so a wrong or broken library is
-rejected rather than half-loaded.
+directories, then `/opt/homebrew/lib`, `/usr/local/lib` and `/usr/lib`, and on
+Linux also the multiarch `/usr/lib/x86_64-linux-gnu` and
+`/usr/lib/aarch64-linux-gnu` where Debian and Ubuntu put it. In each directory
+it tries `libcodec2.so` and then the versioned `libcodec2.so.1.2`, `.1.1` and
+`.1.0`, so a distribution's runtime package is enough without its `-dev`
+package (macOS: `libcodec2.dylib`). Each candidate is sanity-checked before
+use, so a wrong or broken library is rejected rather than half-loaded.
 
 The runtime path wins wherever both exist: even in the linked app, a healthy
 system library is preferred and the linked copy is the fallback. Install one
@@ -148,8 +152,10 @@ if you want to control which Codec 2 astar runs.
 === "Debian / Ubuntu"
 
     ```bash
-    sudo apt install libcodec2-dev
+    sudo apt install libcodec2-1.2   # Debian 13: the runtime library is enough to run
     ```
+
+    `libcodec2-dev` is only needed to build against the library.
 
 If your copy lives somewhere unusual, name the library itself:
 
@@ -193,18 +199,24 @@ Which builds include D-Star at all:
 | **Engine crates** | off | `astar-codec`'s `ambe-hw` feature is off by default. Enable it per crate, e.g. `cargo test -p astar-codec --features ambe-hw`. |
 | **`astar-server`** | off in its own manifest | It takes default features only — but see the warning below. |
 
-With no dongle attached the engine reports D-Star as unavailable — the same
-shape of outcome as a build with no Codec 2, and equally silent. Detection is
-hotplug rather than latched at launch, so the capability follows the hardware.
+With no trusted dongle attached the engine reports D-Star as unavailable — the
+same shape of outcome as a build with no Codec 2, and equally silent. A dongle
+is trusted by its USB serial number: in the app, through
+[Settings → Vocoders](../macos/vocoders.md); for `astar-server`, through
+`[vocoder] trusted_serials`; for the `*-listen` CLI tools, through
+`ASTAR_VOCODER_SERIALS=serial1,serial2`. Detection is hotplug rather than
+latched at launch, so the capability follows the hardware.
 
-!!! danger "`IAX_THUMBDV_PORT` narrows the scan — it can never replace it"
+!!! danger "Only trusted serials are opened; `IAX_THUMBDV_PORT` only narrows"
 
-    The dongle is found by scanning for that FTDI VID/PID. `IAX_THUMBDV_PORT`
-    selects *among ports the scan already matched*, for a machine with more
-    than one attached. It cannot point the opener at an arbitrary serial port,
-    and that is a safety property rather than a limitation: opening a USB radio
-    interface's tty asserts RTS, which is the radio-key line. See
-    [On-air safety](../about/safety.md).
+    The engine opens a dongle only when it has that FTDI VID/PID **and** its
+    USB serial number is on the trust list; an empty list opens nothing.
+    `IAX_THUMBDV_PORT` selects *among the trusted ports*, for a machine with
+    more than one attached, and a pin outside them is refused. It cannot point
+    the opener at an arbitrary serial port, and that is a safety property
+    rather than a limitation: many radio CAT/PTT cables use the same FTDI
+    chip, and opening a USB radio interface's tty asserts RTS, which is the
+    radio-key line. See [On-air safety](../about/safety.md).
 
     `astar-server` takes default features only, so its own manifest does not
     enable `dstar` — enabling it would make the daemon's remote `POST /key` a

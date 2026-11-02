@@ -27,7 +27,7 @@ workspace = true
 # refuses on the feature-independent `dstar_active` snapshot flag instead of a
 # `#[cfg]` (iax-d9f4). Do not weaken that guard on the assumption that the
 # node is built without `dstar`: in a workspace build, it is not.
-default = ["dstar", "ysf", "m17", "nxdn", "dmr"]
+default = ["dstar", "ysf", "m17", "nxdn", "dmr", "echolink"]
 dstar = ["astar-station/dstar"]
 # M17, ON by default — it mirrors `astar-station`'s OWN default, so this
 # feature does not turn anything on that a plain build did not already have.
@@ -70,6 +70,17 @@ nxdn = ["astar-station/nxdn"]
 # path refuses on the feature-independent `dmr_active` snapshot flag rather
 # than a `#[cfg]`.
 dmr = ["astar-station/dmr"]
+# EchoLink, calling out only, ON by default: the Swift binding is generated
+# from this crate and reaching EchoLink from astar is the point of the
+# `iax_station_echolink_*` entry points. It needs no hardware.
+#
+# The `astar-station` dependency above takes `echolink` from its own
+# defaults, so turning this OFF does not take EchoLink out of the facade.
+# That is why every action entry point checks THIS feature itself
+# (`echolink_gate` in src/ffi.rs): without it they refuse with
+# IAX_ERR_ECHOLINK before reading an argument, the state and station
+# documents are empty, and `echolink_available` is false.
+echolink = ["astar-station/echolink"]
 # Statically-linked Codec 2 for M17 (astar-8c4d). Deliberately NOT default:
 # `codec2` is LGPL-2.1-only AND MIT, and a plain `cargo build` of this crate
 # must stay free of LGPL code. The macOS app opts in when it builds the
@@ -77,7 +88,7 @@ dmr = ["astar-station/dmr"]
 codec2-static = ["astar-station/codec2-static"]
 
 [dependencies]
-astar-station = { path = "../astar-station", version = "0.1.16-beta" }
+astar-station = { path = "../astar-station", version = "0.1.18-beta" }
 # Serialize the secret-free MicProfile to/from JSON for the characterize /
 # set-mic-profile FFI (iax-5fb6 / iax-2095).
 serde_json.workspace = true
@@ -86,9 +97,15 @@ serde_json.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# Every EchoLink socket refuses a non-loopback address in a test build. No
+# test here logs in or calls anyone, and this makes that a property of the
+# code rather than a promise.
+astar-station = { path = "../astar-station", version = "0.1.18-beta", features = [
+    "echolink-loopback-only",
+] }
 # The FFI tests build the real station; the test-backend feature keeps any
 # device-enumeration path hardware-free.
-astar-audio = { path = "../astar-audio", version = "0.1.16-beta", features = [
+astar-audio = { path = "../astar-audio", version = "0.1.18-beta", features = [
     "test-backend",
 ] }
 

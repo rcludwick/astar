@@ -1,0 +1,29 @@
+### node -> server after 30 s of storm
+hold: dialled from node at 20:38:11.3N
+t=1s node=down server=-
+t=2s node=down server=-
+t=3s node=down server=-
+t=4s node=down server=-
+t=5s node=down server=-
+t=6s node=down server=-
+t=7s node=down server=-
+t=8s node=down server=-
+t=9s node=down server=-
+t=10s node=down server=-
+hold: link never came up on both sides in 10s
+exit=1
+### server -> node
+{"ok":true}
+hold: dialled from server at 20:38:26.3N
+t=1s node=down server=link:1999
+t=2s node=down server=link:1999
+t=3s node=down server=link:1999
+t=4s node=down server=link:1999
+t=5s node=down server=link:1999
+t=6s node=down server=link:1999
+t=7s node=down server=link:1999
+t=8s node=down server=link:1999
+t=9s node=down server=-
+t=10s node=down server=-
+hold: link never came up on both sides in 10s
+exit=1

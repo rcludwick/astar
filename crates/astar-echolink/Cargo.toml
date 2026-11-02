@@ -1,0 +1,26 @@
+[package]
+name = "astar-echolink"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "EchoLink protocol primitives: directory lines and list parsing, RTCP SDES/BYE, the GSM audio datagram, oNDATA text, and the per-station connection state machine. Sans-IO, plus loopback-only fakes for tests."
+
+[lints]
+workspace = true
+
+[features]
+# `fake::FakeDirectory` and `fake::FakeStation`: a directory server and a
+# station that bind 127.0.0.1 only, for tests. Only ever turned on from a
+# `[dev-dependencies]` entry; `ci/guard-echolink.sh` fails if it reaches a
+# `default` list or a normal dependency. It pulls in the GSM encoder so the
+# fake station can talk (a 1 kHz tone).
+loopback-fakes = ["dep:astar-codec"]
+
+[dependencies]
+zeroize.workspace = true
+miniz_oxide.workspace = true
+thiserror.workspace = true
+astar-codec = { path = "../astar-codec", default-features = false, features = ["gsm"], optional = true }

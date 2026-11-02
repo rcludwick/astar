@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Discord — astar-server</title>
+<link rel="stylesheet" href="../style.css">
+<link rel="stylesheet" href="../auth.css">
+</head>
+<body>
+<div class="ambient ambient-a"></div>
+<div class="ambient ambient-b"></div>
+<div class="ambient ambient-c"></div>
+<main>
+  <header class="card header">
+    <div>
+      <a class="back" href="../">← node</a>
+      <h1>Discord</h1>
+      <p class="subtitle">approvals, bans and the mic</p>
+    </div>
+    <div class="badges">
+      <span class="badge off" id="badge-bridge"><i class="dot"></i>bridge</span>
+      <span class="badge off" id="badge-gateway"><i class="dot"></i>bot</span>
+      <span class="badge off" id="badge-commands"><i class="dot"></i>commands</span>
+      <div id="auth-chip"></div>
+    </div>
+  </header>
+
+  <p class="banner warn" id="offline" hidden>Can't reach the node — still trying.</p>
+  <p class="banner err" id="last-error" hidden></p>
+
+  <section class="card" id="setup" hidden></section>
+
+  <div class="stack" id="admin" hidden>
+    <section class="card">
+      <div class="card-head"><h2>Discord commands</h2></div>
+      <div class="slot row-actions" id="slot-switch"></div>
+      <p class="hint" id="note-switch"></p>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>Link</h2></div>
+      <div id="link-body"></div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>In the channel now</h2><span class="count" id="count-present">0</span></div>
+      <ul class="people" id="list-present"></ul>
+      <p class="hint" id="mic-timers"></p>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>Pending requests</h2><span class="count" id="count-pending">0</span></div>
+      <ul class="people" id="list-pending"></ul>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>Admins</h2><span class="count" id="count-admins">0</span></div>
+      <ul class="people" id="list-admins"></ul>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>Approved</h2><span class="count" id="count-approved">0</span></div>
+      <ul class="people" id="list-approved"></ul>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>Banned</h2><span class="count" id="count-banned">0</span></div>
+      <ul class="people" id="list-banned"></ul>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2>Approvers</h2><span class="count" id="count-approvers">0</span></div>
+      <ul class="people" id="list-approvers"></ul>
+      <p class="hint">Set in node.toml — <code>[discord] approvers</code>. <a class="manage" href="../settings#discord">Change them in Settings &rarr;</a></p>
+    </section>
+  </div>
+</main>
+<p class="sr-only" id="live" role="status" aria-live="polite"></p>
+<script src="../auth.js"></script>
+<script src="admin.js"></script>
+</body>
+</html>

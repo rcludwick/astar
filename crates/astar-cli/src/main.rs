@@ -27,6 +27,8 @@ mod nxdn_listen;
 mod parrot;
 mod ptt;
 mod register;
+#[cfg(any(feature = "dstar", feature = "ysf", feature = "nxdn", feature = "dmr"))]
+mod vocoder;
 #[cfg(any(feature = "dmr", feature = "dstar", feature = "nxdn", feature = "ysf"))]
 mod wav_backend;
 #[cfg(feature = "ysf")]

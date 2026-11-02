@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings — astar-server</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="auth.css">
+</head>
+<body>
+<div class="ambient ambient-a"></div>
+<div class="ambient ambient-b"></div>
+<div class="ambient ambient-c"></div>
+<main>
+  <header class="card header">
+    <div>
+      <a class="back" href="./">← node</a>
+      <h1>Settings</h1>
+      <p class="subtitle">this node, its accounts, and its bridges</p>
+    </div>
+    <div class="badges">
+      <span class="badge off" id="badge-registered" hidden><i class="dot"></i>registered</span>
+      <span class="badge off" id="badge-saved"><i class="dot"></i>saved</span>
+      <span class="badge off" id="badge-restart"><i class="dot"></i>restart</span>
+      <span class="badge off" id="badge-file"><i class="dot"></i>file</span>
+      <div id="auth-chip"></div>
+    </div>
+  </header>
+
+  <p class="banner warn" id="offline" hidden>Can't reach the node — still trying.</p>
+  <div class="banner err" id="conflict" hidden>node.toml changed since the page loaded — reload to see the current file.</div>
+  <p class="banner err" id="file-banner" hidden></p>
+  <p class="banner err" id="unavailable" hidden></p>
+
+  <section class="card" id="setup" hidden></section>
+
+  <div class="stack" id="cards">
+    <section class="card" id="card-identity" hidden>
+      <a id="identity"></a>
+      <div class="card-head"><h2>Identity</h2></div>
+      <div id="body-identity"></div>
+      <div class="card-foot"><button type="button" class="btn" id="save-identity" disabled>Save</button></div>
+    </section>
+
+    <section class="card" id="card-listener" hidden>
+      <a id="listener"></a>
+      <div class="card-head"><h2>Listener</h2></div>
+      <p class="banner warn" id="auth-banner" hidden>auth = "off" with no allowed_nodes admits every caller on the internet.</p>
+      <div id="body-listener"></div>
+      <div class="card-foot"><button type="button" class="btn" id="save-listener" disabled>Save</button></div>
+    </section>
+
+    <section class="card" id="card-audio" hidden>
+      <a id="audio"></a>
+      <div class="card-head"><h2>Audio &amp; bridge</h2></div>
+      <div id="body-audio"></div>
+      <div class="card-foot"><button type="button" class="btn" id="save-audio" disabled>Save</button></div>
+    </section>
+
+    <section class="card" id="card-announce" hidden>
+      <a id="announce"></a>
+      <div class="card-head"><h2>Announcements</h2></div>
+      <div id="body-announce"></div>
+      <div class="card-foot"><button type="button" class="btn" id="save-announce" disabled>Save</button></div>
+    </section>
+
+    <section class="card" id="card-discord" hidden>
+      <a id="discord"></a>
+      <div class="card-head"><h2>Discord</h2></div>
+      <div id="body-discord"></div>
+      <div class="card-foot"><button type="button" class="btn" id="save-discord" disabled>Save</button></div>
+    </section>
+
+    <section class="card" id="card-linking" hidden>
+      <a id="linking"></a>
+      <div class="card-head"><h2>Linking</h2></div>
+      <div id="body-linking"></div>
+      <div class="card-foot"><button type="button" class="btn" id="save-linking" disabled>Save</button></div>
+    </section>
+
+    <section class="card" id="card-m17" hidden>
+      <a id="m17"></a>
+      <div class="card-head"><h2>M17</h2></div>
+      <div id="body-m17"></div>
+      <div class="card-foot"><button type="button" class="btn" id="save-m17" disabled>Save</button></div>
+    </section>
+
+    <section class="card" id="card-vocoder" hidden>
+      <a id="vocoder"></a>
+      <div class="card-head"><h2>Vocoders</h2></div>
+      <div id="body-vocoder"></div>
+      <div class="card-foot"><button type="button" class="btn" id="save-vocoder" disabled>Save</button></div>
+    </section>
+
+    <section class="card" id="card-public" hidden>
+      <a id="public"></a>
+      <div class="card-head"><h2>Public page</h2></div>
+      <div id="body-public"></div>
+      <div class="card-foot"><button type="button" class="btn" id="save-public" disabled>Save</button></div>
+    </section>
+
+    <section class="card" id="card-recording" hidden>
+      <a id="recording"></a>
+      <div class="card-head"><h2>Recordings</h2></div>
+      <div id="body-recording"></div>
+      <div class="card-foot"><button type="button" class="btn" id="save-recording" disabled>Save</button></div>
+    </section>
+
+    <section class="card" id="card-advanced" hidden>
+      <a id="advanced"></a>
+      <div class="card-head"><h2>Advanced</h2></div>
+      <div id="body-advanced"></div>
+      <div class="card-foot"><button type="button" class="btn" id="save-advanced" disabled>Save</button></div>
+    </section>
+  </div>
+
+  <section class="card" id="restart-bar" tabindex="-1" aria-labelledby="restart-heading">
+    <div class="card-head"><h2 id="restart-heading">Restart</h2></div>
+    <p class="lead" id="restart-summary"></p>
+    <p class="hint" id="restart-why"></p>
+    <div class="row-actions">
+      <button type="button" class="btn danger" id="btn-restart">Restart node</button>
+      <span class="note" id="restart-status"></span>
+    </div>
+  </section>
+  <template id="tpl-credential">
+    <input type="password" autocomplete="new-password" spellcheck="false" autocapitalize="off" placeholder="new value">
+  </template>
+</main>
+<p class="sr-only" id="live" role="status" aria-live="polite"></p>
+<script src="auth.js"></script>
+<script src="settings.js"></script>
+</body>
+</html>

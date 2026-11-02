@@ -146,7 +146,7 @@ fn nxdn_available_matches_the_shared_thumbdv_probe() {
     let station = test_station();
     assert_eq!(
         station.nxdn_available(),
-        astar_console::nxdn_available(),
+        astar_console::nxdn_available(&station.vocoder_trust()),
         "the facade must not grow a probe of its own"
     );
 }

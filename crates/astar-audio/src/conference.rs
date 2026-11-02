@@ -40,9 +40,29 @@ use crate::router::frame_samples;
 /// the station rate — 320 samples @ 16 kHz, iax-4348).
 const TICK: Duration = Duration::from_millis(20);
 
+/// Ticks a member's TX stays open after the last tick on which anyone it
+/// hears delivered audio (100 ms): enough to ride out a late frame without
+/// dropping the over, short enough that the far node unkeys promptly.
+const TX_HANG_TICKS: u32 = 5;
+
 /// Opaque per-member slot id within a [`Conference`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MemberId(u64);
+
+impl MemberId {
+    /// Construct a `MemberId` from a raw slot value. For tests and FFI
+    /// round-trips; the conference assigns real ids itself.
+    #[must_use]
+    pub fn from_raw(id: u64) -> Self {
+        Self(id)
+    }
+
+    /// The raw slot value.
+    #[must_use]
+    pub fn as_raw(self) -> u64 {
+        self.0
+    }
+}
 
 /// One audio source feeding a conference tick: a PCM `rx` plus the jitter
 /// `residual` that normalizes into. Shared by conference members and the optional
@@ -149,6 +169,9 @@ struct Member {
     /// While it reports a tone (+ tail), the member is excluded from the
     /// relay sum; registered digits land in `Shared::dtmf_digits`.
     dtmf: DtmfDetector,
+    /// Ticks this member's TX stays open with nobody it hears talking
+    /// ([`TX_HANG_TICKS`] after the last audio). At 0 it is sent nothing.
+    tx_hang: u32,
 }
 
 impl Member {
@@ -365,6 +388,7 @@ impl Shared {
     /// Run one 20 ms mix-minus tick over the current membership. Factored out so
     /// unit tests can drive ticks deterministically without the wall-clock
     /// thread.
+    #[allow(clippy::too_many_lines)]
     fn tick(&mut self) {
         if self.members.is_empty() && self.local_mic.is_none() {
             return;
@@ -372,10 +396,17 @@ impl Shared {
 
         let n = self.frame_samples;
 
-        // 1. Decode each member's RX frame into a per-member f32 buffer.
+        // 1. Decode each member's RX frame into a per-member f32 buffer, and
+        //    note which members delivered audio at all this tick.
         let mut bufs: Vec<Vec<f32>> = vec![vec![0.0; n]; self.members.len()];
-        for (member, buf) in self.members.iter_mut().zip(bufs.iter_mut()) {
-            member.src.decode_into(buf);
+        let mut delivered = vec![false; self.members.len()];
+        for ((member, buf), got) in self
+            .members
+            .iter_mut()
+            .zip(bufs.iter_mut())
+            .zip(delivered.iter_mut())
+        {
+            *got = member.src.decode_into(buf) > 0;
         }
 
         // In-band DTMF (iax-8ca0): run each member's detector over this
@@ -429,8 +460,9 @@ impl Shared {
 
         // 2. Decode the optional local mic into its own source buffer.
         let mut mic_buf = vec![0.0_f32; n];
+        let mut mic_delivered = false;
         let have_mic = if let Some(mic) = self.local_mic.as_mut() {
-            mic.decode_into(&mut mic_buf);
+            mic_delivered = mic.decode_into(&mut mic_buf) > 0;
             true
         } else {
             false
@@ -461,14 +493,41 @@ impl Shared {
         //    members. A non-receiving member (Monitor/LocalMonitor link) is
         //    otherwise sent NOTHING — not silence — mirroring the parrot idle
         //    radio-gap semantics above.
+        //
+        //    A member is sent the mix only while someone it hears is talking:
+        //    a relay-eligible member other than itself (or itself, in a full
+        //    mix) delivered audio this tick, or did within the hangover. Then
+        //    it is sent NOTHING, not silence. An app_rpt node treats a link's
+        //    voice frames as its key once the NEWKEY handshake is done, so
+        //    continuous silence held every linked node's transmitter up for
+        //    good (nodebench finding 6). app_rpt sends link voice only while
+        //    keyed, and so does this.
+        let talking: Vec<bool> = self
+            .members
+            .iter()
+            .zip(delivered.iter())
+            .zip(squelched.iter())
+            .map(|((m, &d), &q)| d && m.contributes && !q)
+            .collect();
+        let talkers = talking.iter().filter(|&&t| t).count();
         let mut frame = vec![0_i16; n];
         for (i, member) in self.members.iter_mut().enumerate() {
+            let others_talking = if self.mix_minus && talking[i] {
+                talkers > 1
+            } else {
+                talkers > 0
+            };
+            if others_talking || mic_delivered {
+                member.tx_hang = TX_HANG_TICKS;
+            }
+            let tx_open = member.tx_hang > 0;
+            member.tx_hang = member.tx_hang.saturating_sub(1);
             if let Some(ann) = member.announce.pop_front() {
                 let _ = member.tx.send(ann);
                 member.wake_if_set();
                 continue;
             }
-            if !member.receives {
+            if !member.receives || !tx_open {
                 continue;
             }
             for (j, slot) in frame.iter_mut().enumerate() {
@@ -646,6 +705,7 @@ impl Conference {
             contributes: true,
             receives: true,
             dtmf: DtmfDetector::new(member_rate),
+            tx_hang: 0,
         });
         id
     }
@@ -923,6 +983,44 @@ mod tests {
     }
 
     #[test]
+    fn nobody_talking_sends_nothing() {
+        // Radio-gap semantics on every member (nodebench finding 6): with no
+        // member delivering audio, nothing goes out, not silence.
+        let conf = Conference::new(ConferenceConfig::default());
+        let (_a_in, a_out, _a) = join(&conf);
+        let (_b_in, b_out, _b) = join(&conf);
+        for _ in 0..3 {
+            conf.tick_for_test();
+        }
+        assert!(a_out.try_recv().is_err(), "A is sent nothing");
+        assert!(b_out.try_recv().is_err(), "B is sent nothing");
+    }
+
+    #[test]
+    fn a_talker_opens_the_others_tx_for_the_over_plus_hangover_only() {
+        let conf = Conference::new(ConferenceConfig::default());
+        let (a_in, a_out, _a) = join(&conf);
+        let (_b_in, b_out, _b) = join(&conf);
+        for _ in 0..3 {
+            a_in.send(frame(4000).into()).unwrap();
+            conf.tick_for_test();
+        }
+        // A's own TX stays shut: under mix-minus it hears nobody.
+        assert!(a_out.try_recv().is_err(), "the talker hears no one");
+        assert_eq!(b_out.try_iter().count(), 3, "B hears each tick of A");
+        // A stops: B gets the hangover, then nothing.
+        for _ in 0..20 {
+            conf.tick_for_test();
+        }
+        let tail = b_out.try_iter().count();
+        assert_eq!(
+            tail,
+            usize::try_from(TX_HANG_TICKS).unwrap() - 1,
+            "hangover after the last frame"
+        );
+    }
+
+    #[test]
     fn monitor_member_relays_onward_but_is_never_transmitted_to() {
         // Monitor link semantics (iax-42ce): its RX reaches the Transceive
         // members' TX, but nothing is ever sent to it — not even silence.
@@ -959,10 +1057,11 @@ mod tests {
         t_in.send(frame(4000).into()).unwrap();
         lm_in.send(frame(2000).into()).unwrap();
         conf.tick_for_test();
-        let t_heard = first_sample(&t_out.recv().unwrap());
+        // The only other member is not relayed, so nobody T hears is
+        // talking: T is sent nothing at all (finding 6 radio gap).
         assert!(
-            t_heard.abs() < 1e-3,
-            "LocalMonitor RX is never relayed to other members, got {t_heard}"
+            t_out.try_recv().is_err(),
+            "LocalMonitor RX is never relayed to other members"
         );
         assert!(
             lm_out.try_recv().is_err(),
@@ -1048,12 +1147,8 @@ mod tests {
         let _ = a_in.send(frame(8000).into());
         b_in.send(frame(0).into()).unwrap();
         conf.tick_for_test();
-        // B is now alone: it hears nothing (A was removed from the mix).
-        let b_heard = first_sample(&b_out.recv().unwrap());
-        assert!(
-            b_heard.abs() < 1e-3,
-            "removed A no longer contributes, got {b_heard}"
-        );
+        // B is now alone: nobody it hears is talking, so it is sent nothing.
+        assert!(b_out.try_recv().is_err(), "removed A no longer contributes");
     }
 
     #[test]
@@ -1309,11 +1404,11 @@ mod tests {
             a_in.send(tone.into()).unwrap();
             b_in.send(frame(0).into()).unwrap();
             conf.tick_for_test();
-            let b_heard = b_out.recv().unwrap();
+            // A squelched member is not talking, so B is sent nothing.
+            let b_peak = b_out.try_recv().map_or(0.0, |f| peak_of(&f));
             assert!(
-                peak_of(&b_heard) < 1e-3,
-                "B never hears A's tone (relay squelch), peak {}",
-                peak_of(&b_heard)
+                b_peak < 1e-3,
+                "B never hears A's tone (relay squelch), peak {b_peak}"
             );
             let spk = spk_rx.recv().unwrap();
             assert!(
@@ -1342,18 +1437,17 @@ mod tests {
             a_in.send(tone.into()).unwrap();
             b_in.send(frame(0).into()).unwrap();
             conf.tick_for_test();
-            let _ = b_out.recv().unwrap();
+            let _ = b_out.try_recv();
         }
         // Tail ticks: A speaks normally but is still squelched.
         for i in 0..SQUELCH_TAIL_BLOCKS {
             a_in.send(frame(6000).into()).unwrap();
             b_in.send(frame(0).into()).unwrap();
             conf.tick_for_test();
-            let b_heard = b_out.recv().unwrap();
+            let b_peak = b_out.try_recv().map_or(0.0, |f| peak_of(&f));
             assert!(
-                peak_of(&b_heard) < 1e-3,
-                "tail tick {i}: still squelched, peak {}",
-                peak_of(&b_heard)
+                b_peak < 1e-3,
+                "tail tick {i}: still squelched, peak {b_peak}"
             );
         }
         // Tail expired: the relay resumes.
@@ -1413,7 +1507,10 @@ mod tests {
                 "non-tone audio relays untouched"
             );
         }
-        assert!(conf.drain_dtmf_digits().is_empty());
+        assert_eq!(
+            conf.drain_dtmf_digits(),
+            [] as [(crate::conference::MemberId, char); 0]
+        );
     }
 
     #[test]

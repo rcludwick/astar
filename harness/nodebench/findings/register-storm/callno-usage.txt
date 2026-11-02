@@ -1,0 +1,5 @@
+t=2s 127.0.0.1:57156                               2048         2048         {"calls":[],"links":[],"listening":true,"node_id":"1998","registered":false}
+t=5s 127.0.0.1:57156                               2048         2048         {"calls":[],"links":[],"listening":true,"node_id":"1998","registered":false}
+t=10s 127.0.0.1:57156                               2048         2048         {"calls":[],"links":[],"listening":true,"node_id":"1998","registered":false}
+t=20s 127.0.0.1:57156                               2048         2048         {"calls":[],"links":[],"listening":true,"node_id":"1998","registered":false}
+t=30s 127.0.0.1:57156                               2048         2048         {"calls":[],"links":[],"listening":true,"node_id":"1998","registered":false}

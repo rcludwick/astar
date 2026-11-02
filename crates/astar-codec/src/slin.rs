@@ -44,8 +44,8 @@ pub fn encode_slice(pcm: &[i16], out: &mut [u8]) {
         2 * pcm.len(),
         "slin: encode_slice length mismatch"
     );
-    for (o, &s) in out.chunks_exact_mut(2).zip(pcm) {
-        o.copy_from_slice(&to_wire(s));
+    for (o, &s) in out.as_chunks_mut::<2>().0.iter_mut().zip(pcm) {
+        *o = to_wire(s);
     }
 }
 
@@ -60,8 +60,8 @@ pub fn decode_slice(bytes: &[u8], out: &mut [i16]) {
         2 * out.len(),
         "slin: decode_slice length mismatch"
     );
-    for (s, b) in out.iter_mut().zip(bytes.chunks_exact(2)) {
-        *s = from_wire([b[0], b[1]]);
+    for (s, b) in out.iter_mut().zip(bytes.as_chunks::<2>().0) {
+        *s = from_wire(*b);
     }
 }
 
@@ -93,8 +93,8 @@ pub fn encode_slice_le(pcm: &[i16], out: &mut [u8]) {
         2 * pcm.len(),
         "slin: encode_slice_le length mismatch"
     );
-    for (o, &s) in out.chunks_exact_mut(2).zip(pcm) {
-        o.copy_from_slice(&s.to_le_bytes());
+    for (o, &s) in out.as_chunks_mut::<2>().0.iter_mut().zip(pcm) {
+        *o = s.to_le_bytes();
     }
 }
 
@@ -109,8 +109,8 @@ pub fn decode_slice_le(bytes: &[u8], out: &mut [i16]) {
         2 * out.len(),
         "slin: decode_slice_le length mismatch"
     );
-    for (s, b) in out.iter_mut().zip(bytes.chunks_exact(2)) {
-        *s = i16::from_le_bytes([b[0], b[1]]);
+    for (s, b) in out.iter_mut().zip(bytes.as_chunks::<2>().0) {
+        *s = i16::from_le_bytes(*b);
     }
 }
 

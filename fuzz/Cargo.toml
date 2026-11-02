@@ -16,6 +16,9 @@ path = "../crates/astar-iax-core"
 [dependencies.astar-iax]
 path = "../crates/astar-iax"
 
+[dependencies.astar-http]
+path = "../crates/astar-http"
+
 # Prevent this crate from being treated as a workspace member; the workspace
 # Cargo.toml also excludes `fuzz/`.
 [workspace]
@@ -40,6 +43,13 @@ bench = false
 [[bin]]
 name = "listener_demux"
 path = "fuzz_targets/listener_demux.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_read_head"
+path = "fuzz_targets/http_read_head.rs"
 test = false
 doc = false
 bench = false

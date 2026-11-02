@@ -1,0 +1,3 @@
+rig: pod up (codecs=ulaw debug=1 config=node.toml fill-callerid=1 captures=harness/nodebench/captures)
+rig: astar-server /status answers (0 s)
+rig: app_rpt has node 1999 (0 s)

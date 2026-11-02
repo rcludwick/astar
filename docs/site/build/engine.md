@@ -46,6 +46,12 @@ is the ThumbDV vocoder driver, vendored under its own MIT/Apache-2.0 terms. Its
 `Cargo.toml` hard-codes its licence and version on purpose — converting those
 to `.workspace = true` would relicense someone else's code as AGPL.
 
+`vendor/codec2` is the same kind of island: the `codec2` crate (Codec 2, for
+M17), vendored unmodified under its LGPL-2.1-only AND MIT terms. It is listed in
+the workspace's `exclude` rather than its members, so workspace-wide `fmt` and
+`clippy` leave it exactly as upstream wrote it; Cargo still builds it as a path
+dependency whenever `codec2-static` is on.
+
 ## Scoping a build
 
 The `build`, `test` and `clippy` recipes pass their arguments straight through,

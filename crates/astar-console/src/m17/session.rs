@@ -1,188 +1,35 @@
 // astar — Copyright (c) 2026 Rob Ludwick.
 // SPDX-License-Identifier: AGPL-3.0-only
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
-//! `M17Session`: a full-transceive M17 reflector client runtime (iax-f2b8
-//! Task 3).
-//!
-//! Unlike [`crate::session::ConsoleSession`] (IAX2/`AllStar`), M17 has no
-//! separate call-setup handshake or protocol-level PTT frame: a `CONN`/`ACKN`
-//! exchange with a reflector brings the link up, and transmission is carried
-//! entirely by voice-stream packets (start of a stream = key-down, the `EOS`
-//! bit = key-up).
-//!
-//! The session does **not** own its audio. It is handed a [`CallAudio`] — the
-//! two channel ends of the one lane `ConsoleSession` opened on the station's
-//! router (`crate::voice_route`) — and owns nothing else about audio: no
-//! [`astar_audio::AudioRouter`], no mic or bus id, no meter mirror, no
-//! preference cell, no spectrum copy, and no PTT gate. Meters, DSP
-//! preferences and keying are read and driven once, at the lane, by
-//! `ConsoleSession`. What [`M17Session`] does own:
-//!
-//! - a [`SessionFsm`] (link state + keepalive);
-//! - a [`Codec2Voice`] instance (Codec 2 mode 3200, the rate M17 payloads
-//!   use);
-//! - ONE run-loop thread ("iax-m17") that owns the `UdpSocket` (plain,
-//!   `set_read_timeout(50ms)` — no mio, no async) and drives all of the
-//!   above.
-//!
-//! The control-side [`M17Session`] handle talks to the run-loop thread only
-//! through a small set of atomics (poll-cheap, per [`M17SnapshotState`]) plus
-//! a request flag for PTT — never a shared/locked `Codec2Voice`, so that stays
-//! single-threaded (owned entirely by the run-loop) with no cross-thread
-//! synchronization on the hot audio path.
-//!
-//! # RX jitter handling (documented choice)
-//!
-//! This milestone's RX path is a simple in-order pass-through: packets are
-//! decoded and forwarded to [`astar_audio::router::CallAudio::rx_frames`]
-//! in arrival order, with no reordering/jitter-smoothing buffer. `receiving`
-//! reflects "a stream packet has arrived within the last 400 ms", not
-//! anything about buffer health. The loopback tests exercise same-process
-//! UDP (negligible jitter/reordering), so this is sufficient to validate the
-//! milestone; a `astar_codec::jitter::JitterBuf`-backed reorder stage is
-//! the natural follow-on hardening before this ships against a real
-//! Internet-routed reflector.
+//! [`M17Session`] and every transmit symbol of the M17 client: `TxState`,
+//! [`apply_ptt_edge`], [`drain_tx_frames`], [`send_voice_packet`] and
+//! [`send_disc_flushing_eos_if_keyed`]. They live here and only here, so
+//! the rest of the `m17` module (the shared receive helpers in `super::rx`
+//! and anything built on them) has no way to put a voice-stream packet on
+//! the wire. See [`crate::m17`] for the architecture.
 
-use std::net::{ToSocketAddrs, UdpSocket};
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::net::UdpSocket;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use astar_audio::CallAudio;
 use astar_codec::codec2::Codec2Voice;
 use astar_m17::{
-    BROADCAST, ControlPacket, FsmAction, LinkState, Lsf, SessionFsm, StreamPacket, decode_callsign,
+    BROADCAST, ControlPacket, FsmAction, Lsf, SessionFsm, StreamPacket, decode_callsign,
     encode_callsign,
 };
+use astar_record::frames::{Dir, FrameEvent};
+use astar_record::tap::{StartedOn, TapSlot};
 
-use crate::heard::{HeardEntry, HeardLog};
+use super::rx::{RxTrack, connect_udp_socket, recv_step};
+use super::{M17Config, M17SnapshotState, SharedState, link_to_u8, rec_frame, rec_start};
+use crate::heard::HeardEntry;
 use crate::session::ConsoleError;
 
-/// How long the RX path waits, after the last voice-stream packet, before
-/// clearing [`M17SnapshotState::receiving`] back to `false`.
-const RX_SILENCE_TIMEOUT: Duration = Duration::from_millis(400);
-
-/// The run-loop thread's socket read timeout: also the cadence at which PTT
-/// edges, the FSM keepalive tick, and the RX silence timeout are all
-/// re-checked. 50 ms per the Task 3 design brief (a plain read-timeout loop,
-/// not mio/async).
-const SOCKET_POLL_TIMEOUT: Duration = Duration::from_millis(50);
-
-/// Operator-supplied configuration for an [`M17Session`].
-pub struct M17Config {
-    /// Reflector hostname or IP address.
-    pub host: String,
-    /// Reflector UDP port (the M17 IP-framing default is 17000, but this is
-    /// caller-supplied — no protocol default is assumed here).
-    pub port: u16,
-    /// Reflector module letter (e.g. `b'A'`).
-    pub module: u8,
-    /// This station's callsign (encoded via [`encode_callsign`]; invalid
-    /// callsigns fail [`M17Session::connect`] with [`ConsoleError::Device`]).
-    pub callsign: String,
-    /// Extra directories to search for a runtime `libcodec2` (ahead of the
-    /// hard-coded system paths); see [`astar_codec::open_codec2`].
-    pub codec_dirs: Vec<std::path::PathBuf>,
-    /// How long to wait, with no packet from the reflector, before declaring
-    /// the link [`LinkState::Failed`]. Default (via a fresh [`SessionFsm`])
-    /// is 30 s; tests shorten this to avoid a 30-real-second wait.
-    pub keepalive_timeout: Duration,
-}
-
-/// A poll-cheap snapshot of an [`M17Session`]'s live state. Backed by atomics
-/// on the control side — [`M17Session::state`] never blocks on the run-loop
-/// thread.
-// NOT `Copy`: `talker` is an owned `String`. Cloning a snapshot is one
-// small allocation on a UI-rate poll, which is the same cost D-Star's and
-// YSF's snapshots already pay for the same reason.
-#[derive(Debug, Clone, PartialEq)]
-pub struct M17SnapshotState {
-    /// Current reflector link state.
-    pub link: LinkState,
-    /// `true` while transmit is keyed (mirrors the last [`M17Session::set_ptt`]
-    /// applied by the run-loop; the apply is bounded by one
-    /// [`SOCKET_POLL_TIMEOUT`] tick, ~50 ms).
-    pub ptt: bool,
-    /// `true` while voice-stream packets have arrived from the reflector
-    /// within the last 400 ms.
-    pub receiving: bool,
-    /// The source callsign of the most recently heard transmission — the
-    /// `LSF.src` address of the first packet of the current (or last) stream,
-    /// decoded with [`decode_callsign`] — or `None` until one arrives.
-    ///
-    /// **Last heard, not talking now.** It PERSISTS past end-of-stream, on
-    /// purpose and exactly as D-Star's `talker` does: a reflector that has
-    /// been quiet for a minute should still name whoever last keyed up.
-    /// [`Self::receiving`] is the field that says whether a transmission is
-    /// in progress. It goes away with the session — a disconnected link has
-    /// no last-heard, and a `None` here is what a caller sees once
-    /// `m17_state()` stops returning a snapshot at all.
-    ///
-    /// **Attacker-supplied**: it is whatever callsign whoever keyed up put in
-    /// their LSF. Render it as text, never as markup.
-    pub talker: Option<String>,
-}
-
-/// Atomics shared between the control-side [`M17Session`] and its run-loop
-/// thread. `link` is written by the run-loop and read by
-/// [`M17Session::state`]; `ptt`/`receiving` follow the same direction. Levels
-/// are NOT here: they are read at the lane, by `ConsoleSession`.
-struct SharedState {
-    link: AtomicU8,
-    ptt: AtomicBool,
-    receiving: AtomicBool,
-    /// The last-heard callsign. A `Mutex<Option<String>>` rather than an
-    /// atomic because it is a `String` — the same shape `DstarSession`'s
-    /// shared `talker` uses, and touched at most once per received stream.
-    talker: Mutex<Option<String>>,
-    /// Everyone heard on this link, newest first — `talker` keeps only the
-    /// most recent name, which a short courtesy tail overwrites a second
-    /// after the real talker unkeys.
-    heard: HeardLog,
-}
-
-impl SharedState {
-    fn new() -> Self {
-        Self {
-            link: AtomicU8::new(link_to_u8(LinkState::Idle)),
-            ptt: AtomicBool::new(false),
-            receiving: AtomicBool::new(false),
-            talker: Mutex::new(None),
-            heard: HeardLog::new(),
-        }
-    }
-
-    fn snapshot(&self) -> M17SnapshotState {
-        M17SnapshotState {
-            link: u8_to_link(self.link.load(Ordering::Relaxed)),
-            ptt: self.ptt.load(Ordering::Relaxed),
-            receiving: self.receiving.load(Ordering::Relaxed),
-            talker: self.talker.lock().expect("talker mutex").clone(),
-        }
-    }
-}
-
-fn link_to_u8(s: LinkState) -> u8 {
-    match s {
-        LinkState::Idle => 0,
-        LinkState::Connecting => 1,
-        LinkState::Linked => 2,
-        LinkState::Failed => 3,
-    }
-}
-
-fn u8_to_link(v: u8) -> LinkState {
-    match v {
-        1 => LinkState::Connecting,
-        2 => LinkState::Linked,
-        3 => LinkState::Failed,
-        _ => LinkState::Idle,
-    }
-}
-
 /// A full-transceive M17 reflector client: connects, keys/unkeys transmit,
-/// and decodes received voice — see the module docs for the architecture.
+/// and decodes received voice — see [`crate::m17`] for the architecture.
 pub struct M17Session {
     /// `Some` until [`M17Session::disconnect`] (or `Drop`) joins it.
     thread: Option<JoinHandle<()>>,
@@ -204,8 +51,8 @@ impl M17Session {
     /// station's router (`crate::voice_route`): the session encodes whatever
     /// arrives on `audio.tx_frames` while keyed and plays what it decodes
     /// onto `audio.rx_frames`. It builds no router, resolves no device,
-    /// carries no preference, and never touches the PTT gate — see the
-    /// module docs.
+    /// carries no preference, and never touches the PTT gate — see
+    /// [`crate::m17`]'s docs.
     ///
     /// # Errors
     /// [`ConsoleError::Device`] for an invalid callsign or a missing Codec 2
@@ -272,7 +119,8 @@ impl M17Session {
     /// start/`EOS` (there is no protocol PTT frame): the run-loop starts a
     /// fresh random `StreamID` on the next key-down edge it observes, and
     /// flushes a final `EOS`-marked packet on key-up. Applied by the
-    /// run-loop on its next poll (bounded by [`SOCKET_POLL_TIMEOUT`], ~50 ms)
+    /// run-loop on its next poll (bounded by
+    /// [`SOCKET_POLL_TIMEOUT`](super::rx::SOCKET_POLL_TIMEOUT), ~50 ms)
     /// — this call itself never blocks.
     pub fn set_ptt(&mut self, on: bool) {
         self.ptt_request.store(on, Ordering::Relaxed);
@@ -289,7 +137,18 @@ impl M17Session {
     /// [`M17SnapshotState::talker`].
     #[must_use]
     pub fn heard(&self) -> Vec<HeardEntry> {
-        self.shared.heard.snapshot()
+        self.shared.talkers.heard()
+    }
+
+    /// The codec-frame recording tap: install a [`astar_record::Tap`] here
+    /// and the run loop offers every received and transmitted over to it as
+    /// [`FrameEvent`]s — each 8-byte Codec 2 frame as it comes out of the
+    /// encoder or goes into the decoder, then the 160 samples paired with
+    /// it. The slot is shared: setting it on the returned handle reaches the
+    /// live session.
+    #[must_use]
+    pub fn frame_tap(&self) -> TapSlot<FrameEvent> {
+        self.shared.frame_tap.clone()
     }
 
     /// Disconnect: requests the run-loop send `DISC` and exit, then joins the
@@ -300,68 +159,6 @@ impl M17Session {
             let _ = t.join();
         }
     }
-}
-
-/// Resolves `host:port` and returns a connected, read-timeout-armed
-/// [`UdpSocket`] ready for the run-loop — the [`M17Session::connect`] half of
-/// the iax-m17-localhost fix, split out to keep `connect` under Clippy's
-/// line-count lint.
-///
-/// `to_socket_addrs` can yield MULTIPLE candidates in resolution order —
-/// notably `"localhost"` on macOS, which resolves to
-/// `[[::1]:port, 127.0.0.1:port]`. The old code took only the first
-/// candidate and bound a v4-only `"0.0.0.0:0"` socket regardless of its
-/// family, so an IPv6-first resolution could never connect (an `AF_INET`
-/// socket can't `connect()` to an `AF_INET6` peer). This tries every
-/// candidate, binding a socket that matches ITS family, and uses the first
-/// one that connects.
-///
-/// NOTE: UDP `connect()` succeeding proves only that the local
-/// bind/family/routing-table lookup for that peer succeeded — it's
-/// connectionless, so this is not proof the peer is reachable or even
-/// listening. That's fine here: family mismatch (the actual bug) is exactly
-/// what binding a matching-family socket screens for; genuine
-/// unreachability still surfaces later as the FSM never reaching `Linked`.
-///
-/// # Errors
-/// [`ConsoleError::Resolve`] if `host`/`port` resolve to no addresses, or
-/// no candidate can be bound+connected, or the chosen socket's read timeout
-/// can't be set.
-fn connect_udp_socket(host: &str, port: u16) -> Result<UdpSocket, ConsoleError> {
-    let resolve_err = || ConsoleError::Resolve {
-        node: host.to_string(),
-        source: std::io::Error::new(
-            std::io::ErrorKind::AddrNotAvailable,
-            format!("could not resolve {host}:{port}"),
-        ),
-    };
-    let candidates: Vec<std::net::SocketAddr> = (host, port)
-        .to_socket_addrs()
-        .map(Iterator::collect)
-        .unwrap_or_default();
-    let mut connected = None;
-    for candidate in &candidates {
-        let bind_addr = if candidate.is_ipv6() {
-            "[::]:0"
-        } else {
-            "0.0.0.0:0"
-        };
-        let Ok(candidate_socket) = UdpSocket::bind(bind_addr) else {
-            continue;
-        };
-        if candidate_socket.connect(candidate).is_ok() {
-            connected = Some(candidate_socket);
-            break;
-        }
-    }
-    let socket = connected.ok_or_else(resolve_err)?;
-    socket
-        .set_read_timeout(Some(SOCKET_POLL_TIMEOUT))
-        .map_err(|e| ConsoleError::Resolve {
-            node: host.to_string(),
-            source: e,
-        })?;
-    Ok(socket)
 }
 
 impl Drop for M17Session {
@@ -402,6 +199,10 @@ struct TxState {
     stream_id: u16,
     frame_no: u16,
     pending: Option<[i16; 160]>,
+    /// The transmission's recording while keyed: whether its `Start`
+    /// reached the tap installed now. Until it has, the next sent frame
+    /// offers it again, so Record pressed mid-over records the rest.
+    rec: Option<StartedOn>,
 }
 
 impl TxState {
@@ -410,6 +211,7 @@ impl TxState {
             stream_id: 0,
             frame_no: 0,
             pending: None,
+            rec: None,
         }
     }
 
@@ -417,7 +219,8 @@ impl TxState {
     ///
     /// It must NOT drain `call_audio.tx_frames`. The gate belongs to
     /// `ConsoleSession::set_ptt` now, and it opens up to one
-    /// [`SOCKET_POLL_TIMEOUT`] tick BEFORE this edge is observed — so by the
+    /// [`SOCKET_POLL_TIMEOUT`](super::rx::SOCKET_POLL_TIMEOUT) tick BEFORE this
+    /// edge is observed — so by the
     /// time this runs the channel holds the VOX pre-roll ring (flushed by the
     /// mic lane's own false→true gate edge, iax-2733) and the speech onset
     /// that followed it. Draining here would throw both away and silently
@@ -471,13 +274,9 @@ fn run_loop(p: RunLoopParams) {
 
     let mut keyed = false;
     let mut tx = TxState::new();
-    let mut last_rx_voice: Option<Instant> = None;
-    // Which received stream the last-heard callsign was taken from. `None`
-    // means "the next voice packet opens a new stream", which is also how a
-    // stream that ended (EOS, or the RX silence timeout) leaves it — so a
-    // second transmission that happens to reuse a StreamID is still read as
-    // new, and its LSF still names its talker.
-    let mut rx_stream: Option<u16> = None;
+    // The 400 ms silence clock and the stream the last-heard callsign was
+    // taken from; see `RxTrack`.
+    let mut rx = RxTrack::with_tap(shared.frame_tap.clone());
     let mut buf = [0u8; 2_048];
 
     loop {
@@ -491,6 +290,9 @@ fn run_loop(p: RunLoopParams) {
                 &call_audio,
                 keyed,
             );
+            // A received over still open when the link goes closes here;
+            // frames that never arrived are simply not in it.
+            rx.close_recording();
             break;
         }
 
@@ -527,23 +329,37 @@ fn run_loop(p: RunLoopParams) {
         //    ms) — so any tick that can see flushed frames has already read
         //    `want_key` as true and taken the `if` arm.
         if keyed {
-            drain_tx_frames(&socket, callsign, codec.as_mut(), &mut tx, &call_audio);
+            drain_tx_frames(
+                &socket,
+                callsign,
+                codec.as_mut(),
+                &mut tx,
+                &shared,
+                &call_audio,
+            );
         } else {
             while call_audio.tx_frames.try_recv().is_ok() {}
         }
 
-        // 3. Socket poll (bounded by SOCKET_POLL_TIMEOUT): react to whatever
-        //    the FSM says about a received packet.
-        poll_socket(
-            &socket,
-            &mut buf,
-            &mut fsm,
-            codec.as_mut(),
-            &call_audio,
-            &shared,
-            &mut last_rx_voice,
-            &mut rx_stream,
-        );
+        // 3. Socket poll (bounded by SOCKET_POLL_TIMEOUT). `recv_step` only
+        //    reads and reports; every send happens here, on this loop's own
+        //    socket.
+        let step = recv_step(|b| socket.recv(b), &mut buf, &mut fsm);
+        if let Some(reply) = step.reply {
+            let _ = socket.send(&reply);
+        }
+        if step.ended.is_some() {
+            // NACK or DISC: the FSM already holds Failed. Publish it now
+            // rather than after the tick below; the value is the same, since
+            // the tick leaves a failed FSM alone.
+            shared
+                .link
+                .store(link_to_u8(fsm.state()), Ordering::Relaxed);
+        }
+        if let Some(pkt) = step.voice {
+            rx.on_voice(&pkt, Instant::now(), &shared.receiving, &shared.talkers);
+            decode_and_forward(codec.as_mut(), &mut rx, &pkt, &call_audio);
+        }
 
         // 4. Keepalive tick (answers PING with PONG via FsmAction::Send;
         //    declares Failed after the configured silence window).
@@ -555,39 +371,9 @@ fn run_loop(p: RunLoopParams) {
             .store(link_to_u8(fsm.state()), Ordering::Relaxed);
 
         // 5. RX silence timeout: no voice-stream packet in 400 ms clears
-        //    `receiving`.
-        if let Some(t) = last_rx_voice
-            && t.elapsed() >= RX_SILENCE_TIMEOUT
-        {
-            shared.receiving.store(false, Ordering::Relaxed);
-            last_rx_voice = None;
-            // The stream is over as far as this client is concerned, so the
-            // next voice packet starts a new one. `talker` itself is NOT
-            // cleared — it is "last heard", and outliving the stream is the
-            // whole point.
-            //
-            // An over whose `EOS` was lost ends HERE instead, so this is the
-            // other place the history's clock is refreshed: without it that
-            // station's age would count from the start of their over. A
-            // move-to-front, never a duplicate row.
-            //
-            // The gate is `rx_stream`: `note_talker` clears it on the `EOS`
-            // packet, so a stream that ended properly has already been
-            // refreshed there and has nothing left to refresh here — this
-            // arm would only push its age 400 ms newer than the end it
-            // actually had.
-            if rx_stream.is_some() {
-                let last = shared
-                    .talker
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone();
-                if let Some(call) = last {
-                    shared.heard.note("m17", &call);
-                }
-            }
-            rx_stream = None;
-        }
+        //    `receiving` and, for an over whose EOS was lost, refreshes the
+        //    talker's heard clock (see `RxTrack::expire`).
+        rx.expire(Instant::now(), &shared.receiving, &shared.talkers);
     }
     // `socket` and the `CallAudio` channel ends drop here; the lane's streams
     // belong to the station router and outlive this thread.
@@ -603,7 +389,8 @@ fn run_loop(p: RunLoopParams) {
 /// and it is encoded first (see [`TxState::key_down`]).
 ///
 /// Key-up: drains whatever the lane already queued into ordinary packets
-/// ([`drain_tx_frames`]) — up to one [`SOCKET_POLL_TIMEOUT`] tick's worth of
+/// ([`drain_tx_frames`]) — up to one
+/// [`SOCKET_POLL_TIMEOUT`](super::rx::SOCKET_POLL_TIMEOUT) tick's worth of
 /// audio the run-loop hadn't gotten to yet — and only THEN flushes the
 /// final `EOS`-marked packet (the one pending half-frame, if any, from that
 /// drain, zero-padded, or an all-zero payload if nothing was left). Getting
@@ -623,18 +410,34 @@ fn apply_ptt_edge(
 ) -> bool {
     if want_key {
         tx.key_down();
+        tx.rec = Some(StartedOn::default());
+        ensure_tx_start(&shared.frame_tap, &mut tx.rec, callsign);
     } else {
-        drain_tx_frames(socket, callsign, codec, tx, call_audio);
-        send_voice_packet(
+        drain_tx_frames(socket, callsign, codec, tx, shared, call_audio);
+        let last = tx.pending.take();
+        let payload = send_voice_packet(
             socket,
             callsign,
             codec,
             tx.stream_id,
             tx.frame_no,
             true,
-            tx.pending.take().as_ref(),
+            last.as_ref(),
             None,
         );
+        record_sent(
+            &shared.frame_tap,
+            (&mut tx.rec, callsign),
+            tx.frame_no,
+            &payload,
+            last.as_ref(),
+            None,
+        );
+        if tx.rec.take().is_some_and(|r| r.started()) {
+            shared
+                .frame_tap
+                .offer_with(|| FrameEvent::End { dir: Dir::Tx });
+        }
     }
     shared.ptt.store(want_key, Ordering::Relaxed);
     want_key
@@ -675,6 +478,7 @@ fn drain_tx_frames(
     callsign: [u8; 6],
     codec: &mut dyn Codec2Voice,
     tx: &mut TxState,
+    shared: &SharedState,
     call_audio: &CallAudio,
 ) {
     while let Ok(frame) = call_audio.tx_frames.try_recv() {
@@ -683,7 +487,7 @@ fn drain_tx_frames(
         };
         if let Some(first) = tx.pending.take() {
             let frame_no = tx.next_frame_no();
-            send_voice_packet(
+            let payload = send_voice_packet(
                 socket,
                 callsign,
                 codec,
@@ -693,135 +497,48 @@ fn drain_tx_frames(
                 Some(&first),
                 Some(&pcm),
             );
+            record_sent(
+                &shared.frame_tap,
+                (&mut tx.rec, callsign),
+                frame_no,
+                &payload,
+                Some(&first),
+                Some(&pcm),
+            );
         } else {
             tx.pending = Some(pcm);
         }
     }
 }
 
-/// Run-loop step 3: poll the socket (bounded by [`SOCKET_POLL_TIMEOUT`]) and
-/// react to whatever the FSM says about a received packet: reply to a
-/// keepalive `PING`, decode+forward a voice-stream packet (bumping
-/// `last_rx_voice`/`receiving`), or do nothing for anything else (including
-/// a fresh `Unlinked`, which the run-loop's own `fsm.state()` read picks up
-/// regardless of which path set it).
-#[allow(clippy::too_many_arguments)]
-fn poll_socket(
-    socket: &UdpSocket,
-    buf: &mut [u8],
-    fsm: &mut SessionFsm,
+/// Decode one received [`StreamPacket`] (two Codec 2 mode-3200 chunks, via
+/// [`RxTrack::decode`], which also records them) and forward the 2×160 PCM
+/// samples to `call_audio.rx_frames`. A pure in-order pass-through — see the
+/// [`crate::m17`] docs' "RX jitter handling" section for why no reorder
+/// buffer is used yet.
+fn decode_and_forward(
     codec: &mut dyn Codec2Voice,
+    rx: &mut RxTrack,
+    pkt: &StreamPacket,
     call_audio: &CallAudio,
-    shared: &SharedState,
-    last_rx_voice: &mut Option<Instant>,
-    rx_stream: &mut Option<u16>,
 ) {
-    match socket.recv(buf) {
-        Ok(n) => {
-            let action = fsm.on_packet(&buf[..n], Instant::now());
-            match action {
-                FsmAction::Send(bytes) => {
-                    let _ = socket.send(&bytes);
-                }
-                FsmAction::Voice(pkt) => {
-                    *last_rx_voice = Some(Instant::now());
-                    shared.receiving.store(true, Ordering::Relaxed);
-                    note_talker(&pkt, shared, rx_stream);
-                    decode_and_forward(codec, &pkt, call_audio);
-                }
-                FsmAction::Unlinked | FsmAction::None => {}
-            }
-        }
-        Err(e)
-            if e.kind() == std::io::ErrorKind::WouldBlock
-                || e.kind() == std::io::ErrorKind::TimedOut => {}
-        Err(_) => {}
-    }
-}
-
-/// Record who is talking, at the START and the END of each received stream.
-///
-/// M17 carries the source address in every packet's LSF, so this could run
-/// on all of them; it deliberately does not. The talker only changes when
-/// the stream does, and touching the callsign twice per stream keeps a
-/// decode and a mutex off the 20 ms RX path.
-///
-/// A stream's `EOS` packet closes it out here too, so the next voice packet
-/// is read as a fresh stream even if the reflector reuses the `StreamID`.
-/// The second [`crate::heard::HeardLog::note`] is on that `EOS`, and it is
-/// what makes [`crate::heard::HeardEntry::age_ms`] mean the same thing here
-/// as on the AMBE links: time since the station was last heard, not time
-/// since their over began. That refresh names whoever `talker` already
-/// holds rather than re-decoding the `EOS` packet's LSF, so a rewritten or
-/// zeroed final header cannot attribute the end of an over to the wrong
-/// station. `note` moves an entry already at the front rather than
-/// repeating it, so the refresh never duplicates a row.
-///
-/// An empty decode is ignored rather than stored: `decode_callsign` yields
-/// `""` for a null/reserved address, and "Last heard " with nothing after it
-/// is worse than no line at all.
-fn note_talker(pkt: &StreamPacket, shared: &SharedState, rx_stream: &mut Option<u16>) {
-    // A stream counts as open here only once one of its packets has named a
-    // talker. A null/reserved source leaves `rx_stream` unset, so a later
-    // packet of the same stream can still name it — and so its EOS has no
-    // clock to refresh, because the only name in `talker` would be the
-    // PREVIOUS station's. The EOS packet itself never names anybody: its
-    // header is the one a reflector may rewrite or zero.
-    if *rx_stream != Some(pkt.stream_id) && !pkt.is_last() {
-        let call = decode_callsign(&pkt.lsf.src);
-        if !call.is_empty() {
-            *rx_stream = Some(pkt.stream_id);
-            shared.heard.note("m17", &call);
-            *shared.talker.lock().expect("talker mutex") = Some(call);
-        }
-    }
-    if pkt.is_last() && rx_stream.is_some() {
-        // Refresh from `talker`, not from this packet's own LSF: the EOS
-        // packet is the one frame of an over whose header a reflector may
-        // rewrite or zero, and re-decoding it can name somebody the stream
-        // never belonged to. `talker` is what the stream's first packet
-        // established, which is the station whose age this is refreshing.
-        // Same read as the silence-timeout branch.
-        let last = shared
-            .talker
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let Some(call) = last
-            && !call.is_empty()
-        {
-            shared.heard.note("m17", &call);
-        }
-    }
-    if pkt.is_last() {
-        *rx_stream = None;
-    }
-}
-
-/// Decode one received [`StreamPacket`]'s 16-byte Codec 2 payload (two 8-byte
-/// mode-3200 chunks) into 2×160 PCM samples and forward them to
-/// `call_audio.rx_frames`. A pure in-order pass-through — see the module
-/// docs' "RX jitter handling" section for why no reorder buffer is used yet.
-fn decode_and_forward(codec: &mut dyn Codec2Voice, pkt: &StreamPacket, call_audio: &CallAudio) {
-    let mut bits_a = [0u8; 8];
-    bits_a.copy_from_slice(&pkt.payload[0..8]);
-    let mut bits_b = [0u8; 8];
-    bits_b.copy_from_slice(&pkt.payload[8..16]);
-    let pcm_a = codec.decode(&bits_a);
-    let pcm_b = codec.decode(&bits_b);
+    let frames = rx.decode(&mut |bits: &[u8; 8]| codec.decode(bits), pkt);
     // Codec 2 frames arrive decoded on the protocol's own tick and carry no
     // sender clock, so they play straight through (iax-rxjb).
-    let _ = call_audio.rx_frames.send(pcm_a.to_vec().into());
-    let _ = call_audio.rx_frames.send(pcm_b.to_vec().into());
+    for pcm in frames {
+        let _ = call_audio.rx_frames.send(pcm.to_vec().into());
+    }
 }
 
 /// Build and send one voice-stream packet. `a`/`b` are the two 160-sample
 /// halves; `None` for a half means "send zero bytes for this half" —
 /// literal silence, not a Codec 2-encoded silent frame — which is exactly
 /// what the key-up flush needs for a fully- or partially-empty final packet
-/// (see [`M17Session`]'s module docs and the Task 3 design brief: "zero-pad
+/// (see [`crate::m17`]'s docs and the Task 3 design brief: "zero-pad
 /// the second half if only one frame is pending; if zero frames pending,
 /// send an EOS packet with all-zero payload").
+///
+/// Returns the 16-byte payload it built, for the recording.
 #[allow(clippy::too_many_arguments)]
 fn send_voice_packet(
     socket: &UdpSocket,
@@ -832,7 +549,7 @@ fn send_voice_packet(
     eos: bool,
     a: Option<&[i16; 160]>,
     b: Option<&[i16; 160]>,
-) {
+) -> [u8; 16] {
     let bits_a = a.map_or([0u8; 8], |pcm| codec.encode(pcm));
     let bits_b = b.map_or([0u8; 8], |pcm| codec.encode(pcm));
     let mut payload = [0u8; 16];
@@ -857,6 +574,41 @@ fn send_voice_packet(
         payload,
     };
     let _ = socket.send(&pkt.to_bytes());
+    payload
+}
+
+/// Record one sent packet: for each half that carried audio, its encoded
+/// `Frame` and then the `Pcm` it was encoded from. A `None` half is the
+/// EOS flush's zero padding — no audio went into it, so nothing is recorded
+/// for it. Codec 2 encodes synchronously, so every frame is in hand with its
+/// input already.
+fn record_sent(
+    tap: &TapSlot<FrameEvent>,
+    (rec, callsign): (&mut Option<StartedOn>, [u8; 6]),
+    frame_number: u16,
+    payload: &[u8; 16],
+    a: Option<&[i16; 160]>,
+    b: Option<&[i16; 160]>,
+) {
+    for (half, pcm) in payload.as_chunks::<8>().0.iter().zip([a, b]) {
+        let Some(pcm) = pcm else {
+            continue;
+        };
+        ensure_tx_start(tap, rec, callsign);
+        tap.offer_with(|| rec_frame(Dir::Tx, half, frame_number));
+        tap.offer_with(|| FrameEvent::Pcm {
+            dir: Dir::Tx,
+            pcm: *pcm,
+        });
+    }
+}
+
+/// Offer the open transmission's `Start` if it has not reached the tap
+/// installed now (a lock-free read once it has). Nothing while unkeyed.
+fn ensure_tx_start(tap: &TapSlot<FrameEvent>, rec: &mut Option<StartedOn>, callsign: [u8; 6]) {
+    if let Some(r) = rec.as_mut() {
+        r.ensure(tap, || rec_start(Dir::Tx, Some(decode_callsign(&callsign))));
+    }
 }
 
 /// Convert one TX frame (`StreamConfig::default()` guarantees 160 i16
@@ -877,6 +629,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicU32;
     use std::sync::mpsc::{Receiver, Sender, channel};
+    use std::time::Duration;
 
     /// Build a [`CallAudio`] by hand — no `AudioRouter`/`MicLane` involved —
     /// so a test can push raw frames straight onto the exact channel
@@ -939,7 +692,14 @@ mod tests {
         );
         assert!(keyed);
         // Run-loop step 2 while keyed: exactly what the loop does next.
-        drain_tx_frames(&send_sock, [0; 6], codec.as_mut(), &mut tx, &call_audio);
+        drain_tx_frames(
+            &send_sock,
+            [0; 6],
+            codec.as_mut(),
+            &mut tx,
+            &shared,
+            &call_audio,
+        );
 
         let mut buf = [0u8; 128];
         let (n, _) = recv_sock
@@ -1021,141 +781,179 @@ mod tests {
         assert!(tx.pending.is_none());
     }
 
-    /// A stream whose source is null names nobody — and its EOS, even one a
-    /// reflector rewrote to carry a real callsign, must neither name that
-    /// station nor refresh the previous station's clock.
+    /// F12: the key-up flush carries one leftover frame and a zero-filled
+    /// half. The leftover records as a Frame and its Pcm; the padding, which
+    /// no audio went into, records nothing.
     #[test]
-    fn an_unnamed_stream_neither_names_nor_refreshes_anyone() {
+    fn the_eos_flush_records_only_the_half_that_carried_audio() {
+        let (recv_sock, send_sock) = loopback_pair();
+        let (call_audio, push, _rx) = fake_call_audio();
+        push.send(vec![30_i16; 160]).unwrap();
+        let (mut codec, _backend) = astar_codec::codec2::open_codec2(&[])
+            .expect("a codec must be available under this crate's dev-dependency codec2-static");
+        let mut tx = TxState::new();
+        tx.frame_no = 7;
         let shared = SharedState::new();
-        let mut rx_stream: Option<u16> = None;
-        let packet = |stream_id: u16, src: [u8; 6], frame_number: u16| StreamPacket {
-            stream_id,
-            lsf: Lsf {
-                dst: BROADCAST,
-                src,
-                type_field: Lsf::TYPE_VOICE_3200_STREAM,
-                meta: [0; 14],
-            },
-            frame_number,
-            payload: [0u8; 16],
-        };
-        let n0call = encode_callsign("N0CALL").expect("a valid callsign encodes");
-        let aj7hr = encode_callsign("AJ7HR").expect("a valid callsign encodes");
+        let (tap, events) = astar_record::tap::tap_channel(16);
+        shared.frame_tap.set(Some(tap));
+        // The transmission's recording is open, its Start on this tap.
+        tx.rec = Some(StartedOn::default());
+        ensure_tx_start(&shared.frame_tap, &mut tx.rec, [0; 6]);
+        assert!(matches!(events.try_recv(), Ok(FrameEvent::Start { .. })));
 
-        // N0CALL talks and finishes.
-        note_talker(&packet(0x1234, n0call, 0), &shared, &mut rx_stream);
-        note_talker(
-            &packet(0x1234, n0call, StreamPacket::EOS_BIT),
+        assert!(!apply_ptt_edge(
+            &send_sock,
+            [0; 6],
+            codec.as_mut(),
+            &mut tx,
             &shared,
-            &mut rx_stream,
-        );
-        assert_eq!(shared.snapshot().talker.as_deref(), Some("N0CALL"));
+            &call_audio,
+            false,
+        ));
+        let mut buf = [0u8; 128];
+        let (n, _) = recv_sock.recv_from(&mut buf).expect("the EOS flush");
+        let pkt = StreamPacket::parse(&buf[..n]).expect("valid stream packet");
+        assert!(pkt.is_last());
+        assert_eq!(pkt.payload[8..], [0u8; 8], "the second half is padding");
 
-        // A stream with a null source: nobody is named and it never opens.
-        note_talker(&packet(0x5678, [0; 6], 0), &shared, &mut rx_stream);
-        assert_eq!(rx_stream, None, "a nameless stream is not an open one");
-        assert_eq!(shared.snapshot().talker.as_deref(), Some("N0CALL"));
-
-        // Its EOS carries a rewritten, valid source: still nobody.
-        note_talker(
-            &packet(0x5678, aj7hr, StreamPacket::EOS_BIT),
-            &shared,
-            &mut rx_stream,
-        );
-        assert_eq!(rx_stream, None);
-        assert_eq!(shared.snapshot().talker.as_deref(), Some("N0CALL"));
-        let heard = shared.heard.snapshot();
+        let got: Vec<FrameEvent> = events.try_iter().collect();
         assert_eq!(
-            heard.len(),
-            1,
-            "no row for a station only an EOS named: {heard:?}"
+            got,
+            vec![
+                FrameEvent::Frame {
+                    dir: Dir::Tx,
+                    bytes: pkt.payload[..8].to_vec(),
+                    seq: Some(astar_record::frames::Seq {
+                        value: 7,
+                        modulus: 0x8000
+                    }),
+                },
+                FrameEvent::Pcm {
+                    dir: Dir::Tx,
+                    pcm: [30; 160]
+                },
+                FrameEvent::End { dir: Dir::Tx },
+            ]
         );
-        assert_eq!(heard[0].callsign, "N0CALL");
     }
 
-    /// One received voice packet must name its talker in the snapshot, and
-    /// keep naming them after the stream ends — "last heard", not "talking
-    /// now" (`receiving` is the field that says that).
+    /// Record pressed mid-transmission: the tap appears after key-down,
+    /// and the next sent frame opens the recording for the rest of it.
     #[test]
-    fn a_received_stream_names_its_talker_and_the_name_outlives_it() {
-        // Round-trip the address encoding first: a talker line is only worth
-        // anything if the six base-40 bytes on the wire come back as the
-        // callsign that went in.
-        let src = encode_callsign("N0CALL").expect("a valid callsign encodes");
-        assert_eq!(decode_callsign(&src), "N0CALL");
-
+    fn a_tap_set_mid_transmission_records_the_rest_of_it() {
+        let (_recv_sock, send_sock) = loopback_pair();
+        let (call_audio, push, _rx) = fake_call_audio();
+        let (mut codec, _backend) = astar_codec::codec2::open_codec2(&[])
+            .expect("a codec must be available under this crate's dev-dependency codec2-static");
+        let mut tx = TxState::new();
         let shared = SharedState::new();
-        let mut rx_stream: Option<u16> = None;
-        assert!(
-            shared.snapshot().talker.is_none(),
-            "a link with nothing heard on it yet names nobody"
+        assert!(apply_ptt_edge(
+            &send_sock,
+            [0; 6],
+            codec.as_mut(),
+            &mut tx,
+            &shared,
+            &call_audio,
+            true,
+        ));
+        let (tap, events) = astar_record::tap::tap_channel(16);
+        shared.frame_tap.set(Some(tap));
+        push.send(vec![10_i16; 160]).unwrap();
+        push.send(vec![20_i16; 160]).unwrap();
+        drain_tx_frames(
+            &send_sock,
+            [0; 6],
+            codec.as_mut(),
+            &mut tx,
+            &shared,
+            &call_audio,
         );
-
-        let voice = |frame_number: u16| StreamPacket {
-            stream_id: 0x1234,
-            lsf: Lsf {
-                dst: BROADCAST,
-                src,
-                type_field: Lsf::TYPE_VOICE_3200_STREAM,
-                meta: [0; 14],
-            },
-            frame_number,
-            payload: [0u8; 16],
-        };
-
-        note_talker(&voice(0), &shared, &mut rx_stream);
-        assert_eq!(
-            shared.snapshot().talker.as_deref(),
-            Some("N0CALL"),
-            "the first packet of a stream names who keyed up"
-        );
-        assert_eq!(rx_stream, Some(0x1234));
-
-        // The EOS packet ends the stream; the callsign stays.
-        note_talker(&voice(StreamPacket::EOS_BIT), &shared, &mut rx_stream);
-        assert_eq!(
-            rx_stream, None,
-            "EOS closes the stream out so the next packet reads as a new one"
-        );
-        assert_eq!(
-            shared.snapshot().talker.as_deref(),
-            Some("N0CALL"),
-            "last heard PERSISTS past end-of-stream, exactly as D-Star's does"
-        );
-        assert!(
-            !shared.snapshot().receiving,
-            "and `receiving` — never set by note_talker — is what says nobody is on"
-        );
-        // The EOS refreshes the history's clock so `age_ms` counts from the
-        // end of the over. That is a move-to-front, not a second row.
-        let after_eos = shared.heard.snapshot();
-        assert_eq!(
-            after_eos.len(),
-            1,
-            "the EOS refresh must not duplicate the talker: {after_eos:?}"
-        );
-        assert_eq!(after_eos[0].callsign, "N0CALL");
-
-        // A second talker replaces the first once their stream opens.
-        let src2 = encode_callsign("AJ7HR").expect("a valid callsign encodes");
-        let mut second = voice(0);
-        second.stream_id = 0x4321;
-        second.lsf.src = src2;
-        note_talker(&second, &shared, &mut rx_stream);
-        assert_eq!(shared.snapshot().talker.as_deref(), Some("AJ7HR"));
-
-        // The one-name `talker` slot only ever holds the newest; the history
-        // keeps both, which is the whole point of it.
-        let heard: Vec<_> = shared
-            .heard
-            .snapshot()
-            .into_iter()
-            .map(|e| (e.network, e.callsign))
+        assert!(!apply_ptt_edge(
+            &send_sock,
+            [0; 6],
+            codec.as_mut(),
+            &mut tx,
+            &shared,
+            &call_audio,
+            false,
+        ));
+        let kinds: Vec<&str> = events
+            .try_iter()
+            .map(|e| match e {
+                FrameEvent::Start { .. } => "start",
+                FrameEvent::Frame { .. } => "frame",
+                FrameEvent::Pcm { .. } => "pcm",
+                FrameEvent::End { .. } => "end",
+            })
             .collect();
+        assert_eq!(kinds, ["start", "frame", "pcm", "frame", "pcm", "end"]);
+    }
+
+    /// The split moved the PONG send out of the receive helper and into
+    /// `run_loop` (`recv_step` only hands the reply back). Pin that the loop
+    /// still sends it: without it a real reflector drops the link once its
+    /// keepalive window passes. Everything stays on 127.0.0.1.
+    #[test]
+    fn run_loop_answers_a_reflector_ping_with_pong() {
+        let fake = UdpSocket::bind("127.0.0.1:0").expect("bind the fake reflector");
+        fake.set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+        let port = fake.local_addr().expect("fake reflector addr").port();
+        let call = encode_callsign("AJ7HR").expect("a valid callsign encodes");
+
+        let session = M17Session::connect(
+            M17Config {
+                host: "127.0.0.1".to_string(),
+                port,
+                module: b'A',
+                callsign: "AJ7HR".to_string(),
+                codec_dirs: vec![],
+                keepalive_timeout: Duration::from_secs(30),
+            },
+            fake_call_audio().0,
+        )
+        .expect("connect to the loopback fake reflector");
+
+        let mut buf = [0u8; 64];
+        let (n, from) = fake.recv_from(&mut buf).expect("the session sends CONN");
         assert_eq!(
-            heard,
-            [("m17", "AJ7HR".to_string()), ("m17", "N0CALL".to_string())],
-            "the history keeps the first talker after the second replaces the line"
+            &buf[..n],
+            ControlPacket::Conn {
+                callsign: call,
+                module: b'A'
+            }
+            .to_bytes()
+            .as_slice()
+        );
+        fake.send_to(&ControlPacket::Ackn.to_bytes(), from)
+            .expect("send ACKN");
+        fake.send_to(
+            &ControlPacket::Ping {
+                callsign: BROADCAST,
+            }
+            .to_bytes(),
+            from,
+        )
+        .expect("send PING");
+
+        let (n, _) = fake
+            .recv_from(&mut buf)
+            .expect("the run loop answers PING (a recv timeout here means no PONG went out)");
+        assert_eq!(
+            &buf[..n],
+            ControlPacket::Pong { callsign: call }.to_bytes().as_slice(),
+            "a PING must be answered with a PONG carrying the station's callsign"
+        );
+
+        session.disconnect();
+        let (n, _) = fake.recv_from(&mut buf).expect("disconnect sends DISC");
+        assert_eq!(
+            &buf[..n],
+            ControlPacket::Disc {
+                callsign: Some(call)
+            }
+            .to_bytes()
+            .as_slice()
         );
     }
 }

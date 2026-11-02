@@ -100,10 +100,12 @@ public enum ConfigTransfer {
             for entry in merged.merged { session.directoryUpsert(entry) }
         }
 
-        for (key, value) in archive.settings ?? [:] {
+        // Machine-local keys (the vocoder trust list) never come in from a
+        // file, even a hand-edited one — see `ConfigArchive.machineLocalPrefixes`.
+        for (key, value) in archive.settings ?? [:] where ConfigArchive.isImportable(key: key) {
             defaults.set(value.defaultsValue, forKey: key)
         }
-        for (key, value) in archive.interface ?? [:] {
+        for (key, value) in archive.interface ?? [:] where ConfigArchive.isImportable(key: key) {
             defaults.set(value.defaultsValue, forKey: key)
         }
         if let callsign = archive.callsign, !callsign.isEmpty {

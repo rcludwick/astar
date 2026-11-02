@@ -1,0 +1,22 @@
+2026-10-11T20:24:55.844989Z DEBUG tiny_http: Server listening on 0.0.0.0:8730
+astar-server: HTTP control listening on http://0.0.0.0:8730
+2026-10-11T20:24:55.845272Z DEBUG tiny_http: Running accept thread
+2026-10-11T20:24:58.713217Z  INFO astar_iax::negotiate: inbound codec negotiated caller="1999" called="1998" capability=0x0004 requested=Some(G711U) policy=PreferSlin16 accepted=G711U
+2026-10-11T20:25:08.714009Z DEBUG astar_iax::listener: reason="invalid_transition"
+2026-10-11T20:25:10.862103Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:25:18.867435Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:25:18.867450Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:25:18.867451Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:25:48.988588Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:26:08.943534Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:26:16.951172Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:26:16.951186Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:26:16.951187Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:26:48.970704Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:26:56.979256Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:26:56.979273Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:26:56.979274Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:27:48.987696Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:27:56.989206Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:27:56.989227Z DEBUG astar_iax::registration: reason="invalid_transition"
+2026-10-11T20:27:56.989229Z DEBUG astar_iax::registration: reason="invalid_transition"

@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender};
 
 use astar_audio::CallAudio;
-use astar_iax_core::session::CodecPolicy;
 use astar_iax_core::session::call_no::CallNo;
+use astar_iax_core::session::{CallProfile, CodecPolicy};
 use mio::{Poll, Token, Waker};
 
 use crate::audio_bridge::PttGate;
@@ -63,7 +63,7 @@ impl TxFrames {
 /// secret-free snapshot mode a [`CallMode`] lowers to (Standard → `Direct`).
 fn snapshot_mode(mode: &CallMode) -> CallSnapshotMode {
     match mode {
-        CallMode::Standard => CallSnapshotMode::Direct,
+        CallMode::Standard | CallMode::NodeLink { .. } => CallSnapshotMode::Direct,
         CallMode::WebTransceiver { .. } => CallSnapshotMode::WebTransceiver,
     }
 }
@@ -86,6 +86,59 @@ pub fn dial_raw_with_policy(
     mode: CallMode,
     codec_policy: CodecPolicy,
 ) -> Result<RawDial, IaxError> {
+    // Lower the call mode (Standard → default profile, no forced dest).
+    let (mut profile, forced_dest) = mode.resolve();
+    profile.codec_policy = codec_policy;
+    let dest = forced_dest.map_or_else(|| dest.into(), ToString::to_string);
+    spawn_raw(
+        peer,
+        caller_id.into(),
+        dest,
+        secret.into(),
+        profile,
+        snapshot_mode(&mode),
+    )
+}
+
+/// Dial `peer` with an explicit, caller-built [`CallProfile`] — the
+/// `CALLING_NUMBER` / `CALLING_NAME` IEs, whether `CAPABILITY` is sent, and the
+/// codec policy — and the `CALLED_NUMBER` exactly as given (no mode lowering).
+///
+/// Test-support only (`test-support` feature): it lets a bench peer present
+/// itself the way an `app_rpt` node does on a link (`CALLING_NUMBER` = its own
+/// node number, `CALLED_NUMBER` = the target node), which neither
+/// [`CallMode`] shape produces. The secret is a call-time argument, never
+/// stored.
+///
+/// # Errors
+/// [`IaxError`] if the runtime thread/socket cannot start.
+#[cfg(feature = "test-support")]
+pub fn dial_raw_with_profile(
+    peer: SocketAddr,
+    caller_id: impl Into<String>,
+    dest: impl Into<String>,
+    secret: impl Into<String>,
+    profile: CallProfile,
+) -> Result<RawDial, IaxError> {
+    spawn_raw(
+        peer,
+        caller_id.into(),
+        dest.into(),
+        secret.into(),
+        profile,
+        CallSnapshotMode::Direct,
+    )
+}
+
+/// Spawn the device-free call runtime with its frame channels exposed.
+fn spawn_raw(
+    peer: SocketAddr,
+    caller_id: String,
+    dest: String,
+    secret: String,
+    profile: CallProfile,
+    snap_mode: CallSnapshotMode,
+) -> Result<RawDial, IaxError> {
     // Channel wiring: the run-loop drains `tx_frames` (the Receiver) onto the
     // wire, so the caller holds the paired Sender; the run-loop fills
     // `rx_frames` (the Sender) with decoded inbound audio, so the caller holds
@@ -102,12 +155,7 @@ pub fn dial_raw_with_policy(
         preroll_lead: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
     };
 
-    // Lower the call mode (Standard → default profile, no forced dest).
-    let (mut profile, forced_dest) = mode.resolve();
-    profile.codec_policy = codec_policy;
-    let dest = forced_dest.map_or_else(|| dest.into(), ToString::to_string);
-    let snap_mode = snapshot_mode(&mode);
-
+    let profile_rate = profile.codec_policy.max_sample_rate();
     let poll = Poll::new()?;
     let waker = Arc::new(Waker::new(poll.registry(), Token(1))?);
     // A clone for the TX path so each pushed frame wakes the run-loop.
@@ -116,9 +164,9 @@ pub fn dial_raw_with_policy(
 
     let (call, events) = spawn_call_runtime(SpawnParams {
         peer,
-        caller_id: caller_id.into(),
+        caller_id,
         dest,
-        secret: secret.into(),
+        secret,
         profile,
         call_no: CallNo::new(1).expect("CallNo::new(1) is valid"),
         poll,
@@ -130,7 +178,7 @@ pub fn dial_raw_with_policy(
         node: String::new(),
         mode: snap_mode,
         pooled: false,
-        sample_rate: codec_policy.max_sample_rate(),
+        sample_rate: profile_rate,
         // Transport seam (iax-b6f5): plain OS UDP, byte-identical default.
         net: Arc::new(crate::transport::OsNetStack),
     })?;

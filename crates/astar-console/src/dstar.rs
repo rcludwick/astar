@@ -168,7 +168,7 @@ use std::net::{ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use astar_audio::CallAudio;
 use astar_codec::ambe::{
@@ -176,9 +176,11 @@ use astar_codec::ambe::{
 };
 use astar_dstar::tx::general_call_header;
 use astar_dstar::{
-    DSVT_MAGIC, DextraFsm, DsvtPacket, FsmAction, LinkState, NULL_AMBE, RfHeader, SlowDataRx,
-    TxStream, generate_stream_id, repeater_fields,
+    DSVT_MAGIC, DextraFsm, DsvtPacket, FsmAction, LinkState, NULL_AMBE, RfHeader, SYNC_INTERVAL,
+    SlowDataRx, TxStream, generate_stream_id, repeater_fields,
 };
+use astar_record::frames::{CaptureMode, Dir, FrameEvent, Seq};
+use astar_record::tap::{StartedOn, TapSlot};
 
 use crate::heard::{HeardEntry, HeardLog};
 use crate::session::ConsoleError;
@@ -423,16 +425,111 @@ struct SharedState {
     /// most recent name, which a short courtesy tail overwrites a second
     /// after the real talker unkeys.
     heard: HeardLog,
+    /// The codec-frame recording tap ([`DstarSession::frame_tap`]). The run
+    /// loop only ever offers to it, never waits on it.
+    frame_tap: TapSlot<FrameEvent>,
+    /// [`AmbeBackend::as_str`] of the session's vocoder, for `Start` events.
+    vocoder: &'static str,
+    /// The recorded stream open in each direction (`[rx, tx]`): its talker
+    /// and whether its `Start` reached the tap installed now. Only the run
+    /// loop touches it, so the lock is never contended.
+    rec_open: Mutex<[Option<RecOpen>; 2]>,
+}
+
+/// One recorded stream that is open.
+struct RecOpen {
+    talker: String,
+    /// Until the `Start` lands on the installed tap, the next frame offers
+    /// it again, so pressing Record mid-over records the rest of the over.
+    started: StartedOn,
+}
+
+fn dir_index(dir: Dir) -> usize {
+    match dir {
+        Dir::Rx => 0,
+        Dir::Tx => 1,
+    }
 }
 
 impl SharedState {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with_vocoder(AmbeBackend::Hardware)
+    }
+
+    fn with_vocoder(backend: AmbeBackend) -> Self {
         Self {
             link: AtomicU8::new(link_to_u8(LinkState::Idle)),
             talker: Mutex::new(None),
             ptt: AtomicBool::new(false),
             slow_text: Mutex::new(None),
             heard: HeardLog::new(),
+            frame_tap: TapSlot::default(),
+            vocoder: backend.as_str(),
+            rec_open: Mutex::new([None, None]),
+        }
+    }
+
+    fn rec_open(&self) -> std::sync::MutexGuard<'_, [Option<RecOpen>; 2]> {
+        self.rec_open
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Offer `open`'s `Start` if it has not reached the installed tap.
+    fn rec_ensure(&self, dir: Dir, open: &mut RecOpen) {
+        let talker = &open.talker;
+        open.started.ensure(&self.frame_tap, || FrameEvent::Start {
+            dir,
+            network: "dstar",
+            mode: CaptureMode::Dstar,
+            talker: Some(talker.clone()),
+            at: SystemTime::now(),
+            vocoder: self.vocoder,
+        });
+    }
+
+    /// Open a recorded stream, closing any still open in `dir`.
+    fn rec_start(&self, dir: Dir, talker: impl FnOnce() -> String) {
+        self.rec_end(dir);
+        let mut open = RecOpen {
+            talker: talker(),
+            started: StartedOn::default(),
+        };
+        self.rec_ensure(dir, &mut open);
+        self.rec_open()[dir_index(dir)] = Some(open);
+    }
+
+    /// One 9-byte AMBE frame, with its DSVT sequence number. An open stream
+    /// whose `Start` has not reached the tap offers it first.
+    fn rec_frame(&self, dir: Dir, frame: [u8; 9], seq: u8) {
+        if let Some(open) = self.rec_open()[dir_index(dir)].as_mut()
+            && open.started.needs_start(&self.frame_tap)
+        {
+            self.rec_ensure(dir, open);
+        }
+        self.frame_tap.offer_with(|| FrameEvent::Frame {
+            dir,
+            bytes: frame.to_vec(),
+            seq: Some(Seq {
+                value: u16::from(seq),
+                modulus: u16::from(SYNC_INTERVAL),
+            }),
+        });
+    }
+
+    /// The 160 samples paired with the most recent unpaired frame.
+    fn rec_pcm(&self, dir: Dir, pcm: &[i16; 160]) {
+        self.frame_tap
+            .offer_with(|| FrameEvent::Pcm { dir, pcm: *pcm });
+    }
+
+    /// Close the recorded stream in `dir`. An `End` goes out only for a
+    /// stream some tap got the `Start` of.
+    fn rec_end(&self, dir: Dir) {
+        let open = self.rec_open()[dir_index(dir)].take();
+        if open.is_some_and(|o| o.started.started()) {
+            self.frame_tap.offer_with(|| FrameEvent::End { dir });
         }
     }
 
@@ -496,6 +593,14 @@ pub struct DstarSession {
     backend: AmbeBackend,
 }
 
+/// Where [`DstarSession::connect_inner`] gets its vocoder from.
+enum Vocoder<'a> {
+    /// Open a trusted `ThumbDV` (only serials in this list).
+    Open(&'a astar_codec::vocoder_trust::VocoderTrust),
+    /// The caller already opened one.
+    Given(Box<dyn AmbeStream>, AmbeBackend),
+}
+
 impl DstarSession {
     /// Connect to a `DExtra` reflector: opens an AMBE codec handle, binds a
     /// UDP socket, and starts the "iax-dstar" run-loop thread, which sends
@@ -527,8 +632,12 @@ impl DstarSession {
     // rather than moved, which is why clippy would otherwise suggest a
     // reference here.
     #[allow(clippy::needless_pass_by_value)]
-    pub fn connect(cfg: DstarConfig, audio: CallAudio) -> Result<DstarSession, ConsoleError> {
-        Self::connect_inner(cfg, audio, None)
+    pub fn connect(
+        cfg: DstarConfig,
+        audio: CallAudio,
+        trust: &astar_codec::vocoder_trust::VocoderTrust,
+    ) -> Result<DstarSession, ConsoleError> {
+        Self::connect_inner(cfg, audio, Vocoder::Open(trust))
     }
 
     /// [`DstarSession::connect`] with the AMBE decoder supplied by the
@@ -557,16 +666,17 @@ impl DstarSession {
         ambe: Box<dyn AmbeStream>,
         backend: AmbeBackend,
     ) -> Result<DstarSession, ConsoleError> {
-        Self::connect_inner(cfg, audio, Some((ambe, backend)))
+        Self::connect_inner(cfg, audio, Vocoder::Given(ambe, backend))
     }
 
     /// The shared body of [`Self::connect`] and [`Self::connect_with_stream`].
-    /// `vocoder` is `None` when this should open the `ThumbDV` itself.
+    /// `vocoder` is [`Vocoder::Open`] when this should open a trusted
+    /// `ThumbDV` itself.
     #[allow(clippy::needless_pass_by_value)]
     fn connect_inner(
         cfg: DstarConfig,
         audio: CallAudio,
-        vocoder: Option<(Box<dyn AmbeStream>, AmbeBackend)>,
+        vocoder: Vocoder<'_>,
     ) -> Result<DstarSession, ConsoleError> {
         // Validate/build the FSM first (cheap, no I/O) — mirrors
         // M17Session::connect validating the callsign before touching any
@@ -592,17 +702,22 @@ impl DstarSession {
         // and trial-opens each to tell them apart, naming the specific port
         // in the busy case.
         let (ambe, backend) = match vocoder {
-            Some(v) => v,
-            None => open_ambe_stream(Some(AmbeBackend::Hardware), VocoderMode::Dstar).ok_or_else(
-                || ConsoleError::Dstar(astar_codec::ambe::classify_thumbdv_failure().message()),
-            )?,
+            Vocoder::Given(ambe, backend) => (ambe, backend),
+            Vocoder::Open(trust) => {
+                open_ambe_stream(Some(AmbeBackend::Hardware), VocoderMode::Dstar, trust)
+                    .ok_or_else(|| {
+                        ConsoleError::Dstar(
+                            astar_codec::ambe::classify_thumbdv_failure(trust).message(),
+                        )
+                    })?
+            }
         };
 
         let socket = connect_udp_socket(&cfg.host, cfg.port)?;
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let ptt_request = Arc::new(AtomicBool::new(false));
-        let shared = Arc::new(SharedState::new());
+        let shared = Arc::new(SharedState::with_vocoder(backend));
 
         let thread_shutdown = Arc::clone(&shutdown);
         let thread_ptt_request = Arc::clone(&ptt_request);
@@ -662,6 +777,16 @@ impl DstarSession {
         self.shared.heard.snapshot()
     }
 
+    /// The codec-frame recording tap: install a [`astar_record::Tap`] here
+    /// and the run loop offers every received and transmitted over to it as
+    /// [`FrameEvent`]s — each AMBE frame as it goes into (or comes out of)
+    /// the vocoder, then the 160 samples paired with it. The slot is shared:
+    /// setting it on the returned handle reaches the live session.
+    #[must_use]
+    pub fn frame_tap(&self) -> TapSlot<FrameEvent> {
+        self.shared.frame_tap.clone()
+    }
+
     /// Disconnect: requests the run-loop send an unlink and exit, then joins
     /// the thread. The 50 ms socket read timeout bounds the join.
     pub fn disconnect(mut self) {
@@ -706,8 +831,10 @@ impl Drop for DstarSession {
 }
 
 /// Resolves `host:port` and returns a connected, read-timeout-armed
-/// [`UdpSocket`]. A copy of [`crate::m17`]'s own `connect_udp_socket` (that
-/// function is private to its module) — see its doc comment for the full
+/// [`UdpSocket`]. The D-Star twin of `crate::m17::rx::connect_udp_socket`,
+/// kept separate because `dstar` builds without the `m17` feature. Unlike the
+/// M17 one it still makes up "could not resolve" instead of keeping the real
+/// error (the D-Star half of iax-c1d5) — see that doc comment for the full
 /// rationale on trying every resolved candidate address (notably
 /// `"localhost"` on macOS resolving to both an IPv6 and IPv4 candidate).
 ///
@@ -891,7 +1018,7 @@ struct RunLoopParams {
 /// (key-up, or the shutdown/Drop path — see [`unlink_flushing_eot_if_keyed`]).
 /// Owns [`astar_dstar::tx::TxStream`] (stream id + seq-wrap + slow-data
 /// framing, iax-2f6b's TX-framing module) plus the mic-frame queue a session
-/// needs on top of it — mirrors [`crate::m17::TxState`]'s role.
+/// needs on top of it — mirrors [`crate::m17::session::TxState`]'s role.
 struct TxState {
     stream: Option<TxStream>,
     /// Captured mic PCM frames that arrived but haven't been submitted to
@@ -906,6 +1033,17 @@ struct TxState {
     /// When the next paced voice frame may go out. `None` before the first
     /// frame of a transmission (which goes out as soon as it is ready).
     next_due: Option<Instant>,
+    /// PCM submitted to the encoder whose encoded frame has not come back
+    /// yet, oldest first. The encoder answers in order, so each frame
+    /// `poll_encoded` returns pairs with the front of this queue — which is
+    /// how a recording gets `Frame{Tx}` ahead of its `Pcm{Tx}`. Holds one
+    /// entry per frame the encoder has in flight: an entry is pushed only
+    /// when a submit actually raised `in_flight_encoded()`, and key-down
+    /// trims it back to that count.
+    encoding: VecDeque<[i16; 160]>,
+    /// The DSVT sequence number the next encoded frame will carry on the
+    /// wire (frames leave in encode order, starting at 0 after the header).
+    rec_seq: u8,
 }
 
 impl TxState {
@@ -915,7 +1053,30 @@ impl TxState {
             pending_pcm: VecDeque::new(),
             ready: VecDeque::new(),
             next_due: None,
+            encoding: VecDeque::new(),
+            rec_seq: 0,
         }
+    }
+
+    /// Hand `pcm` to the encoder, remembering it for its recording pair —
+    /// unless the encoder dropped it (a dead worker does), in which case no
+    /// frame will ever come back for it.
+    fn submit_encode(&mut self, ambe: &mut dyn AmbeStream, pcm: &[i16; 160]) {
+        let before = ambe.in_flight_encoded();
+        ambe.submit_encode(*pcm);
+        if ambe.in_flight_encoded() > before {
+            self.encoding.push_back(*pcm);
+        }
+    }
+
+    /// An encoded frame came back: record it, then the PCM it was made from.
+    fn note_encoded(&mut self, shared: &SharedState, frame: [u8; 9]) {
+        let pcm = self.encoding.pop_front();
+        shared.rec_frame(Dir::Tx, frame, self.rec_seq);
+        if let Some(pcm) = pcm {
+            shared.rec_pcm(Dir::Tx, &pcm);
+        }
+        self.rec_seq = (self.rec_seq + 1) % SYNC_INTERVAL;
     }
 
     /// `true` when anything is queued anywhere on the TX path — the run
@@ -1145,7 +1306,8 @@ struct RxState<'a> {
     ambe: &'a mut dyn AmbeStream,
     /// Arrived-but-not-yet-submitted 9-byte channel frames. See the module
     /// docs' "Pipelined AMBE decode" section for why this queue exists.
-    pending: &'a mut VecDeque<[u8; 9]>,
+    /// Each frame travels with its DSVT sequence number, for the recording.
+    pending: &'a mut VecDeque<([u8; 9], u8)>,
     tracker: &'a mut StreamTracker,
     slow_rx: &'a mut SlowDataRx,
     call_audio: &'a CallAudio,
@@ -1165,15 +1327,17 @@ struct RxState<'a> {
 /// `poll_decoded` is non-blocking by contract.
 fn pump(rx: &mut RxState<'_>) {
     while rx.ambe.in_flight() < AMBE_STREAM_MAX_IN_FLIGHT {
-        let Some(frame) = rx.pending.pop_front() else {
+        let Some((frame, seq)) = rx.pending.pop_front() else {
             break;
         };
+        rx.shared.rec_frame(Dir::Rx, frame, seq);
         rx.ambe.submit_decode(frame.into());
         rx.tracker.note_frame_submitted();
     }
     if rx.tracker.is_primed() {
         while let Some(pcm) = rx.ambe.poll_decoded() {
             let _ = rx.call_audio.rx_frames.send(pcm.to_vec().into());
+            rx.shared.rec_pcm(Dir::Rx, &pcm);
         }
     }
 }
@@ -1201,9 +1365,10 @@ fn flush_pipeline(rx: &mut RxState<'_>, forward: bool) {
     let deadline = Instant::now() + FLUSH_DEADLINE;
     loop {
         while rx.ambe.in_flight() < AMBE_STREAM_MAX_IN_FLIGHT {
-            let Some(frame) = rx.pending.pop_front() else {
+            let Some((frame, seq)) = rx.pending.pop_front() else {
                 break;
             };
+            rx.shared.rec_frame(Dir::Rx, frame, seq);
             rx.ambe.submit_decode(frame.into());
         }
         let mut delivered = false;
@@ -1212,6 +1377,10 @@ fn flush_pipeline(rx: &mut RxState<'_>, forward: bool) {
             if forward {
                 let _ = rx.call_audio.rx_frames.send(pcm.to_vec().into());
             }
+            // Recorded either way: `forward` decides only what is PLAYED.
+            // The discarded tail still belongs to the stream whose frames
+            // were recorded, and its `End` comes after this flush.
+            rx.shared.rec_pcm(Dir::Rx, &pcm);
         }
         if rx.pending.is_empty() && rx.ambe.in_flight() == 0 {
             return;
@@ -1234,6 +1403,16 @@ fn flush_pipeline(rx: &mut RxState<'_>, forward: bool) {
         }
     }
     rx.pending.clear();
+}
+
+/// The current received stream is over: close its recording (when one was
+/// open) and reset tracking so the next `Header` starts clean. The caller
+/// has already flushed the pipeline.
+fn end_rx_stream(rx: &mut RxState<'_>) {
+    if rx.tracker.current_stream.is_some() {
+        rx.shared.rec_end(Dir::Rx);
+    }
+    rx.tracker.end();
 }
 
 /// Convert one TX frame (`StreamConfig::default()` guarantees 160 `i16`
@@ -1289,17 +1468,19 @@ fn pump_tx(ctx: &mut TxCtx<'_>, tx: &mut TxState) {
         let Some(pcm) = tx.pending_pcm.pop_front() else {
             break;
         };
-        ctx.ambe.submit_encode(pcm);
+        tx.submit_encode(ctx.ambe, &pcm);
     }
     while let Some(frame) = ctx.ambe.poll_encoded() {
         // This session's stream is opened in `VocoderMode::Dstar`, so a
         // frame of any other width cannot arrive — but substituting the null
         // codeword beats truncating something that is not a D-Star frame onto
         // the air.
-        tx.ready.push_back(frame.as_dstar().unwrap_or_else(|| {
+        let frame = frame.as_dstar().unwrap_or_else(|| {
             tracing::warn!("dstar: encoder returned a non-D-Star frame, substituting silence");
             astar_dstar::NULL_AMBE
-        }));
+        });
+        tx.note_encoded(ctx.shared, frame);
+        tx.ready.push_back(frame);
     }
     send_paced_voice_frames(ctx, tx, Instant::now());
 }
@@ -1392,36 +1573,39 @@ fn run_tx_pump_step(
 /// whether it emits an EOT frame at all.
 fn flush_tx_pipeline(
     ambe: &mut dyn AmbeStream,
-    pending: &mut VecDeque<[i16; 160]>,
+    shared: &SharedState,
+    tx: &mut TxState,
 ) -> Vec<[u8; 9]> {
     let deadline = Instant::now() + FLUSH_DEADLINE;
     let mut out = Vec::new();
     loop {
         while ambe.in_flight_encoded() < AMBE_STREAM_MAX_IN_FLIGHT {
-            let Some(pcm) = pending.pop_front() else {
+            let Some(pcm) = tx.pending_pcm.pop_front() else {
                 break;
             };
-            ambe.submit_encode(pcm);
+            tx.submit_encode(ambe, &pcm);
         }
         let mut delivered = false;
         while let Some(frame) = ambe.poll_encoded() {
             delivered = true;
-            out.push(frame.as_dstar().unwrap_or_else(|| {
+            let frame = frame.as_dstar().unwrap_or_else(|| {
                 tracing::warn!("dstar: encoder returned a non-D-Star frame, substituting silence");
                 astar_dstar::NULL_AMBE
-            }));
+            });
+            tx.note_encoded(shared, frame);
+            out.push(frame);
         }
-        if pending.is_empty() && ambe.in_flight_encoded() == 0 {
+        if tx.pending_pcm.is_empty() && ambe.in_flight_encoded() == 0 {
             return out;
         }
         if Instant::now() >= deadline {
             tracing::warn!(
-                pending = pending.len(),
+                pending = tx.pending_pcm.len(),
                 in_flight = ambe.in_flight_encoded(),
                 "dstar: TX encoder flush hit its {FLUSH_DEADLINE:?} deadline, unkeying with what \
                  encoded so far"
             );
-            pending.clear();
+            tx.pending_pcm.clear();
             return out;
         }
         if !delivered {
@@ -1434,7 +1618,7 @@ fn flush_tx_pipeline(
 
 /// Run-loop step: apply a pending PTT edge. Returns the keyed state that was
 /// actually reached — which for a key-down is NOT always `want_key`: see the
-/// refusal cases below. [`crate::m17::apply_ptt_edge`] is the M17 precedent
+/// refusal cases below. [`crate::m17::session::apply_ptt_edge`] is the M17 precedent
 /// this mirrors.
 ///
 /// The lane's gate is NOT touched here — `ConsoleSession::set_ptt` opened it
@@ -1490,9 +1674,16 @@ fn key_down(ctx: &mut TxCtx<'_>, tx: &mut TxState) -> bool {
     tx.pending_pcm.clear();
     tx.ready.clear();
     tx.next_due = None;
+    tx.rec_seq = 0;
     let mut stale = 0usize;
     while ctx.ambe.poll_encoded().is_some() {
         stale += 1;
+    }
+    // The frames just thrown away were the oldest entries; the ones still in
+    // flight come out later and are sent, so keep exactly their audio.
+    let in_flight = ctx.ambe.in_flight_encoded();
+    while tx.encoding.len() > in_flight {
+        tx.encoding.pop_front();
     }
     if stale > 0 {
         tracing::warn!(
@@ -1514,6 +1705,7 @@ fn key_down(ctx: &mut TxCtx<'_>, tx: &mut TxState) -> bool {
     }
     tx.stream = Some(stream);
     ctx.shared.ptt.store(true, Ordering::Relaxed);
+    ctx.shared.rec_start(Dir::Tx, || ctx.header.my_callsign());
     true
 }
 
@@ -1522,7 +1714,7 @@ fn key_up(ctx: &mut TxCtx<'_>, tx: &mut TxState) {
     ctx.shared.ptt.store(false, Ordering::Relaxed);
     drain_tx_mic_frames(ctx, tx);
     let mut encoded: Vec<[u8; 9]> = tx.ready.drain(..).collect();
-    encoded.extend(flush_tx_pipeline(ctx.ambe, &mut tx.pending_pcm));
+    encoded.extend(flush_tx_pipeline(ctx.ambe, ctx.shared, tx));
     tx.next_due = None;
     let Some(mut stream) = tx.stream.take() else {
         // No stream was ever opened, so there is nothing to terminate:
@@ -1540,20 +1732,21 @@ fn key_up(ctx: &mut TxCtx<'_>, tx: &mut TxState) {
         // decoder, it is a frame whose voice parameters are all zero (see
         // NULL_AMBE).
         send_terminating_frame(ctx.socket, &stream.unkey(NULL_AMBE).encode());
-        return;
-    }
-    let last = encoded.len() - 1;
-    for (i, ambe) in encoded.into_iter().enumerate() {
-        if i == last {
-            send_terminating_frame(ctx.socket, &stream.unkey(ambe).encode());
-        } else {
-            send_packet(
-                ctx.socket,
-                &stream.next_voice_frame(ambe, false).encode(),
-                "a flushed DSVT voice frame",
-            );
+    } else {
+        let last = encoded.len() - 1;
+        for (i, ambe) in encoded.into_iter().enumerate() {
+            if i == last {
+                send_terminating_frame(ctx.socket, &stream.unkey(ambe).encode());
+            } else {
+                send_packet(
+                    ctx.socket,
+                    &stream.next_voice_frame(ambe, false).encode(),
+                    "a flushed DSVT voice frame",
+                );
+            }
         }
     }
+    ctx.shared.rec_end(Dir::Tx);
 }
 
 /// Run-loop step: apply a pending PTT edge, if `want_key` differs from
@@ -1575,7 +1768,7 @@ fn apply_pending_ptt_edge(
     shared: &SharedState,
     header: RfHeader,
     shutdown: &AtomicBool,
-    pending: &mut VecDeque<[u8; 9]>,
+    pending: &mut VecDeque<([u8; 9], u8)>,
     tracker: &mut StreamTracker,
     slow_rx: &mut SlowDataRx,
     tx: &mut TxState,
@@ -1611,7 +1804,7 @@ fn apply_pending_ptt_edge(
             shutdown,
         };
         flush_pipeline(&mut rx, true);
-        rx.tracker.end();
+        end_rx_stream(&mut rx);
     }
     keyed
 }
@@ -1621,7 +1814,7 @@ fn apply_pending_ptt_edge(
 /// sending the unlink. Without this, disconnecting while keyed would leave
 /// the reflector's own stream open (no EOT bit ever seen) until ITS OWN
 /// stream-idle timeout closed it — mirrors
-/// [`crate::m17::send_disc_flushing_eos_if_keyed`] exactly, adapted to
+/// [`crate::m17::session::send_disc_flushing_eos_if_keyed`] exactly, adapted to
 /// D-Star's unlink instead of M17's `DISC`. [`DstarSession::disconnect`] and
 /// `Drop` both route through this same shutdown branch (see the module
 /// docs), so both are covered by the same guarantee.
@@ -1650,7 +1843,7 @@ fn run_ptt_step(
     shared: &SharedState,
     header: RfHeader,
     shutdown: &AtomicBool,
-    pending: &mut VecDeque<[u8; 9]>,
+    pending: &mut VecDeque<([u8; 9], u8)>,
     tracker: &mut StreamTracker,
     slow_rx: &mut SlowDataRx,
     tx: &mut TxState,
@@ -1723,7 +1916,7 @@ fn run_loop(p: RunLoopParams) {
     let mut buf = [0u8; 2_048];
     let mut tracker = StreamTracker::new();
     let mut slow_rx = SlowDataRx::new();
-    let mut pending: VecDeque<[u8; 9]> = VecDeque::new();
+    let mut pending: VecDeque<([u8; 9], u8)> = VecDeque::new();
     let mut fast_socket = false;
     let mut ptt = PttGate::new();
     let mut tx = TxState::new();
@@ -1738,6 +1931,12 @@ fn run_loop(p: RunLoopParams) {
                 header,
             };
             unlink_flushing_eot_if_keyed(&mut ctx, &mut tx, &mut fsm, ptt.is_keyed());
+            // Close a received recording that is still open. There is no
+            // flush here: frames still in the vocoder never decode, and the
+            // writer trims a stream's undecoded tail.
+            if tracker.current_stream.is_some() {
+                shared.rec_end(Dir::Rx);
+            }
             break;
         }
 
@@ -1914,7 +2113,7 @@ fn run_rx_poll_step(
     buf: &mut [u8],
     fsm: &mut DextraFsm,
     ambe: &mut dyn AmbeStream,
-    pending: &mut VecDeque<[u8; 9]>,
+    pending: &mut VecDeque<([u8; 9], u8)>,
     tracker: &mut StreamTracker,
     slow_rx: &mut SlowDataRx,
     call_audio: &CallAudio,
@@ -1941,7 +2140,7 @@ fn run_rx_poll_step(
         if rx.tracker.is_abandoned(Instant::now()) {
             tracing::debug!("dstar: stream went quiet, flushing and resetting tracking");
             flush_pipeline(&mut rx, true);
-            rx.tracker.end();
+            end_rx_stream(&mut rx);
         }
     }
 }
@@ -1961,10 +2160,16 @@ fn handle_dsvt(pkt: DsvtPacket, rx: &mut RxState<'_>) {
             // would also push B's own first frames past the pipeline's
             // in-flight bound.
             flush_pipeline(rx, false);
+            if rx.tracker.current_stream.is_some() {
+                // The previous stream never sent its `end`: close its
+                // recording before this one opens.
+                rx.shared.rec_end(Dir::Rx);
+            }
             rx.tracker.start(stream_id, Instant::now());
             *rx.slow_rx = SlowDataRx::new();
             let call = header.my_callsign();
             rx.shared.heard.note("dstar", &call);
+            rx.shared.rec_start(Dir::Rx, || call.clone());
             *rx.shared.talker.lock().expect("talker mutex") = Some(call);
         }
         DsvtPacket::Voice {
@@ -1991,7 +2196,7 @@ fn handle_dsvt(pkt: DsvtPacket, rx: &mut RxState<'_>) {
                     "dstar: {MAX_PENDING_FRAMES} undecoded frames already queued, dropping newest"
                 );
             } else {
-                rx.pending.push_back(frame);
+                rx.pending.push_back((frame, seq));
             }
             pump(rx);
             if let Some(text) = rx.slow_rx.feed(seq, &slow_data) {
@@ -2013,7 +2218,7 @@ fn handle_dsvt(pkt: DsvtPacket, rx: &mut RxState<'_>) {
                     rx.shared.heard.note("dstar", &call);
                 }
                 flush_pipeline(rx, true);
-                rx.tracker.end();
+                end_rx_stream(rx);
             }
         }
     }
@@ -2077,6 +2282,193 @@ mod tx_tests {
         }
     }
 
+    /// An encoder with two stages: `done` frames are ready to poll,
+    /// `working` ones are still in flight. Every `refuse`d submit is dropped
+    /// the way a dead worker drops one.
+    #[derive(Default)]
+    struct StagedEncoder {
+        done: VecDeque<[u8; 9]>,
+        working: VecDeque<[u8; 9]>,
+        refuse: usize,
+    }
+
+    fn level_frame(level: i16) -> [u8; 9] {
+        let b = level.to_be_bytes();
+        [b[0], b[1], 0, 0, 0, 0, 0, 0, 0]
+    }
+
+    impl AmbeStream for StagedEncoder {
+        fn submit_decode(&mut self, _frame: astar_codec::ambe::ChannelFrame) {}
+        fn poll_decoded(&mut self) -> Option<[i16; 160]> {
+            None
+        }
+        fn in_flight(&self) -> usize {
+            0
+        }
+        fn submit_encode(&mut self, pcm: [i16; 160]) {
+            if self.refuse > 0 {
+                self.refuse -= 1;
+                return;
+            }
+            self.done.push_back(level_frame(pcm[0]));
+        }
+        fn poll_encoded(&mut self) -> Option<astar_codec::ambe::ChannelFrame> {
+            self.done
+                .pop_front()
+                .map(astar_codec::ambe::ChannelFrame::Dstar)
+        }
+        fn in_flight_encoded(&self) -> usize {
+            self.done.len() + self.working.len()
+        }
+    }
+
+    fn tx_events(rx: &Receiver<FrameEvent>) -> Vec<FrameEvent> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|e| !matches!(e, FrameEvent::Start { .. }))
+            .collect()
+    }
+
+    /// Record pressed mid-over: the tap appears after the stream's header,
+    /// and its next frame opens the recording for the rest of the over.
+    /// A stream no tap ever saw start gets no `End`.
+    #[test]
+    fn a_tap_set_mid_over_records_the_rest_of_the_over() {
+        let shared = SharedState::new();
+        shared.rec_start(Dir::Rx, || "W1ABC".to_owned());
+        shared.rec_frame(Dir::Rx, [1; 9], 0);
+        let (tap, events) = astar_record::tap::tap_channel(16);
+        shared.frame_tap.set(Some(tap));
+        shared.rec_frame(Dir::Rx, [2; 9], 1);
+        shared.rec_pcm(Dir::Rx, &[5; 160]);
+        shared.rec_frame(Dir::Rx, [3; 9], 2);
+        shared.rec_end(Dir::Rx);
+        // Never started on any tap: nothing to end.
+        shared.frame_tap.set(None);
+        shared.rec_start(Dir::Tx, || "W1ABC".to_owned());
+        let (tap, later) = astar_record::tap::tap_channel(16);
+        shared.frame_tap.set(Some(tap));
+        shared.rec_end(Dir::Tx);
+        let got: Vec<FrameEvent> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+        assert!(
+            matches!(&got[0], FrameEvent::Start { dir: Dir::Rx, talker: Some(t), .. } if t == "W1ABC"),
+            "{got:?}"
+        );
+        assert_eq!(
+            got[1..]
+                .iter()
+                .map(|e| match e {
+                    FrameEvent::Frame { bytes, .. } => bytes[0],
+                    FrameEvent::Pcm { .. } => 5,
+                    FrameEvent::End { .. } => 0,
+                    FrameEvent::Start { .. } => 9,
+                })
+                .collect::<Vec<_>>(),
+            vec![2, 5, 3, 0]
+        );
+        assert!(
+            later.try_recv().is_err(),
+            "no End for a stream never started"
+        );
+    }
+
+    /// A submit the encoder dropped leaves nothing to pair with, so the next
+    /// frame still records with its own audio.
+    #[test]
+    fn a_refused_encode_does_not_shift_the_recording() {
+        let shared = SharedState::new();
+        let (tap, events) = astar_record::tap::tap_channel(16);
+        shared.frame_tap.set(Some(tap));
+        let mut ambe = StagedEncoder {
+            refuse: 1,
+            ..StagedEncoder::default()
+        };
+        let mut tx = TxState::new();
+        tx.submit_encode(&mut ambe, &[1; 160]); // dropped by the encoder
+        tx.submit_encode(&mut ambe, &[2; 160]);
+        let frame = ambe
+            .poll_encoded()
+            .and_then(astar_codec::ambe::ChannelFrame::as_dstar)
+            .expect("frame");
+        tx.note_encoded(&shared, frame);
+        assert_eq!(
+            tx_events(&events),
+            vec![
+                FrameEvent::Frame {
+                    dir: Dir::Tx,
+                    bytes: level_frame(2).to_vec(),
+                    seq: Some(Seq {
+                        value: 0,
+                        modulus: 21
+                    }),
+                },
+                FrameEvent::Pcm {
+                    dir: Dir::Tx,
+                    pcm: [2; 160],
+                },
+            ]
+        );
+        assert!(tx.encoding.is_empty());
+    }
+
+    /// Key-down drops the previous over's finished frames, but the ones
+    /// still in flight come out later and are sent — they must record with
+    /// their own audio, not the new over's.
+    #[test]
+    fn key_down_keeps_the_audio_of_frames_still_in_flight() {
+        let (send_sock, _recv_sock) = loopback_pair();
+        let (call_audio, _push, _rx) = fake_call_audio();
+        let mut ambe = StagedEncoder {
+            done: VecDeque::from(vec![level_frame(1), level_frame(2)]),
+            working: VecDeque::from(vec![level_frame(3)]),
+            refuse: 0,
+        };
+        let shared = SharedState::new();
+        let (tap, events) = astar_record::tap::tap_channel(16);
+        shared.frame_tap.set(Some(tap));
+        let mut tx = TxState::new();
+        tx.encoding = VecDeque::from(vec![[1; 160], [2; 160], [3; 160]]);
+        {
+            let mut ctx = TxCtx {
+                socket: &send_sock,
+                ambe: &mut ambe,
+                call_audio: &call_audio,
+                shared: &shared,
+                header: test_header(),
+            };
+            assert!(apply_ptt_edge(&mut ctx, &mut tx, true));
+        }
+        assert_eq!(tx.encoding, VecDeque::from(vec![[3; 160]]));
+
+        // The in-flight frame finishes and goes out under the new stream.
+        let late = ambe.working.pop_front().expect("in flight");
+        ambe.done.push_back(late);
+        let mut ctx = TxCtx {
+            socket: &send_sock,
+            ambe: &mut ambe,
+            call_audio: &call_audio,
+            shared: &shared,
+            header: test_header(),
+        };
+        pump_tx(&mut ctx, &mut tx);
+        assert_eq!(
+            tx_events(&events),
+            vec![
+                FrameEvent::Frame {
+                    dir: Dir::Tx,
+                    bytes: level_frame(3).to_vec(),
+                    seq: Some(Seq {
+                        value: 0,
+                        modulus: 21
+                    }),
+                },
+                FrameEvent::Pcm {
+                    dir: Dir::Tx,
+                    pcm: [3; 160],
+                },
+            ]
+        );
+    }
+
     /// An [`AmbeStream`] double whose encode side never answers — the
     /// unit-test-level twin of `dstar_session_pipeline.rs`'s
     /// `FakeVocoder::wedged_encode`, for exercising [`flush_tx_pipeline`]'s
@@ -2107,7 +2499,7 @@ mod tx_tests {
     /// Build a [`CallAudio`] by hand — no router involved — so a test can
     /// push raw frames straight onto the exact channel
     /// [`drain_tx_mic_frames`]/[`apply_ptt_edge`] read from. Mirrors
-    /// `crate::m17::tests::fake_call_audio` exactly.
+    /// `crate::m17::session::tests::fake_call_audio` exactly.
     fn fake_call_audio() -> (CallAudio, Sender<Vec<i16>>, Receiver<astar_audio::RxFrame>) {
         let (tx_tx, tx_rx) = channel::<Vec<i16>>();
         let (rx_tx, rx_rx) = channel::<astar_audio::RxFrame>();

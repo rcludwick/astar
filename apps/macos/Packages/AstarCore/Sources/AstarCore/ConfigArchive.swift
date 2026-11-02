@@ -219,6 +219,21 @@ public struct ConfigArchive: Codable, Equatable {
     /// would propagate it into every future import.
     private static let dead: Set<String> = ["audio.wideband"]
 
+    /// Per-machine hardware that must never travel in a file, whatever its
+    /// key says otherwise. `vocoder.` holds the vocoder trust list — the USB
+    /// serials of the AMBE sticks this Mac may open — and a trust list
+    /// imported from another Mac would trust whatever device happens to carry
+    /// that serial here. Refused on export AND on import (`isImportable`), so
+    /// a hand-edited file cannot plant one either. Adding this exclusion does
+    /// not move `ConfigVersion`: nothing that was ever exported changes
+    /// meaning.
+    public static let machineLocalPrefixes = ["vocoder."]
+
+    /// Whether an imported scalar under `key` may be written to defaults.
+    public static func isImportable(key: String) -> Bool {
+        !machineLocalPrefixes.contains(where: { key.hasPrefix($0) })
+    }
+
     /// Prefix-driven rather than an enumerated list, so a preference added
     /// later is picked up without anyone remembering to update this file.
     private static let settingsPrefixes = ["audio.", "m17.", "serial."]
@@ -235,6 +250,7 @@ public struct ConfigArchive: Codable, Equatable {
         var out = [String: SettingValue]()
         for (key, raw) in defaults {
             guard prefixes.contains(where: { key.hasPrefix($0) }) else { continue }
+            guard isImportable(key: key) else { continue }
             guard !claimedElsewhere.contains(key), !dead.contains(key) else { continue }
             let lowered = key.lowercased()
             guard !secretHints.contains(where: { lowered.contains($0) }) else { continue }

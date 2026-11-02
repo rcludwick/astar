@@ -66,6 +66,17 @@ public enum Network: String, CaseIterable, Codable, Sendable {
     /// talkgroup number names nothing on its own (TG 91 is a different room
     /// on every network that has one). `DmrDial` is where that is enforced.
     case dmr
+    /// EchoLink: calling one station, link, repeater or conference by node
+    /// number or callsign, after logging in to the EchoLink directory.
+    ///
+    /// Availability is a BUILD fact, like ``m17``: EchoLink voice is GSM
+    /// 06.10, which astar decodes in software, so no hardware goes into it.
+    /// The segment appears whenever the engine was built with EchoLink.
+    ///
+    /// The odd one out in one respect: a call needs a directory login first,
+    /// and the login is a separate, longer-lived thing than the call. Logging
+    /// in and calling are both a person's actions.
+    case echolink
 
     /// The networks the engine can actually drive right now. AllStar is
     /// always available; `hamlink` stays unavailable until the engine gains
@@ -76,7 +87,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
     /// not about the build.
     public static func available(
         m17: Bool, dstar: Bool = false, ysf: Bool = false, nxdn: Bool = false,
-        dmr: Bool = false
+        dmr: Bool = false, echolink: Bool = false
     ) -> [Network] {
         var networks: [Network] = [.allstar]
         if m17 { networks.append(.m17) }
@@ -84,6 +95,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         if ysf { networks.append(.ysf) }
         if nxdn { networks.append(.nxdn) }
         if dmr { networks.append(.dmr) }
+        if echolink { networks.append(.echolink) }
         return networks
     }
 
@@ -93,10 +105,12 @@ public enum Network: String, CaseIterable, Codable, Sendable {
     /// mirrors `available(m17:)`'s flag.
     public static func resolve(
         _ raw: String?, m17: Bool, dstar: Bool = false, ysf: Bool = false, nxdn: Bool = false,
-        dmr: Bool = false
+        dmr: Bool = false, echolink: Bool = false
     ) -> Network {
         guard let raw, let network = Network(rawValue: raw),
-            available(m17: m17, dstar: dstar, ysf: ysf, nxdn: nxdn, dmr: dmr).contains(network)
+            available(
+                m17: m17, dstar: dstar, ysf: ysf, nxdn: nxdn, dmr: dmr, echolink: echolink
+            ).contains(network)
         else { return .allstar }
         return network
     }
@@ -111,6 +125,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         case .ysf: return "Fusion"
         case .nxdn: return "NXDN"
         case .dmr: return "DMR"
+        case .echolink: return "EchoLink"
         }
     }
 
@@ -125,6 +140,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         case .ysf: return "YSF"
         case .nxdn: return "NXDN"
         case .dmr: return "DMR"
+        case .echolink: return "ECHO"
         }
     }
 
@@ -140,6 +156,9 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         // Stacked planes: a DMR master carries two timeslots, and the target
         // names which one — the only network here where that is true.
         case .dmr: return "square.stack.3d.up"
+        // Two people and a wave: EchoLink is a call to another station, not
+        // a room on a reflector.
+        case .echolink: return "person.2.wave.2"
         }
     }
 
@@ -168,6 +187,9 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         // which is the only way to reach a network the directory does not
         // list, TGIF included.
         case .dmr: return "Talkgroup, or system:host:port/talkgroup"
+        // Either names a station in the directory's list: the callsign as it
+        // is listed (`KX7ABC-L`, `*ECHOTEST*`), or the node number.
+        case .echolink: return "Callsign or node number"
         }
     }
 
@@ -191,6 +213,11 @@ public enum Network: String, CaseIterable, Codable, Sendable {
             // admitting a space would let `XLX836 A` sit in the field looking
             // dialable.
             return (c.isASCII && (c.isLetter || c.isNumber)) || ".:-/_".contains(c)
+        case .echolink:
+            // A node number or a listed callsign: letters and digits, the
+            // `-` of a `-L`/`-R` suffix, and the stars around a conference
+            // name. No space, no `/` and no `.` — nothing here is an address.
+            return c.isASCII && (c.isLetter || c.isNumber || "-*".contains(c))
         case .m17, .dstar, .ysf, .nxdn:
             // `host[:port]/module` or `host[:port] module`
             // (`ReflectorAddressDial`) — unlike the node networks, the space
@@ -216,7 +243,9 @@ public enum Network: String, CaseIterable, Codable, Sendable {
     public var isDigitalVoice: Bool {
         switch self {
         case .allstar, .hamlink: return false
-        case .m17, .dstar, .ysf, .nxdn, .dmr: return true
+        // EchoLink names the far station in the call itself, and that
+        // station is who is talking when the far end keys up.
+        case .m17, .dstar, .ysf, .nxdn, .dmr, .echolink: return true
         }
     }
 

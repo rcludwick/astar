@@ -1,0 +1,45 @@
+; nodebench: iax.conf for node 1999. No outbound registration anywhere. Binds
+; 0.0.0.0 inside the pod so host-published ports reach it (see pod.yaml).
+;
+; This is a template: the entrypoint writes /etc/asterisk/iax.conf from it,
+; replacing each @CODECS@ line with "disallow = all" plus one "allow =" per
+; codec in NODEBENCH_CODECS (default "slin16,slin,ulaw"; "ulaw" gives the
+; ClearNode-like ulaw-only variant). Order matters: that is the offer order.
+
+[general]
+bindaddr = 0.0.0.0
+bindport = 4569
+@CODECS@
+jitterbuffer = yes
+forcejitterbuffer = yes
+dropcount = 2
+maxjitterbuffer = 1000
+maxjitterinterps = 10
+resyncthreshold = 500
+maxexcessbuffer = 80
+minexcessbuffer = 10
+jittershrinkrate = 1
+autokill = yes
+delayreject = yes
+maxcallnumbers_nonvalidated = 10
+
+; app_rpt's own node-to-node identity: an ASL3 node dials radio@host/<node>.
+[radio]
+type = user
+@CODECS@
+codecpriority = host
+context = radio-secure
+transfer = no
+
+; astar-server (node 1998). It registers here and dials with username 1998.
+; Test-only secret: this pod is loopback-only and the secret guards nothing.
+[1998]
+type = friend
+host = dynamic
+auth = md5
+secret = nodebench-loopback-only
+@CODECS@
+codecpriority = host
+context = radio-secure
+transfer = no
+qualify = no

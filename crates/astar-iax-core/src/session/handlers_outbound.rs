@@ -42,7 +42,8 @@ impl Fsm {
         let mut out: SmallVec<[Action; 4]> = SmallVec::new();
         match event {
             Event::App(AppCommand::StartCall { dest, now }) => {
-                let capabilities: CodecMask = self.call_profile.codec_policy.capability_mask();
+                // What we offer: never GSM (see `CodecPolicy::offer_order`).
+                let capabilities: CodecMask = self.call_profile.codec_policy.offer_mask();
                 let ping_seq = 0u8;
                 // First NEW: peer scallno is unknown, dest_call = 0 (RFC 5456
                 // §8.6.1). iax-e402: subsequent NEWs (after CALLTOKEN) carry
@@ -1026,13 +1027,23 @@ impl Fsm {
                         // payload (raw UTF-8, not IEs). Dispatch on body content
                         // before the subclass match (Text uses Subclass::Raw(0)).
                         if matches!(full.frame_type, FrameType::Text) {
-                            let body = String::from_utf8_lossy(full.payload);
+                            // `app_rpt` sends its link strings as C strings,
+                            // NUL included (`datalen = strlen + 1`). Matched
+                            // with the NUL, `!NEWKEY1!` and `!!DISCONNECT!!`
+                            // never compared equal (nodebench finding 6).
+                            let payload = crate::text::trim_c_string(full.payload);
+                            let body = String::from_utf8_lossy(payload);
                             if body == "!NEWKEY1!" {
-                                // app_rpt newkey handshake — echo back.
+                                // app_rpt newkey handshake — echo back, and
+                                // tell the leg: this peer keys by sending
+                                // voice (nodebench finding 7).
                                 out.push(Action::SendReliable(build_text(
                                     our_call,
                                     peer_call,
                                     "!NEWKEY1!",
+                                )));
+                                out.push(Action::AppEvent(AppEvent::TextReceived(
+                                    crate::text::OwnedTextEvent::Raw("!NEWKEY1!".into()),
                                 )));
                                 return (
                                     SessionState::Active(ActiveData {
@@ -1049,36 +1060,19 @@ impl Fsm {
                                     }),
                                     out,
                                 );
-                            } else if body == "!!DISCONNECT!!" {
-                                // app_rpt peer teardown — mirror the peer-HANGUP
-                                // arm: cancel keepalive, set HangupRetry timer,
-                                // emit Disconnected, go to Hangup with Peer origin.
-                                out.push(Action::CancelTimer(TimerKind::Keepalive));
-                                out.push(Action::SetTimer(
-                                    TimerKind::HangupRetry,
-                                    Duration::from_secs(1),
-                                ));
-                                out.push(Action::AppEvent(AppEvent::Disconnected {
-                                    reason: FailReason::RemoteHangup {
-                                        cause: Some("disconnect".into()),
-                                    },
-                                }));
-                                let _ = (pending_dtmf, last_dtmf_at, keepalive, last_full_voice);
-                                return (
-                                    SessionState::Hangup(HangupData {
-                                        our_call,
-                                        peer_call,
-                                        initiated_by: HangupOrigin::Peer,
-                                        sent_at: now,
-                                        attempts: 1,
-                                    }),
-                                    out,
-                                );
                             }
+                            // `!!DISCONNECT!!` is app_rpt saying it is about
+                            // to hang up; its HANGUP follows in the same
+                            // breath. It is not a teardown of its own: ending
+                            // the leg here left that HANGUP unacknowledged,
+                            // and the node retransmitted it at the next call
+                            // on the same number (finding 4's shape). It falls
+                            // through to TextReceived like any status text,
+                            // and the peer-HANGUP arm ends the call.
                             // Periodic status frames (e.g. "L <linklist>") —
                             // parse and surface to the application layer.
                             {
-                                let event = crate::text::TextEvent::parse(full.payload)
+                                let event = crate::text::TextEvent::parse(payload)
                                     .unwrap_or(crate::text::TextEvent::Raw(""))
                                     .to_owned();
                                 out.push(Action::AppEvent(AppEvent::TextReceived(event)));
@@ -1325,6 +1319,29 @@ impl Fsm {
                                     _ => CallProgress::Proceeding,
                                 };
                                 out.push(Action::AppEvent(AppEvent::CallProgress(event)));
+                                (
+                                    SessionState::Active(ActiveData {
+                                        our_call,
+                                        peer_call,
+                                        established_at,
+                                        pending_dtmf,
+                                        last_dtmf_at,
+                                        keepalive,
+                                        last_full_voice,
+                                        last_ptt,
+                                        last_rx_voice_format,
+                                        negotiated_format,
+                                    }),
+                                    out,
+                                )
+                            }
+                            // chan_iax2 sends `ast_indicate(chan, -1)` ("stop
+                            // any indication") as control byte 0xff; app_rpt
+                            // does it right after ANSWER. astar plays no
+                            // indications, so there is nothing to stop.
+                            Subclass::Raw(crate::subclass::CONTROL_STOP_INDICATIONS)
+                                if matches!(full.frame_type, FrameType::Control) =>
+                            {
                                 (
                                     SessionState::Active(ActiveData {
                                         our_call,
@@ -1643,7 +1660,7 @@ impl Fsm {
 /// when the peer named something outside our CAPABILITY, which the caller turns
 /// into a HANGUP.
 ///
-/// The gate is `policy.capability_mask()` — what we actually offered — not
+/// The gate is `policy.offer_mask()` — what we actually offered — not
 /// "can the media path code this at all", which is what it used to be. Those
 /// are different questions and the difference has a bandwidth bill attached: a
 /// `ulaw_only` station can *encode* slin16 perfectly well, so the old gate let
@@ -1659,7 +1676,7 @@ impl Fsm {
 /// applies, and that is in our mask by construction.
 fn accepted_format(ies: &Ies, policy: CodecPolicy) -> Option<VoiceFormat> {
     match ies.format.and_then(VoiceFormat::from_u32) {
-        Some(f) if policy.capability_mask().contains(f) => Some(f),
+        Some(f) if policy.offer_mask().contains(f) => Some(f),
         Some(_) => None,
         None => Some(policy.preferred()),
     }
@@ -1686,7 +1703,7 @@ fn hangup_unnegotiable_accept(
     tracing::info!(
         target: "astar_iax::negotiate",
         accepted = format_args!("0x{:04x}", named.unwrap_or(0)),
-        offered = format_args!("0x{:04x}", policy.capability_mask().get()),
+        offered = format_args!("0x{:04x}", policy.offer_mask().get()),
         policy = ?policy,
         "peer ACCEPTed a format we never offered -- hanging up"
     );

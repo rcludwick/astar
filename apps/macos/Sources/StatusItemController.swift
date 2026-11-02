@@ -28,6 +28,9 @@
         /// the AppDelegate owns it, because the dial path subscribes to its
         /// index at launch.
         private let reflectors: ReflectorDirectory
+        /// Settings → Vocoders' model (vocoder trust). Owned by the AppDelegate,
+        /// which wires its changes into the session's station.
+        private let vocoders: VocoderSettings
         private let statusItem: NSStatusItem
         private var cancellables = Set<AnyCancellable>()
         /// The main window — created on first use; the asterisk toggles its visibility.
@@ -37,7 +40,8 @@
         init(
             session: CallSession, serial: SerialController, setups: SetupController,
             micAnalyzer: MicAnalyzerController, deviceMonitor: AudioDeviceMonitor,
-            navigation: AppNavigation, reflectors: ReflectorDirectory
+            navigation: AppNavigation, reflectors: ReflectorDirectory,
+            vocoders: VocoderSettings
         ) {
             self.session = session
             self.serial = serial
@@ -46,6 +50,7 @@
             self.deviceMonitor = deviceMonitor
             self.navigation = navigation
             self.reflectors = reflectors
+            self.vocoders = vocoders
             self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
             super.init()
 
@@ -66,18 +71,27 @@
             // CallSession (rx-audio activity OR remotePTT). "Connected" requires an
             // actual dialed call — status alone can read .answered for an idle WT
             // session, which shouldn't tint the asterisk.
-            Publishers.CombineLatest4(
-                session.$ptt, session.$receiving, session.$status, session.$dialedNode
+            //
+            // A recording adds a red dot at the asterisk's bottom-right, over
+            // whichever tint the call state picks, so it is visible from any
+            // app while the window is closed.
+            Publishers.CombineLatest(
+                Publishers.CombineLatest4(
+                    session.$ptt, session.$receiving, session.$status, session.$dialedNode
+                )
+                .map { ptt, receiving, status, dialedNode -> StatusIconState in
+                    StatusIconState(
+                        transmitting: ptt,
+                        receiving: receiving,
+                        connected: status == .answered && dialedNode != nil)
+                },
+                session.$recording
             )
-            .map { ptt, receiving, status, dialedNode -> StatusIconState in
-                StatusIconState(
-                    transmitting: ptt,
-                    receiving: receiving,
-                    connected: status == .answered && dialedNode != nil)
-            }
-            .removeDuplicates()
+            .removeDuplicates { $0 == $1 }
             .receive(on: RunLoop.main)
-            .sink { [weak self] state in self?.updateIcon(state) }
+            .sink { [weak self] state, recording in
+                self?.updateIcon(state, recording: recording)
+            }
             .store(in: &cancellables)
 
             // Install the serial PTT source (was done in MenuPopover.onAppear under
@@ -113,6 +127,7 @@
                     .environmentObject(micAnalyzer)
                     .environmentObject(deviceMonitor)
                     .environmentObject(navigation)
+                    .environmentObject(vocoders)
             )
             let w = NSWindow(contentViewController: hosting)
             w.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
@@ -205,19 +220,56 @@
         /// the SAME asset geometry (`MenuBarRainbow`, solid-filled for the
         /// colored states) — mixing the asset with SF-symbol glyphs made the
         /// item visibly grow/shrink between states (astar-3f57).
-        private func updateIcon(_ state: StatusIconState) {
+        ///
+        /// `recording` adds the red recording dot to whichever mark is chosen.
+        private func updateIcon(_ state: StatusIconState, recording: Bool) {
             guard let button = statusItem.button else { return }
+            let image: NSImage?
             switch state {
             case .idle:
-                button.image = rainbowAsterisk() ?? asterisk(nil)
+                image = rainbowAsterisk() ?? asterisk(nil)
             case .connected:
-                button.image = tintedAsterisk(.systemBlue) ?? asterisk(.systemBlue)
+                image = tintedAsterisk(.systemBlue) ?? asterisk(.systemBlue)
             case .transmitting:
                 let paleRed = NSColor(red: 0.95, green: 0.45, blue: 0.45, alpha: 1)
-                button.image = tintedAsterisk(paleRed) ?? asterisk(paleRed)
+                image = tintedAsterisk(paleRed) ?? asterisk(paleRed)
             case .receiving:
-                button.image = tintedAsterisk(.systemGreen) ?? asterisk(.systemGreen)
+                image = tintedAsterisk(.systemGreen) ?? asterisk(.systemGreen)
             }
+            button.image = recording ? image.map(Self.withRecordingDot) : image
+            button.setAccessibilityValue(recording ? "Recording" : nil)
+        }
+
+        /// Diameter of the recording dot, in points.
+        private static let recordingDotSize: CGFloat = 5
+
+        /// `mark` with a 5 pt red dot at its bottom-right corner, at the same
+        /// size so the status item never changes width. A template mark (the
+        /// SF Symbol fallback) is drawn in the label colour first, because
+        /// the composite cannot be a template without turning the dot grey.
+        private static func withRecordingDot(_ mark: NSImage) -> NSImage {
+            let size = NSSize(width: markPointSize, height: markPointSize)
+            let template = mark.isTemplate
+            let img = NSImage(size: size, flipped: false) { rect in
+                if template {
+                    let tinted = NSImage(size: rect.size, flipped: false) { inner in
+                        mark.draw(in: inner)
+                        NSColor.labelColor.set()
+                        inner.fill(using: .sourceAtop)
+                        return true
+                    }
+                    tinted.draw(in: rect)
+                } else {
+                    mark.draw(in: rect)
+                }
+                let d = recordingDotSize
+                let dot = NSRect(x: rect.maxX - d, y: rect.minY, width: d, height: d)
+                NSColor.systemRed.setFill()
+                NSBezierPath(ovalIn: dot).fill()
+                return true
+            }
+            img.isTemplate = false
+            return img
         }
 
         /// Point size of the menu-bar asterisk — noticeably larger than the system

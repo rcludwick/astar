@@ -1,0 +1,32 @@
+************************ NODE 1999 STATISTICS *************************
+
+Selected system state............................: 0
+Signal on input..................................: NO
+System...........................................: ENABLED
+Parrot Mode......................................: DISABLED
+Scheduler........................................: ENABLED
+Tail Time........................................: STANDARD
+Time out timer...................................: ENABLED
+Incoming connections.............................: ENABLED
+Time out timer state.............................: RESET
+Time outs since system initialization............: 0
+Identifier state.................................: CLEAN
+Kerchunks today..................................: 1
+Kerchunks since system initialization............: 1
+Keyups today.....................................: 4
+Keyups since system initialization...............: 5
+DTMF commands today..............................: 0
+DTMF commands since system initialization........: 0
+Last DTMF command executed.......................: N/A
+TX time today....................................: 00:00:12:340
+TX time since system initialization..............: 00:01:00:005
+Uptime...........................................: 01:02:03
+Nodes currently connected to us..................: 1998, 2000, 2001, 2002
+                                                 : 2003
+Autopatch........................................: ENABLED
+Autopatch state..................................: DOWN
+Autopatch called number..........................: N/A
+Reverse patch/IAXRPT connected...................: DOWN
+User linking commands............................: ENABLED
+User functions...................................: ENABLED
+

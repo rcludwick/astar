@@ -301,25 +301,30 @@ impl AmbeBackend {
     }
 }
 
+#[cfg(test)]
+use crate::vocoder_trust::enrol_vocoder_with;
+pub use crate::vocoder_trust::{
+    MODEL_AMBE3000, MODEL_AMBE3003, NO_TRUSTED_VOCODER, VOCODER_SERIALS_ENV, VocoderCandidate,
+    VocoderEnrolment, VocoderTrust, enrol_vocoder, list_vocoder_candidates,
+};
+
 /// `IAX_THUMBDV_PORT` env var: pins `ThumbDV` detection to one specific serial
-/// device path when several `ThumbDV`-class devices are attached and the scan
-/// would otherwise need disambiguating (iax-b3e7 spec §4). Checked BEFORE
-/// [`ambe_thumbdv::detect`]'s own scan (via [`detect_thumbdv`]) and before
-/// [`open_hw_stream_from_candidate_ports`]'s equivalent scan — mirrors
-/// `IAX_CODEC2_PATH`'s precedent in this crate's `codec2.rs`.
+/// device path when several trusted sticks are attached and the scan would
+/// otherwise need disambiguating (iax-b3e7 spec §4). Applied by
+/// [`thumbdv_candidate_ports`], which every opener in this crate walks.
 ///
-/// # ON-AIR SAFETY — this override does NOT widen the VID/PID filter
+/// # ON-AIR SAFETY — this override does NOT widen the trust list
 ///
-/// The pinned path still has to appear in
-/// [`ambe_thumbdv::SerialTransport::candidate_ports`]'s FTDI `0x0403`/`0x6015`
-/// (or `"ThumbDV"` product-string) scan; see
-/// [`thumbdv_candidate_ports_from`]. A path that doesn't match is REFUSED
-/// (empty candidate list + a `tracing::error!`), never opened. That filter is
-/// what keeps every opener in this crate away from a USB radio interface's
-/// serial port — opening one of those asserts RTS, which on the reference
-/// `AllScan` UCI150 is the transmitter keying line. So the override selects
-/// *which* `ThumbDV`, which is all spec §4 asks for; it can never be used to
-/// point this crate at a radio interface (deliberately or by typo).
+/// The pinned path still has to appear among the ports whose USB serial is
+/// in the [`VocoderTrust`] (and that are FTDI `0x0403`/`0x6015` or
+/// `"ThumbDV"`-product devices); see [`thumbdv_candidate_ports_from`]. A path
+/// that doesn't match is REFUSED (empty candidate list + a `tracing::error!`),
+/// never opened. That filter is what keeps every opener in this crate away
+/// from a USB radio interface's or CAT cable's serial port — opening one of
+/// those asserts DTR/RTS, which on the reference `AllScan` UCI150 is the
+/// transmitter keying line. So the override selects *which* trusted stick,
+/// which is all spec §4 asks for; it can never be used to point this crate at
+/// a radio interface (deliberately or by typo).
 #[cfg(feature = "ambe-hw")]
 fn thumbdv_port_override() -> Option<String> {
     std::env::var("IAX_THUMBDV_PORT")
@@ -327,27 +332,49 @@ fn thumbdv_port_override() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// The candidate serial-port list any `ThumbDV` opener should scan: the
-/// VID/PID-filtered [`ambe_thumbdv::SerialTransport::candidate_ports`] scan
-/// `detect()` uses internally, narrowed to [`thumbdv_port_override`]'s single
-/// pinned path when `IAX_THUMBDV_PORT` is set.
+/// The candidate serial-port list any `ThumbDV` opener should walk: the
+/// attached ports whose USB serial is in `trust`
+/// ([`ambe_thumbdv::SerialTransport::candidate_ports_trusted`]), narrowed to
+/// [`thumbdv_port_override`]'s single pinned path when `IAX_THUMBDV_PORT` is
+/// set. An empty `trust` returns an empty list without enumerating anything.
 #[cfg(feature = "ambe-hw")]
-fn thumbdv_candidate_ports() -> Vec<String> {
+fn thumbdv_candidate_ports(trust: &VocoderTrust) -> Vec<String> {
+    if trust.is_empty() {
+        return Vec::new();
+    }
     thumbdv_candidate_ports_from(
         thumbdv_port_override().as_deref(),
-        &ambe_thumbdv::SerialTransport::candidate_ports(),
+        &ambe_thumbdv::SerialTransport::candidate_ports_trusted(&trust.serials),
     )
 }
 
-/// The candidate-list policy itself, with the override and the real VID/PID
-/// scan both injected — the hardware-free unit-test seam for
+/// The whole policy over a synthetic USB listing: trust filter, then pin.
+/// The hardware-free seam that composes exactly what
+/// [`thumbdv_candidate_ports`] composes.
+#[cfg(all(test, feature = "ambe-hw"))]
+fn trusted_candidate_ports_from(
+    pinned: Option<&str>,
+    listing: &[ambe_thumbdv::UsbListing],
+    trust: &VocoderTrust,
+) -> Vec<String> {
+    if trust.is_empty() {
+        return Vec::new();
+    }
+    thumbdv_candidate_ports_from(
+        pinned,
+        &ambe_thumbdv::trusted_ports_from(listing, &trust.serials),
+    )
+}
+
+/// The pin policy itself, with the override and the trusted scan both
+/// injected — the hardware-free unit-test seam for
 /// [`thumbdv_candidate_ports`].
 ///
-/// The override NARROWS the scan, it never replaces it: a pinned path is
-/// returned only if the scan already found it. Anything else yields an empty
-/// candidate list, so no opener in this crate ever touches the pinned path.
-/// See [`thumbdv_port_override`]'s "ON-AIR SAFETY" section for why that
-/// property is load-bearing and must not regress.
+/// The override NARROWS the trusted scan, it never replaces it: a pinned path
+/// is returned only if the trusted scan already found it. Anything else
+/// yields an empty candidate list, so no opener in this crate ever touches
+/// the pinned path. See [`thumbdv_port_override`]'s "ON-AIR SAFETY" section
+/// for why that property is load-bearing and must not regress.
 #[cfg(feature = "ambe-hw")]
 fn thumbdv_candidate_ports_from(pinned: Option<&str>, scanned: &[String]) -> Vec<String> {
     let Some(pinned) = pinned else {
@@ -357,63 +384,80 @@ fn thumbdv_candidate_ports_from(pinned: Option<&str>, scanned: &[String]) -> Vec
         return vec![pinned.to_string()];
     }
     tracing::error!(
-        "IAX_THUMBDV_PORT={pinned} is not a ThumbDV: no serial port with that path matched the \
-         FTDI 0x0403:0x6015 / \"ThumbDV\" scan ({scanned:?}). Refusing to open it — pointing this \
-         at a USB radio interface's port would assert RTS and key a transmitter."
+        "IAX_THUMBDV_PORT={pinned} is not a trusted vocoder: no port with that path has a \
+         trusted USB serial ({scanned:?}). Refusing to open it — pointing this at a USB radio \
+         interface's or CAT cable's port would assert DTR/RTS and could key a transmitter."
     );
     Vec::new()
 }
 
-/// Detect and initialize a `ThumbDV`, honoring [`thumbdv_port_override`]
-/// first: when `IAX_THUMBDV_PORT` pins one of the scanned candidates, this
-/// bypasses [`ambe_thumbdv::detect`]'s own scan and opens/initializes exactly
-/// that path (trying both of `detect`'s supported baud rates, same fallback
-/// order). Without the override, delegates straight to
-/// [`ambe_thumbdv::detect`]. A pinned path the VID/PID scan didn't find is
-/// refused outright — see [`thumbdv_candidate_ports_from`].
+/// Walk `ports` and, for each at both supported baud rates (§6 fallback),
+/// `open` a transport and hand it to `init`; return the first `init` that
+/// succeeds. The one loop every hardware opener in this crate uses, with the
+/// transport factory injected so tests can count opens.
 #[cfg(feature = "ambe-hw")]
-fn detect_thumbdv()
--> Result<ambe_thumbdv::ThumbDv<ambe_thumbdv::SerialTransport>, ambe_thumbdv::DeviceError> {
-    if thumbdv_port_override().is_none() {
-        return ambe_thumbdv::detect();
-    }
-    for path in thumbdv_candidate_ports() {
-        for baud in [460_800u32, 230_400u32] {
-            if let Ok(transport) = ambe_thumbdv::SerialTransport::open(&path, baud)
-                && let Ok(dev) = ambe_thumbdv::ThumbDv::init_with(transport)
-            {
-                return Ok(dev);
+fn open_first_with<T, R, E>(
+    ports: &[String],
+    mut open: impl FnMut(&str, u32) -> std::io::Result<T>,
+    mut init: impl FnMut(T) -> Result<R, E>,
+) -> Option<R> {
+    for path in ports {
+        for baud in ambe_thumbdv::PROBE_BAUDS {
+            let Ok(transport) = open(path, baud) else {
+                continue;
+            };
+            if let Ok(r) = init(transport) {
+                return Some(r);
             }
         }
     }
-    Err(ambe_thumbdv::DeviceError::Timeout(
-        "IAX_THUMBDV_PORT device did not initialize",
+    None
+}
+
+/// Detect and initialize a trusted `ThumbDV`, honoring
+/// [`thumbdv_port_override`]. Only [`thumbdv_candidate_ports`] is walked.
+#[cfg(feature = "ambe-hw")]
+fn detect_thumbdv(
+    trust: &VocoderTrust,
+) -> Result<ambe_thumbdv::ThumbDv<ambe_thumbdv::SerialTransport>, ambe_thumbdv::DeviceError> {
+    let ports = thumbdv_candidate_ports(trust);
+    if ports.is_empty() {
+        return Err(ambe_thumbdv::DeviceError::NoTrustedDevice);
+    }
+    open_first_with(
+        &ports,
+        ambe_thumbdv::SerialTransport::open,
+        ambe_thumbdv::ThumbDv::init_with,
+    )
+    .ok_or(ambe_thumbdv::DeviceError::Timeout(
+        "no trusted ThumbDV initialized",
     ))
 }
 
-/// `true` when a `ThumbDV`-class serial port is attached — the VID/PID scan
-/// only, with NO device open at all (nothing is initialized, no port is
-/// held, nothing can be keyed). This is the right probe for a UI
-/// availability indicator: it answers "is the dongle plugged in" without
-/// contending for a port a live D-Star session may already own, which a
-/// real open-based probe cannot do (only one process may hold the device).
+/// `true` when a trusted vocoder stick is attached — enumeration only, with
+/// NO device open at all (nothing is initialized, no port is held, nothing
+/// can be keyed). This is the right probe for a UI availability indicator:
+/// it answers "is the dongle plugged in" without contending for a port a
+/// live D-Star session may already own. Always `false` for an empty `trust`.
 #[cfg(feature = "ambe-hw")]
 #[must_use]
-pub fn thumbdv_present() -> bool {
-    !thumbdv_candidate_ports().is_empty()
+pub fn thumbdv_present(trust: &VocoderTrust) -> bool {
+    !thumbdv_candidate_ports(trust).is_empty()
 }
 
-/// Distinguishes *why* `ThumbDV` detection just failed, since
-/// [`ambe_thumbdv::detect`] collapses "no dongle" and "dongle busy" into the
-/// same `DeviceError::Timeout("no ThumbDV found")` (iax-b3e7 spec §4) —
-/// not useful for an operator staring at `dstar-listen`'s output. Classified
-/// entirely on this side, with zero changes to the `ambe-thumbdv` crate:
-/// [`ambe_thumbdv::SerialTransport::candidate_ports`] plus a trial open of
-/// each candidate tells "no candidates" (unplugged) apart from "a candidate
-/// exists but won't open because something else already has it" (busy).
+/// Distinguishes *why* `ThumbDV` detection just failed, since the openers
+/// collapse "nothing trusted", "no dongle" and "dongle busy" into the same
+/// `None` (iax-b3e7 spec §4) — not useful for an operator staring at
+/// `dstar-listen`'s output. An empty [`VocoderTrust`] is reported as such;
+/// otherwise the trusted candidate list plus a trial open of each candidate
+/// tells "no candidates" (unplugged) apart from "a candidate exists but won't
+/// open because something else already has it" (busy).
 #[cfg(feature = "ambe-hw")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThumbDvFailure {
+    /// The trust list is empty, so no hardware vocoder may be opened at all.
+    /// Renders [`NO_TRUSTED_VOCODER`].
+    NoTrustedVocoder,
     /// No serial port matching the `ThumbDV`'s VID/PID (or the
     /// `IAX_THUMBDV_PORT` override) was found at all.
     Unplugged,
@@ -426,7 +470,7 @@ pub enum ThumbDvFailure {
         port: String,
     },
     /// A candidate port exists but failed to open/initialize for some other
-    /// reason (wrong device, a transient I/O error, etc.) — `detect()`'s own
+    /// reason (wrong device, a transient I/O error, etc.) — the opener's own
     /// error is the most useful thing to log in this case, but this crate
     /// doesn't have it any more by the time this classification runs (see
     /// [`classify_thumbdv_failure`]'s doc), so this variant renders a
@@ -442,6 +486,7 @@ impl ThumbDvFailure {
     #[must_use]
     pub fn message(&self) -> String {
         match self {
+            ThumbDvFailure::NoTrustedVocoder => NO_TRUSTED_VOCODER.to_string(),
             ThumbDvFailure::Unplugged => {
                 "no ThumbDV detected — plug in the dongle and try again".to_string()
             }
@@ -465,8 +510,11 @@ impl ThumbDvFailure {
 /// exception to it).
 #[cfg(feature = "ambe-hw")]
 #[must_use]
-pub fn classify_thumbdv_failure() -> ThumbDvFailure {
-    let candidates = thumbdv_candidate_ports();
+pub fn classify_thumbdv_failure(trust: &VocoderTrust) -> ThumbDvFailure {
+    if trust.is_empty() {
+        return ThumbDvFailure::NoTrustedVocoder;
+    }
+    let candidates = thumbdv_candidate_ports(trust);
     classify_thumbdv_failure_with(&candidates, |port| {
         // Deliberately a raw filesystem open, NOT `SerialTransport::open`:
         // `serialport` sets `TIOCEXCL` on every successful open (posix
@@ -575,8 +623,9 @@ fn is_busy_or_permission_denied(e: &std::io::Error) -> bool {
 ///
 /// `prefer` selects a backend; `None` (no opinion) takes whatever this build
 /// offers. There is exactly one backend — [`AmbeBackend::Hardware`] — so both
-/// `None` and `Some(Hardware)` try [`ambe_thumbdv::detect`] (a bounded serial
-/// probe) and return `None` when no dongle answers. Nothing is ever silently
+/// `None` and `Some(Hardware)` walk the trusted candidate ports (a bounded
+/// serial probe of each) and return `None` when no trusted dongle answers —
+/// immediately, with nothing enumerated or opened, when `trust` is empty. Nothing is ever silently
 /// substituted for the backend the caller asked for: an operator
 /// transmitting/decoding through a vocoder they did not choose, with no
 /// indication anything changed, would be a much worse failure mode than a
@@ -587,10 +636,13 @@ fn is_busy_or_permission_denied(e: &std::io::Error) -> bool {
 /// Returns `None` if no backend is available (including: `ambe-hw` isn't
 /// compiled in, or it is but no dongle is detected).
 #[must_use]
-pub fn open_ambe(prefer: Option<AmbeBackend>) -> Option<(Box<dyn AmbeVoice>, AmbeBackend)> {
-    // `detect_thumbdv()` honors `IAX_THUMBDV_PORT` before falling back to
-    // `ambe_thumbdv::detect()`'s own bounded serial probing (never hangs —
-    // see ambe-thumbdv's device.rs).
+pub fn open_ambe(
+    prefer: Option<AmbeBackend>,
+    trust: &VocoderTrust,
+) -> Option<(Box<dyn AmbeVoice>, AmbeBackend)> {
+    // `detect_thumbdv()` walks only trusted ports, narrowed by
+    // `IAX_THUMBDV_PORT`; every transaction is bounded (never hangs — see
+    // ambe-thumbdv's device.rs).
     //
     // On failure there is nothing to fall back to: `None`, outright. A
     // caller must NEVER silently receive some other vocoder in place of the
@@ -600,7 +652,7 @@ pub fn open_ambe(prefer: Option<AmbeBackend>) -> Option<(Box<dyn AmbeVoice>, Amb
         // `Hardware` is the only backend, so `None` (no opinion) and
         // `Some(Hardware)` take the same path.
         let _ = prefer;
-        detect_thumbdv().ok().map(|dv| {
+        detect_thumbdv(trust).ok().map(|dv| {
             (
                 Box::new(open_hw_with(dv)) as Box<dyn AmbeVoice>,
                 AmbeBackend::Hardware,
@@ -611,7 +663,7 @@ pub fn open_ambe(prefer: Option<AmbeBackend>) -> Option<(Box<dyn AmbeVoice>, Amb
     // Without `ambe-hw` compiled in there is no backend at all.
     #[cfg(not(feature = "ambe-hw"))]
     {
-        let _ = prefer;
+        let _ = (prefer, trust);
         None
     }
 }
@@ -625,16 +677,14 @@ pub fn open_ambe(prefer: Option<AmbeBackend>) -> Option<(Box<dyn AmbeVoice>, Amb
 ///
 /// Backend selection mirrors [`open_ambe`] exactly — see its doc comment.
 ///
-/// The hardware path cannot reuse [`ambe_thumbdv::detect`]: it hands back an
-/// already-initialized [`ambe_thumbdv::ThumbDv`], which has no way to yield
-/// its transport back out for the pipelined worker to drive directly (see
-/// [`open_hw_stream_with`]'s doc comment). So this scans
-/// [`thumbdv_candidate_ports`] itself (`IAX_THUMBDV_PORT` override, else the
-/// same VID/PID-filtered scan `detect()` uses internally, so this never
-/// risks opening an unrelated serial device) — and opens the first
-/// candidate that both connects and passes [`open_hw_stream_with`]'s own
-/// init handshake, at either of `detect`'s two supported baud rates (§6
-/// fallback). This does not itself distinguish "no dongle" from "dongle
+/// The hardware path cannot reuse an already-initialized
+/// [`ambe_thumbdv::ThumbDv`], which has no way to yield its transport back
+/// out for the pipelined worker to drive directly (see
+/// [`open_hw_stream_with`]'s doc comment). So this walks
+/// [`thumbdv_candidate_ports`] itself — only ports whose USB serial is in
+/// `trust`, narrowed by `IAX_THUMBDV_PORT` — and opens the first candidate
+/// that both connects and passes [`open_hw_stream_with`]'s own init
+/// handshake, at either supported baud rate (§6 fallback). This does not itself distinguish "no dongle" from "dongle
 /// busy" — it only answers "is a working pipelined stream available now";
 /// call [`classify_thumbdv_failure`] on `None` to tell those apart for an
 /// error message.
@@ -644,41 +694,39 @@ pub fn open_ambe(prefer: Option<AmbeBackend>) -> Option<(Box<dyn AmbeVoice>, Amb
 pub fn open_ambe_stream(
     prefer: Option<AmbeBackend>,
     mode: VocoderMode,
+    trust: &VocoderTrust,
 ) -> Option<(Box<dyn AmbeStream>, AmbeBackend)> {
     #[cfg(feature = "ambe-hw")]
     {
         // `Hardware` is the only backend, so `None` (no opinion) and
         // `Some(Hardware)` take the same path.
         let _ = prefer;
-        open_hw_stream_from_candidate_ports(mode).map(|stream| (stream, AmbeBackend::Hardware))
+        open_hw_stream_from_candidate_ports(mode, trust)
+            .map(|stream| (stream, AmbeBackend::Hardware))
     }
 
     #[cfg(not(feature = "ambe-hw"))]
     {
-        let _ = (prefer, mode);
+        let _ = (prefer, mode, trust);
         None
     }
 }
 
 /// Scans [`thumbdv_candidate_ports`] and returns a pipelined [`AmbeStream`]
 /// for the first candidate that opens and passes [`open_hw_stream_with`]'s
-/// init handshake, trying both of `detect`'s supported baud rates per
-/// candidate. `None` if no candidate is present or every candidate fails
+/// init handshake, trying both supported baud rates per candidate. `None` if no candidate is present or every candidate fails
 /// (unplugged, busy, wrong device) — see [`open_ambe_stream`]'s doc for why
 /// finer-grained classification isn't this function's job.
 #[cfg(feature = "ambe-hw")]
-fn open_hw_stream_from_candidate_ports(mode: VocoderMode) -> Option<Box<dyn AmbeStream>> {
-    for path in thumbdv_candidate_ports() {
-        for baud in [460_800u32, 230_400u32] {
-            let Ok(transport) = ambe_thumbdv::SerialTransport::open(&path, baud) else {
-                continue;
-            };
-            if let Ok(stream) = open_hw_stream_with(transport, mode) {
-                return Some(stream);
-            }
-        }
-    }
-    None
+fn open_hw_stream_from_candidate_ports(
+    mode: VocoderMode,
+    trust: &VocoderTrust,
+) -> Option<Box<dyn AmbeStream>> {
+    open_first_with(
+        &thumbdv_candidate_ports(trust),
+        ambe_thumbdv::SerialTransport::open,
+        |transport| open_hw_stream_with(transport, mode),
+    )
 }
 
 // ---------------------------------------------------------------------
@@ -1679,6 +1727,13 @@ pub(crate) mod test_support {
     /// `true` (and, on stderr, why) when a test may actually touch hardware:
     /// the single `IAX_THUMBDV_TESTS=1` gate spec §5 requires, so a machine
     /// with no dongle — and plain CI — stays green.
+    /// The trust list a hardware-gated test runs with: whatever the
+    /// operator exported in `ASTAR_VOCODER_SERIALS`. Never a serial baked
+    /// into the source.
+    pub(crate) fn hardware_trust() -> super::VocoderTrust {
+        super::VocoderTrust::from_env()
+    }
+
     pub(crate) fn hardware_opted_in() -> bool {
         if std::env::var("IAX_THUMBDV_TESTS").ok().as_deref() == Some("1") {
             return true;
@@ -1719,7 +1774,7 @@ mod hw_tests {
     use super::test_support::with_no_thumbdv;
     use super::{
         AmbeBackend, AmbeStream, AmbeVoice, ChannelFrame, NULL_AMBE_FRAME, VocoderMode,
-        channel_frame_for, open_ambe, open_ambe_stream, open_hw_stream_with,
+        VocoderTrust, channel_frame_for, open_ambe, open_ambe_stream, open_hw_stream_with,
         open_hw_stream_with_handle, open_hw_with,
     };
     use ambe_thumbdv::{
@@ -1898,7 +1953,13 @@ mod hw_tests {
         // ThumbDV outside a task that says to). Without that pin the
         // assertion went vacuous on a dongle-equipped machine, since
         // `Some(Hardware)` also satisfies `assert_ne!(.., Some(Soft))`.
-        let result = with_no_thumbdv(|| open_ambe(Some(AmbeBackend::Hardware)).map(|(_, b)| b));
+        let result = with_no_thumbdv(|| {
+            open_ambe(
+                Some(AmbeBackend::Hardware),
+                &VocoderTrust::new(["TESTSER1"]),
+            )
+            .map(|(_, b)| b)
+        });
         assert_eq!(
             result, None,
             "an explicit Hardware preference with no hardware available must return None, never \
@@ -1913,7 +1974,12 @@ mod hw_tests {
         // exercised through `open_ambe_stream`'s own candidate-port scan
         // instead of `ambe_thumbdv::detect()`.
         let result = with_no_thumbdv(|| {
-            open_ambe_stream(Some(AmbeBackend::Hardware), VocoderMode::Dstar).map(|(_, b)| b)
+            open_ambe_stream(
+                Some(AmbeBackend::Hardware),
+                VocoderMode::Dstar,
+                &VocoderTrust::new(["TESTSER1"]),
+            )
+            .map(|(_, b)| b)
         });
         assert_eq!(
             result, None,
@@ -2982,15 +3048,15 @@ mod hw_tests {
 // `cargo test` always runs the function; it just does nothing observable
 // without the opt-in.
 //
-// These tests physically open `/dev/cu.usbserial-DK0EOQVS` (or whatever
-// `IAX_THUMBDV_PORT`/the VID·PID scan finds) and must not be run
+// These tests physically open the trusted stick (`ASTAR_VOCODER_SERIALS`,
+// narrowed by `IAX_THUMBDV_PORT`) and must not be run
 // concurrently with anything else touching the port — that's the caller's
 // responsibility (only one process may hold the dongle).
 // ---------------------------------------------------------------------
 
 #[cfg(all(test, feature = "ambe-hw"))]
 mod hw_hardware_tests {
-    use super::test_support::{hardware_lock, hardware_opted_in};
+    use super::test_support::{hardware_lock, hardware_opted_in, hardware_trust};
     use super::{AmbeBackend, ChannelFrame, VocoderMode, open_ambe_stream};
     use std::time::{Duration, Instant};
 
@@ -3000,12 +3066,10 @@ mod hw_hardware_tests {
             return;
         }
         let _hw = hardware_lock();
-        // `super::detect_thumbdv()`, not `ambe_thumbdv::detect()` directly:
-        // the crate's own entry point is the one that honors
-        // `IAX_THUMBDV_PORT`, so on the multi-USB-serial machine spec §4
-        // added the override for, this test probes the SAME device the rest
-        // of the suite does instead of falling back to a raw VID/PID scan.
-        let dv = super::detect_thumbdv()
+        // `super::detect_thumbdv`, the crate's own entry point: it honors the
+        // trust list (`ASTAR_VOCODER_SERIALS` here) and `IAX_THUMBDV_PORT`,
+        // so this test probes the SAME device the rest of the suite does.
+        let dv = super::detect_thumbdv(&hardware_trust())
             .expect("a real ThumbDV must be detected when IAX_THUMBDV_TESTS=1 is set");
         assert_eq!(
             dv.prodid(),
@@ -3021,7 +3085,12 @@ mod hw_hardware_tests {
             return;
         }
         let _hw = hardware_lock();
-        let (_stream, backend) = open_ambe_stream(Some(AmbeBackend::Hardware), VocoderMode::Dstar).expect(
+        let (_stream, backend) = open_ambe_stream(
+            Some(AmbeBackend::Hardware),
+            VocoderMode::Dstar,
+            &hardware_trust(),
+        )
+        .expect(
             "strict Hardware open must succeed when IAX_THUMBDV_TESTS=1 and a dongle is attached",
         );
         assert_eq!(
@@ -3074,9 +3143,12 @@ mod hw_hardware_tests {
         // These are the same bytes the console/station end-to-end tests feed.
         let frame = [0xA5u8, 0x3C, 0x91, 0x77, 0x2E, 0xC4, 0x58, 0xDA, 0x0F];
 
-        let (mut stream, backend) =
-            open_ambe_stream(Some(AmbeBackend::Hardware), VocoderMode::Dstar)
-                .expect("dongle required for this test");
+        let (mut stream, backend) = open_ambe_stream(
+            Some(AmbeBackend::Hardware),
+            VocoderMode::Dstar,
+            &hardware_trust(),
+        )
+        .expect("dongle required for this test");
         assert_eq!(backend, AmbeBackend::Hardware);
 
         // Prime the pipeline (mirrors DstarSession's own priming, spec item
@@ -3187,9 +3259,12 @@ mod hw_hardware_tests {
             *s = v;
         }
 
-        let (mut stream, backend) =
-            open_ambe_stream(Some(AmbeBackend::Hardware), VocoderMode::Dstar)
-                .expect("dongle required for this test");
+        let (mut stream, backend) = open_ambe_stream(
+            Some(AmbeBackend::Hardware),
+            VocoderMode::Dstar,
+            &hardware_trust(),
+        )
+        .expect("dongle required for this test");
         assert_eq!(backend, AmbeBackend::Hardware);
 
         for _ in 0..IN_FLIGHT {
@@ -3341,8 +3416,9 @@ mod hw_hardware_tests {
     /// straight back for decoding, and returns the decoded PCM together
     /// with the first channel frame's bytes (for the failure message).
     fn hardware_vocoder_loopback(mode: VocoderMode) -> (Vec<i16>, Vec<u8>) {
-        let (mut stream, backend) = open_ambe_stream(Some(AmbeBackend::Hardware), mode)
-            .expect("a real ThumbDV is required for this test");
+        let (mut stream, backend) =
+            open_ambe_stream(Some(AmbeBackend::Hardware), mode, &hardware_trust())
+                .expect("a real ThumbDV is required for this test");
         assert_eq!(
             backend,
             AmbeBackend::Hardware,
@@ -3510,7 +3586,7 @@ mod hw_hardware_tests {
 
 #[cfg(all(test, feature = "ambe-hw"))]
 mod thumbdv_failure_tests {
-    use super::test_support::{env_lock, hardware_lock, hardware_opted_in};
+    use super::test_support::{env_lock, hardware_lock, hardware_opted_in, hardware_trust};
     use super::{
         ThumbDvFailure, classify_thumbdv_failure, classify_thumbdv_failure_with,
         thumbdv_candidate_ports, thumbdv_candidate_ports_from, thumbdv_port_override,
@@ -3525,7 +3601,7 @@ mod thumbdv_failure_tests {
 
     #[test]
     fn candidate_busy_names_the_port() {
-        let port = "/dev/cu.usbserial-DK0EOQVS".to_string();
+        let port = "/dev/cu.usbserial-TESTSER1".to_string();
         let got = classify_thumbdv_failure_with(std::slice::from_ref(&port), |p| {
             assert_eq!(p, port, "must trial-open the candidate it was given");
             Err(io::Error::from(io::ErrorKind::ResourceBusy))
@@ -3596,13 +3672,13 @@ mod thumbdv_failure_tests {
         );
     }
 
-    // ---- IAX_THUMBDV_PORT: narrows the VID/PID scan, never widens it ----
+    // ---- IAX_THUMBDV_PORT: narrows the trusted scan, never widens it ----
     //
-    // ON-AIR SAFETY. The FTDI 0x0403:0x6015 / "ThumbDV" filter in
-    // `SerialTransport::candidate_ports()` is the only thing keeping every
-    // opener in this crate away from a USB radio interface's serial port
-    // (opening one asserts RTS, which on the reference AllScan UCI150 is the
-    // transmitter keying line). The env override must therefore be able to
+    // ON-AIR SAFETY. The trusted-serial filter in
+    // `SerialTransport::candidate_ports_trusted()` is the only thing keeping
+    // every opener in this crate away from a USB radio interface's or CAT
+    // cable's serial port (opening one asserts DTR/RTS, which on the
+    // reference AllScan UCI150 is the transmitter keying line). The env override must therefore be able to
     // SELECT among scanned candidates and nothing else; the tests below pin
     // that. They use the injected `thumbdv_candidate_ports_from` seam, so
     // they assert the policy without depending on what is plugged into the
@@ -3630,7 +3706,7 @@ mod thumbdv_failure_tests {
         // `classify_thumbdv_failure`'s trial open, which runs on the FAILURE
         // path), so a non-empty result here means a radio interface's tty
         // gets opened and its transmitter keyed. It must be empty.
-        let scanned = ["/dev/cu.usbserial-DK0EOQVS".to_string()];
+        let scanned = ["/dev/cu.usbserial-TESTSER1".to_string()];
         assert!(
             thumbdv_candidate_ports_from(Some("/dev/cu.wchusbserial5B210098201"), &scanned)
                 .is_empty(),
@@ -3640,7 +3716,7 @@ mod thumbdv_failure_tests {
 
     #[test]
     fn no_env_override_returns_the_scan_verbatim() {
-        let scanned = ["/dev/cu.usbserial-DK0EOQVS".to_string()];
+        let scanned = ["/dev/cu.usbserial-TESTSER1".to_string()];
         assert_eq!(
             thumbdv_candidate_ports_from(None, &scanned),
             scanned.to_vec(),
@@ -3657,9 +3733,10 @@ mod thumbdv_failure_tests {
             std::env::set_var("IAX_THUMBDV_PORT", "/dev/cu.usbserial-PINNED");
         }
         let override_val = thumbdv_port_override();
-        // A path no VID/PID scan can return, so this also proves the
-        // end-to-end refusal (and physically opens nothing).
-        let candidates = thumbdv_candidate_ports();
+        // A path no scan can return, under a made-up trusted serial, so this
+        // also proves the end-to-end refusal (it enumerates; it opens
+        // nothing).
+        let candidates = thumbdv_candidate_ports(&super::VocoderTrust::new(["TESTSER1"]));
         // SAFETY: same serialization as the `set_var` above.
         unsafe {
             std::env::remove_var("IAX_THUMBDV_PORT");
@@ -3703,7 +3780,7 @@ mod thumbdv_failure_tests {
             return;
         }
         let _hw = hardware_lock();
-        let _ = classify_thumbdv_failure();
+        let _ = classify_thumbdv_failure(&hardware_trust());
     }
 
     #[test]
@@ -3718,7 +3795,7 @@ mod thumbdv_failure_tests {
             return;
         }
         let _hw = hardware_lock();
-        let candidates = thumbdv_candidate_ports();
+        let candidates = thumbdv_candidate_ports(&hardware_trust());
         assert!(
             !candidates.is_empty(),
             "IAX_THUMBDV_TESTS=1 requires a ThumbDV attached"
@@ -3727,7 +3804,7 @@ mod thumbdv_failure_tests {
         let held = ambe_thumbdv::SerialTransport::open(&port, 460_800)
             .expect("port must be free for this check to mean anything");
 
-        let failure = classify_thumbdv_failure();
+        let failure = classify_thumbdv_failure(&hardware_trust());
         drop(held); // release BEFORE asserting, so a failed assertion never leaves it held
 
         assert_eq!(failure, ThumbDvFailure::Busy { port: port.clone() });
@@ -3735,5 +3812,352 @@ mod thumbdv_failure_tests {
             failure.message(),
             format!("ThumbDV at {port} is busy — another process has it open")
         );
+    }
+}
+
+// ---------------------------------------------------------------------
+// Vocoder trust (on-air safety). Every listing is synthetic and every
+// transport is a counting fake: nothing here enumerates or opens a real
+// serial port. The serials are made up.
+// ---------------------------------------------------------------------
+
+#[cfg(all(test, feature = "ambe-hw"))]
+mod vocoder_trust_hw_tests {
+    use super::test_support::with_no_thumbdv;
+    use super::{
+        AmbeBackend, MODEL_AMBE3000, MODEL_AMBE3003, NO_TRUSTED_VOCODER, ThumbDvFailure,
+        VocoderCandidate, VocoderEnrolment, VocoderMode, VocoderTrust, classify_thumbdv_failure,
+        enrol_vocoder_with, open_ambe, open_ambe_stream, open_first_with, thumbdv_present,
+        trusted_candidate_ports_from,
+    };
+    use ambe_thumbdv::{FT_X_PID, FTDI_VID, MockTransport, Transport, UsbListing};
+    use std::cell::Cell;
+    use std::io;
+    use std::time::Duration;
+
+    fn ftx(port: &str, serial: &str, product: &str) -> UsbListing {
+        UsbListing {
+            port_name: port.to_string(),
+            vid: FTDI_VID,
+            pid: FT_X_PID,
+            serial_number: Some(serial.to_string()),
+            product: Some(product.to_string()),
+        }
+    }
+
+    const CAT: &str = "/dev/cu.usbserial-CATCABLE";
+    const STICK1: &str = "/dev/cu.usbserial-TESTSER1";
+    const STICK2: &str = "/dev/cu.usbserial-TESTSER2";
+
+    fn bench() -> Vec<UsbListing> {
+        vec![
+            ftx(STICK1, "TESTSER1", "FT230X Basic UART"),
+            ftx(CAT, "CATCABLE", "FT231X USB UART"),
+            ftx(STICK2, "TESTSER2", "FT230X Basic UART"),
+        ]
+    }
+
+    // ---- The rule: only trusted serials are candidates --------------------
+
+    #[test]
+    fn an_untrusted_cat_cable_is_never_a_candidate() {
+        let alone = [ftx(CAT, "CATCABLE", "FT231X USB UART")];
+        let trust = VocoderTrust::new(["TESTSER1"]);
+        assert_eq!(
+            trusted_candidate_ports_from(None, &alone, &trust),
+            [] as [std::string::String; 0]
+        );
+        assert!(
+            trusted_candidate_ports_from(Some(CAT), &alone, &trust).is_empty(),
+            "IAX_THUMBDV_PORT naming the cable must not make it a candidate"
+        );
+        assert_eq!(
+            trusted_candidate_ports_from(Some(CAT), &bench(), &trust),
+            [] as [std::string::String; 0]
+        );
+    }
+
+    #[test]
+    fn empty_trust_means_no_candidates_and_no_open_attempt() {
+        let opens = Cell::new(0usize);
+        let ports = trusted_candidate_ports_from(None, &bench(), &VocoderTrust::none());
+        let got = open_first_with(
+            &ports,
+            |_p, _b| {
+                opens.set(opens.get() + 1);
+                Ok(MockTransport::new())
+            },
+            |_t| Ok::<(), ()>(()),
+        );
+        assert_eq!(ports, [] as [std::string::String; 0]);
+        assert!(got.is_none());
+        assert_eq!(
+            opens.get(),
+            0,
+            "an empty trust list must never open anything"
+        );
+        // Pinned, too: a pin cannot conjure a candidate out of empty trust.
+        assert_eq!(
+            trusted_candidate_ports_from(Some(STICK1), &bench(), &VocoderTrust::none()),
+            [] as [std::string::String; 0]
+        );
+    }
+
+    #[test]
+    fn only_trusted_ports_are_ever_opened() {
+        let opened = std::cell::RefCell::new(Vec::new());
+        let trust = VocoderTrust::new(["TESTSER2"]);
+        let ports = trusted_candidate_ports_from(None, &bench(), &trust);
+        let _ = open_first_with(
+            &ports,
+            |p, _b| {
+                opened.borrow_mut().push(p.to_string());
+                Err::<MockTransport, _>(io::Error::from(io::ErrorKind::NotFound))
+            },
+            |_t| Ok::<(), ()>(()),
+        );
+        let opened = opened.into_inner();
+        assert_ne!(opened, [] as [std::string::String; 0]);
+        assert!(
+            opened.iter().all(|p| p == STICK2),
+            "only the trusted stick may be opened, got {opened:?}"
+        );
+    }
+
+    #[test]
+    fn the_pin_narrows_within_the_trusted_list() {
+        let trust = VocoderTrust::new(["TESTSER1", "TESTSER2"]);
+        assert_eq!(
+            trusted_candidate_ports_from(Some(STICK2), &bench(), &trust),
+            vec![STICK2.to_string()]
+        );
+        assert_eq!(
+            trusted_candidate_ports_from(None, &bench(), &trust),
+            vec![STICK1.to_string(), STICK2.to_string()]
+        );
+    }
+
+    #[test]
+    fn a_pin_outside_the_trusted_list_is_refused() {
+        let trust = VocoderTrust::new(["TESTSER1"]);
+        // A real FT-X stick, but not a trusted one.
+        assert_eq!(
+            trusted_candidate_ports_from(Some(STICK2), &bench(), &trust),
+            [] as [std::string::String; 0]
+        );
+        // Something that is not even enumerated.
+        assert_eq!(
+            trusted_candidate_ports_from(Some("/dev/cu.wchusbserialRADIO"), &bench(), &trust),
+            [] as [std::string::String; 0]
+        );
+    }
+
+    // ---- Real entry points with an empty trust list -----------------------
+    //
+    // An empty list returns before enumeration, so these are safe on a
+    // machine with sticks and radio cables attached.
+
+    #[test]
+    fn real_openers_refuse_with_empty_trust() {
+        let none = VocoderTrust::none();
+        assert!(open_ambe(Some(AmbeBackend::Hardware), &none).is_none());
+        assert!(open_ambe_stream(Some(AmbeBackend::Hardware), VocoderMode::Dstar, &none).is_none());
+        assert!(open_ambe_stream(None, VocoderMode::Dmr, &none).is_none());
+        assert!(!thumbdv_present(&none));
+    }
+
+    #[test]
+    fn empty_trust_classifies_as_no_trusted_vocoder() {
+        let f = classify_thumbdv_failure(&VocoderTrust::none());
+        assert_eq!(f, ThumbDvFailure::NoTrustedVocoder);
+        assert_eq!(f.message(), NO_TRUSTED_VOCODER);
+        assert_eq!(
+            NO_TRUSTED_VOCODER,
+            "No trusted vocoder — add one in Settings → Vocoders"
+        );
+    }
+
+    #[test]
+    fn a_trusted_but_pinned_away_list_opens_nothing() {
+        // A trusted serial that is not attached, plus a pin at a path that
+        // is not enumerated: the strict path, end to end, opening nothing.
+        let r = with_no_thumbdv(|| {
+            open_ambe_stream(None, VocoderMode::Dstar, &VocoderTrust::new(["TESTSER9"]))
+                .map(|(_, b)| b)
+        });
+        assert_eq!(r, None);
+    }
+
+    // ---- Enrolment against a fake transport -------------------------------
+
+    struct Fake {
+        replies: Vec<Vec<u8>>,
+        pending: Option<Vec<u8>>,
+        log: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>,
+    }
+
+    // `Transport: Send`; the tests are single-threaded, and the `Rc` never
+    // leaves this thread.
+    unsafe impl Send for Fake {}
+
+    impl Transport for Fake {
+        fn send(&mut self, _b: &[u8]) -> io::Result<()> {
+            self.log.borrow_mut().push("send");
+            self.pending = (!self.replies.is_empty()).then(|| self.replies.remove(0));
+            Ok(())
+        }
+        fn recv_some(&mut self, buf: &mut [u8], _t: Duration) -> io::Result<usize> {
+            Ok(self.pending.take().map_or(0, |r| {
+                buf[..r.len()].copy_from_slice(&r);
+                r.len()
+            }))
+        }
+        fn deassert_control_lines(&mut self) -> io::Result<()> {
+            self.log.borrow_mut().push("deassert");
+            Ok(())
+        }
+    }
+
+    impl Drop for Fake {
+        fn drop(&mut self) {
+            self.log.borrow_mut().push("close");
+        }
+    }
+
+    fn prodid(s: &[u8]) -> Vec<u8> {
+        let len = u16::try_from(1 + s.len()).unwrap();
+        let mut v = vec![0x61];
+        v.extend_from_slice(&len.to_be_bytes());
+        v.extend_from_slice(&[0x00, 0x30]);
+        v.extend_from_slice(s);
+        v
+    }
+
+    const READY: [u8; 5] = [0x61, 0x00, 0x01, 0x00, 0x39];
+
+    fn candidates() -> Vec<VocoderCandidate> {
+        vec![
+            VocoderCandidate {
+                serial: "TESTSER1".into(),
+                port: STICK1.into(),
+            },
+            VocoderCandidate {
+                serial: "CATCABLE".into(),
+                port: CAT.into(),
+            },
+        ]
+    }
+
+    fn enrol(
+        serial: &str,
+        replies: &[Vec<u8>],
+    ) -> (VocoderEnrolment, Vec<&'static str>, Vec<String>) {
+        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let opened = std::cell::RefCell::new(Vec::new());
+        let out = enrol_vocoder_with(serial, &candidates(), |p, _b| {
+            opened.borrow_mut().push(p.to_string());
+            Ok(Fake {
+                replies: replies.to_vec(),
+                pending: None,
+                log: std::rc::Rc::clone(&log),
+            })
+        });
+        let ops = log.borrow().clone();
+        (out, ops, opened.into_inner())
+    }
+
+    #[test]
+    fn enrolling_an_ambe3000_trusts_it() {
+        let (out, ops, opened) = enrol("TESTSER1", &[READY.to_vec(), prodid(b"AMBE3000R\0")]);
+        assert_eq!(
+            out,
+            VocoderEnrolment::Trusted {
+                serial: "TESTSER1".into(),
+                port: STICK1.into(),
+                prodid: "AMBE3000R".into(),
+                model: MODEL_AMBE3000.into(),
+            }
+        );
+        assert!(out.is_trusted());
+        assert_eq!(
+            opened,
+            vec![STICK1.to_string()],
+            "only the chosen port is opened"
+        );
+        assert_eq!(
+            ops.first(),
+            Some(&"deassert"),
+            "DTR/RTS low before any write: {ops:?}"
+        );
+        assert_eq!(ops.last(), Some(&"close"));
+    }
+
+    #[test]
+    fn enrolling_an_ambe3003_is_recognised_but_not_trusted() {
+        let (out, _, _) = enrol("TESTSER1", &[READY.to_vec(), prodid(b"AMBE3003F\0")]);
+        assert!(!out.is_trusted());
+        assert_eq!(out.as_str(), "unsupported");
+        match &out {
+            VocoderEnrolment::Unsupported { model, prodid, .. } => {
+                assert_eq!(model, MODEL_AMBE3003);
+                assert_eq!(prodid, "AMBE3003F");
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        assert!(
+            out.message().contains("not supported yet"),
+            "{}",
+            out.message()
+        );
+    }
+
+    #[test]
+    fn enrolling_a_garbage_replier_is_refused_and_closed() {
+        let (out, ops, _) = enrol("CATCABLE", &[b"?;".to_vec(), b"?;".to_vec()]);
+        assert_eq!(
+            out,
+            VocoderEnrolment::NoAnswer {
+                serial: "CATCABLE".into(),
+                port: CAT.into()
+            }
+        );
+        assert!(out.message().contains("CAT/PTT cable"), "{}", out.message());
+        let opens = ops.iter().filter(|o| **o == "deassert").count();
+        let closes = ops.iter().filter(|o| **o == "close").count();
+        assert_eq!(opens, closes, "every open is closed: {ops:?}");
+    }
+
+    #[test]
+    fn enrolling_a_silent_port_times_out_and_is_refused() {
+        let (out, ops, _) = enrol("TESTSER1", &[]);
+        assert_eq!(out.as_str(), "no_answer");
+        assert_eq!(ops.last(), Some(&"close"));
+    }
+
+    #[test]
+    fn enrolling_another_chip_is_wrong_device() {
+        let (out, _, _) = enrol("TESTSER1", &[READY.to_vec(), prodid(b"AMBE2000\0")]);
+        assert_eq!(out.as_str(), "wrong_device");
+        assert!(!out.is_trusted());
+    }
+
+    #[test]
+    fn enrolling_an_absent_serial_opens_nothing() {
+        let (out, ops, opened) = enrol("TESTSER9", &[]);
+        assert_eq!(
+            out,
+            VocoderEnrolment::NotFound {
+                serial: "TESTSER9".into()
+            }
+        );
+        assert!(opened.is_empty() && ops.is_empty());
+    }
+
+    #[test]
+    fn enrolling_a_busy_port_is_open_failed() {
+        let out = enrol_vocoder_with::<Fake, _>("TESTSER1", &candidates(), |_, _| {
+            Err(io::Error::from(io::ErrorKind::ResourceBusy))
+        });
+        assert_eq!(out.as_str(), "open_failed");
     }
 }

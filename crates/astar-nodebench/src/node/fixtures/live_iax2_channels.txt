@@ -1,0 +1,3 @@
+Channel               Peer                                      Username    ID (Lo/Rem)  Seq (Tx/Rx)  Lag      Jitter  JitBuf  Format  FirstMsg    LastMsg
+IAX2/127.0.0.1:4570-  127.0.0.1                                 radio       07124/00001  00044/00039  00000ms  0003ms  0061ms  ulaw    Tx:NEW      Rx:ACK    
+1 active IAX channel

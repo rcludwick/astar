@@ -12,7 +12,67 @@ inline. All 129 issues (107 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (40)
+## Open items (43)
+
+### astar-dmr-keychain-wipe — a failed Keychain read followed by a save wipes every DMR password
+*P2 · bug · labels: app, keychain, dmr, cx:2*
+
+Found during EchoLink Task 16. `KeychainDmrPasswordStore.load()`
+(`apps/macos/Packages/AstarCore/Sources/AstarCore/DmrPasswordStore.swift:69`)
+returns `[:]` both when there is no item and when the read **failed** (a
+locked Keychain, a denied access prompt, a decode error). `save` and
+`remove` then write that empty map plus the one change back, so a single
+failed read followed by a save loses every other system's saved password.
+The EchoLink store already tells the two apart: `KeychainItem.readChecked()`
+throws on a failed read, and `KeychainEchoLinkCredentialStore` refuses to
+write after one. Do the same here, with a test using a failing
+`KeychainBackend` that checks the other systems' passwords survive. The
+AllStar store (`KeychainCredentialStore`) writes the whole value at once and
+does not read first, so it does not have this bug.
+
+### astar-uiclone — replace the Iced client: one look and feel on Linux, Windows, iOS and Android
+*P1 high · epic · labels: gui, cross-platform, ios, android, ui, design*
+
+Decided 2026-10-08 (Rob): **Iced goes.** Its look falls well short of the
+macOS app, and "same look and feel on every platform" cannot be met on top of
+it. The goal is a complete look-and-feel clone of the macOS SwiftUI app on
+Linux, Windows, iOS and Android: same layout, controls, flows, wording and
+light/dark theming, with each platform's native conventions where they matter
+(menus, file dialogs, notifications, accessibility).
+
+Scope:
+
+* **Pick the replacement toolkit first.** It is a design spike with Rob's
+  sign-off, judged against the macOS app side by side, not on paper. It must:
+  * bind the Rust engine (`crates/`) without a second copy of any
+    protocol, audio or PTT logic, so fat core and thin views still hold;
+  * reach all four platforms;
+  * meet the accessibility bar.
+  iOS may simply be the existing SwiftUI app, since `apps/macos` already
+  targets it. If so, the toolkit choice covers Linux, Windows and Android.
+* **Feature parity is measured against `docs/FEATURES.md`.** Every row the Mac
+  has, the new client has, before Iced is removed.
+* **Retire `apps/gui`** (crate `astar-gui`) only once the replacement reaches
+  parity on Linux and Windows. Remove its `just gui-*` recipes and its CI and
+  docs references in the same change.
+
+**EchoLink's pane is owed to the replacement client** (2026-10-28): the
+Windows/Linux client is paused, so `apps/gui` has no EchoLink UI and its
+`docs/FEATURES.md` cells read "paused". The engine side (login, station list,
+call, chat, the GSM codec) is all in `crates/` behind the `iax_station_echolink_*`
+C ABI, so the new client needs only the pane: login with the
+"Log in automatically" switch and a password in the platform's secret store,
+the filtered station list with its free/busy dots, the call view with the
+station's information text and the chat. `docs/site/macos/echolink.md` is the
+reference for its look and wording.
+
+This supersedes the `gui-rs:` parity items below (astar-guidv, astar-1efc,
+astar-651e, astar-a5c8, astar-b2dc, astar-b692, astar-c450, astar-fd98,
+astar-6193, astar-99e6, astar-e396) and the gui-rs half of astar-f92a. Each
+becomes a parity requirement on the new client rather than Iced work, so close
+them against this item when the replacement lands, not before. The Android
+audio spike (astar-6a8e) and the iOS audio spike (astar-44c3) are
+prerequisites, not duplicates.
 
 ### astar-guidv — the Iced client has no digital voice at all
 *P2 medium · feature · labels: gui, cross-platform, dstar, ysf, cx:8*
@@ -552,3 +612,18 @@ it already was. Fixing it means either teaching `save` which `Setup` (if any)
 initiated the characterization, or having the config-row "+" follow up with
 its own `micProfileID` edit once `save` returns. Not fixed here — flagged to
 the owner separately.
+
+### app-record-minors — smaller follow-ups to recording in the macOS app
+*P3 · task · labels: macos, record, cx:2*
+
+From review of `work/recording`:
+
+- Space on a focused **Record** button keys PTT instead of toggling the
+  recording, as it already does on a focused **Disconnect**. Decide whether
+  Space should stay PTT everywhere in the call card, and make VoiceOver users
+  aware of it.
+- With **Always record** on, redialling the same network straight from
+  answered to answered (no hang-up seen by the poll) records nothing for the
+  new connection.
+- Pressing **Record** during a cross-network redial names the file after the
+  network being dialled rather than the one still connected (cosmetic).

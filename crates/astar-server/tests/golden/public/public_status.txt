@@ -1,0 +1,9 @@
+request: GET /public/status HTTP/1.1
+status: 200
+header: cache-control: no-store
+header: content-security-policy: default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; media-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+header: content-type: application/json
+header: referrer-policy: no-referrer
+header: x-content-type-options: nosniff
+header: x-frame-options: DENY
+body-json-keys: activity,last_talker,links,listeners,mode,mp3,node,rate,secure,stream,talker,today,uptime_secs

@@ -5,7 +5,8 @@
 # Merge invariant: this repo has NO git dependencies.
 #
 # The only AMBE code here is the ThumbDV driver, a vendored path crate at
-# vendor/ambe-thumbdv — there is no software vocoder and never will be. That is what
+# vendor/ambe-thumbdv — there is no software vocoder and never will be. Codec 2
+# (M17) is likewise a vendored path crate, at vendor/codec2. That is what
 # makes `cargo build --locked --offline` work and what keeps the build from
 # reaching out to an external repo mid-CI. If a `git = "..."` dependency ever
 # comes back, the offline/locked guarantee dies quietly — so fail loudly here.
@@ -55,6 +56,23 @@ for lic in LICENSE-MIT LICENSE-APACHE; do
     rc=1
   fi
 done
+
+# 5. Codec 2 is vendored too (LGPL-2.1-only AND MIT). Its source shipping in
+#    this repository is what the relink offer in LICENSE-EXCEPTIONS.md section 2
+#    points at, so the crate, its licence text and its provenance must stay —
+#    and its manifest must keep upstream's licence rather than inherit AGPL.
+for f in Cargo.toml LICENSE-LGPL-2.1 VENDORED.md; do
+  if [ ! -f "vendor/codec2/$f" ]; then
+    echo "FAIL: vendor/codec2/$f is missing (the vendored LGPL Codec 2 crate)." >&2
+    rc=1
+  fi
+done
+if [ -f vendor/codec2/Cargo.toml ] &&
+  ! grep -qE '^license = "LGPL-2\.1-only AND MIT"$' vendor/codec2/Cargo.toml; then
+  echo "FAIL: vendor/codec2/Cargo.toml must hard-code upstream's licence," >&2
+  echo "      license = \"LGPL-2.1-only AND MIT\" — never .workspace = true." >&2
+  rc=1
+fi
 
 [ "$rc" -eq 0 ] && echo "no-git-deps: clean (fully vendored; --locked --offline holds)"
 exit "$rc"

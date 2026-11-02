@@ -12,9 +12,10 @@ them.
 | script | purpose |
 | --- | --- |
 | `guard-safety-env.sh` | Hard-fails if any hardware / live-network opt-in is armed. Runs before every compiling job. |
-| `guard-no-git-deps.sh` | The repo has no git dependencies; `ambe-thumbdv` is vendored with its licences and must stay. |
+| `guard-no-git-deps.sh` | The repo has no git dependencies; `ambe-thumbdv` and `codec2` are vendored with their licences and must stay. |
 | `guard-distribution-claims.sh` | astar has never been released — fails on any invented install channel. |
 | `guard-spdx-headers.sh` | Every first-party `.rs` / `.swift` / `.sh` / `.py` file carries the `AGPL-3.0-only` SPDX header the README and the docs site promise. `vendor/` and the vendored C libiax2 are exempt — different licences. |
+| `fetch-m17-reflectors.sh` | Regenerates astar-server's bundled M17 reflector snapshot (`crates/astar-server/data/m17-reflectors.json`) from hamcall-db, or from a local copy of the feed. Validates every row before writing; CC BY 4.0 attribution travels in the file. |
 | `build-docs.sh` | Builds the Zensical site (`docs/site` → `docs/.site`) with `--strict`. Shared by GitLab and the dormant Pages workflow. |
 | `release.sh` | Cuts a release as far as `origin`: preconditions, the version bump in all five homes, the reflector snapshot, the four gates, commit + tag + push. `just release <version>`; `--dry-run` rehearses it read-only, touching nothing but remote-tracking refs. |
 | `publish.sh` | The deliberate second step — push to `public` and create the GitHub release with the notarized DMG. `just publish <version>`, and only when Rob says so. |

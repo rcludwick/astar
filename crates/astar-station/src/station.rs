@@ -7,10 +7,15 @@ use std::sync::{Arc, Mutex};
 use astar_audio::AudioBackend;
 use astar_console::{
     CallStatus, ConsoleConfig, ConsoleSession, ConsoleState, HeardEntry, LinkConnectSpec,
-    OperatingMode, RegisterOutcome,
+    M17MonitorEdge, M17MonitorStatus, OperatingMode, RecordTaps, RegisterOutcome,
 };
 use astar_iax::{CallMode, CodecPolicy, IncomingCallPolicy, LinkEvent, LinkMode, LinkRoster};
 use astar_iax_core::session::auth::Secret;
+use astar_record::frames::FrameEvent;
+use astar_record::tap::{
+    FRAME_TAP_CAPACITY, HEARD_TAP_CAPACITY, SENT_TAP_CAPACITY, Tap, tap_channel,
+};
+use astar_record::{Layout, RecordError, RecordState, Recorder, RecorderConfig, RecorderInputs};
 
 use crate::config::NodeConfig;
 use crate::{RegisterConfig, StationConfig, StationError, StationEvent};
@@ -128,6 +133,222 @@ fn plan_dtmf(
 /// it is never stored in config, a snapshot, an event, or a log.
 pub type SecretResolver = dyn Fn(&str) -> String + Send + Sync;
 
+/// A request to monitor one M17 reflector module, receive-only (see
+/// [`Station::m17_monitor_connect`]).
+///
+/// It is a type of its own, not [`Station::m17_connect`]'s positional
+/// arguments, because it names a different kind of leg. A monitor never
+/// transmits, is not excluded by an IAX2 call, and [`Station::disconnect`]
+/// never ends it: a hang-up takes the call and leaves the engine the monitor
+/// feeds. It is feature-independent, so a
+/// caller builds it the same way in every build. It carries no secret: an
+/// M17 link needs none, and the callsign is the station's public identity on
+/// the reflector.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct M17MonitorRequest {
+    /// Reflector host name or IP literal. Resolved on the monitor's own
+    /// thread, never on the caller's.
+    pub host: String,
+    /// Reflector UDP port.
+    pub port: u16,
+    /// Module letter. Lowercase is accepted and uppercased.
+    pub module: char,
+    /// Callsign the monitor links as. It goes out in CONN, PONG and DISC only.
+    pub callsign: String,
+}
+
+/// What [`Station::record_start`] records, and where. Carries no secret.
+///
+/// A struct rather than positional arguments because the app's human file
+/// name (`<date> <time> <network> <node or reflector>.flac`) needs the
+/// operator's label and time zone as well as the folder and layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordRequest {
+    /// The recordings folder. Created if missing.
+    pub dir: std::path::PathBuf,
+    pub layout: Layout,
+    /// Also write unamblify codec-frame captures under `dir/captured/`.
+    pub frames: bool,
+    /// The `<network> <node or reflector>` part of the file name, e.g.
+    /// `"AllStar 2000"`.
+    pub label: String,
+    /// The operator's offset from UTC, for the date and time in the name.
+    pub utc_offset_secs: i32,
+}
+
+/// The app recorder and the server's frame tap, behind one lock. Lock order
+/// is `recording` → `session`, never the reverse.
+#[derive(Default)]
+struct RecordSlot {
+    /// The app recording, while one runs (or until a stop collects one that
+    /// stopped by itself).
+    recorder: Option<Recorder>,
+    /// The frame tap the app recorder installed, if it asked for frames.
+    app_frames: Option<Tap<FrameEvent>>,
+    /// The server's frame tap, set through [`Station::set_frame_tap`].
+    server_frames: Option<Tap<FrameEvent>>,
+    /// The last recording's final state, for [`Station::record_state`] after
+    /// a stop. `None` before any recording.
+    last: Option<RecordState>,
+    /// `record_start` is making a recorder with the lock released. It
+    /// refuses a second start; a stop in this window sets `stop_requested`.
+    starting: bool,
+    /// A stop arrived while `starting`: the start, on retaking the lock,
+    /// stops the recorder it made instead of installing it.
+    stop_requested: bool,
+    /// A recorder is being joined with the lock released. `record_start`
+    /// refuses while it is set.
+    stopping: bool,
+    /// Test seam: `record_start` waits on the first barrier and then the
+    /// second once it has released the lock, so a test can land a stop
+    /// inside the window.
+    #[cfg(test)]
+    start_pause: Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
+}
+
+impl RecordSlot {
+    fn busy(&self) -> bool {
+        self.starting || self.stopping
+    }
+}
+
+/// Clears the slot's `starting`/`stopping`/`stop_requested` flags if the
+/// window they cover unwinds, so a panic there cannot refuse every later
+/// start. On the normal path the owner clears them under the lock and calls
+/// [`BusyGuard::disarm`]. At most one of `starting`/`stopping` is ever set
+/// (each refuses or bypasses the other), so clearing both is safe.
+struct BusyGuard<'a> {
+    slot: &'a Mutex<RecordSlot>,
+    armed: bool,
+}
+
+impl<'a> BusyGuard<'a> {
+    fn new(slot: &'a Mutex<RecordSlot>) -> Self {
+        BusyGuard { slot, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for BusyGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let mut slot = self
+                .slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            slot.starting = false;
+            slot.stopping = false;
+            slot.stop_requested = false;
+        }
+    }
+}
+
+/// How long an M17 monitor goes without hearing its reflector before it gives
+/// the link up. This is `SessionFsm`'s own default, and the figure
+/// [`Station::m17_connect`] uses, so the two kinds of leg fail on the same
+/// silence.
+#[cfg(feature = "m17")]
+const M17_MONITOR_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// One station from the `EchoLink` directory's list, as
+/// [`Station::echolink_stations`] hands it out.
+///
+/// It carries no IP address. The directory lists every station's address,
+/// and the engine needs it to place a call, but a front-end only ever needs
+/// the callsign or node number to name one, so the address stays inside the
+/// engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EchoLinkStationInfo {
+    /// Callsign, uppercased.
+    pub call: String,
+    /// The station's description, with the directory's status tag removed.
+    pub description: String,
+    /// Node number.
+    pub node: u32,
+    /// `"user"`, `"link"` (callsign ends in `-L`), `"repeater"` (`-R`) or
+    /// `"conference"` (callsign wrapped in stars, like `*ECHOTEST*`).
+    pub kind: &'static str,
+    /// `"online"` (free), `"busy"` (in a contact) or `"unknown"` (the
+    /// description carried no status tag).
+    pub status: &'static str,
+}
+
+#[cfg(feature = "echolink")]
+impl From<&astar_console::echolink::StationEntry> for EchoLinkStationInfo {
+    fn from(e: &astar_console::echolink::StationEntry) -> Self {
+        use astar_console::echolink::{StationKind, StationStatus};
+        Self {
+            call: e.call.clone(),
+            description: e.description.clone(),
+            node: e.node,
+            kind: match e.kind {
+                StationKind::User => "user",
+                StationKind::Link => "link",
+                StationKind::Repeater => "repeater",
+                StationKind::Conference => "conference",
+            },
+            status: match e.status {
+                StationStatus::Online => "online",
+                StationStatus::Busy => "busy",
+                StationStatus::Unknown => "unknown",
+            },
+        }
+    }
+}
+
+/// What [`Station::echolink_state`], [`Station::echolink_node_poll`] and
+/// [`Station::echolink_node_peers`] hand out: astar-console's own types when
+/// the `echolink` feature is on.
+#[cfg(feature = "echolink")]
+pub use astar_console::echolink::{EchoLinkNodeEdge, EchoLinkPeerStatus, EchoLinkState};
+
+/// Stand-ins for the `EchoLink` state types in a build without the
+/// `echolink` feature, so every `Station::echolink_*` method keeps the same
+/// signature in every build. They have no values: the methods that would
+/// return one return `None` or an empty list.
+#[cfg(not(feature = "echolink"))]
+mod echolink_off {
+    /// No `EchoLink` in this build; [`crate::Station::echolink_state`] is
+    /// always `None`.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum EchoLinkState {}
+    /// No `EchoLink` in this build; [`crate::Station::echolink_node_poll`]
+    /// is always empty.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum EchoLinkNodeEdge {}
+    /// No `EchoLink` in this build; [`crate::Station::echolink_node_peers`]
+    /// is always empty.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum EchoLinkPeerStatus {}
+}
+#[cfg(not(feature = "echolink"))]
+pub use echolink_off::{EchoLinkNodeEdge, EchoLinkPeerStatus, EchoLinkState};
+
+/// The refusal for an `EchoLink` password the directory line cannot carry.
+/// It names the kinds of character, never the password.
+pub const ECHOLINK_PASSWORD_UNSENDABLE: &str = "The EchoLink password has a character the \
+     directory can't take: a line break, or a non-ASCII character such as ¬.";
+
+/// Whether `password` can go into the directory's login line as it is.
+///
+/// The line is `l` + callsign + `0xAC 0xAC` + password + CR + …, written as
+/// UTF-8 bytes, so a CR or LF would end the password's field early and a
+/// `0xAC` byte (which `¬` and some other non-ASCII characters carry) would
+/// look like the separator. A password holding any of those three bytes is
+/// refused before anything is sent.
+#[must_use]
+pub fn echolink_password_is_sendable(password: &str) -> bool {
+    !password.bytes().any(|b| matches!(b, b'\r' | b'\n' | 0xAC))
+}
+
+/// The sentence every `EchoLink` call returns in a build without the
+/// `echolink` feature.
+#[cfg(not(feature = "echolink"))]
+const ECHOLINK_NOT_COMPILED: &str = "echolink support not compiled";
+
 /// An IAX2 station: owns the single-call session, audio, and the ASL3 connect
 /// recipe. PTT-source-agnostic: callers drive keying via [`Station::set_ptt`];
 /// hardware PTT lives in `astar-ptt` / `astar-serial-sys`. Internally
@@ -220,6 +441,9 @@ pub struct Station {
     /// enabled.
     #[cfg(feature = "m17")]
     codec2_probe_cache: Mutex<Option<(Vec<std::path::PathBuf>, bool)>>,
+    /// Call recording: the app recorder and the server's frame tap. See
+    /// [`Station::record_start`] and [`Station::set_frame_tap`].
+    recording: Mutex<RecordSlot>,
 }
 
 /// Supervision state for automatic re-registration (iax-177d). Without it a
@@ -256,7 +480,9 @@ struct EventTracker {
 }
 
 impl Station {
-    /// Create a station with the real `CpalBackend`.
+    /// Create a station with the real `CpalBackend` (feature
+    /// `device-audio`, on by default).
+    #[cfg(feature = "device-audio")]
     #[must_use]
     pub fn new(config: StationConfig) -> Self {
         Self::with_backend_factory(
@@ -292,8 +518,10 @@ impl Station {
             codec_dirs: Mutex::new(Vec::new()),
             #[cfg(feature = "m17")]
             codec2_probe_cache: Mutex::new(None),
+            recording: Mutex::new(RecordSlot::default()),
         };
         station.pin_station_policy();
+        station.set_vocoder_trust(station.config.vocoder_trust.clone());
         if configured_mode == OperatingMode::Node {
             let _ = station.set_mode(OperatingMode::Node);
         }
@@ -309,6 +537,10 @@ impl Station {
     ///
     /// Used by the `astar-inspect` harness, which dogfoods [`Station::connect_wt`]
     /// while retaining its own session-based parrot/DTMF/calibration handlers.
+    ///
+    /// Dropping the station ends every network on the shared session, the
+    /// `EchoLink` directory login included, even though the host keeps the
+    /// session itself.
     #[must_use]
     pub fn with_shared_session(
         config: StationConfig,
@@ -334,12 +566,50 @@ impl Station {
             codec_dirs: Mutex::new(Vec::new()),
             #[cfg(feature = "m17")]
             codec2_probe_cache: Mutex::new(None),
+            recording: Mutex::new(RecordSlot::default()),
         };
         station.pin_station_policy();
+        station.set_vocoder_trust(station.config.vocoder_trust.clone());
         if configured_mode == OperatingMode::Node {
             let _ = station.set_mode(OperatingMode::Node);
         }
         station
+    }
+
+    /// Replace the vocoder trust list: the USB serials of the AMBE sticks
+    /// later D-Star/YSF/NXDN/DMR connects (and the `*_available` probes) may
+    /// consider. A live session keeps the stick it already opened. Seeded
+    /// from [`StationConfig::vocoder_trust`] at construction.
+    pub fn set_vocoder_trust(&self, trust: astar_codec::vocoder_trust::VocoderTrust) {
+        self.session.lock().unwrap().set_vocoder_trust(trust);
+    }
+
+    /// The current vocoder trust list.
+    #[must_use]
+    pub fn vocoder_trust(&self) -> astar_codec::vocoder_trust::VocoderTrust {
+        self.session.lock().unwrap().vocoder_trust().clone()
+    }
+
+    /// Step 1 of every AMBE-network connect, under the session lock: open and
+    /// reserve the ONE audio lane, and take a copy of the vocoder trust list
+    /// the off-lock vocoder open will use.
+    #[cfg(any(feature = "dstar", feature = "ysf", feature = "nxdn", feature = "dmr"))]
+    fn open_voice_route_with_trust(
+        &self,
+        input: Option<&str>,
+        output: Option<&str>,
+    ) -> Result<
+        (
+            astar_audio::CallAudio,
+            astar_codec::vocoder_trust::VocoderTrust,
+        ),
+        StationError,
+    > {
+        let mut s = self.session.lock().unwrap();
+        let audio = s
+            .open_voice_route(input, output, || (self.make_backend)())
+            .map_err(map_console_err)?;
+        Ok((audio, s.vocoder_trust().clone()))
     }
 
     /// Pin the session's station codec policy from [`StationConfig`] at
@@ -748,6 +1018,9 @@ impl Station {
     /// (`Call::hangup` joins the runtime thread / drops cpal streams, which can
     /// briefly block — never under the session lock).
     pub fn disconnect(&self) {
+        // Finish an app recording before the call it records goes away. A
+        // no-op, taps untouched, when none is running.
+        let _ = self.record_stop();
         // Teardown cancels any in-flight DTMF sequence (iax-4b7a) — the
         // remainder must never play into a later call.
         self.cancel_dtmf();
@@ -768,6 +1041,8 @@ impl Station {
         self.ysf_disconnect();
         self.nxdn_disconnect();
         self.dmr_disconnect();
+        // The EchoLink call, if any; the directory login stays up.
+        self.echolink_disconnect();
         if self.mode() == OperatingMode::Node {
             // Node mode: hang up the active inbound-adopted call but keep the
             // listener running for the next caller (the session retains its
@@ -782,6 +1057,633 @@ impl Station {
             let _ = call.hangup(None);
             drop(manager);
         }
+    }
+
+    // ── EchoLink ────────────────────────────────────────────────────────
+
+    /// Use `net` for every later `EchoLink` login and call: where the link
+    /// binds, how it finds a station's ports, and the protocol timings.
+    /// Production never needs this (the session starts on
+    /// [`astar_console::echolink::EchoLinkNetwork::production`]); tests and
+    /// embedders point it at loopback fakes.
+    #[cfg(feature = "echolink")]
+    pub fn set_echolink_network(&self, net: astar_console::echolink::EchoLinkNetwork) {
+        self.session.lock().unwrap().set_echolink_network(net);
+    }
+
+    /// Start logging in to the `EchoLink` directory as `callsign`, trying
+    /// `servers` in turn (`IP`, `IP:port`, `name` or `name:port`). Returns at
+    /// once; the login runs on its own thread, and
+    /// [`Station::echolink_state`] shows how it went. The location last given
+    /// to [`Station::echolink_set_location`] goes out beside the callsign.
+    ///
+    /// `password` is taken by value and wrapped in `Zeroizing` before
+    /// anything else happens, so it is zeroed when it is dropped, whichever
+    /// way this returns. It moves into the directory thread and is never
+    /// stored on the station, printed, logged or put in an error.
+    ///
+    /// A login already running is replaced; the new login's thread logs the
+    /// old one off first.
+    ///
+    /// # Errors
+    /// [`StationError::EchoLink`] for an empty callsign, an empty password,
+    /// or no non-empty server, all checked before anything starts (so a
+    /// running login stands), and when the `echolink` feature isn't compiled
+    /// in.
+    pub fn echolink_login(
+        &self,
+        callsign: &str,
+        password: String,
+        servers: &[String],
+    ) -> Result<(), StationError> {
+        let password = zeroize::Zeroizing::new(password);
+        let callsign = callsign.trim();
+        if callsign.is_empty() {
+            return Err(StationError::EchoLink(
+                "Enter a callsign to log in to EchoLink".into(),
+            ));
+        }
+        if password.is_empty() {
+            return Err(StationError::EchoLink(
+                "Enter a password to log in to EchoLink".into(),
+            ));
+        }
+        if !echolink_password_is_sendable(&password) {
+            return Err(StationError::EchoLink(ECHOLINK_PASSWORD_UNSENDABLE.into()));
+        }
+        let servers: Vec<String> = servers
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if servers.is_empty() {
+            return Err(StationError::EchoLink(
+                "Add an EchoLink directory server to log in".into(),
+            ));
+        }
+        #[cfg(feature = "echolink")]
+        {
+            let login = astar_console::echolink::EchoLinkLogin {
+                callsign: callsign.to_owned(),
+                servers,
+                // Empty: the session uses the location last set.
+                location: String::new(),
+            };
+            self.session
+                .lock()
+                .unwrap()
+                .echolink_login(login, password)
+                .map_err(map_console_err)
+        }
+        #[cfg(not(feature = "echolink"))]
+        {
+            drop((password, servers));
+            Err(StationError::EchoLink(ECHOLINK_NOT_COMPILED.into()))
+        }
+    }
+
+    /// Hang up any `EchoLink` call and every station on the node's leg, then
+    /// log off the directory. No-op when not logged in (and without the
+    /// `echolink` feature).
+    ///
+    /// The calls are hung up under the session lock, so the far stations
+    /// hear a BYE before this station leaves the list. The logoff itself
+    /// waits on any directory exchange already in flight, about 80 s at
+    /// worst, so the login is taken out under the lock and logged off only
+    /// after every lock is released: this call can block that long, but
+    /// nothing else on the station waits for it.
+    pub fn echolink_logout(&self) {
+        #[cfg(feature = "echolink")]
+        {
+            let presence = self.session.lock().unwrap().echolink_logout();
+            if let Some(presence) = presence {
+                presence.logout();
+            }
+        }
+    }
+
+    /// Call an `EchoLink` station, named by node number or callsign as the
+    /// directory lists it, over the station's selected devices. Returns as
+    /// soon as the first SDES is out; the answer shows in
+    /// [`Station::snapshot`] and [`Station::echolink_state`].
+    ///
+    /// # Errors
+    /// [`StationError::EchoLink`] for an empty target, when not logged in,
+    /// when no listed station matches, when the UDP ports cannot be opened,
+    /// and when the `echolink` feature isn't compiled in;
+    /// [`StationError::AlreadyConnected`] while any other network, another
+    /// `EchoLink` call or the node's `EchoLink` leg holds the station;
+    /// [`StationError::Audio`] when the output device cannot be opened.
+    pub fn echolink_connect(&self, node_or_call: &str) -> Result<(), StationError> {
+        let target = node_or_call.trim();
+        if target.is_empty() {
+            return Err(StationError::EchoLink(
+                "Enter a node number or callsign to call".into(),
+            ));
+        }
+        #[cfg(feature = "echolink")]
+        {
+            let (input, output) = self.selected_devices();
+            let backend = (self.make_backend)();
+            self.session
+                .lock()
+                .unwrap()
+                .echolink_connect(backend, target, input.as_deref(), output.as_deref())
+                .map_err(map_console_err)
+        }
+        #[cfg(not(feature = "echolink"))]
+        {
+            Err(StationError::EchoLink(ECHOLINK_NOT_COMPILED.into()))
+        }
+    }
+
+    /// Hang up the `EchoLink` call, if any. The directory login stays up.
+    /// No-op with no call (and without the `echolink` feature).
+    pub fn echolink_disconnect(&self) {
+        #[cfg(feature = "echolink")]
+        {
+            self.session.lock().unwrap().echolink_disconnect();
+        }
+    }
+
+    /// The directory's latest station list. Empty when not logged in, before
+    /// the first list arrives, and without the `echolink` feature. Carries no
+    /// IP address (see [`EchoLinkStationInfo`]).
+    #[must_use]
+    pub fn echolink_stations(&self) -> Vec<EchoLinkStationInfo> {
+        #[cfg(feature = "echolink")]
+        {
+            let stations = self.session.lock().unwrap().echolink_stations();
+            stations.iter().map(EchoLinkStationInfo::from).collect()
+        }
+        #[cfg(not(feature = "echolink"))]
+        {
+            Vec::new()
+        }
+    }
+
+    /// Ask the `EchoLink` directory for a fresh station list now, rather than
+    /// at the next 600 s refresh. Returns `Ok(true)` when it was asked, and
+    /// `Ok(false)`, asking nothing, when the last list came less than 30 s
+    /// ago: the caller says "try again in a moment". The new list shows in
+    /// [`Station::echolink_stations`] once it arrives.
+    ///
+    /// # Errors
+    /// [`StationError::EchoLink`] when not logged in, and when the
+    /// `echolink` feature isn't compiled in.
+    pub fn echolink_refresh_list(&self) -> Result<bool, StationError> {
+        #[cfg(feature = "echolink")]
+        {
+            self.session
+                .lock()
+                .unwrap()
+                .echolink_refresh_list()
+                .map_err(map_console_err)
+        }
+        #[cfg(not(feature = "echolink"))]
+        {
+            Err(StationError::EchoLink(ECHOLINK_NOT_COMPILED.into()))
+        }
+    }
+
+    /// Send a line of text chat to the station on the `EchoLink` call.
+    ///
+    /// # Errors
+    /// [`StationError::NotConnected`] with no call in hand, checked first;
+    /// [`StationError::EchoLink`] for an empty line, and when the
+    /// `echolink` feature isn't compiled in.
+    pub fn echolink_send_chat(&self, text: &str) -> Result<(), StationError> {
+        #[cfg(feature = "echolink")]
+        {
+            let session = self.session.lock().unwrap();
+            // `echolink_state` carries a call exactly while one is in hand.
+            if session.echolink_state().and_then(|s| s.call).is_none() {
+                return Err(StationError::NotConnected);
+            }
+            if text.trim().is_empty() {
+                return Err(StationError::EchoLink("Type something to send".into()));
+            }
+            session.echolink_send_chat(text).map_err(map_console_err)
+        }
+        #[cfg(not(feature = "echolink"))]
+        {
+            let _ = text;
+            Err(StationError::EchoLink(ECHOLINK_NOT_COMPILED.into()))
+        }
+    }
+
+    /// Where the `EchoLink` login and call stand. `Some` while a login is
+    /// running, logged in or failed (a failed login carries its sentence in
+    /// `login.error`), or while a call is in hand; `None` once logged out,
+    /// and always without the `echolink` feature. Holds no password.
+    #[must_use]
+    pub fn echolink_state(&self) -> Option<EchoLinkState> {
+        #[cfg(feature = "echolink")]
+        {
+            self.session.lock().unwrap().echolink_state()
+        }
+        #[cfg(not(feature = "echolink"))]
+        {
+            None
+        }
+    }
+
+    /// Set the location text other stations see beside the callsign. It may
+    /// come before a login (which then carries it); while logged in it goes
+    /// out with the next status refresh. No-op without the `echolink`
+    /// feature.
+    pub fn echolink_set_location(&self, text: &str) {
+        #[cfg(feature = "echolink")]
+        {
+            self.session.lock().unwrap().echolink_set_location(text);
+        }
+        #[cfg(not(feature = "echolink"))]
+        {
+            let _ = text;
+        }
+    }
+
+    /// The sentence saying why the `EchoLink` login failed, for a person to
+    /// read (for example `"EchoLink said the password is wrong"`). `None` when
+    /// the login has not failed, when logged out, and without the
+    /// `echolink` feature.
+    #[must_use]
+    pub fn echolink_last_error(&self) -> Option<String> {
+        #[cfg(feature = "echolink")]
+        {
+            self.echolink_state().and_then(|s| s.login.error)
+        }
+        #[cfg(not(feature = "echolink"))]
+        {
+            None
+        }
+    }
+
+    /// `true` when this crate was built with its own `echolink` feature.
+    ///
+    /// Deliberately NOT [`astar_console::echolink_available`]: Cargo unifies
+    /// features, so astar-console can carry `EchoLink` (pulled in by another
+    /// crate in the build) while this crate's methods are the "not compiled"
+    /// stubs. What a caller can use is what this crate compiled.
+    #[must_use]
+    pub fn echolink_available(&self) -> bool {
+        cfg!(feature = "echolink")
+    }
+
+    /// Dial an `EchoLink` station, named by node number or callsign, into the
+    /// node's conference as a peer member. Returns as soon as the first SDES
+    /// is out; the answer shows in [`Station::echolink_node_peers`] and as an
+    /// `EchoLinkNodeEdge::Connected` from [`Station::echolink_node_poll`].
+    ///
+    /// # Errors
+    /// [`StationError::EchoLink`] for an empty target, when not logged in,
+    /// when no listed station matches, when the node has no conference
+    /// (`"no conference: …"`), when another station on the leg shares the
+    /// IP, when the UDP ports cannot be opened, and when the `echolink`
+    /// feature isn't compiled in; [`StationError::AlreadyConnected`] while the
+    /// app's own `EchoLink` call is in hand or the station is already on the
+    /// leg.
+    pub fn echolink_node_connect(&self, target: &str) -> Result<(), StationError> {
+        let target = target.trim();
+        if target.is_empty() {
+            return Err(StationError::EchoLink(
+                "Enter a node number or callsign to call".into(),
+            ));
+        }
+        #[cfg(feature = "echolink")]
+        {
+            // Only waits for the leg's thread to take the station, at most
+            // one 50 ms link pass: short enough for the session lock.
+            self.session
+                .lock()
+                .unwrap()
+                .echolink_node_connect(target)
+                .map_err(map_console_err)
+        }
+        #[cfg(not(feature = "echolink"))]
+        {
+            Err(StationError::EchoLink(ECHOLINK_NOT_COMPILED.into()))
+        }
+    }
+
+    /// Hang up on one station on the node's `EchoLink` leg, by callsign.
+    ///
+    /// # Errors
+    /// [`StationError::NotConnected`] when no such station is on the leg;
+    /// [`StationError::EchoLink`] for an empty callsign, and when the
+    /// `echolink` feature isn't compiled in.
+    pub fn echolink_node_disconnect(&self, call: &str) -> Result<(), StationError> {
+        let call = call.trim();
+        if call.is_empty() {
+            return Err(StationError::EchoLink(
+                "Enter the callsign of the station to hang up on".into(),
+            ));
+        }
+        #[cfg(feature = "echolink")]
+        {
+            self.session
+                .lock()
+                .unwrap()
+                .echolink_node_disconnect(call)
+                .map_err(map_console_err)
+        }
+        #[cfg(not(feature = "echolink"))]
+        {
+            let _ = call;
+            Err(StationError::EchoLink(ECHOLINK_NOT_COMPILED.into()))
+        }
+    }
+
+    /// Drain what has happened on the node's `EchoLink` leg since the last
+    /// poll: stations answering, and contacts ending on their own. Empty with
+    /// no leg, and without the `echolink` feature.
+    #[must_use]
+    pub fn echolink_node_poll(&self) -> Vec<EchoLinkNodeEdge> {
+        #[cfg(feature = "echolink")]
+        {
+            self.session.lock().unwrap().echolink_node_poll()
+        }
+        #[cfg(not(feature = "echolink"))]
+        {
+            Vec::new()
+        }
+    }
+
+    /// Every station on the node's `EchoLink` leg and where its contact
+    /// stands. Empty with no leg, and without the `echolink` feature.
+    #[must_use]
+    pub fn echolink_node_peers(&self) -> Vec<EchoLinkPeerStatus> {
+        #[cfg(feature = "echolink")]
+        {
+            self.session.lock().unwrap().echolink_node_peers()
+        }
+        #[cfg(not(feature = "echolink"))]
+        {
+            Vec::new()
+        }
+    }
+
+    /// Start recording the live connection: heard audio, sent audio and,
+    /// with `req.frames`, the codec frames, into `req.dir`.
+    ///
+    /// The taps go onto the console and their receivers to a new
+    /// [`Recorder`], which drains them on its own 20 ms clock. The rate is
+    /// the pipeline's (16 kHz on a `prefer_slin16` station).
+    ///
+    /// No lock is held across the recorder's file I/O or a join: the slot is
+    /// marked as starting while the recorder is made, so a concurrent start
+    /// refuses and [`Station::record_state`] keeps reporting the last state.
+    /// A [`Station::record_stop`] (or [`Station::disconnect`]) landing in that
+    /// window is honoured: the new recorder is stopped before any tap is
+    /// installed, its final state becomes the last one, and this returns
+    /// `Ok`.
+    ///
+    /// # Errors
+    /// [`StationError::Record`] `("already recording")` while one runs, is
+    /// starting or is still finishing, `("frame tap in use")` while the
+    /// server's frame tap is set (the two share one slot), and the recorder's
+    /// own message when the folder cannot be used or the disk is short of
+    /// space; [`StationError::NotConnected`] with no call or digital session
+    /// live, including one that ended while the recorder was being made.
+    pub fn record_start(&self, req: RecordRequest) -> Result<(), StationError> {
+        let mut guard = BusyGuard::new(&self.recording);
+        guard.disarm(); // armed below, once `starting` is set
+        let (sample_rate, contended, finished) = {
+            let mut slot = self.recording.lock().unwrap();
+            if slot.busy() || slot.recorder.as_ref().is_some_and(|r| r.state().recording) {
+                return Err(StationError::Record(
+                    RecordError::AlreadyRecording.to_string(),
+                ));
+            }
+            if slot.server_frames.is_some() {
+                return Err(StationError::Record("frame tap in use".to_owned()));
+            }
+            let mut s = self.session.lock().unwrap();
+            // A recorder that stopped by itself (low disk, folder gone) is
+            // collected: its taps come off first, so a restart that fails
+            // below leaves no dead taps behind.
+            let finished = slot.recorder.take();
+            if finished.is_some() {
+                s.set_record_taps(RecordTaps {
+                    frames: slot.server_frames.clone(),
+                    ..RecordTaps::default()
+                });
+                slot.app_frames = None;
+            }
+            if !s.has_connection() {
+                drop(s);
+                drop(slot);
+                self.finish_collected(finished);
+                return Err(StationError::NotConnected);
+            }
+            slot.starting = true;
+            slot.stop_requested = false;
+            guard.armed = true;
+            #[cfg(test)]
+            let pause = slot.start_pause.clone();
+            drop(s);
+            drop(slot);
+            #[cfg(test)]
+            if let Some((a, b)) = pause {
+                a.wait();
+                b.wait();
+            }
+            let s = self.session.lock().unwrap();
+            (
+                s.pipeline_sample_rate(),
+                s.record_contended_counters(),
+                finished,
+            )
+        };
+        // Its thread has already left its loop, so the join is immediate;
+        // still, no lock is held.
+        self.finish_collected(finished);
+
+        let (started, taps) = Self::make_recorder(req, sample_rate, contended);
+
+        let mut slot = self.recording.lock().unwrap();
+        slot.starting = false;
+        let stop_requested = std::mem::take(&mut slot.stop_requested);
+        guard.disarm();
+        let recorder = started.map_err(|e| StationError::Record(e.to_string()))?;
+        let mut s = self.session.lock().unwrap();
+        let connected = s.has_connection();
+        if stop_requested || !connected {
+            // Stopped (or the connection went away) while the recorder was
+            // being made: no app tap goes on, and the recorder is finished
+            // outside the locks like any other stop.
+            s.set_record_taps(RecordTaps {
+                frames: slot.server_frames.clone(),
+                ..RecordTaps::default()
+            });
+            drop(s);
+            self.abandon_new_recorder(slot, recorder);
+            return if stop_requested {
+                Ok(())
+            } else {
+                Err(StationError::NotConnected)
+            };
+        }
+        // A server tap set meanwhile keeps the frame slot (see
+        // `set_frame_tap`).
+        let app_frames = taps.frames.clone();
+        s.set_record_taps(RecordTaps {
+            frames: slot.server_frames.clone().or_else(|| taps.frames.clone()),
+            ..taps
+        });
+        drop(s);
+        slot.app_frames = app_frames;
+        slot.recorder = Some(recorder);
+        Ok(())
+    }
+
+    /// Finish a recorder [`Station::record_start`] made but will not install:
+    /// mark the slot as stopping, join outside the lock, and keep the final
+    /// state (`recording: false`) as the last one.
+    fn abandon_new_recorder(
+        &self,
+        mut slot: std::sync::MutexGuard<'_, RecordSlot>,
+        recorder: Recorder,
+    ) {
+        slot.app_frames = None;
+        slot.stopping = true;
+        slot.last = Some(RecordState {
+            recording: false,
+            ..recorder.state()
+        });
+        let mut guard = BusyGuard::new(&self.recording);
+        drop(slot);
+        let state = recorder.stop();
+        let mut slot = self.recording.lock().unwrap();
+        slot.stopping = false;
+        guard.disarm();
+        slot.last = Some(state);
+    }
+
+    /// Make the three taps and a recorder reading them, with no lock held.
+    /// Returns the senders for the console beside the recorder.
+    fn make_recorder(
+        req: RecordRequest,
+        sample_rate: u32,
+        contended: Vec<Arc<std::sync::atomic::AtomicU64>>,
+    ) -> (Result<Recorder, RecordError>, RecordTaps) {
+        let (heard_tap, heard) = tap_channel(HEARD_TAP_CAPACITY);
+        let (sent_tap, sent) = tap_channel(SENT_TAP_CAPACITY);
+        let (frames_tap, frames) = if req.frames {
+            let (t, r) = tap_channel(FRAME_TAP_CAPACITY);
+            (Some(t), Some(r))
+        } else {
+            (None, None)
+        };
+        let mut drop_counters = vec![heard_tap.dropped_counter(), sent_tap.dropped_counter()];
+        drop_counters.extend(frames_tap.as_ref().map(Tap::dropped_counter));
+        drop_counters.extend(contended);
+        let started = Recorder::start(
+            RecorderConfig {
+                dir: req.dir,
+                layout: req.layout,
+                frames: req.frames,
+                label: req.label,
+                utc_offset_secs: req.utc_offset_secs,
+                sample_rate,
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+            },
+            RecorderInputs {
+                heard,
+                sent,
+                frames,
+                drop_counters,
+            },
+        );
+        let taps = RecordTaps {
+            heard: Some(heard_tap),
+            sent: Some(sent_tap),
+            frames: frames_tap,
+        };
+        (started, taps)
+    }
+
+    /// Join a recorder collected by [`Station::record_start`] (no lock held)
+    /// and keep its final state as the last one.
+    fn finish_collected(&self, finished: Option<Recorder>) {
+        if let Some(old) = finished {
+            let state = old.stop();
+            self.recording.lock().unwrap().last = Some(state);
+        }
+    }
+
+    /// Stop the app recording, finish its file(s) and return the final
+    /// state. Idempotent: with none running it returns the last state and
+    /// leaves the taps alone, so the server's frame tap is never touched.
+    ///
+    /// The taps come off first, so nothing more arrives; the recorder is
+    /// joined after both locks are released (a join can take one tick).
+    /// During that join a concurrent stop returns the last state, already
+    /// `recording: false`, and a concurrent start is refused rather than
+    /// overlapping the finishing recorder. A stop while a start is still
+    /// making its recorder marks it stopped: that start finishes the
+    /// recorder instead of installing it (see [`Station::record_start`]).
+    pub fn record_stop(&self) -> RecordState {
+        let mut guard = BusyGuard::new(&self.recording);
+        guard.disarm();
+        let recorder = {
+            let mut slot = self.recording.lock().unwrap();
+            if slot.starting {
+                slot.stop_requested = true;
+            }
+            let Some(r) = slot.recorder.take() else {
+                return slot.last.clone().unwrap_or_else(RecordState::idle);
+            };
+            // Clear only what `record_start` installed: the server's frame
+            // tap, if it set one since, stays.
+            self.session.lock().unwrap().set_record_taps(RecordTaps {
+                frames: slot.server_frames.clone(),
+                ..RecordTaps::default()
+            });
+            slot.app_frames = None;
+            slot.stopping = true;
+            guard.armed = true;
+            slot.last = Some(RecordState {
+                recording: false,
+                ..r.state()
+            });
+            r
+        };
+        let state = recorder.stop();
+        let mut slot = self.recording.lock().unwrap();
+        slot.stopping = false;
+        guard.disarm();
+        slot.last = Some(state.clone());
+        state
+    }
+
+    /// The live recording state; after a stop (and while one is finishing),
+    /// the last recording's state with `recording: false` and its `error`,
+    /// until the next start; [`RecordState::idle`] before any.
+    #[must_use]
+    pub fn record_state(&self) -> RecordState {
+        let slot = self.recording.lock().unwrap();
+        match slot.recorder.as_ref() {
+            Some(r) => r.state(),
+            None => slot.last.clone().unwrap_or_else(RecordState::idle),
+        }
+    }
+
+    /// Install (or, with `None`, remove) the server's codec-frame tap. It
+    /// changes only the console's frame slot, never the heard/sent taps, and
+    /// survives [`Station::record_stop`] and [`Station::disconnect`]. While
+    /// it is set, [`Station::record_start`] refuses.
+    ///
+    /// The app recorder and the server share that one slot. Setting a server
+    /// tap during an app recording takes the slot: the app's frame capture
+    /// gets nothing (its audio continues) until the server tap is removed,
+    /// which hands the slot back to the app recording.
+    pub fn set_frame_tap(&self, tap: Option<Tap<FrameEvent>>) {
+        let mut slot = self.recording.lock().unwrap();
+        slot.server_frames.clone_from(&tap);
+        let effective = tap.or_else(|| slot.app_frames.clone());
+        self.session.lock().unwrap().set_frame_tap(effective);
     }
 
     /// Extra directories to search for a runtime `libcodec2`, ahead of the
@@ -893,6 +1795,173 @@ impl Station {
         }
     }
 
+    /// Link a receive-only M17 monitor to `req`'s reflector module. What it
+    /// hears feeds the conference as a contributing-only member.
+    ///
+    /// This is deliberately NOT [`Station::m17_connect`]. That is a
+    /// transmit-capable client that takes the voice route, so a pooled IAX2
+    /// link refuses it and [`Station::set_ptt`] keys it. A monitor takes
+    /// neither. The node's links keep running beside it, and a key request
+    /// with only a monitor up returns [`StationError::NotConnected`].
+    ///
+    /// A monitor needs a conference to join: Bridge or Conference topology,
+    /// with the engine built. It uses the codec search dirs from
+    /// [`Station::set_codec_dirs`] and a 30 s keepalive. Name resolution,
+    /// codec open and CONN all run on the monitor's own thread, so this
+    /// returns without waiting on the network.
+    ///
+    /// # Errors
+    /// [`StationError::M17`] in these cases:
+    /// - the module is outside `A`-`Z`;
+    /// - the callsign is empty or cannot be encoded;
+    /// - no engine or no conference exists;
+    /// - the `m17` feature is not compiled in (`"m17 support not compiled"`).
+    ///
+    /// [`StationError::AlreadyConnected`] while a monitor is already live.
+    pub fn m17_monitor_connect(&self, req: M17MonitorRequest) -> Result<(), StationError> {
+        let module = req.module.to_ascii_uppercase();
+        let module_byte = match u8::try_from(module) {
+            Ok(byte) if byte.is_ascii_uppercase() => byte,
+            _ => return Err(StationError::M17("module must be A-Z".into())),
+        };
+        if req.callsign.is_empty() {
+            return Err(StationError::M17("callsign must not be empty".into()));
+        }
+        #[cfg(feature = "m17")]
+        {
+            let codec_dirs = self
+                .codec_dirs
+                .lock()
+                .expect("station codec_dirs poisoned")
+                .clone();
+            let cfg = astar_console::M17MonitorConfig {
+                host: req.host,
+                port: req.port,
+                module: module_byte,
+                callsign: req.callsign,
+                codec_dirs,
+                keepalive_timeout: M17_MONITOR_KEEPALIVE,
+            };
+            // `m17_monitor_connect` only validates, enrols and spawns a
+            // thread, so it is safe to call under the session lock.
+            self.session
+                .lock()
+                .expect("station session poisoned")
+                .m17_monitor_connect(cfg)
+                .map_err(map_console_err)
+        }
+        #[cfg(not(feature = "m17"))]
+        {
+            let _ = (req.host, req.port, module_byte);
+            Err(StationError::M17("m17 support not compiled".into()))
+        }
+    }
+
+    /// Stop the M17 monitor, if one is up: withdraw it from the conference
+    /// and send DISC.
+    ///
+    /// The monitor is taken out under the session lock, and its thread is
+    /// joined only after the lock is released. The join can wait out one
+    /// 50 ms socket poll. Holding the session lock that long would stall
+    /// every snapshot, key request and link command on the node.
+    ///
+    /// This is a no-op with no monitor up, and without the `m17` feature.
+    /// [`Station::disconnect`] never calls it, and never takes the monitor's
+    /// conference away: a handset hang-up must not drop a reflector link
+    /// someone else dialled. With the inbound listener up (the node's normal
+    /// state, where [`Station::mode`] reads Node) `disconnect` hangs up only
+    /// the handset call. With no listener and a WT call up it goes through
+    /// [`ConsoleSession::detach`], which keeps the engine in the session
+    /// while a monitor is up and hands back only the call.
+    pub fn m17_monitor_disconnect(&self) {
+        #[cfg(feature = "m17")]
+        {
+            let taken = self
+                .session
+                .lock()
+                .expect("station session poisoned")
+                .m17_monitor_take();
+            // The guard above was a temporary and is already released.
+            if let Some(monitor) = taken {
+                monitor.disconnect();
+            }
+        }
+    }
+
+    /// The monitor's next lifecycle edge, if any. A monitor that has ended is
+    /// cleared away as a side effect.
+    ///
+    /// Returns [`M17MonitorEdge::Linked`] once, when the reflector accepts
+    /// the link. Returns [`M17MonitorEdge::Ended`] with its reason when the
+    /// leg is reaped (refused, gone silent, conference gone). The facade has
+    /// no callbacks, so the caller polls this on its own cadence. A reaped
+    /// monitor is joined after the session lock is released, for the same
+    /// reason as in [`Station::m17_monitor_disconnect`].
+    ///
+    /// Returns `None` when there is nothing to report, and always without
+    /// the `m17` feature.
+    #[must_use]
+    pub fn m17_monitor_poll(&self) -> Option<M17MonitorEdge> {
+        #[cfg(feature = "m17")]
+        {
+            let (edge, reaped) = self
+                .session
+                .lock()
+                .expect("station session poisoned")
+                .m17_monitor_poll();
+            if let Some(monitor) = reaped {
+                monitor.disconnect();
+            }
+            edge
+        }
+        #[cfg(not(feature = "m17"))]
+        {
+            None
+        }
+    }
+
+    /// A poll-cheap, secret-free view of the monitor: its link state, whether
+    /// audio is arriving, the last talker, why it failed, and its drop and
+    /// refusal counters.
+    ///
+    /// It reads the monitor's atomics and never waits on the network, so it
+    /// is safe on a status pump. `None` with no monitor up, and without the
+    /// `m17` feature.
+    #[must_use]
+    pub fn m17_monitor_status(&self) -> Option<M17MonitorStatus> {
+        #[cfg(feature = "m17")]
+        {
+            self.session
+                .lock()
+                .expect("station session poisoned")
+                .m17_monitor_status()
+        }
+        #[cfg(not(feature = "m17"))]
+        {
+            None
+        }
+    }
+
+    /// The monitor's own last-heard list, for a node's last-heard display.
+    ///
+    /// Callsigns come off the reflector and are attacker-supplied, so render
+    /// them as text only. Empty with no monitor up, and without the `m17`
+    /// feature.
+    #[must_use]
+    pub fn m17_monitor_heard(&self) -> Vec<HeardEntry> {
+        #[cfg(feature = "m17")]
+        {
+            self.session
+                .lock()
+                .expect("station session poisoned")
+                .m17_monitor_heard()
+        }
+        #[cfg(not(feature = "m17"))]
+        {
+            Vec::new()
+        }
+    }
+
     /// Connect to a D-Star `DExtra` reflector, full-transceive (iax-a9d4
     /// Task 6 built RX; iax-2f6b adds TX): resolves `host`/`port`, validates
     /// `module` (uppercased; must land on `A`-`Z`) and a non-empty
@@ -992,13 +2061,8 @@ impl Station {
             // every other connect path refuses while it is held — and the
             // pref push, so the session starts at the operator's chosen
             // volume rather than the router's unity default.
-            let audio = {
-                let mut s = self.session.lock().unwrap();
-                s.open_voice_route(input.as_deref(), output.as_deref(), || {
-                    (self.make_backend)()
-                })
-                .map_err(map_console_err)?
-            };
+            let (audio, trust) =
+                self.open_voice_route_with_trust(input.as_deref(), output.as_deref())?;
 
             // Step 2, deliberately OFF the session mutex: a candidate-port
             // scan, then per candidate and per baud rate an open plus an
@@ -1006,7 +2070,7 @@ impl Station {
             // the socket bind — seconds, on a flaky dongle. Holding the
             // mutex across that blocked every snapshot/state poll for the
             // whole window.
-            let session = match astar_console::DstarSession::connect(cfg, audio) {
+            let session = match astar_console::DstarSession::connect(cfg, audio, &trust) {
                 Ok(s) => s,
                 Err(e) => {
                     // The lane opened but the session did not: give it back,
@@ -1055,7 +2119,7 @@ impl Station {
     pub fn dstar_available(&self) -> bool {
         #[cfg(feature = "dstar")]
         {
-            astar_console::dstar_available()
+            astar_console::dstar_available(&self.vocoder_trust())
         }
         #[cfg(not(feature = "dstar"))]
         {
@@ -1114,19 +2178,14 @@ impl Station {
             // every other connect path refuses while it is held — and the
             // pref push, so the link starts at the operator's chosen volume
             // rather than the router's unity default.
-            let audio = {
-                let mut s = self.session.lock().unwrap();
-                s.open_voice_route(input.as_deref(), output.as_deref(), || {
-                    (self.make_backend)()
-                })
-                .map_err(map_console_err)?
-            };
+            let (audio, trust) =
+                self.open_voice_route_with_trust(input.as_deref(), output.as_deref())?;
 
             // Step 2, deliberately OFF the session mutex: the `ThumbDV`
             // candidate-port scan and init cookbook, then the socket bind —
             // seconds, on a flaky dongle. Holding the mutex across that
             // blocked every snapshot/state poll for the whole window.
-            let link = match astar_console::YsfLink::connect_with_audio(&cfg, audio) {
+            let link = match astar_console::YsfLink::connect_with_audio(&cfg, audio, &trust) {
                 Ok(l) => l,
                 Err(e) => {
                     // The lane opened but the link did not: give it back, or
@@ -1170,7 +2229,7 @@ impl Station {
     pub fn ysf_available(&self) -> bool {
         #[cfg(feature = "ysf")]
         {
-            astar_console::ysf_available()
+            astar_console::ysf_available(&self.vocoder_trust())
         }
         #[cfg(not(feature = "ysf"))]
         {
@@ -1285,19 +2344,14 @@ impl Station {
             // every other connect path refuses while it is held — and the
             // pref push, so the link starts at the operator's chosen volume
             // rather than the router's unity default.
-            let audio = {
-                let mut s = self.session.lock().unwrap();
-                s.open_voice_route(input.as_deref(), output.as_deref(), || {
-                    (self.make_backend)()
-                })
-                .map_err(map_console_err)?
-            };
+            let (audio, trust) =
+                self.open_voice_route_with_trust(input.as_deref(), output.as_deref())?;
 
             // Step 2, deliberately OFF the session mutex: the `ThumbDV`
             // candidate-port scan and init cookbook, then the socket bind —
             // seconds, on a flaky dongle. Holding the mutex across that
             // blocks every snapshot/state poll for the whole window.
-            let link = match astar_console::NxdnLink::connect_with_audio(&cfg, audio) {
+            let link = match astar_console::NxdnLink::connect_with_audio(&cfg, audio, &trust) {
                 Ok(l) => l,
                 Err(e) => {
                     // The lane opened but the link did not: give it back, or
@@ -1342,7 +2396,7 @@ impl Station {
     pub fn nxdn_available(&self) -> bool {
         #[cfg(feature = "nxdn")]
         {
-            astar_console::nxdn_available()
+            astar_console::nxdn_available(&self.vocoder_trust())
         }
         #[cfg(not(feature = "nxdn"))]
         {
@@ -1562,13 +2616,8 @@ impl Station {
             // every other connect path refuses while it is held — and the
             // pref push, so the link starts at the operator's chosen volume
             // rather than the router's unity default.
-            let audio = {
-                let mut s = self.session.lock().unwrap();
-                s.open_voice_route(input.as_deref(), output.as_deref(), || {
-                    (self.make_backend)()
-                })
-                .map_err(map_console_err)?
-            };
+            let (audio, trust) =
+                self.open_voice_route_with_trust(input.as_deref(), output.as_deref())?;
 
             // Step 2, deliberately OFF the session mutex: the `ThumbDV`
             // candidate-port scan and init cookbook, the socket bind, and
@@ -1576,7 +2625,7 @@ impl Station {
             // round trip to the master, with retries. Seconds, on a flaky
             // dongle or a slow master. Holding the mutex across that blocks
             // every snapshot/state poll for the whole window.
-            let link = match astar_console::DmrLink::connect_with_audio(cfg, audio) {
+            let link = match astar_console::DmrLink::connect_with_audio(cfg, audio, &trust) {
                 Ok(l) => l,
                 Err(e) => {
                     // The lane opened but the link did not: give it back, or
@@ -1627,7 +2676,7 @@ impl Station {
     pub fn dmr_available(&self) -> bool {
         #[cfg(feature = "dmr")]
         {
-            astar_console::dmr_available()
+            astar_console::dmr_available(&self.vocoder_trust())
         }
         #[cfg(not(feature = "dmr"))]
         {
@@ -2311,6 +3360,62 @@ impl Station {
         self.session.lock().unwrap().poll_announcements();
     }
 
+    /// Enroll a receive-only external conference member — the attachment point
+    /// for the Discord bridge. The member receives the mix and contributes
+    /// nothing; see `Manager::add_bridge_member`.
+    ///
+    /// `None` when no `Manager` has been built yet (the engine is lazy — see
+    /// [`Self::enable_inbound`]/[`Self::connect`]) or the current bridge
+    /// topology is not a plain mix-minus conference.
+    ///
+    /// `.unwrap()` on the lock is deliberate, matching this file's dominant
+    /// idiom (`announce_to_member` and 50+ other call sites): a poisoned
+    /// session mutex means the node is already broken, and must panic loudly
+    /// rather than be reported as the benign "no conference right now" `None`.
+    pub fn add_bridge_member(&self) -> Option<astar_iax::BridgeMemberHandle> {
+        self.session.lock().unwrap().add_bridge_member()
+    }
+
+    /// Whether a member [`Station::add_bridge_member`] enrolled is still in
+    /// the current conference (a Handset switch drops it).
+    #[must_use]
+    pub fn has_bridge_member(&self, id: astar_audio::MemberId) -> bool {
+        self.session.lock().unwrap().has_bridge_member(id)
+    }
+
+    /// Withdraw a member enrolled by [`Station::add_bridge_member`].
+    pub fn remove_bridge_member(&self, id: astar_audio::MemberId) {
+        self.session.lock().unwrap().remove_bridge_member(id);
+    }
+
+    /// Number of members currently enrolled in the mix-minus conference,
+    /// including any [`Station::add_bridge_member`] enrollees. `0` with no
+    /// `Manager` built yet. Introspection for tests that need to prove a
+    /// member was (or was not) actually withdrawn.
+    #[must_use]
+    pub fn conference_member_count(&self) -> usize {
+        self.session.lock().unwrap().conference_member_count()
+    }
+
+    /// Speak a private announcement to the Discord bridge's conference member.
+    /// Reaches that member only — never the air.
+    ///
+    /// # Errors
+    /// [`StationError::Iax`] if no `Manager` has been built yet, the member id
+    /// is unknown to the conference, or the phrase cannot be resolved.
+    pub fn announce_to_bridge_member(
+        &self,
+        member: astar_audio::MemberId,
+        req: astar_iax::AnnounceRequest,
+        lead: std::time::Duration,
+    ) -> Result<(), StationError> {
+        self.session
+            .lock()
+            .unwrap()
+            .announce_to_bridge_member(member, req, lead)
+            .map_err(map_console_err)
+    }
+
     /// Answer a ringing inbound call (Node/Manual).
     ///
     /// # Errors
@@ -2762,8 +3867,29 @@ impl Station {
     }
 }
 
+/// Prints only what is safe to print: the selected devices and, when
+/// compiled in, the `EchoLink` state. Neither of them
+/// carries a secret, and no field of `Station` holds one (secrets are
+/// in-arguments only). The session is read with `try_lock`, so printing a
+/// station never waits on, or deadlocks against, a held session lock.
+impl std::fmt::Debug for Station {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut d = f.debug_struct("Station");
+        if let Ok(devices) = self.devices.try_lock() {
+            d.field("devices", &*devices);
+        }
+        #[cfg(feature = "echolink")]
+        if let Ok(session) = self.session.try_lock() {
+            d.field("echolink", &session.echolink_state());
+        }
+        d.finish_non_exhaustive()
+    }
+}
+
 impl Drop for Station {
     fn drop(&mut self) {
+        // Finish an open recording first (`disconnect` does too; idempotent).
+        let _ = self.record_stop();
         // Hang up any live call. `disconnect()` itself now also clears any
         // live/failed M17 session (iax-f2b8-fix Fix 1), so the explicit call
         // below is a defensive, idempotent no-op kept for clarity at the
@@ -2774,6 +3900,12 @@ impl Drop for Station {
         self.ysf_disconnect();
         self.nxdn_disconnect();
         self.dmr_disconnect();
+        // Hang up every EchoLink station and log off the directory. The
+        // login is taken out under the session lock and logged off after it
+        // is released (it can wait ~80 s on an exchange in flight), so a
+        // drop never holds the lock that long, and the session never logs
+        // off in its own drop.
+        self.echolink_logout();
         // Stop monitor mode (releases the input device).
         self.monitor_stop();
         // Stop outbound registration (sends REGREL, joins the thread).
@@ -2820,6 +3952,7 @@ fn map_console_err(e: astar_console::ConsoleError) -> StationError {
         C::Device(d) => StationError::Audio(d),
         C::Iax(i) => StationError::Iax(i.to_string()),
         C::Link(m) => StationError::Link(m),
+        C::EchoLink(m) => StationError::EchoLink(m),
         C::M17(m) => StationError::M17(m),
         C::Dstar(m) => StationError::Dstar(m),
         C::Ysf(m) => StationError::Ysf(m),
@@ -2832,6 +3965,131 @@ fn map_console_err(e: astar_console::ConsoleError) -> StationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With this crate's `echolink` feature off, the facade says so, even
+    /// though a test build's dev-dependency turns astar-console's on.
+    #[cfg(not(feature = "echolink"))]
+    #[test]
+    fn echolink_off_reports_unavailable_and_stubs_every_call() {
+        let station = Station::with_backend_factory(
+            StationConfig::default(),
+            Box::new(|| Box::new(astar_audio::NullBackend::new())),
+        );
+        assert!(!station.echolink_available());
+        let not_compiled = |r: Result<(), StationError>| matches!(r, Err(StationError::EchoLink(ref m)) if m == ECHOLINK_NOT_COMPILED);
+        assert!(not_compiled(station.echolink_login(
+            "KX7ABC",
+            "pw".to_owned(),
+            &["127.0.0.1:5200".to_owned()]
+        )));
+        assert!(not_compiled(station.echolink_connect("9999")));
+        assert!(not_compiled(station.echolink_send_chat("hi")));
+        assert!(not_compiled(station.echolink_node_connect("9999")));
+        assert!(not_compiled(station.echolink_node_disconnect("KX7ABC")));
+        assert!(station.echolink_state().is_none());
+        assert!(station.echolink_last_error().is_none());
+        assert!(station.echolink_stations().is_empty());
+        assert!(station.echolink_node_poll().is_empty());
+        assert!(station.echolink_node_peers().is_empty());
+        station.echolink_set_location("Denver");
+        station.echolink_disconnect();
+        station.echolink_logout();
+    }
+
+    // --- recording: a stop inside record_start's unlocked window ---------
+
+    /// A stop (or a disconnect, which stops first) landing while
+    /// `record_start` is making its recorder with the lock released must
+    /// win: once both return, no recorder runs and no app tap is installed,
+    /// and the last state says `recording: false`. The barrier seam holds
+    /// the start inside the window, so the stop lands there every run.
+    #[cfg(feature = "m17")]
+    #[test]
+    fn a_stop_inside_the_start_window_wins() {
+        use std::sync::Barrier;
+        // An M17 session is a connection the moment it exists; the silent
+        // 127.0.0.1 socket never answers, which is all this needs.
+        let target = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let addr = target.local_addr().expect("addr");
+        let station = Station::with_backend_factory(
+            StationConfig::default(),
+            Box::new(|| Box::new(astar_audio::NullBackend::new())),
+        );
+        station
+            .m17_connect(&addr.ip().to_string(), addr.port(), 'A', "N0CALL")
+            .expect("m17 connect");
+        let dir =
+            std::env::temp_dir().join(format!("astar-station-startwin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (a, b) = (Arc::new(Barrier::new(2)), Arc::new(Barrier::new(2)));
+        station.recording.lock().unwrap().start_pause = Some((Arc::clone(&a), Arc::clone(&b)));
+
+        std::thread::scope(|sc| {
+            let start = sc.spawn(|| {
+                station.record_start(RecordRequest {
+                    dir: dir.clone(),
+                    layout: Layout::Stereo,
+                    frames: true,
+                    label: "M17 test".to_owned(),
+                    utc_offset_secs: 0,
+                })
+            });
+            a.wait(); // the start has released the lock
+            assert!(matches!(
+                station.record_start(RecordRequest {
+                    dir: dir.clone(),
+                    layout: Layout::Stereo,
+                    frames: false,
+                    label: "M17 test".to_owned(),
+                    utc_offset_secs: 0,
+                }),
+                Err(StationError::Record(m)) if m == "already recording"
+            ));
+            let stopped = station.record_stop();
+            assert!(!stopped.recording, "the stop reports not recording");
+            assert!(!station.record_state().recording);
+            b.wait(); // let the start go on
+            start
+                .join()
+                .expect("start thread")
+                .expect("a start stopped in its window still returns Ok");
+        });
+
+        let slot = station.recording.lock().unwrap();
+        assert!(slot.recorder.is_none(), "no recorder outlives the stop");
+        assert!(!slot.busy() && !slot.stop_requested, "flags are cleared");
+        assert!(
+            slot.last.as_ref().is_some_and(|l| !l.recording),
+            "the stopped recorder's final state is the last one"
+        );
+        drop(slot);
+        {
+            let s = station.session.lock().unwrap();
+            let taps = s.record_taps();
+            assert!(
+                taps.heard.is_none() && taps.sent.is_none() && taps.frames.is_none(),
+                "no app tap is installed"
+            );
+        }
+        assert!(!station.record_state().recording);
+        station.disconnect();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The busy flags are cleared even if the window unwinds.
+    #[test]
+    fn a_busy_guard_clears_the_flags_on_unwind() {
+        let slot = Mutex::new(RecordSlot::default());
+        slot.lock().unwrap().starting = true;
+        slot.lock().unwrap().stop_requested = true;
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = BusyGuard::new(&slot);
+            panic!("inside the window");
+        }));
+        assert!(r.is_err());
+        let s = slot.lock().unwrap();
+        assert!(!s.busy() && !s.stop_requested);
+    }
 
     // --- iax-f2b8-fix Fix 2: snapshot's m17_available must be dirs-aware ---
 
@@ -2954,5 +4212,34 @@ mod tests {
                 "{mode:?} must reject a non-keypad character",
             );
         }
+    }
+
+    #[test]
+    fn station_enrolls_a_receive_only_bridge_member() {
+        let st = Station::with_backend_factory(
+            StationConfig::default(),
+            Box::new(|| Box::new(astar_audio::NullBackend::new())),
+        );
+        // `add_bridge_member` needs a live `Manager`, and the Station only
+        // builds one lazily (on connect, or here, on the inbound listener
+        // starting) — exactly the sequence the node daemon runs in practice
+        // (it always brings the listener up before wiring the bridge).
+        // Loopback, ephemeral port: no traffic leaves 127.0.0.1.
+        st.enable_inbound(crate::config::InboundConfig {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            ..crate::config::InboundConfig::default()
+        })
+        .expect("inbound listener starts and builds the engine");
+        st.set_bridge_config(astar_iax::BridgeConfig {
+            mode: astar_iax::BridgeMode::Bridge,
+            mix_minus: true,
+            include_local_radio: false,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let h = st.add_bridge_member().expect("bridge mode enrolls");
+        assert!(h.sample_rate == 8000 || h.sample_rate == 16000);
+        st.remove_bridge_member(h.id);
     }
 }

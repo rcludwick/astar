@@ -17,7 +17,9 @@ use astar_iax_core::frame::parse_lenient;
 use astar_iax_core::session::CallProfile;
 use astar_iax_core::session::auth::{AuthMethods, Credentials, Secret};
 use astar_iax_core::session::call_no::CallNo;
-use astar_iax_core::session::fsm::{Action, AppCommand, AppEvent, Event, Fsm, TimerKind};
+use astar_iax_core::session::fsm::{
+    Action, AppCommand, AppEvent, Event, Fsm, SessionState, TimerKind,
+};
 use astar_iax_core::session::reliability::{Reliability, ReliabilityConfig, RxOutcome};
 use mio::{Poll, Waker};
 
@@ -261,7 +263,11 @@ fn translate(event: &AppEvent, negotiated: VoiceFormat) -> Option<CallEvent> {
 /// on. It does not affect the returned `ts`. (The first frame anchors with
 /// `next == None`; that is initialization, not a re-anchor.) A deliberate
 /// pre-roll lead must NOT count as a re-anchor — see the guardrail test.
-fn voice_ts_ladder(next: &mut Option<u32>, wall_ms: u32, media_lead: u32) -> (u32, bool) {
+pub(crate) fn voice_ts_ladder(
+    next: &mut Option<u32>,
+    wall_ms: u32,
+    media_lead: u32,
+) -> (u32, bool) {
     let wall_ref = wall_ms.wrapping_add(media_lead);
     let reanchored = matches!(*next, Some(t) if (i64::from(wall_ref) - i64::from(t)).abs() > 80);
     let ts = match *next {
@@ -374,12 +380,18 @@ fn run_loop(
         password: Arc::new(Secret::new(secret)),
         allowed_methods: AuthMethods::MD5,
     };
+    // A web-transceiver call is a guest on a node, not a node-to-node link:
+    // app_rpt's link rules (link_keying) do not apply to it.
+    let is_web_transceiver = !profile.send_capability;
     let mut fsm = Fsm::new(creds, our_call).with_call_profile(profile);
     let mut rel = Reliability::new(our_call, ReliabilityConfig::default());
     let mut timers: Vec<(Instant, TimerKind)> = Vec::new();
     let mut buf = [0u8; 4096];
 
     let start = Instant::now();
+    // One clock for the call: voice counts from `start`, and so do the
+    // control, TEXT and HANGUP frames Reliability stamps (finding 3).
+    rel.set_epoch(start);
 
     let mut tracer = Tracer {
         obs: frame_observer,
@@ -398,6 +410,12 @@ fn run_loop(
     // iax-rxjb: the receive-side media clock, rebuilding the sender's 32-bit
     // timestamp from the wire's mix of full and mini frames.
     let mut rx_clock = crate::rx_clock::RxTimestamps::default();
+    // The far end's keying mode, app_rpt's rule (nodebench finding 7).
+    let mut keying = if is_web_transceiver {
+        crate::link_keying::LinkKeying::off()
+    } else {
+        crate::link_keying::LinkKeying::default()
+    };
 
     // Kick the call.
     let actions = fsm.handle(Event::App(AppCommand::StartCall {
@@ -418,6 +436,7 @@ fn run_loop(
         &mut rx_decode_warned,
         &mut edge,
         &mut rx_clock,
+        &mut keying,
     ) {
         return;
     }
@@ -449,9 +468,16 @@ fn run_loop(
     let mut tx_max_gap_ms = 0u64; // largest inter-frame send spacing
     let mut tx_last_send: Option<Instant> = None;
     let mut tx_last_log = Instant::now();
+    // Our own hangup to an app_rpt node, held while it reads !!DISCONNECT!!
+    // (nodebench finding 3; `link_keying::DISCONNECT_GRACE`).
+    let mut pending_hangup: Option<crate::link_keying::PendingHangup> = None;
     loop {
         let now = Instant::now();
-        let next_timer = timers.iter().map(|(at, _)| *at).min();
+        let next_timer = timers
+            .iter()
+            .map(|(at, _)| *at)
+            .chain(pending_hangup.as_ref().map(|p| p.due))
+            .min();
         let timeout = poll_timeout(next_timer, now);
 
         if let Err(e) = poll.poll(&mut events, Some(timeout)) {
@@ -463,6 +489,54 @@ fn run_loop(
 
         // Drain commands woken via the waker (Token(1)).
         while let Ok(cmd) = cmd_rx.try_recv() {
+            // A hangup to an app_rpt node says !!DISCONNECT!! first and holds
+            // the HANGUP (finding 3). While one is held, a later Shutdown
+            // waits for it.
+            let wants_hangup = match &cmd {
+                RuntimeCommand::App(AppCommand::Hangup { cause, .. }) => {
+                    Some((cause.clone(), false))
+                }
+                RuntimeCommand::Shutdown => Some((None, true)),
+                RuntimeCommand::App(_) => None,
+            };
+            if let Some(p) = pending_hangup.as_mut()
+                && wants_hangup.is_some()
+            {
+                p.then_shutdown |= matches!(cmd, RuntimeCommand::Shutdown);
+                continue;
+            }
+            if let Some((cause, then_shutdown)) = wants_hangup
+                && keying.is_app_rpt()
+                && matches!(fsm.state(), SessionState::Active(_))
+            {
+                let actions = fsm.handle(Event::App(AppCommand::SendText(
+                    crate::link_keying::DISCONNECT.into(),
+                )));
+                if dispatch_actions(
+                    actions,
+                    sock.as_ref(),
+                    &mut rel,
+                    &mut timers,
+                    &spk_tx,
+                    &event_tx,
+                    &state,
+                    &remote_keyed,
+                    &mut tracer,
+                    fsm.negotiated_format().unwrap_or(VoiceFormat::G711U),
+                    &mut rx_decode_warned,
+                    &mut edge,
+                    &mut rx_clock,
+                    &mut keying,
+                ) {
+                    return;
+                }
+                pending_hangup = Some(crate::link_keying::PendingHangup {
+                    cause,
+                    due: Instant::now() + crate::link_keying::DISCONNECT_GRACE,
+                    then_shutdown,
+                });
+                continue;
+            }
             match cmd {
                 RuntimeCommand::App(app) => {
                     let actions = fsm.handle(Event::App(app));
@@ -480,6 +554,7 @@ fn run_loop(
                         &mut rx_decode_warned,
                         &mut edge,
                         &mut rx_clock,
+                        &mut keying,
                     ) {
                         return;
                     }
@@ -503,9 +578,41 @@ fn run_loop(
                         &mut rx_decode_warned,
                         &mut edge,
                         &mut rx_clock,
+                        &mut keying,
                     );
                     return;
                 }
+            }
+        }
+
+        // The held hangup is due: send it now.
+        if pending_hangup
+            .as_ref()
+            .is_some_and(|p| Instant::now() >= p.due)
+        {
+            let p = pending_hangup.take().expect("checked is_some");
+            let actions = fsm.handle(Event::App(AppCommand::Hangup {
+                cause: p.cause,
+                now: Instant::now(),
+            }));
+            let terminated = dispatch_actions(
+                actions,
+                sock.as_ref(),
+                &mut rel,
+                &mut timers,
+                &spk_tx,
+                &event_tx,
+                &state,
+                &remote_keyed,
+                &mut tracer,
+                fsm.negotiated_format().unwrap_or(VoiceFormat::G711U),
+                &mut rx_decode_warned,
+                &mut edge,
+                &mut rx_clock,
+                &mut keying,
+            );
+            if terminated || p.then_shutdown {
+                return;
             }
         }
 
@@ -554,6 +661,7 @@ fn run_loop(
                                 &mut rx_decode_warned,
                                 &mut edge,
                                 &mut rx_clock,
+                                &mut keying,
                             ) {
                                 return;
                             }
@@ -589,6 +697,7 @@ fn run_loop(
                                 &mut rx_decode_warned,
                                 &mut edge,
                                 &mut rx_clock,
+                                &mut keying,
                             ) {
                                 return;
                             }
@@ -627,6 +736,7 @@ fn run_loop(
                 &mut rx_decode_warned,
                 &mut edge,
                 &mut rx_clock,
+                &mut keying,
             ) {
                 return;
             }
@@ -704,6 +814,7 @@ fn run_loop(
                 &mut rx_decode_warned,
                 &mut edge,
                 &mut rx_clock,
+                &mut keying,
             ) {
                 return;
             }
@@ -731,6 +842,7 @@ fn run_loop(
                 &mut rx_decode_warned,
                 &mut edge,
                 &mut rx_clock,
+                &mut keying,
             ) {
                 return;
             }
@@ -797,6 +909,7 @@ fn dispatch_actions(
     rx_decode_warned: &mut bool,
     edge: &mut crate::codec_edge::EdgeAudio,
     rx_clock: &mut crate::rx_clock::RxTimestamps,
+    keying: &mut crate::link_keying::LinkKeying,
 ) -> bool {
     let now = Instant::now();
     let mut terminated = false;
@@ -824,6 +937,7 @@ fn dispatch_actions(
                 timers.retain(|(_, k)| *k != kind);
             }
             Action::AppEvent(ev) => {
+                keying.observe(&ev, now);
                 // Keystone: publish coarse connection-state for Call::snapshot.
                 match &ev {
                     AppEvent::Connected { .. } => {
@@ -847,6 +961,11 @@ fn dispatch_actions(
                     ts,
                 } = &ev
                 {
+                    // An app_rpt link that never did NEWKEY is heard only
+                    // while RADIO_KEYed; a monitor link never keys.
+                    if !keying.rx_open(remote_keyed.load(Ordering::Relaxed), now) {
+                        continue;
+                    }
                     // RX codec edge (iax-31f7 / iax-4348): decode the received
                     // payload on its OWN format into bus-rate PCM (resampling if
                     // the wire rate differs). Undecodable frames are dropped (warn

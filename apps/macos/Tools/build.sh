@@ -64,7 +64,7 @@ xcodegen generate >/dev/null
 # images; fail loudly here rather than hitting an opaque xcodebuild error.
 [ -d astar.xcodeproj ] || { echo "!! xcodegen produced no astar.xcodeproj" >&2; exit 1; }
 
-# 3. Build (ad-hoc signed so it runs locally).
+# 3. Build (ad-hoc signed so it runs locally; step 4 may re-sign it).
 #
 # Pin ARCHS to the host arch: astarserial.xcframework carries only a
 # macOS host slice (arm64 on Apple Silicon) — an unpinned build that resolves to
@@ -90,4 +90,34 @@ fi
 
 APP="$DD/Build/Products/$CONFIG/astar.app"
 [ -d "$APP" ] || { echo "!! build reported success but no app at $APP" >&2; exit 1; }
+# 4. Re-sign with a stable identity when this Mac has one.
+#
+# An ad-hoc signature identifies the app only by the hash of this exact
+# binary, so every rebuild is a new app to the Keychain: "Always Allow" is
+# granted to the old hash, and each saved password (AllStarLink, every DMR
+# talkgroup, EchoLink) asks again for the login password after each build.
+# Signed with a Developer ID, the app is "com.aj7hr.astar from team X", which
+# survives rebuilds, so "Always Allow" sticks. The identity is discovered the
+# same way make-dmg.sh does it, never hard-coded; with none, or with
+# ASTAR_ADHOC=1, the ad-hoc signature stays. No hardened runtime and no
+# secure timestamp here: this is a local build, not one to ship, and a
+# timestamp would need the network on every build.
+if [ "${ASTAR_ADHOC:-0}" != "1" ]; then
+  SIGN_IDENTITY="${ASTAR_SIGN_IDENTITY:-$(
+    security find-identity -v -p codesigning 2>/dev/null |
+      sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1
+  )}"
+  if [ -n "$SIGN_IDENTITY" ]; then
+    while IFS= read -r -d '' nested; do
+      codesign --force --timestamp=none --sign "$SIGN_IDENTITY" "$nested" >/dev/null 2>&1
+    done < <(find "$APP/Contents" -type f \( -name '*.dylib' -o -name '*.so' \) -print0)
+    if codesign --force --timestamp=none --entitlements astar.entitlements \
+      --sign "$SIGN_IDENTITY" "$APP" >/dev/null 2>&1; then
+      echo ">> signed as: $SIGN_IDENTITY (stable across rebuilds, so Keychain access sticks)"
+    else
+      echo "!! re-signing with \"$SIGN_IDENTITY\" failed — the build stays ad-hoc" >&2
+    fi
+  fi
+fi
+
 echo ">> build ok → $APP"

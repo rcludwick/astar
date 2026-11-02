@@ -55,6 +55,15 @@ deploy/sysroot-amd64/
 # deliverable)
 /node.toml
 
+# The node's credentials file, which the settings page writes beside whatever
+# node.toml it runs with (`just node` puts it in the repo root), plus the temp
+# files its atomic writes rename from and the directory-writability probe.
+# Unanchored: a config anywhere in the tree gets its credentials beside it,
+# and they must never be staged.
+credentials.toml
+*.toml.tmp
+.astar-settings-probe
+
 rust_out
 .playwright-mcp/
 __pycache__/

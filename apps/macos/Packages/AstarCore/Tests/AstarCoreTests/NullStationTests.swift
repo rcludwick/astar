@@ -86,6 +86,26 @@ final class NullStationTests: XCTestCase {
         XCTAssertNoThrow(try station.setMicProfile(nil))
     }
 
+    /// No engine, so EchoLink is logged out with nothing listed, and the two
+    /// calls that would start something say there is no engine rather than
+    /// pretending they did.
+    func testEchoLinkIsLoggedOutAndRefusesToStart() throws {
+        let station = NullStation()
+        XCTAssertFalse(try station.readSnapshot().echolinkAvailable)
+        XCTAssertNil(try station.echolinkState())
+        XCTAssertEqual(try station.echolinkStations(), [])
+        XCTAssertThrowsError(
+            try station.echolinkLogin(callsign: "KX7ABC", password: "pw", servers: ["127.0.0.1"])
+        ) { XCTAssertEqual($0 as? NullStationError, .noEngine) }
+        XCTAssertThrowsError(try station.echolinkConnect("9999")) {
+            XCTAssertEqual($0 as? NullStationError, .noEngine)
+        }
+        XCTAssertNoThrow(try station.echolinkLogout())
+        XCTAssertNoThrow(try station.echolinkDisconnect())
+        XCTAssertNoThrow(try station.echolinkSendChat("hi"))
+        XCTAssertNoThrow(try station.echolinkSetLocation("Denver"))
+    }
+
     /// A `CallSession` driven by `NullStation` polls cleanly to the idle resting
     /// state and never crashes — the preview/fallback path.
     func testCallSessionOverNullStationPollsIdle() {

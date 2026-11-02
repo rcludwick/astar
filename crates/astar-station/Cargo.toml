@@ -14,20 +14,20 @@ workspace = true
 [dependencies]
 # `serde` on astar-iax so the secret-free LinkRoster serializes to JSON for
 # the link C-ABI (iax-1075).
-astar-iax = { path = "../astar-iax", version = "0.1.16-beta", features = ["serde"] }
-astar-iax-core = { path = "../astar-iax-core", version = "0.1.16-beta" }
+astar-iax = { path = "../astar-iax", version = "0.1.18-beta", default-features = false, features = ["serde"] }
+astar-iax-core = { path = "../astar-iax-core", version = "0.1.18-beta" }
 # `default-features = false`: astar-console's own default pulls in its
 # `m17` feature. This crate mirrors that default via its OWN `m17` feature
 # below (`m17 = ["astar-console/m17"]`) so `--no-default-features` on
 # THIS crate actually disables M17 end-to-end, instead of astar-console
 # silently building with it anyway.
-astar-console = { path = "../astar-console", version = "0.1.16-beta", default-features = false }
+astar-console = { path = "../astar-console", version = "0.1.18-beta", default-features = false }
 # In-band DTMF tone generator (iax-68eb) for `Station::send_dtmf`.
-astar-codec = { path = "../astar-codec", version = "0.1.16-beta" }
+astar-codec = { path = "../astar-codec", version = "0.1.18-beta" }
 # `serde` so the secret-free MicProfile serializes to JSON for the
 # characterize / set-mic-profile FFI (iax-5fb6 / iax-2095).
-astar-audio = { path = "../astar-audio", version = "0.1.16-beta", features = ["serde"] }
-astar-asl3 = { path = "../astar-asl3", version = "0.1.16-beta" }
+astar-audio = { path = "../astar-audio", version = "0.1.18-beta", default-features = false, features = ["serde"] }
+astar-asl3 = { path = "../astar-asl3", version = "0.1.18-beta" }
 # DMR's network taxonomy (iax-d4f7): `DmrNetwork::from_slug`, `dialable` and
 # `Timeslot`. NOT optional and NOT behind the `dmr` feature, unlike every
 # other network's protocol crate here — `Station::dmr_connect` resolves the
@@ -36,29 +36,52 @@ astar-asl3 = { path = "../astar-asl3", version = "0.1.16-beta" }
 # feature off. A crate that carries a taxonomy plus one `sha2` is cheap
 # enough to compile either way; a consent gate that only exists in some
 # builds is not.
-astar-dmr = { path = "../astar-dmr", version = "0.1.16-beta" }
+astar-dmr = { path = "../astar-dmr", version = "0.1.18-beta" }
+# `Station::echolink_login` wraps the password in `Zeroizing` the moment it
+# arrives, in every build, so it is not optional.
+zeroize.workspace = true
+# Call recording (`Station::record_start`/`record_stop`/`record_state`): the
+# recorder thread, its FLAC writer and the codec-frame captures.
+astar-record = { path = "../astar-record", version = "0.1.18-beta" }
 
 [dev-dependencies]
-astar-audio = { path = "../astar-audio", version = "0.1.16-beta", features = ["test-backend", "serde"] }
-astar-iax-core = { path = "../astar-iax-core", version = "0.1.16-beta" }
+# Reads the recordings back in `tests/record_facade.rs`.
+claxon = "=0.4.3"
+serde_json = { workspace = true }
+astar-audio = { path = "../astar-audio", version = "0.1.18-beta", features = ["test-backend", "serde"] }
+astar-iax-core = { path = "../astar-iax-core", version = "0.1.18-beta" }
 # Forces the LGPL `codec2-static` backend on for every TEST/bench build of
 # this crate (mirrors astar-console's own dev-dependency override — see
 # that crate's Cargo.toml for the full licensing note) so the M17 station
 # tests always have a working Codec 2 instance without depending on a system
 # libcodec2 being installed. Never part of any default feature set.
-astar-codec = { path = "../astar-codec", version = "0.1.16-beta", features = ["codec2-static"] }
+astar-codec = { path = "../astar-codec", version = "0.1.18-beta", features = ["codec2-static"] }
 # M17 wire-frame parsing (StreamPacket/decode_callsign) for the m17_station
 # test's PTT-frame assertion.
-astar-m17 = { path = "../astar-m17", version = "0.1.16-beta" }
+astar-m17 = { path = "../astar-m17", version = "0.1.18-beta" }
 # D-Star DSVT/RfHeader framing (iax-a9d4 Task 6) for the dstar_station test's
 # canned-stream fixtures. Zero dependencies of its own (pure decode/encode +
 # a loopback reflector), so — unlike the AMBE codec deps — this is always
 # cheap to compile in as a dev-dependency, regardless of `--features dstar`.
-astar-dstar = { path = "../astar-dstar", version = "0.1.16-beta" }
-tiny_http = "0.12"
+astar-dstar = { path = "../astar-dstar", version = "0.1.18-beta" }
+astar-http = { path = "../astar-http", version = "0.1.18-beta", features = ["testing"] }
+# Every test build refuses EchoLink traffic to anything but loopback, and
+# the tests drive the fake directory and fake station.
+astar-console = { path = "../astar-console", version = "0.1.18-beta", features = ["echolink-loopback-only"] }
+astar-echolink = { path = "../astar-echolink", version = "0.1.18-beta", features = ["loopback-fakes"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [features]
-default = ["m17"]
+default = ["m17", "device-audio", "echolink"]
+# `default-features = false` on astar-audio (and on every astar crate that
+# reaches it) so astar-server's release can drop cpal; `device-audio` below
+# puts it back, and it is on by default.
+device-audio = [
+    "astar-audio/device-audio",
+    "astar-iax/device-audio",
+    "astar-console/device-audio",
+]
 # M17 digital-voice client (iax-f2b8 Task 4): re-exposes astar-console's
 # `m17` feature, wired through `Station::m17_connect`/`m17_disconnect`/
 # `m17_available`. Byte-identical defaults with this feature off: the methods
@@ -122,3 +145,14 @@ dmr = ["astar-console/dmr"]
 # backend first and falls back to this one, so enabling both means a user with
 # the C library still gets it and everyone else gets a working M17 anyway.
 codec2-static = ["astar-console/codec2-static"]
+# EchoLink, calling out only: re-exposes astar-console's `echolink` feature,
+# wired through `Station::echolink_login`/`echolink_connect`/... and the
+# node leg's `echolink_node_*`. On by default (the protocol and GSM 06.10
+# are pure Rust). With it off the methods still exist, with the same
+# signatures, and return `StationError::EchoLink("echolink support not
+# compiled")` / are no-ops / return `false`, `None` or empty.
+echolink = ["astar-console/echolink"]
+# Test builds only: every EchoLink bind, connect, send and server lookup
+# refuses a non-loopback address. The dev-dependency above turns it on; it
+# must never reach `default` (`ci/guard-echolink.sh`).
+echolink-loopback-only = ["astar-console/echolink-loopback-only"]

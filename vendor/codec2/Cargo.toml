@@ -1,0 +1,38 @@
+[package]
+# NOTE (astar): every key below is upstream's, copied verbatim from the
+# published crate's Cargo.toml.orig. `license`, `version`, `edition`,
+# `repository` and `authors` are deliberately hard-coded, never inherited from
+# the workspace: this crate is a vendored LGPL-2.1-only AND MIT island inside an
+# AGPL-3.0 workspace, and `license.workspace = true` would silently relicense
+# it. It is also listed in the workspace's `exclude` and has its own empty
+# `[workspace]` below, so it builds with its own edition and none of astar's
+# lints. See VENDORED.md.
+name = "codec2"
+version = "0.3.1"
+description = "A pure-Rust implementation of the Codec2 low-bitrate speech compression codec"
+authors = ["David Rowe", "Matt Weeks <scriptjunkie@scriptjunkie.us>"]
+license = "LGPL-2.1-only AND MIT"
+edition = "2018"
+repository = "https://github.com/scriptjunkie/codec2"
+keywords = ["audio", "speech", "compression", "codec"]
+categories = ["compression", "multimedia::audio", "multimedia::encoding", "algorithms"]
+readme = "README.md"
+
+[dependencies]
+micromath = {version = "2.1.0", optional = true}
+
+[dev-dependencies]
+zerocopy = "0.3.0"
+
+[features]
+micromath = ["dep:micromath"]
+
+# astar: silence rustc warnings for this crate, as Cargo does for any crates.io
+# dependency (--cap-lints allow). A path dependency is not capped, so without
+# this upstream's own dead-code warning shows in every astar build log.
+[lints.rust]
+warnings = "allow"
+
+# astar: an empty workspace table makes this crate its own workspace root, so
+# Cargo never adopts it into an enclosing workspace (see VENDORED.md).
+[workspace]

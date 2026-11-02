@@ -12,10 +12,10 @@ description = "High-level idiomatic Rust API for the IAX2 protocol."
 workspace = true
 
 [dependencies]
-astar-iax-core = { path = "../astar-iax-core", version = "0.1.16-beta" }
-astar-audio = { path = "../astar-audio", version = "0.1.16-beta" }
-astar-codec = { path = "../astar-codec", version = "0.1.16-beta" }
-astar-wireguard = { path = "../astar-wireguard", version = "0.1.16-beta" }
+astar-iax-core = { path = "../astar-iax-core", version = "0.1.18-beta" }
+astar-audio = { path = "../astar-audio", version = "0.1.18-beta", default-features = false }
+astar-codec = { path = "../astar-codec", version = "0.1.18-beta", features = ["gsm"] }
+astar-wireguard = { path = "../astar-wireguard", version = "0.1.18-beta" }
 mio.workspace = true
 rand.workspace = true
 serde = { workspace = true, optional = true }
@@ -24,12 +24,25 @@ tracing.workspace = true
 thiserror.workspace = true
 
 [features]
+default = ["device-audio"]
+# `default-features = false` on astar-audio (and on every astar crate that
+# reaches it) so astar-server's release can drop cpal; `device-audio` below
+# puts it back, and it is on by default.
+device-audio = ["astar-audio/device-audio"]
 # Derive serde on the secret-free read surface (CallSnapshot / CallId and the
 # routing-config types). Off by default; downstream (iax-ad2e roster, iax-1075
 # FFI) turns it on. iax-42e9. Also turns on astar-iax-core's serde derive so
 # `CallSnapshot.negotiated_format: Option<VoiceFormat>` round-trips (iax-31f7).
 serde = ["dep:serde", "astar-iax-core/serde"]
+# Bench/test-only surface: `dial_raw_with_profile` (a raw dial with a
+# caller-built CallProfile, so a test peer can present CALLING_NUMBER like an
+# app_rpt node does). Off by default; only crates/astar-nodebench turns it on.
+test-support = []
 
 [dev-dependencies]
 base64.workspace = true
 serde_json.workspace = true
+# Unit tests reach for the hardware-free `NullBackend` (manager.rs); the
+# feature only turns on for test builds, mirroring astar-audio's own
+# self-dependency in its Cargo.toml.
+astar-audio = { path = "../astar-audio", features = ["test-backend"] }

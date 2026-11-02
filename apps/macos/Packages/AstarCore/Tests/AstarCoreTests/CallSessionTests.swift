@@ -198,6 +198,11 @@ final class FakeStation: StationDriving {
     func setCodecDirs(_ dirs: [String]) throws {
         codecDirs.append(dirs)
     }
+    /// Every trust list the session handed the station, in order.
+    private(set) var vocoderTrustCalls: [[String]] = []
+    func setVocoderTrust(_ serials: [String]) throws {
+        vocoderTrustCalls.append(serials)
+    }
 
     // D-Star (iax-4c8e) scripting/recording. The reflector callsign is
     // recorded because it is the field that goes out on the air in RPT1/RPT2
@@ -234,6 +239,55 @@ final class FakeStation: StationDriving {
     /// method Swift needs for the protocol.
     var heardValue: [HeardEntry] = []
     func heard() throws -> [HeardEntry] { heardValue }
+
+    // Recording. Every start's arguments, in order, and whether it ran on the
+    // main thread — the session must never block the main actor on one.
+    struct RecordStartCall: Equatable {
+        let directory: String
+        let layout: RecordingLayout
+        let frames: Bool
+        let label: String
+        let utcOffsetSeconds: Int32
+    }
+    private(set) var recordStartCalls: [RecordStartCall] = []
+    private(set) var recordStartOnMainThread: [Bool] = []
+    private(set) var recordStopCount = 0
+    private(set) var recordStopOnMainThread: [Bool] = []
+    private(set) var recordStateReads = 0
+    /// When set, `recordStart` throws (a folder that can't be used, a full disk).
+    var recordStartError: Error?
+    /// Called at the end of every `recordStart`/`recordStop`, on whichever
+    /// thread ran it.
+    var onRecordStart: (() -> Void)?
+    var onRecordStop: (() -> Void)?
+    /// What `recordState()` reports.
+    var recordStateValue: RecordState = try! RecordState.make()
+    func recordStart(
+        directory: String, layout: RecordingLayout, frames: Bool, label: String,
+        utcOffsetSeconds: Int32
+    ) throws {
+        recordStartOnMainThread.append(Thread.isMainThread)
+        defer { onRecordStart?() }
+        if let recordStartError { throw recordStartError }
+        recordStartCalls.append(
+            RecordStartCall(
+                directory: directory, layout: layout, frames: frames, label: label,
+                utcOffsetSeconds: utcOffsetSeconds))
+        callLog.append("recordStart")
+    }
+    func recordStop() throws {
+        recordStopOnMainThread.append(Thread.isMainThread)
+        recordStopCount += 1
+        callLog.append("recordStop")
+        onRecordStop?()
+    }
+    /// When set, `recordState()` throws.
+    var recordStateError: Error?
+    func recordState() throws -> RecordState {
+        recordStateReads += 1
+        if let recordStateError { throw recordStateError }
+        return recordStateValue
+    }
 
     // System Fusion. `host` is recorded whole — `host:port` is one string
     // across this ABI, and the port being folded into it is exactly the sort
@@ -312,6 +366,65 @@ final class FakeStation: StationDriving {
         callLog.append("dmrDisconnect")
     }
     func dmrState() throws -> DMRState? { dmrStateValue }
+
+    // EchoLink. The login's password is recorded here, in a fake, because
+    // this is the only layer ever allowed to hold one.
+    private(set) var echolinkLoginCalls: [(callsign: String, password: String, servers: [String])] =
+        []
+    private(set) var echolinkLogouts = 0
+    private(set) var echolinkConnectCalls: [String] = []
+    private(set) var echolinkDisconnects = 0
+    private(set) var echolinkChatSent: [String] = []
+    private(set) var echolinkLocations: [String] = []
+    /// When set, `echolinkLogin` throws — the "refused before it started" shape.
+    var echolinkLoginError: Error?
+    /// When set, `echolinkConnect` throws.
+    var echolinkConnectError: Error?
+    /// What `echolinkState()` reports; `nil` is "logged out, nothing to say".
+    var echolinkStateValue: EchoLinkState?
+    var echolinkStationsValue: [EchoLinkStationEntry] = []
+    private(set) var echolinkStationsReads = 0
+    func echolinkLogin(callsign: String, password: String, servers: [String]) throws {
+        if let echolinkLoginError { throw echolinkLoginError }
+        echolinkLoginCalls.append((callsign, password, servers))
+        callLog.append("echolinkLogin")
+    }
+    /// How long `echolinkLogout` takes: a logoff stuck behind a directory
+    /// exchange already in flight.
+    var echolinkLogoutDelay: TimeInterval = 0
+    func echolinkLogout() throws {
+        if echolinkLogoutDelay > 0 { Thread.sleep(forTimeInterval: echolinkLogoutDelay) }
+        echolinkLogouts += 1
+        callLog.append("echolinkLogout")
+    }
+    func echolinkConnect(_ target: String) throws {
+        waitForGateIfSet()
+        if let echolinkConnectError { throw echolinkConnectError }
+        echolinkConnectCalls.append(target)
+        callLog.append("echolinkConnect")
+    }
+    func echolinkDisconnect() throws {
+        echolinkDisconnects += 1
+        callLog.append("echolinkDisconnect")
+    }
+    func echolinkSendChat(_ text: String) throws { echolinkChatSent.append(text) }
+    func echolinkSetLocation(_ text: String) throws { echolinkLocations.append(text) }
+    func echolinkState() throws -> EchoLinkState? { echolinkStateValue }
+    func echolinkStations() throws -> [EchoLinkStationEntry] {
+        echolinkStationsReads += 1
+        return echolinkStationsValue
+    }
+    private(set) var echolinkRefreshes = 0
+    /// What `echolinkRefreshList()` answers: `true` asked, `false` too soon.
+    var echolinkRefreshResult = true
+    /// When set, `echolinkRefreshList` throws.
+    var echolinkRefreshError: Error?
+    func echolinkRefreshList() throws -> Bool {
+        if let echolinkRefreshError { throw echolinkRefreshError }
+        echolinkRefreshes += 1
+        callLog.append("echolinkRefreshList")
+        return echolinkRefreshResult
+    }
 }
 
 /// A station whose device enumeration always throws, to verify CallSession's
@@ -358,7 +471,14 @@ private struct ThrowingStation: StationDriving {
     func m17Disconnect() throws { throw Boom() }
     func m17State() throws -> M17State? { throw Boom() }
     func heard() throws -> [HeardEntry] { throw Boom() }
+    func recordStart(
+        directory: String, layout: RecordingLayout, frames: Bool, label: String,
+        utcOffsetSeconds: Int32
+    ) throws { throw Boom() }
+    func recordStop() throws { throw Boom() }
+    func recordState() throws -> RecordState { throw Boom() }
     func setCodecDirs(_ dirs: [String]) throws { throw Boom() }
+    func setVocoderTrust(_ serials: [String]) throws { throw Boom() }
     func connectDStar(
         host: String, port: UInt16, module: Character, callsign: String,
         reflectorCallsign: String?
@@ -379,6 +499,17 @@ private struct ThrowingStation: StationDriving {
     ) throws { throw Boom() }
     func dmrDisconnect() throws { throw Boom() }
     func dmrState() throws -> DMRState? { throw Boom() }
+    func echolinkLogin(callsign: String, password: String, servers: [String]) throws {
+        throw Boom()
+    }
+    func echolinkLogout() throws { throw Boom() }
+    func echolinkConnect(_ target: String) throws { throw Boom() }
+    func echolinkDisconnect() throws { throw Boom() }
+    func echolinkSendChat(_ text: String) throws { throw Boom() }
+    func echolinkSetLocation(_ text: String) throws { throw Boom() }
+    func echolinkState() throws -> EchoLinkState? { throw Boom() }
+    func echolinkStations() throws -> [EchoLinkStationEntry] { throw Boom() }
+    func echolinkRefreshList() throws -> Bool { throw Boom() }
 }
 
 /// An in-memory audio store so persistence-path tests don't touch real defaults.
@@ -403,9 +534,8 @@ final class MemoryNodeDirectoryStore: NodeDirectoryStore {
     private(set) var recordedRecents: [(node: String, label: String, network: Network)] = []
     func recordRecent(node: String, label: String, network: Network) {
         recordedRecents.append((node, label, network))
-        if let i = entries.firstIndex(where: { $0.node == node }) {
+        if let i = entries.firstIndex(where: { $0.matches(target: node, network: network) }) {
             entries[i].lastUsed = Date()
-            entries[i].network = network
         } else {
             entries.append(NodeEntry(label: label, node: node, lastUsed: Date(), network: network))
         }
@@ -1627,11 +1757,10 @@ final class CallSessionTests: XCTestCase {
         XCTAssertEqual(directory.entries.first?.network, .allstar)
     }
 
-    func testAddFavoriteLeavesExistingEntryNetworkUntouched() throws {
-        // Re-favoriting an entry that's already correctly stamped (e.g. by
-        // `recordRecent` while on M17) must not stomp it back to the
-        // `network` parameter's default when the caller doesn't know better
-        // (astar-c2e5) — only NEW entries get the parameter's value.
+    func testAddFavoriteOnAnotherNetworkLeavesTheExistingEntryAlone() throws {
+        // The directory is keyed on (network, target): favoriting the same
+        // text on AllStar makes an AllStar entry and leaves the M17 one as
+        // it was, rather than re-stamping it.
         let directory = MemoryNodeDirectoryStore()
         directory.entries = [
             NodeEntry(label: "m17.example.net/A", node: "m17.example.net/A", network: .m17)
@@ -1640,7 +1769,10 @@ final class CallSessionTests: XCTestCase {
 
         session.addFavorite(node: "m17.example.net/A", label: "W1AW")  // default .allstar
 
+        XCTAssertEqual(directory.entries.count, 2)
         XCTAssertEqual(directory.entries.first?.network, .m17, "existing network preserved")
+        XCTAssertFalse(directory.entries[0].favorite, "the M17 entry was not starred")
+        XCTAssertTrue(session.isFavorite(node: "m17.example.net/A", network: .allstar))
     }
 
     func testRemoveFavoriteKeepsRecentButClearsFlag() throws {

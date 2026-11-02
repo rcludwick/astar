@@ -20,6 +20,12 @@ pub enum CallMode {
     /// `CAPABILITY` IE. Pair with `caller_id("allstar-public")` and the guest
     /// `secret("allstar")`.
     WebTransceiver { node: String, name: String },
+    /// A node-to-node link: [`CallMode::Standard`] plus `CALLING_NUMBER` set
+    /// to our own node number, the caller ID an `app_rpt` node puts on its
+    /// own link dials. `app_rpt` hangs up a link whose caller ID is not
+    /// numeric ("Caller ID is not numeric") straight after ACCEPT, so a link
+    /// dialled without it never came up (iax-cnlink).
+    NodeLink { node: String },
 }
 
 impl CallMode {
@@ -28,6 +34,13 @@ impl CallMode {
     pub(crate) fn resolve(&self) -> (CallProfile, Option<&'static str>) {
         match self {
             CallMode::Standard => (CallProfile::default(), None),
+            CallMode::NodeLink { node } => (
+                CallProfile {
+                    calling_number: Some(node.clone()),
+                    ..CallProfile::default()
+                },
+                None,
+            ),
             CallMode::WebTransceiver { node, name } => (
                 CallProfile {
                     calling_number: Some(node.clone()),
@@ -63,6 +76,18 @@ mod tests {
         assert_eq!(profile.calling_number, Some("55553".into()));
         assert_eq!(profile.calling_name, Some("astar".into()));
         assert!(!profile.send_capability, "WT mode omits CAPABILITY");
+    }
+
+    #[test]
+    fn node_link_is_standard_plus_our_node_as_calling_number() {
+        let mode = CallMode::NodeLink {
+            node: "1998".into(),
+        };
+        let (profile, dest) = mode.resolve();
+        assert_eq!(dest, None, "the dialled node stays CALLED_NUMBER");
+        assert_eq!(profile.calling_number, Some("1998".into()));
+        assert_eq!(profile.calling_name, None);
+        assert!(profile.send_capability, "a node link advertises CAPABILITY");
     }
 
     #[test]

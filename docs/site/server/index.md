@@ -37,6 +37,9 @@ engine the [macOS app](../macos/index.md) uses, with no UI attached.
 * **Registration** with an upstream registrar, so your node is reachable by
   number.
 * **Node-to-node links** — connect (`*3`), monitor (`*2`), disconnect (`*1`).
+* **M17 reflector monitor** — link to one module of an M17 reflector,
+  receive-only, from Discord (`/dial m17`) or `POST /m17`. Off until
+  `node.toml` has an `[m17]` section.
 * **Conference bridge** — mix-minus by default, so each member hears everyone
   but themselves; switchable live between handset, bridge and conference
   topologies.
@@ -76,14 +79,15 @@ If the config path does not exist, `serve` writes a commented template there and
 carries on with safe defaults rather than exiting — a daemon under
 `--restart=always` must not crash-loop over a missing file.
 
-## Credentials never touch disk
+## Credentials never touch node.toml
 
 !!! danger "The config file is secret-free by design"
 
-    `node.toml` carries **no passwords and no tokens**. The registration secret
-    arrives at runtime, either from the environment (`ALLSTAR_SECRET`) or by
-    being POSTed to the loopback control port. The `[portal]` section names an
-    *environment variable* rather than holding a password.
+    `node.toml` carries **no passwords and no tokens**. Credentials live in
+    `credentials.toml` beside it — mode `0600`, written by the settings page —
+    or arrive from the environment or the loopback control port, whichever
+    `[secrets] source` names. The `[portal]` section names an account, never
+    a password.
 
     Secrets are connect/init arguments only: they are never stored on a station,
     never present in snapshots, events or errors, and never logged. Do not put a
@@ -105,6 +109,9 @@ carries on with safe defaults rather than exiting — a daemon under
     `key_refusal` in `controller.rs`, checked on every `NodeCommand::Key`. See
     [Control API](control-api.md#ptt).
 
+    IAX2 and the console's own M17 client session are remotely keyable; the
+    node's M17 *monitor* has no transmit path, and `POST /key` cannot reach it.
+
 ## Working on it
 
 The crate is `crates/astar-server`, about 6,400 lines of Rust. Where things
@@ -121,6 +128,7 @@ live:
 | `server.rs` | 196 | The HTTP listener and the `/events` SSE path, ahead of the router. |
 | `sse.rs` | 169 | Event serialization for the SSE stream. |
 | `config.rs` | — | `node.toml` deserialization; one struct per section. |
+| `m17_directory.rs` | — | `[m17]` reflector names to `host:port`: the operator's table, then the bundled or file directory. |
 | `template.rs` | 85 | The commented config written when the file is missing. |
 
 Tests are `crates/astar-server/tests/config_bootstrap.rs` and `serve_wiring.rs`,
@@ -134,7 +142,7 @@ The controller is driven by a pump rather than threads-per-connection, so a
 behaviour change is usually a new `NodeCommand` arm plus a route in `http.rs`
 plus a menu entry in `tui.rs` — the three surfaces are deliberately parallel.
 
-Two rules that are load-bearing rather than stylistic, and which a change here
+Three rules that are load-bearing rather than stylistic, and which a change here
 must not break:
 
 * **Secrets are in-args only.** They never reach a `Station`, a snapshot, an
@@ -142,6 +150,11 @@ must not break:
 * **The `key_refusal` guard stays.** `POST /key` must keep refusing while
   `dstar_active`. `iax-d9f4` tracks making that structural instead of a runtime
   check; until then the runtime check is the only thing holding the line.
+* **The M17 monitor stays receive-only.** `POST /m17` and `/dial m17` carry a
+  reflector *name*, never an address, and `M17Action` has only `monitor` and
+  `disconnect`. The monitor itself lives in `astar-console`, whose
+  `tests/m17_monitor.rs` and `tests/m17_monitor_vocabulary.rs` fail if it ever
+  sends anything but control packets.
 
 ## Next steps
 
