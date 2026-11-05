@@ -937,6 +937,15 @@ public struct M17State: Equatable, Sendable {
     }
 }
 
+/// Which vocoder D-Star uses (``Station/setDStarVocoder(_:)``). The raw values
+/// are the engine's own spelling, shared with `node.toml`. D-Star only.
+public enum DStarVocoder: String, Sendable, CaseIterable {
+    /// The ThumbDV / DVstick dongle. The default.
+    case dongle
+    /// The software vocoder (Bruce Perens' AMBE 3600×2400 implementation).
+    case software
+}
+
 /// The D-Star-shaped state of a live session, from ``Station/dstarState()``
 /// (iax-4c8e).
 ///
@@ -950,10 +959,11 @@ public struct DStarState: Equatable, Sendable {
         case idle, linking, linked, unlinking, failed
     }
 
-    /// Which vocoder backed this session. Always ``Backend/thumbdv`` today —
-    /// D-Star is hardware-only.
+    /// Which vocoder backed this session: the dongle, or — when the operator
+    /// chose it in a build that has it — the software vocoder.
     public enum Backend: String, Sendable {
         case thumbdv
+        case software
     }
 
     public let link: Link
@@ -2383,6 +2393,33 @@ public final class Station {
     /// The station's current vocoder trust list.
     public func vocoderTrust() throws -> [String] {
         try listDevices { h, buf, len in iax_station_vocoder_trust(h, buf, len) }
+    }
+
+    /// Choose D-Star's vocoder: the dongle (the default) or the software
+    /// vocoder. Applies to every later ``connectDStar(host:port:module:callsign:reflectorCallsign:)``
+    /// and to the snapshot's `dstarAvailable`; a live session keeps the
+    /// vocoder it opened.
+    ///
+    /// D-Star only. System Fusion, NXDN and DMR have no such setting: their
+    /// AMBE+2 vocoder is hardware-only (US 8,359,197 until 2028-05-20).
+    /// ``DStarVocoder/software`` is accepted in every build; in one without it
+    /// (``dstarSoftwareVocoderCompiled`` is `false`) the next D-Star connect
+    /// fails and says so, rather than quietly using the dongle.
+    public func setDStarVocoder(_ vocoder: DStarVocoder) throws {
+        try check(vocoder.rawValue.withCString { iax_station_set_dstar_vocoder(handle, $0) })
+    }
+
+    /// The station's current D-Star vocoder choice.
+    public func dstarVocoder() throws -> DStarVocoder {
+        DStarVocoder(rawValue: try readJSON { h, buf, len in iax_station_dstar_vocoder(h, buf, len) })
+            ?? .dongle
+    }
+
+    /// Whether this build of the engine contains the software D-Star vocoder
+    /// (the `dstar-soft-ambe` feature). Shipped builds do; one made with
+    /// `ASTAR_DSTAR_SOFT_AMBE=0 just xcframework` does not.
+    public static var dstarSoftwareVocoderCompiled: Bool {
+        astar_dstar_software_vocoder_compiled() != 0
     }
 
     /// Every vocoder-class USB serial port that could be enrolled, by serial

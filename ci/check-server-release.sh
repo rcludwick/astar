@@ -52,7 +52,7 @@ else
   "${run[@]}" --version | grep -q '^astar-server ' && echo "ok   --version runs" \
     || { echo "FAIL: --version"; fail=1; }
   feats=$("${run[@]}" --features)
-  for f in stream stream-mp3 codec2-static public-tls discord auth dns-providers; do
+  for f in stream stream-mp3 codec2-static dstar-soft-ambe public-tls discord auth dns-providers; do
     grep -qw -- "$f" <<<"$feats" || { echo "FAIL: --features lacks $f ($feats)"; fail=1; }
   done
   grep -qw device-audio <<<"$feats" && { echo "FAIL: device-audio is in the release"; fail=1; }

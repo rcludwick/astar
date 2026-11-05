@@ -2002,3 +2002,282 @@ mod tests {
         }
     }
 }
+
+/// `astar-rec-echolink-beat`: an `EchoLink` recording carried a regular beat the
+/// speaker never played. These drive the real output path — `Mixer`,
+/// `OutputBus`, `fill_output` and its resampler — with EchoLink-shaped
+/// arrivals and run the heard tap through the recorder's own 20 ms aligner,
+/// all on one simulated clock.
+#[cfg(test)]
+mod heard_tap_timing {
+    use super::*;
+    use crate::mixer::{Mixer, RxFrame};
+    use crate::router::OutputBus;
+    use astar_record::align::Aligner;
+    use astar_record::tap::{PcmChunk, tap_channel};
+    use std::sync::mpsc::Receiver;
+    use std::sync::{Arc, Mutex};
+
+    const BUS_RATE: u32 = 16_000;
+    /// Samples per 20 ms GSM frame once the session's 8 kHz is bridged up.
+    const FRAME: usize = 320;
+    /// Four GSM frames per `EchoLink` packet: 80 ms.
+    const PACKET_MS: f64 = 80.0;
+    const PACKETS: usize = 75; // 6 s of talk
+    /// The output path settles inside this; gaps are only judged after it.
+    const SETTLE_MS: f64 = 500.0;
+    /// The speaker's first callback comes this long after the first packet
+    /// lands: the only cushion a bare lane ever gets.
+    const START_MS: f64 = 20.0;
+    /// The last packet's audio has played out by here.
+    #[allow(clippy::cast_precision_loss)]
+    const TALK_END_MS: f64 = PACKET_MS * PACKETS as f64;
+
+    /// The bus output the device was fed: every `read`'s first `n` samples,
+    /// which is all `fill_output` ever passes on to the resampler.
+    struct Probe {
+        bus: OutputBus,
+        fed: Vec<f32>,
+        dry_reads_after_settle: usize,
+        now_ms: f64,
+    }
+
+    impl OutputSource for Probe {
+        fn read(&mut self, out: &mut [f32]) -> usize {
+            let n = self.bus.read(out);
+            self.fed.extend_from_slice(&out[..n]);
+            if n == 0 && self.now_ms > SETTLE_MS && self.now_ms < TALK_END_MS {
+                self.dry_reads_after_settle += 1;
+            }
+            n
+        }
+    }
+
+    /// The i16 the heard tap writes for one sent sample (the bus turns i16
+    /// into f32 / 32768 and the tap quantises with * 32767, truncating).
+    #[allow(clippy::cast_possible_truncation)]
+    fn tapped(v: i16) -> i16 {
+        ((f32::from(v) / 32768.0).clamp(-1.0, 1.0) * 32767.0) as i16
+    }
+
+    /// Distinct, never-zero sample values, so a gap shows as zeros and a
+    /// repeat or a loss shows as a break in the sequence.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    fn voice(k: usize) -> i16 {
+        1_000 + (k % 20_000) as i16
+    }
+
+    /// Arrival times: packet `i` is due at `80 i` ms. The first one is the
+    /// slowest through the network and every later one lands up to
+    /// `jitter_ms` early (with 30 ms, some back to back), so a bare lane never
+    /// genuinely runs dry and every gap in the recording is one the speaker
+    /// did not play.
+    fn arrivals(jitter_ms: f64) -> Vec<f64> {
+        let mut seed: u32 = 0x2026_1101;
+        let mut early = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            f64::from(seed >> 8) / f64::from(1u32 << 24) * jitter_ms
+        };
+        #[allow(clippy::cast_precision_loss)]
+        (0..PACKETS)
+            .map(|i| {
+                if i == 0 {
+                    0.0
+                } else {
+                    i as f64 * PACKET_MS - early()
+                }
+            })
+            .collect()
+    }
+
+    struct Outcome {
+        /// The recording's receive lane, one aligner frame per 20 ms tick.
+        recorded: Vec<i16>,
+        /// What the bus fed the device, quantised as the tap quantises.
+        fed: Vec<i16>,
+        /// What the heard tap delivered, before the aligner.
+        heard: Vec<i16>,
+        dry_reads_after_settle: usize,
+        aligner_dropped: u64,
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn run(device_rate: u32, callback_frames: usize, jitter_ms: f64) -> Outcome {
+        let mixer = Arc::new(Mutex::new(Mixer::new()));
+        let (to_bus, from_session) = std::sync::mpsc::channel::<RxFrame>();
+        mixer.lock().unwrap().add_call(from_session);
+        let bus = OutputBus::new(Arc::clone(&mixer), BUS_RATE);
+        let (tap, heard_rx): (_, Receiver<PcmChunk>) = tap_channel(1 << 16);
+        bus.record_tap().set(Some(tap));
+        let mut probe = Probe {
+            bus,
+            fed: Vec::new(),
+            dry_reads_after_settle: 0,
+            now_ms: 0.0,
+        };
+        let mut resampler = (device_rate != BUS_RATE)
+            .then(|| AntiAliasResampler::new(BUS_RATE, device_rate).expect("resampler"));
+        let (mut src_buf, mut up_buf) = (Vec::new(), Vec::new());
+        let mut residual = std::collections::VecDeque::new();
+        let mut aligner = Aligner::new(FRAME);
+        let mut recorded = Vec::new();
+        let mut heard = Vec::new();
+
+        let arrivals = arrivals(jitter_ms);
+        let callback_ms = callback_frames as f64 * 1000.0 / f64::from(device_rate);
+        let (mut next_packet, mut next_callback, mut next_tick) =
+            (0usize, START_MS, START_MS + 20.0);
+        let mut sample = 0usize;
+        let end_ms = PACKET_MS * PACKETS as f64 + 1_000.0;
+        loop {
+            // The earliest of the three event streams goes next.
+            let packet_at = arrivals.get(next_packet).copied().unwrap_or(f64::INFINITY);
+            let t = packet_at.min(next_callback).min(next_tick);
+            if t > end_ms {
+                break;
+            }
+            if t == packet_at {
+                for _ in 0..4 {
+                    let pcm: Vec<i16> = (0..FRAME)
+                        .map(|_| {
+                            sample += 1;
+                            voice(sample)
+                        })
+                        .collect();
+                    to_bus.send(RxFrame::from(pcm)).unwrap();
+                }
+                next_packet += 1;
+            } else if t == next_callback {
+                probe.now_ms = t;
+                let mut out = vec![0.0_f32; callback_frames * 2];
+                fill_output(
+                    &mut out,
+                    2,
+                    1,
+                    device_rate,
+                    BUS_RATE,
+                    resampler.as_mut(),
+                    &mut src_buf,
+                    &mut up_buf,
+                    &mut residual,
+                    &mut probe,
+                );
+                next_callback += callback_ms;
+            } else {
+                // The recorder's 20 ms tick: drain the tap, take one frame.
+                for chunk in heard_rx.try_iter() {
+                    assert_eq!(chunk.rate, BUS_RATE);
+                    heard.extend_from_slice(&chunk.samples);
+                    aligner.push_rx(&chunk.samples);
+                }
+                recorded.extend(aligner.tick().0);
+                next_tick += 20.0;
+            }
+        }
+        Outcome {
+            recorded,
+            fed: probe
+                .fed
+                .iter()
+                .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
+                .collect(),
+            heard,
+            dry_reads_after_settle: probe.dry_reads_after_settle,
+            aligner_dropped: aligner.dropped(),
+        }
+    }
+
+    /// Zero runs of at least 1 ms strictly between the first and last voice
+    /// sample, as (start, length).
+    fn gaps(samples: &[i16]) -> Vec<(usize, usize)> {
+        let Some(first) = samples.iter().position(|&s| s != 0) else {
+            return Vec::new();
+        };
+        let last = samples.iter().rposition(|&s| s != 0).unwrap();
+        let mut out = Vec::new();
+        let mut i = first;
+        while i <= last {
+            if samples[i] == 0 {
+                let start = i;
+                while samples[i] == 0 {
+                    i += 1;
+                }
+                if i - start >= 16 {
+                    out.push((start, i - start));
+                }
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+
+    fn check(device_rate: u32, callback_frames: usize, jitter_ms: f64) {
+        let o = run(device_rate, callback_frames, jitter_ms);
+        let what = format!(
+            "{device_rate} Hz device, {callback_frames}-frame callbacks, {jitter_ms} ms jitter"
+        );
+        assert_eq!(
+            o.dry_reads_after_settle, 0,
+            "{what}: precondition — the speaker never ran dry after settling"
+        );
+        let expected: Vec<i16> = (1..=PACKETS * 4 * FRAME)
+            .map(|k| tapped(voice(k)))
+            .collect();
+        assert_eq!(
+            o.fed.len(),
+            expected.len(),
+            "{what}: the device got every sample"
+        );
+        assert_eq!(o.fed, expected, "{what}: the device got them in order");
+
+        // The tap carries what the device was fed: no more, no less.
+        assert_eq!(
+            o.heard.len(),
+            o.fed.len(),
+            "{what}: the heard tap delivered {} samples for {} played ({:.0} ms extra)",
+            o.heard.len(),
+            o.fed.len(),
+            (o.heard.len() as f64 - o.fed.len() as f64) / 16.0
+        );
+        assert_eq!(o.heard, o.fed, "{what}: the heard tap is the played audio");
+
+        // And the recording: no gap after settling, no loss, no repeat.
+        let settle = (SETTLE_MS as usize) * 16;
+        let late_gaps: Vec<_> = gaps(&o.recorded)
+            .into_iter()
+            .filter(|&(at, _)| at > settle)
+            .collect();
+        assert!(
+            late_gaps.is_empty(),
+            "{what}: {} gaps the speaker never played, first {:?}",
+            late_gaps.len(),
+            &late_gaps[..late_gaps.len().min(6)]
+        );
+        assert_eq!(
+            o.aligner_dropped, 0,
+            "{what}: the recorder threw audio away"
+        );
+        let voiced: Vec<i16> = o.recorded.iter().copied().filter(|&s| s != 0).collect();
+        assert_eq!(voiced, expected, "{what}: recorded audio lost or repeated");
+    }
+
+    /// Rob's case: a 48 kHz device with the usual 512-frame callback, the
+    /// bus at 16 kHz. Before the fix the tap carried each read's unplayed
+    /// headroom as silence: 1280 samples of voice, 84 zeros, 1280 of voice,
+    /// 511 zeros — exactly the pattern in the recording that had the beat.
+    #[test]
+    fn an_echolink_call_records_without_gaps_or_repeats_at_48k() {
+        check(48_000, 512, 0.0);
+        check(48_000, 512, 30.0);
+    }
+
+    #[test]
+    fn an_echolink_call_records_without_gaps_or_repeats_at_other_device_shapes() {
+        for jitter_ms in [0.0, 30.0] {
+            check(48_000, 480, jitter_ms);
+            check(44_100, 512, jitter_ms);
+            check(BUS_RATE, 320, jitter_ms);
+        }
+    }
+}

@@ -672,6 +672,7 @@ fn m17_route(ctrl: &NodeController, body: &[u8]) -> HttpResponse {
         Ok(r) => r,
         Err(e) => return HttpResponse::error_json(400, &format!("bad request: {e}")),
     };
+    let monitor = matches!(req.action, M17Action::Monitor);
     let cmd = match req.action {
         M17Action::Disconnect => NodeCommand::M17 {
             action: M17Action::Disconnect,
@@ -700,7 +701,22 @@ fn m17_route(ctrl: &NodeController, body: &[u8]) -> HttpResponse {
             }
         }
     };
-    execute_and_render(ctrl, cmd)
+    let r = execute_and_render(ctrl, cmd);
+    if monitor && r.status == 200 {
+        // Additive: `ok` stays, and the caller learns where the reflector's
+        // audio now goes. The monitor joins the conference as a contributing
+        // member, so every AllStar and EchoLink member hears it.
+        let reach = ctrl.m17_relay_counts();
+        return HttpResponse::json(
+            200,
+            &serde_json::json!({
+                "ok": true,
+                "relays_to": reach,
+                "warning": reach.warning(),
+            }),
+        );
+    }
+    r
 }
 
 // ---- the Discord admin page (iax-c9f4) --------------------------------------
@@ -2285,6 +2301,70 @@ mod tests {
         assert_eq!(json_of(&r), error_body("No M17 link is up."));
     }
 
+    /// `POST /m17` says who will hear the reflector: three loopback links in
+    /// transceive count, a monitor-only link does not (the conference never
+    /// sends it anything), and `/status` carries the same warning.
+    #[test]
+    fn m17_monitor_reply_warns_and_counts_the_members_it_relays_to() {
+        let rec =
+            crate::test_support::RecordingReflector::start(crate::test_support::FakeReply::Ackn);
+        let c = m17_controller(rec.addr);
+        // Kept alive to the end: dropping a socket closes its port, and ICMP
+        // would tear the link down mid-test. Every address is 127.0.0.1.
+        let mut sinks = Vec::new();
+        for (node, action) in [
+            ("1999", LinkAction::Connect),
+            ("1998", LinkAction::Connect),
+            ("1997", LinkAction::Connect),
+            ("1996", LinkAction::Monitor),
+        ] {
+            let (sink, addr) = crate::test_support::dead_port();
+            sinks.push(sink);
+            c.execute(NodeCommand::Link {
+                action,
+                node: node.into(),
+                addr: Some(addr),
+            })
+            .expect("a loopback link registers");
+        }
+        assert_eq!(c.snapshot().links.len(), 4);
+
+        let r = m17_post(&c, std::str::from_utf8(M17_MONITOR_BODY).unwrap());
+        assert_eq!(r.status, 200, "{:?}", json_of(&r));
+        let v = json_of(&r);
+        assert_eq!(v["ok"], serde_json::json!(true), "the old field stays");
+        assert_eq!(
+            v["relays_to"],
+            serde_json::json!({ "allstar": 3, "echolink": 0 }),
+            "three transceive links; the monitor-only link is never sent the mix"
+        );
+        let warning = v["warning"].as_str().expect("a warning string");
+        assert!(
+            warning.starts_with(crate::m17_relay::M17_RELAY_WARNING),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("Right now that is 3 AllStar connections, and any of them with a radio will transmit what this reflector carries."),
+            "{warning}"
+        );
+
+        let st = status_json(&c);
+        assert_eq!(st["m17_relay"]["relays_to"], v["relays_to"]);
+        assert_eq!(st["m17_relay"]["warning"], v["warning"]);
+
+        c.teardown_m17();
+        rec.stop();
+        drop(sinks);
+    }
+
+    /// With M17 off, `/status` has no `m17_relay` at all, so the golden key
+    /// lists and every client that never turned M17 on see nothing new.
+    #[test]
+    fn status_has_no_m17_relay_while_m17_is_off() {
+        let c = test_controller();
+        assert!(status_json(&c).get("m17_relay").is_none());
+    }
+
     #[test]
     fn m17_monitor_links_by_name_and_presents_the_uppercased_identity() {
         let rec =
@@ -2298,7 +2378,14 @@ mod tests {
             r#"{"action":"monitor","reflector":"m17-test","module":"a","callsign":"aj7hr"}"#,
         );
         assert_eq!(r.status, 200, "monitor is accepted: {:?}", json_of(&r));
-        assert_eq!(json_of(&r), serde_json::json!({ "ok": true }));
+        assert_eq!(
+            json_of(&r),
+            serde_json::json!({
+                "ok": true,
+                "relays_to": { "allstar": 0, "echolink": 0 },
+                "warning": crate::m17_relay::RelayCounts::default().warning(),
+            })
+        );
 
         assert!(
             crate::test_support::wait_until(|| first_conn(&rec).is_some(), 3000),
@@ -6096,6 +6183,41 @@ mod tests {
                 "{method} {path}: {r:?}"
             );
         }
+    }
+
+    /// The admin page shows the node's relay warning beside the links, read
+    /// from `/status`'s `m17_relay`, through textContent only.
+    #[test]
+    fn admin_page_renders_the_m17_relay_warning_from_status() {
+        assert!(INDEX_HTML.contains("id=\"m17-relay-warning\""));
+        assert!(APP_JS.contains("renderM17Relay(snap.m17_relay)"));
+        let start = APP_JS
+            .find("function renderM17Relay")
+            .expect("the renderer");
+        let tail = &APP_JS[start..];
+        let body = &tail[..tail.find("\n}\n").expect("its end")];
+        assert!(body.contains("relay.warning"), "{body}");
+        for sink in ["innerHTML", "outerHTML", "insertAdjacentHTML"] {
+            assert!(!body.contains(sink), "renderM17Relay uses {sink}");
+        }
+    }
+
+    /// The settings page's M17 card leads with the warning, word for word
+    /// the node's own, and swaps in the counted version from `/status`.
+    #[test]
+    fn settings_m17_card_renders_the_relay_warning() {
+        let quoted = format!("\"{}\"", crate::m17_relay::M17_RELAY_WARNING);
+        assert!(
+            SETTINGS_JS.contains(&quoted),
+            "settings.js carries M17_RELAY_WARNING verbatim"
+        );
+        let start = SETTINGS_JS
+            .find("function renderCardM17")
+            .expect("the card");
+        let tail = &SETTINGS_JS[start..];
+        let body = &tail[..tail.find("\n}\n").expect("its end")];
+        assert!(body.contains("m17RelayWarning()"), "{body}");
+        assert!(SETTINGS_JS.contains("st.m17_relay.warning"));
     }
 
     #[test]

@@ -69,7 +69,7 @@ noticeably slower to build and meaningfully faster to run.
 
 ## Feature flags
 
-Most features are on by default and you can ignore this section. The three that
+Most features are on by default and you can ignore this section. The ones that
 matter are off-by-default or licence-driven.
 
 | Feature | Crate | Default | What it does |
@@ -78,11 +78,17 @@ matter are off-by-default or licence-driven.
 | `codec2-runtime` | `astar-codec` | **off**¹ | `dlopen`s a *system* `libcodec2` at run time via `libloading`. No LGPL code enters the build. |
 | `codec2-static` | `astar-codec` | **off** | Links the `codec2` crate directly. Kept off, and out of every default set, because Codec 2 is LGPL-2.1 and MIT. |
 | `ambe-hw` | `astar-codec` | **off** | The ThumbDV USB vocoder backend. |
-| `dstar` | `astar-cli`, `astar-station`, `astar-console` | **off** | D-Star. Pulls in `ambe-hw`; there is no software fallback. |
+| `dstar` | `astar-cli`, `astar-station`, `astar-console` | **off** | D-Star. Pulls in `ambe-hw`. The dongle is its vocoder unless the software one below is both built and chosen; nothing ever falls back from one to the other. |
 | `dstar` | `astar-sys` | **on** | D-Star over the C ABI, because the Swift binding is generated from this crate. |
+| `dstar-soft-ambe` | `astar-codec`, `astar-console`, `astar-station`, `astar-sys`, `astar-server` | **off**² | The software D-Star vocoder: Bruce Perens' AMBE 3600×2400, vendored at `vendor/ham-digital-modes-ambe` (LGPL-3.0-or-later). D-Star only: System Fusion, NXDN and DMR use AMBE+2 and stay on the dongle. Built in, it is a choice, not a switch-over: D-Star uses the dongle unless the operator picks Software. |
 
 ¹ Off in `astar-codec` itself, but `astar-station`'s and `astar-console`'s
 default `m17` feature turns it on — so a normal build has it.
+
+² Off in a plain `cargo build`, like `codec2-static`, so nothing links LGPL
+code by accident. **Every shipped build turns it on**: `just xcframework` (the
+macOS app; `ASTAR_DSTAR_SOFT_AMBE=0` opts out) and astar-server's `release`
+feature set. `ci/guard-dstar-soft-ambe.sh` checks both halves.
 
 !!! warning "`astar-sys` turns D-Star on for the whole workspace build"
 

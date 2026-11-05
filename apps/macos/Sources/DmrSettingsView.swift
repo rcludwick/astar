@@ -25,7 +25,7 @@
         @EnvironmentObject private var reflectors: ReflectorDirectory
 
         var body: some View {
-            Section("DMR") {
+            SettingsSection(.dmr) {
                 VStack(alignment: .leading, spacing: 4) {
                     SettingsField("DMR Radio ID") {
                         TextField("", text: $session.dmrRadioID)
@@ -285,6 +285,7 @@
             DmrSettingsView()
         }
         .environmentObject(CallSession(station: NullStation()))
+        .environmentObject(SettingsDisclosure())
         .environmentObject(ReflectorDirectory(storage: FileReflectorDirectoryStorage()))
         .frame(width: 340)
         .padding()

@@ -12,9 +12,10 @@
     struct MicProfilesView: View {
         @EnvironmentObject private var session: CallSession
         @EnvironmentObject private var micAnalyzer: MicAnalyzerController
+        @EnvironmentObject private var disclosure: SettingsDisclosure
 
         var body: some View {
-            Section {
+            SettingsSection(.micProfiles) {
                 if session.micProfiles.isEmpty {
                     Text(
                         "No mic profiles yet. Add one with the + above and characterize it in the analyzer."
@@ -29,13 +30,12 @@
                             .listRowInsets(EdgeInsets(top: 4, leading: 6, bottom: 4, trailing: 6))
                     }
                 }
-            } header: {
-                HStack {
-                    Text("Mic Profiles")
-                    Spacer(minLength: 8)
-                    AddButton(help: "Add a mic profile") {
-                        micAnalyzer.startNew(input: nil)
-                    }
+            } accessory: {
+                AddButton(help: "Add a mic profile") {
+                    // Open the section too, so the new profile is in view when
+                    // Back returns here from the analyzer.
+                    disclosure.setExpanded(.micProfiles, true)
+                    micAnalyzer.startNew(input: nil)
                 }
             }
         }

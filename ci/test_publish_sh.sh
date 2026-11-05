@@ -23,7 +23,9 @@
 #   * the notes come from the NEWEST changelog section, or not at all;
 #   * the DMG gate is spctl AND stapler, not either;
 #   * publishing happens from `main`, because `main` is what gets pushed;
-#   * a diverged public repo is refused rather than force-published;
+#   * a real publish pushes one squashed commit with the tag's files, dated in
+#     the evening MST, and no private commit object;
+#   * a release already on public is refused;
 #   * a dry run prints the three commands and runs none of them.
 set -euo pipefail
 
@@ -85,6 +87,7 @@ publish() {
     STUB_SPCTL_RC="${STUB_SPCTL_RC:-0}" \
     STUB_STAPLER_RC="${STUB_STAPLER_RC:-0}" \
     STUB_GH_RC="${STUB_GH_RC:-0}" \
+    ASTAR_PUBLISH_NOW="${ASTAR_PUBLISH_NOW:-1789268400}" \
     "$PUBLISH_SH" "$@"
 }
 
@@ -118,6 +121,7 @@ cat >"$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 echo "gh $*" >>"$STUB_LOG"
 if [ "${1:-}" = "auth" ]; then exit "${STUB_GH_RC:-0}"; fi
+case "$*" in *releases/latest*) echo "${STUB_LATEST:-}" ;; esac
 exit 0
 EOF
 
@@ -158,7 +162,17 @@ git_q remote add origin "$TMP/origin.git"
 git_q remote add public "$TMP/public.git"
 git_q tag -a "v$NEW" -m "astar $NEW"
 git_q push -q origin main "v$NEW"
-git_q push -q public main # public has main, but not the tag: publish pushes it
+# Public has its own history: one squashed root commit that shares no object
+# with the private one, as the real public repo does.
+old_root="$(git -C "$REPO" -c user.name=t -c user.email=t@e commit-tree "$(git -C "$REPO" rev-parse "HEAD^{tree}")" -m "astar $OLD")"
+git_q push -q public "$old_root:refs/heads/main"
+# The private work after it: a second commit, then the release tag.
+echo "more private work" >"$REPO/private.txt"
+git_q add private.txt
+git_q commit -qm "a private commit that must never reach public"
+git_q tag -d "v$NEW" >/dev/null
+git_q tag -a "v$NEW" -m "astar $NEW"
+git_q push -q -f origin main "v$NEW"
 
 # ---------------------------------------------------------------------------
 # 1. The notes come from the NEWEST section, or not at all.
@@ -231,7 +245,9 @@ contains "says to cut the release first" "no local tag v0.1.99-beta" "$out"
 echo "dry run"
 out="$(publish "$NEW" --dry-run 2>&1)"
 log="$(cat "$STUB_LOG")"
-contains "would push to public" "would run: git push public main v$NEW" "$out"
+contains "would build one squashed commit" "would build: one commit with v$NEW's files on top of public main" "$out"
+contains "would push it and its tag atomically" "would run: git push --atomic public <that commit>:main <that tag>:refs/tags/v$NEW" "$out"
+contains "dates it in the evening, MST" " MST," "$out"
 contains "would create the release with the DMG" \
   "would run: gh release create v$NEW apps/macos/build/astar.dmg" "$out"
 contains "marks it --latest" "--latest" "$out"
@@ -251,22 +267,51 @@ check "pushed nothing to public" "" \
   "$(git -C "$TMP/public.git" tag -l "v$NEW")"
 
 # ---------------------------------------------------------------------------
-# 5. A diverged public repo is refused. (Last: it changes public for good.)
+# 5. A real publish pushes ONE squashed commit, and nothing private.
+#    (Last: it changes public for good.)
 # ---------------------------------------------------------------------------
 
-echo "diverged public"
-git clone -q "$TMP/public.git" "$TMP/other"
-git -C "$TMP/other" -c user.name=other -c user.email=other@example.com \
-  -c commit.gpgsign=false commit -q --allow-empty -m "straight to public"
-git -C "$TMP/other" push -q origin main
+echo "push hours"
+set +e
+out="$(ASTAR_PUBLISH_NOW=1788975000 publish "$NEW" 2>&1)"
+rc=$?
+set -e
+check "refuses a real publish on a weekday at 10:30 AM MST" "1" "$rc"
+contains "says when pushes are allowed" "no pushes to the public repo Monday-Friday, 7 AM to 5 PM MST" "$out"
+check "pushed nothing during work hours" "" "$(git -C "$TMP/public.git" tag -l "v$NEW")"
+out="$(ASTAR_PUBLISH_NOW=1788975000 publish "$NEW" --dry-run 2>&1)"
+contains "a dry run in work hours says NOT NOW" "NOT NOW: it is Wed 2026-09-09 10:30 MST" "$out"
+out="$(ASTAR_PUBLISH_NOW=1788998400 publish "$NEW" --dry-run 2>&1)"
+contains "5 PM on a weekday is allowed" "allowed now: it is Wed 2026-09-09 17:00 MST" "$out"
+
+echo "real publish"
+priv="$(git -C "$REPO" rev-parse "v$NEW^{commit}")"
+out="$(STUB_LATEST="v$NEW" ASTAR_CLEAN_IGNORE_BUSY=1 publish "$NEW" 2>&1)" || {
+  bad "a real publish succeeds"
+  printf '%s\n' "$out" >&2
+}
+pub="$(git -C "$TMP/public.git" rev-parse main)"
+check "public main gained exactly one commit" "2" "$(git -C "$TMP/public.git" rev-list --count main)"
+check "it sits on the previous public release" "$old_root" "$(git -C "$TMP/public.git" rev-parse main^)"
+check "it carries exactly the tag's files" "$(git -C "$REPO" rev-parse "v$NEW^{tree}")" \
+  "$(git -C "$TMP/public.git" rev-parse "main^{tree}")"
+check "its message names the release" "astar $NEW" "$(git -C "$TMP/public.git" log -1 --format=%s main)"
+if git -C "$TMP/public.git" cat-file -e "$priv" 2>/dev/null; then
+  bad "no private commit reaches public"
+else
+  ok "no private commit reaches public"
+fi
+check "the public tag names the squashed commit" "$pub" "$(git -C "$TMP/public.git" rev-parse "v$NEW^{commit}")"
+hour="$(TZ=America/Phoenix git -C "$TMP/public.git" log -1 --format=%ad --date=format-local:%H main)"
+if [ "$hour" -ge 18 ] && [ "$hour" -le 22 ]; then ok "dated in the evening, MST ($hour h)"; else bad "dated in the evening, MST (got $hour h)"; fi
+check "the private tag is untouched" "$priv" "$(git -C "$REPO" rev-parse "v$NEW^{commit}")"
 
 set +e
 out="$(publish "$NEW" --dry-run 2>&1)"
 rc=$?
 set -e
-check "refuses when public/main is not an ancestor of main" "1" "$rc"
-contains "says the public repo diverged" "public repo has diverged" "$out"
-lacks "created no release" "release create" "$(cat "$STUB_LOG")"
+check "refuses to publish the same release twice" "1" "$rc"
+contains "says it is already public" "already on the public repo" "$out"
 
 echo
 if [ "$failures" -ne 0 ]; then

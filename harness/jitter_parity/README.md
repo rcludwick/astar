@@ -64,11 +64,14 @@ inspect any new diffs before committing the regenerated `.out` files.
 
 None at present. The port had one documented simplification (the
 shrink-with-frame-present branch in voice `get`, folded into the no-frame
-shrink path; see ticket `iax-9c62`). None of the bundled traces exercises
-exactly that branch, so the harness currently passes against every golden.
-If a future trace hits that path and produces a divergence, add a per-trace
-allowlist entry in `allowed_diff_lines` inside `jitter_parity.rs`, with a
-comment pointing to `iax-9c62`.
+shrink path; ticket `iax-9c62`). It was restored on 2026-11-02
+(`astar-el-hollow`): without it a stream that never pauses could only ever
+deepen the buffer. None of the bundled traces exercises that branch, and the
+C source is no longer on this machine to cut a golden for it, so its
+behaviour is pinned by the Rust unit test
+`a_fast_sender_that_never_pauses_is_shrunk_by_dropping_frames` instead. A
+trace that reaches it is still worth adding next time the C harness can be
+built.
 
 The harness did surface one separate divergence on initial implementation:
 the Rust port was treating `silence_begin_ts == -1` (the post-reset

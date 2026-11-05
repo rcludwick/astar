@@ -50,7 +50,7 @@
         @State private var chosenForImport: Set<ConfigSection> = []
 
         var body: some View {
-            Section("Backup") {
+            SettingsSection(.backup) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
                         Button("Export…") { sheet = .export }

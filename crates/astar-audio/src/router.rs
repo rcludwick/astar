@@ -1295,15 +1295,24 @@ impl OutputSource for OutputBus {
         // Zeroing the tail also makes the device play clean silence on underrun
         // rather than stale buffer content.
         out[n..].fill(0.0);
-        // Recording: a copy of the final buffer, zeroed tail included, from
-        // a bus carrying a call only. Every open bus shares the one heard
-        // tap, so an idle bus offering its silence would interleave a
-        // second stream into the receive lane. Never waits; nothing is
-        // built unless a tap is installed.
-        if calls > 0 {
+        // Recording: a copy of the `n` samples the device is actually fed,
+        // from a bus carrying a call only. Never the zeroed tail: the output
+        // path asks for more than one callback needs (on a resampled device,
+        // the callback's share at the bus rate plus 512 samples of
+        // headroom, in `fill_output`) and plays only
+        // the first `n`, so the tail is request size, not silence anyone
+        // heard. Offering it put up to 32 ms of invented silence into the
+        // recording after every short read, which on a bare 80 ms EchoLink
+        // lane was every packet (astar-rec-echolink-beat). The recorder's
+        // aligner fills real underruns and the quiet between overs with
+        // silence on its own 20 ms clock. Every open bus shares the one
+        // heard tap, so an idle bus offering would interleave a second
+        // stream into the receive lane. Never waits; nothing is built unless
+        // a tap is installed.
+        if calls > 0 && n > 0 {
             self.heard.offer_with(|| PcmChunk {
                 rate: self.sample_rate,
-                samples: out.iter().map(|&s| quantise_sample(s)).collect(),
+                samples: out[..n].iter().map(|&s| quantise_sample(s)).collect(),
             });
         }
         if let Ok(mut sa) = self.rx_spectrum.lock() {
@@ -3362,7 +3371,7 @@ mod tests {
     }
 
     #[test]
-    fn heard_tap_copies_exactly_what_the_bus_produced() {
+    fn heard_tap_copies_exactly_what_the_device_is_fed() {
         let mixer = Arc::new(Mutex::new(Mixer::new()));
         let (tx, rx) = channel();
         mixer.lock().unwrap().add_call(rx);
@@ -3381,12 +3390,19 @@ mod tests {
             "a real frame and a zeroed tail: n={n}"
         );
 
+        // Only the `n` samples the device is fed: the zeroed tail is the
+        // output path's request headroom, never played, and recording it
+        // put a beat into EchoLink recordings (astar-rec-echolink-beat).
         let chunks = drain(&heard);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].rate, 8_000);
-        assert_eq!(chunks[0].samples, quantised(&out));
-        assert!(chunks[0].samples[n..].iter().all(|&s| s == 0));
-        assert!(chunks[0].samples[..n].iter().any(|&s| s != 0));
+        assert_eq!(chunks[0].samples, quantised(&out[..n]));
+        assert!(chunks[0].samples.iter().any(|&s| s != 0));
+
+        // A dry read feeds the device nothing, so it offers nothing.
+        let mut out = [0.5_f32; 320];
+        assert_eq!(crate::OutputSource::read(&mut bus, &mut out), 0);
+        assert!(drain(&heard).is_empty(), "a dry read offers nothing");
     }
 
     #[test]
@@ -3489,21 +3505,24 @@ mod tests {
         for _ in 0..ATTEMPTS {
             let (done_tx, done_rx) = channel();
             std::thread::spawn(move || {
-                // Each bus carries a (silent) call: only such a bus offers.
+                // Each bus carries a call with audio queued: only a bus
+                // feeding its device something offers.
                 let busy = || {
                     let mixer = Arc::new(Mutex::new(Mixer::new()));
                     let (tx, rx) = channel::<RxFrame>();
                     mixer.lock().unwrap().add_call(rx);
                     (OutputBus::new(mixer, 8_000), tx)
                 };
-                let (mut plain, _plain_call) = busy();
-                let (mut tapped_bus, _tapped_call) = busy();
+                let (mut plain, plain_call) = busy();
+                let (mut tapped_bus, tapped_call) = busy();
                 let (tap, _never_drained) = astar_record::tap::tap_channel(1);
                 let dropped = tap.dropped_counter();
                 tapped_bus.record_tap().set(Some(tap));
                 let mut out = [0.0_f32; 512];
                 let (mut baseline, mut tapped) = (Duration::ZERO, Duration::ZERO);
                 for _ in 0..CALLS {
+                    let _ = plain_call.send(RxFrame::from(vec![1_000_i16; 512]));
+                    let _ = tapped_call.send(RxFrame::from(vec![1_000_i16; 512]));
                     baseline = baseline.max(timed(&mut plain, &mut out));
                     tapped = tapped.max(timed(&mut tapped_bus, &mut out));
                 }
@@ -3553,9 +3572,12 @@ mod tests {
         let mut router = AudioRouter::new(Box::new(backend));
         let (tap, heard) = astar_record::tap::tap_channel(4);
         router.set_record_taps(Some(tap), None);
-        let _call = router
+        let (call, _, _) = router
             .open_monitor_call(&OutputId::new("out:test"), crate::StreamConfig::default())
             .expect("bus opens");
+        call.rx_frames
+            .send(RxFrame::from(vec![1_000_i16; 512]))
+            .unwrap();
 
         let out = controls.pull_output(512);
         assert_eq!(out.len(), 512);
@@ -3570,7 +3592,7 @@ mod tests {
         let (backend, controls) = test_support_router::NullBackend::with_controls();
         let mut router = AudioRouter::new(Box::new(backend));
         // Opened BEFORE the taps are set: set_record_taps reaches open slots.
-        let _call = router
+        let call = router
             .open_call(
                 &MicId::new("in:test"),
                 &OutputId::new("out:test"),
@@ -3578,15 +3600,22 @@ mod tests {
             )
             .expect("router opens streams");
         let (heard_tap, heard) = astar_record::tap::tap_channel(16);
+        let rx_audio = || {
+            call.rx_frames
+                .send(RxFrame::from(vec![1_000_i16; 160]))
+                .unwrap();
+        };
         let (sent_tap, sent) = astar_record::tap::tap_channel(16);
         router.set_record_taps(Some(heard_tap), Some(sent_tap));
 
+        rx_audio();
         controls.pull_output(160);
         controls.push_mic(&[0.25_f32; 160]);
         assert_eq!(drain(&heard).len(), 1, "heard while set");
         assert_eq!(drain(&sent).len(), 1, "sent while set");
 
         router.set_record_taps(None, None);
+        rx_audio();
         controls.pull_output(160);
         controls.push_mic(&[0.25_f32; 160]);
         assert!(drain(&heard).is_empty(), "no heard after clearing");

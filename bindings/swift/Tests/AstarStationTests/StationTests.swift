@@ -455,6 +455,23 @@ final class StationTests: XCTestCase {
         XCTAssertEqual(try st.vocoderTrust(), [])
     }
 
+    func testDStarVocoderDefaultsToTheDongleAndRoundTrips() throws {
+        let st = try Station()
+        XCTAssertEqual(try st.dstarVocoder(), .dongle)
+        try st.setDStarVocoder(.software)
+        XCTAssertEqual(try st.dstarVocoder(), .software)
+        try st.setDStarVocoder(.dongle)
+        XCTAssertEqual(try st.dstarVocoder(), .dongle)
+    }
+
+    func testDStarSoftwareVocoderIsBuiltInByDefault() {
+        // `just xcframework` builds `dstar-soft-ambe` in (Rob, 2026-11-01);
+        // only ASTAR_DSTAR_SOFT_AMBE=0 leaves it out.
+        if ProcessInfo.processInfo.environment["ASTAR_DSTAR_SOFT_AMBE"] != "0" {
+            XCTAssertTrue(Station.dstarSoftwareVocoderCompiled)
+        }
+    }
+
     func testDStarConnectWithNoTrustedVocoderIsRefusedByName() throws {
         let st = try Station()
         XCTAssertThrowsError(
@@ -463,7 +480,9 @@ final class StationTests: XCTestCase {
             let e = error as? StationError
             XCTAssertEqual(e?.code, -19, "IAX_ERR_DSTAR")
             XCTAssertTrue(
-                e?.detail.hasSuffix(Station.noTrustedVocoderMessage) ?? false,
+                // With the software vocoder built in, D-Star's refusal goes on
+                // to name it, so the shared sentence is a prefix, not a suffix.
+                e?.detail.contains(Station.noTrustedVocoderMessage) ?? false,
                 "got \(String(describing: e?.detail))"
             )
         }

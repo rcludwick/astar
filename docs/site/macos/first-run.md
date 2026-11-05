@@ -142,7 +142,8 @@ control. They are the depth the buffer may adapt between, in milliseconds:
 
 Those defaults are Asterisk's, deliberately: the node at the other end of an
 AllStarLink call is Asterisk, so matching its buffer makes astar sound the way
-operators already expect. **Raise Max** — 300, 400 — when audio is still choppy
+operators already expect. The same buffer, with the same Min and Max, plays an
+[EchoLink](echolink.md#voice-quality) call's audio. **Raise Max** — 300, 400 — when audio is still choppy
 on a path you cannot fix: a satellite link, hotel wifi, a distant node. **Lower
 Min** toward 0 when the path is clean and you would rather have the
 conversation feel immediate; you will hear the difference in how quickly
@@ -232,10 +233,11 @@ network available. **M17** needs nothing installed and dials reflectors as
 `host[:port]/module`. It transmits your callsign, so set it before you key;
 AllStarLink identifies by node number instead.
 
-**D-Star** needs a hardware vocoder dongle — its voice codec has no software
-implementation in astar — so it appears in the network picker only while one is
-attached, and only once you have added it in
-[Settings → Vocoders](vocoders.md). See [Digital voice](hardware.md#digital-voice).
+**D-Star** uses a hardware vocoder dongle by default, so it appears in the
+network picker only while one is attached, and only once you have added it in
+[Settings → Vocoders](vocoders.md). No dongle? Choose **Software** for D-Star
+on the same page and it appears without one. See
+[Digital voice](hardware.md#digital-voice).
 
 **Bluetooth and AirPods.** They work — they appear in the Mic and Speaker menus
 like any other device. Two caveats. First, the moment macOS starts using a

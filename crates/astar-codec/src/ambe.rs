@@ -3,11 +3,17 @@
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 //! AMBE vocoder — the D-Star payload codec (iax-a9d4).
 //!
-//! One backend, opt-in via the `ambe-hw` Cargo feature: it talks to a
+//! The default backend, opt-in via the `ambe-hw` Cargo feature, talks to a
 //! `ThumbDV` USB dongle (`ambe-thumbdv`) that runs the real DVSI AMBE3000
 //! chip, over a dedicated worker thread — all serial/USB I/O stays off the
-//! calling (audio) thread (iax-239a). D-Star here is hardware-only; there is
-//! no software vocoder and no fallback.
+//! calling (audio) thread (iax-239a).
+//!
+//! A second backend exists for **D-Star only**: the software vocoder
+//! ([`AmbeBackend::Software`], feature `dstar-soft-ambe`, off by default —
+//! astar-dstar-perens). It is opened only when a caller names it, only for
+//! [`VocoderMode::Dstar`] ([`software_backend_permitted`]), and never as a
+//! fallback for a missing dongle. DMR, NXDN and System Fusion are AMBE+2
+//! (US 8,359,197 until 2028-05-20) and stay hardware-only.
 //!
 //! # Licensing / feature story (read before touching `Cargo.toml`)
 //!
@@ -278,12 +284,24 @@ pub const AMBE_STREAM_MAX_IN_FLIGHT: usize = 4;
 /// [`open_ambe`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AmbeBackend {
-    /// `ThumbDV` USB hardware dongle (`ambe-hw` feature).
-    ///
-    /// The only backend. A software AMBE variant existed once; D-Star is
-    /// hardware-only now, and this stays an enum so the ABI string below and
-    /// the `Option<AmbeBackend>` preference API keep their shape.
+    /// `ThumbDV` USB hardware dongle (`ambe-hw` feature). The default, and
+    /// the only backend for DMR, NXDN and System Fusion.
     Hardware,
+    /// The software D-Star vocoder (Bruce Perens' AMBE 3600x2400, feature
+    /// `dstar-soft-ambe`). D-Star only — see [`software_backend_permitted`].
+    /// Opens no port, so vocoder trust does not apply to it.
+    Software,
+}
+
+/// `true` only for the one mode a software backend may serve: D-Star.
+///
+/// D-Star's AMBE 3600x2400 is out of patent. DMR, NXDN and System Fusion DN
+/// are AMBE+2, which still reads on US 8,359,197 until 2028-05-20, so they
+/// are hardware-only and no software backend may ever be opened for them —
+/// whatever a caller asks for. NXDN rides [`VocoderMode::YsfDn`].
+#[must_use]
+pub const fn software_backend_permitted(mode: VocoderMode) -> bool {
+    matches!(mode, VocoderMode::Dstar)
 }
 
 impl AmbeBackend {
@@ -297,6 +315,7 @@ impl AmbeBackend {
     pub const fn as_str(self) -> &'static str {
         match self {
             AmbeBackend::Hardware => "thumbdv",
+            AmbeBackend::Software => "software",
         }
     }
 }
@@ -621,20 +640,20 @@ fn is_busy_or_permission_denied(e: &std::io::Error) -> bool {
 
 /// Open an AMBE voice instance.
 ///
-/// `prefer` selects a backend; `None` (no opinion) takes whatever this build
-/// offers. There is exactly one backend — [`AmbeBackend::Hardware`] — so both
-/// `None` and `Some(Hardware)` walk the trusted candidate ports (a bounded
-/// serial probe of each) and return `None` when no trusted dongle answers —
-/// immediately, with nothing enumerated or opened, when `trust` is empty. Nothing is ever silently
+/// `prefer` selects a backend. `None` (no opinion) and `Some(Hardware)` both
+/// mean the dongle, the default: they walk the trusted candidate ports (a
+/// bounded serial probe of each) and return `None` when no trusted dongle
+/// answers — immediately, with nothing enumerated or opened, when `trust` is
+/// empty. `Some(Software)` returns the software D-Star vocoder in a
+/// `dstar-soft-ambe` build and `None` otherwise; it never touches a port.
+/// [`AmbeVoice`] is D-Star's full-rate frame by definition, so no other mode
+/// can reach the software path through here. Nothing is ever silently
 /// substituted for the backend the caller asked for: an operator
 /// transmitting/decoding through a vocoder they did not choose, with no
 /// indication anything changed, would be a much worse failure mode than a
-/// visible connect error. `astar-station`'s D-Star path relies on exactly
-/// this: it is hardware-only (no preference knob) and requests
-/// `Some(Hardware)` unconditionally.
+/// visible connect error.
 ///
-/// Returns `None` if no backend is available (including: `ambe-hw` isn't
-/// compiled in, or it is but no dongle is detected).
+/// Returns `None` if the requested backend is not available.
 #[must_use]
 pub fn open_ambe(
     prefer: Option<AmbeBackend>,
@@ -647,11 +666,21 @@ pub fn open_ambe(
     // On failure there is nothing to fall back to: `None`, outright. A
     // caller must NEVER silently receive some other vocoder in place of the
     // backend it asked for (see this function's doc comment).
+    // The software vocoder only when asked for by name — never as a
+    // substitute for a dongle that is not there.
+    if prefer == Some(AmbeBackend::Software) {
+        #[cfg(feature = "dstar-soft-ambe")]
+        {
+            return Some((crate::ambe_soft::open_voice(), AmbeBackend::Software));
+        }
+        #[cfg(not(feature = "dstar-soft-ambe"))]
+        {
+            return None;
+        }
+    }
     #[cfg(feature = "ambe-hw")]
     {
-        // `Hardware` is the only backend, so `None` (no opinion) and
-        // `Some(Hardware)` take the same path.
-        let _ = prefer;
+        // `None` (no opinion) means the dongle: it is the default backend.
         detect_thumbdv(trust).ok().map(|dv| {
             (
                 Box::new(open_hw_with(dv)) as Box<dyn AmbeVoice>,
@@ -696,11 +725,23 @@ pub fn open_ambe_stream(
     mode: VocoderMode,
     trust: &VocoderTrust,
 ) -> Option<(Box<dyn AmbeStream>, AmbeBackend)> {
+    // The software vocoder only when asked for by name, and only for D-Star
+    // (`ambe_soft::open_stream` checks `software_backend_permitted`). Never a
+    // substitute for a missing dongle, and never for an AMBE+2 mode.
+    if prefer == Some(AmbeBackend::Software) {
+        #[cfg(feature = "dstar-soft-ambe")]
+        {
+            return crate::ambe_soft::open_stream(mode)
+                .map(|stream| (stream, AmbeBackend::Software));
+        }
+        #[cfg(not(feature = "dstar-soft-ambe"))]
+        {
+            return None;
+        }
+    }
     #[cfg(feature = "ambe-hw")]
     {
-        // `Hardware` is the only backend, so `None` (no opinion) and
-        // `Some(Hardware)` take the same path.
-        let _ = prefer;
+        // `None` (no opinion) means the dongle: it is the default backend.
         open_hw_stream_from_candidate_ports(mode, trust)
             .map(|stream| (stream, AmbeBackend::Hardware))
     }
@@ -709,6 +750,42 @@ pub fn open_ambe_stream(
     {
         let _ = (prefer, mode, trust);
         None
+    }
+}
+
+/// Open D-Star's vocoder by the operator's [`DstarVocoder`] choice: the
+/// trusted dongle for [`DstarVocoder::Dongle`], the software vocoder for
+/// [`DstarVocoder::Software`]. Never one in place of the other.
+///
+/// # Errors
+/// The sentence to show: for the dongle, [`classify_thumbdv_failure`]'s
+/// (no trusted vocoder, none attached, busy); for software in a build
+/// without `dstar-soft-ambe`,
+/// [`SOFTWARE_DSTAR_VOCODER_NOT_COMPILED`](crate::vocoder_choice::SOFTWARE_DSTAR_VOCODER_NOT_COMPILED).
+pub fn open_dstar_stream(
+    choice: crate::vocoder_choice::DstarVocoder,
+    trust: &VocoderTrust,
+) -> Result<(Box<dyn AmbeStream>, AmbeBackend), String> {
+    use crate::vocoder_choice::{DstarVocoder, SOFTWARE_DSTAR_VOCODER_NOT_COMPILED};
+    match choice {
+        DstarVocoder::Software => {
+            open_ambe_stream(Some(AmbeBackend::Software), VocoderMode::Dstar, trust)
+                .ok_or_else(|| SOFTWARE_DSTAR_VOCODER_NOT_COMPILED.to_string())
+        }
+        DstarVocoder::Dongle => {
+            open_ambe_stream(Some(AmbeBackend::Hardware), VocoderMode::Dstar, trust).ok_or_else(
+                || match classify_thumbdv_failure(trust) {
+                    // Nothing trusted, and this build has the other way to do
+                    // D-Star: say so, so it is easy to find. Still a refusal.
+                    ThumbDvFailure::NoTrustedVocoder
+                        if crate::vocoder_choice::software_dstar_vocoder_compiled() =>
+                    {
+                        crate::vocoder_choice::NO_TRUSTED_VOCODER_DSTAR.to_string()
+                    }
+                    failure => failure.message(),
+                },
+            )
+        }
     }
 }
 
@@ -4159,5 +4236,80 @@ mod vocoder_trust_hw_tests {
             Err(io::Error::from(io::ErrorKind::ResourceBusy))
         });
         assert_eq!(out.as_str(), "open_failed");
+    }
+}
+
+/// Backend selection (astar-dstar-perens): the software vocoder is D-Star
+/// only, opened only by name, and the dongle stays the default. Every test
+/// here runs with an EMPTY trust list, so nothing is enumerated or opened.
+#[cfg(test)]
+mod backend_selection_tests {
+    use super::*;
+    use crate::vocoder_choice::{
+        DstarVocoder, SOFTWARE_DSTAR_VOCODER_NOT_COMPILED, software_dstar_vocoder_compiled,
+    };
+
+    #[test]
+    fn only_dstar_may_have_a_software_backend() {
+        assert!(software_backend_permitted(VocoderMode::Dstar));
+        // AMBE+2 (US 8,359,197 until 2028-05-20): DMR, and System Fusion DN,
+        // which NXDN shares. Hardware only, whatever the build.
+        assert!(!software_backend_permitted(VocoderMode::Dmr));
+        assert!(!software_backend_permitted(VocoderMode::YsfDn));
+    }
+
+    #[test]
+    fn asking_for_software_never_opens_an_ambe_plus_2_mode() {
+        let none = VocoderTrust::none();
+        for mode in [VocoderMode::Dmr, VocoderMode::YsfDn] {
+            assert!(
+                open_ambe_stream(Some(AmbeBackend::Software), mode, &none).is_none(),
+                "{mode:?} must never get a software vocoder"
+            );
+        }
+    }
+
+    #[test]
+    fn no_preference_never_lands_on_software() {
+        // Empty trust: no dongle can be found, and the answer is "nothing",
+        // not a quiet software substitute.
+        let none = VocoderTrust::none();
+        assert!(open_ambe_stream(None, VocoderMode::Dstar, &none).is_none());
+        assert!(open_ambe(None, &none).is_none());
+        assert!(
+            open_dstar_stream(DstarVocoder::Dongle, &none).is_err(),
+            "the dongle choice with nothing trusted must fail, not fall back"
+        );
+    }
+
+    #[test]
+    fn software_for_dstar_follows_the_feature() {
+        let none = VocoderTrust::none();
+        let opened = open_ambe_stream(Some(AmbeBackend::Software), VocoderMode::Dstar, &none);
+        assert_eq!(opened.is_some(), software_dstar_vocoder_compiled());
+        if let Some((_, backend)) = opened {
+            assert_eq!(backend, AmbeBackend::Software);
+            assert_eq!(backend.as_str(), "software");
+        }
+        match open_dstar_stream(DstarVocoder::Software, &none) {
+            Ok((_, backend)) => {
+                assert!(software_dstar_vocoder_compiled());
+                assert_eq!(backend, AmbeBackend::Software);
+            }
+            Err(message) => {
+                assert!(!software_dstar_vocoder_compiled());
+                assert_eq!(message, SOFTWARE_DSTAR_VOCODER_NOT_COMPILED);
+            }
+        }
+        assert_eq!(
+            open_ambe(Some(AmbeBackend::Software), &none).is_some(),
+            software_dstar_vocoder_compiled()
+        );
+    }
+
+    #[test]
+    fn backend_abi_strings_are_fixed() {
+        assert_eq!(AmbeBackend::Hardware.as_str(), "thumbdv");
+        assert_eq!(AmbeBackend::Software.as_str(), "software");
     }
 }

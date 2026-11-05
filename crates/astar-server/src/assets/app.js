@@ -237,9 +237,26 @@ function render() {
   $("links-body").replaceChildren(...rows);
   // Only an operator who turned M17 on needs telling that it cannot decode.
   $("badge-m17codec").hidden = !(snap.m17_enabled && !snap.m17_available);
+  renderM17Relay(snap.m17_relay);
   renderDiscord(snap.discord);
   renderEchoLink(snap.echolink);
   renderPublic(snap.public);
+}
+
+// The M17 monitor joins the conference as a contributing member, so what a
+// reflector carries is relayed to every AllStar node and EchoLink station on
+// this node, and a linked radio transmits it. The node writes the warning,
+// counts included (snap.m17_relay, present only while M17 is enabled); this
+// shows it beside the links, before and while a reflector is monitored.
+function renderM17Relay(relay) {
+  const p = $("m17-relay-warning");
+  if (!relay || !relay.warning) {
+    p.hidden = true;
+    return;
+  }
+  const lead = snap.m17 ? "M17 reflector audio is being relayed. " : "Before you link an M17 reflector: ";
+  p.replaceChildren(el("strong", null, lead), document.createTextNode(relay.warning));
+  p.hidden = false;
 }
 
 // The public page's certificate and DNS, for the operator only: the public

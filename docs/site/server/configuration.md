@@ -296,6 +296,25 @@ audio is mixed into the conference, and the only packets the node ever sends
 the reflector are the ones that hold a link open: connect, the keepalive reply
 and disconnect.
 
+!!! warning "What the reflector carries goes out on the air"
+
+    The monitor is receive-only toward the reflector: it never sends voice to
+    it. But what it hears there is mixed into this node's conference, and the
+    conference relays it to every AllStar node linked to this one and every
+    EchoLink station on it. A linked node with a radio puts it on the air.
+
+    So link only reflectors whose traffic you would rebroadcast yourself, and
+    mind your licence's rules on retransmission.
+
+    In detail: a node or handset that dialled in to this one is sent the mix
+    all the time, so it hears the reflector the moment it speaks. A link this
+    node dialled in transceive, and an EchoLink station, are sent the mix
+    while someone else on the conference is talking, and the reflector is in
+    that mix. A link dialled as a monitor only (`*2`) is never sent anything.
+    The admin page, the settings page, `POST /m17` and Discord's `/dial m17`
+    all say this, with a count of who is connected at that moment, and the
+    node logs a line with the same count when the reflector accepts the link.
+
 ```toml
 [m17]                    # OPTIONAL. Absent = M17 off. Receive-only: no key here can transmit.
 enabled   = true         # default true when the section exists
@@ -363,15 +382,31 @@ no vocoder port at all, and never scans for one.
 ```toml
 [vocoder]                          # OPTIONAL. Absent = no vocoder is ever opened.
 trusted_serials = ["TESTSER1"]     # USB serial numbers, exactly as `vocoder list` shows them
+dstar = "dongle"                   # OPTIONAL. "dongle" (default) or "software"
 ```
 
 | Key | Default | Meaning |
 |---|---|---|
 | `trusted_serials` | `[]` | The serials of the sticks the node may open. Each is 1 to 64 printable ASCII characters with no spaces or commas, written exactly. Repeats are ignored. Read at start-up. |
+| `dstar` | `"dongle"` | Which vocoder D-Star uses. `"dongle"` is a trusted stick from `trusted_serials`. `"software"` is Bruce Perens' software AMBE vocoder, which needs no stick and opens no port. Exactly one of those two words; read at start-up. |
 
 A malformed serial is a start-up error, and so is any other key in the
 section: there is deliberately no `port`, `scan` or `any` key, because nothing
 may widen the list beyond the serials written down.
+
+**The D-Star vocoder.** D-Star's voice codec, AMBE 3600×2400, is out of patent,
+so astar can do it in software. `dstar = "software"` picks that instead of a
+stick. It is built into the static release (`just server-release`), so on a
+released node the switch is just this key; a plain `cargo build` leaves it out
+unless you add `--features dstar-soft-ambe`. In a build without it,
+`dstar = "software"` is a start-up error that names the feature: the node never
+quietly falls back to a stick you did not choose. The dongle stays the default
+when the key is absent.
+
+There is no such key for System Fusion, NXDN or DMR. Their codec, AMBE+2, is
+covered by US patent 8,359,197 until 2028-05-20, so they always use a stick.
+Writing `ysf = …`, `nxdn = …` or `dmr = …` here is a start-up error like any
+other unknown key.
 
 !!! danger "Why the node will not just find your stick"
 
@@ -418,11 +453,14 @@ container image is built without it. Without it, `list` finds nothing and
 **On the settings page.** The **Vocoders** card (`/settings#vocoder`) shows
 the list, and you can remove a stick from it. You can also type a serial in,
 but the page cannot probe it, so it asks you to confirm first. Use
-`vocoder add` where you can. Changes wait for a restart.
+`vocoder add` where you can. The same card has a **D-Star vocoder** picker
+for `dstar`; choosing Software in a build without it is refused when you
+save. Changes wait for a restart.
 
 **What uses it today.** `astar-server` has no D-Star leg of its own yet, so
-today the list only decides what the node *may* open. The station reads it at
-start-up, so any vocoder use that comes later is limited to these sticks.
+today the list only decides what the node *may* open, and `dstar` only decides
+which vocoder a D-Star connect would use. The station reads both at start-up,
+so any vocoder use that comes later follows them.
 
 ## `[discord]` — a Discord voice channel as a conference member
 

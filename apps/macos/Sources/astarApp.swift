@@ -117,9 +117,15 @@ struct AstarApp: App {
         /// open. A change is handed straight to the session's station, so the
         /// next D-Star/YSF/NXDN/DMR connect sees it; the session read the same
         /// stored list at launch, so the two start out agreeing.
-        lazy var vocoders = VocoderSettings(onTrustChanged: { [weak self] serials in
-            self?.session.applyVocoderTrust(serials)
-        })
+        lazy var vocoders = VocoderSettings(
+            onTrustChanged: { [weak self] serials in
+                self?.session.applyVocoderTrust(serials)
+            },
+            // D-Star's vocoder choice goes to the station the same way; the
+            // session read the same stored choice at launch.
+            onDStarVocoderChanged: { [weak self] vocoder in
+                self?.session.applyDStarVocoder(vocoder)
+            })
         private var statusController: StatusItemController?
         // Posts VoiceOver announcements for call-session events (astar-b167,
         // accessibility-audit F6) — a sibling of `statusController`, not owned

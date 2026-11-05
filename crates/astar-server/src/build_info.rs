@@ -11,6 +11,8 @@ pub const FEATURES: &[&str] = &[
     "stream-mp3",
     #[cfg(feature = "codec2-static")]
     "codec2-static",
+    #[cfg(feature = "dstar-soft-ambe")]
+    "dstar-soft-ambe",
     #[cfg(feature = "public-tls")]
     "public-tls",
     #[cfg(feature = "discord")]
@@ -96,6 +98,10 @@ mod tests {
             cfg!(feature = "stream-mp3")
         );
         assert_eq!(FEATURES.contains(&"auth"), cfg!(feature = "auth"));
+        assert_eq!(
+            FEATURES.contains(&"dstar-soft-ambe"),
+            cfg!(feature = "dstar-soft-ambe")
+        );
         assert_eq!(
             FEATURES.contains(&"dns-providers"),
             cfg!(feature = "dns-providers")

@@ -248,6 +248,11 @@ fn main() -> ExitCode {
         }
     };
 
+    // `[vocoder] dstar` (astar-dstar-perens): which vocoder a D-Star connect
+    // uses. Validated at load — an unknown value, or "software" in a build
+    // without the feature, already stopped the node — so this cannot fail.
+    station.set_dstar_vocoder(cfg.dstar_vocoder().expect("validated at load"));
+
     // Apply audio device selection from config.
     if let Some(audio) = &cfg.audio {
         station.set_devices(audio.input.clone(), audio.output.clone());

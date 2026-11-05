@@ -62,9 +62,10 @@ public final class CallSession: ObservableObject {
     /// `dstarAvailable` flag. Gates the D-Star picker segment
     /// (`Network.available(m17:dstar:)`).
     ///
-    /// Unlike `m17Available` this reports HARDWARE, not a build: D-Star voice
-    /// is AMBE and astar ships no software vocoder, so it is true only while a
-    /// ThumbDV is attached. The engine memoizes the probe process-wide, so a
+    /// Unlike `m17Available` this usually reports HARDWARE, not a build: with
+    /// the dongle chosen (the default) it is true only while a ThumbDV is
+    /// attached. With the software vocoder chosen (`dstarVocoder`), it is true
+    /// exactly when the build contains it. The engine memoizes the probe process-wide, so a
     /// dongle plugged in after launch does not appear until the next one.
     @Published public private(set) var dstarAvailable = false
 
@@ -432,6 +433,12 @@ public final class CallSession: ObservableObject {
     /// opens no vocoder at all, which is what turns "D-Star is unavailable"
     /// into "add a vocoder" in the connect refusal.
     @Published public private(set) var vocoderSerials: [String]
+
+    /// Which vocoder D-Star uses (Settings → Vocoders), as last handed to the
+    /// station: the dongle unless the operator chose software. Read from
+    /// `DStarVocoderPreference` over this session's defaults at init; changed
+    /// only through `applyDStarVocoder(_:)`. D-Star only.
+    @Published public private(set) var dstarVocoder: DStarVocoder
 
     /// Mic voice compression (dynamics) is engaged. Mirrors the station; toggled
     /// from the dialing page. Persisted via the audio store.
@@ -1026,6 +1033,7 @@ public final class CallSession: ObservableObject {
         // consent: an unstamped domain has never been asked.
         self.brandmeisterConsent = userDefaults.bool(forKey: Self.brandmeisterConsentKey)
         self.vocoderSerials = UserDefaultsVocoderTrustStore(userDefaults).serials()
+        self.dstarVocoder = DStarVocoderPreference.load(userDefaults)
         // EchoLink's own callsign, falling back to the operator's when none is
         // saved yet. Absent `autoLogin` reads false, the only safe direction.
         let storedEchoLinkCallsign = userDefaults.string(forKey: Self.echolinkCallsignKey) ?? ""
@@ -1033,6 +1041,9 @@ public final class CallSession: ObservableObject {
             storedEchoLinkCallsign.isEmpty ? m17Callsign : storedEchoLinkCallsign
         self.echolinkLocation = userDefaults.string(forKey: Self.echolinkLocationKey) ?? ""
         self.echolinkAutoLogin = userDefaults.bool(forKey: Self.echolinkAutoLoginKey)
+        // The station is built with the trust list in its config; the D-Star
+        // vocoder choice is a setter, so hand it over here.
+        try? station.setDStarVocoder(dstarVocoder)
     }
 
     /// Hand the station a new vocoder trust list (Settings → Vocoders added
@@ -1044,6 +1055,18 @@ public final class CallSession: ObservableObject {
             try station.setVocoderTrust(serials)
         } catch {
             NSLog("[astar] setVocoderTrust failed: %@", String(describing: error))
+        }
+    }
+
+    /// Hand the station D-Star's vocoder choice (Settings → Vocoders). A live
+    /// session keeps the vocoder it opened; the next D-Star connect, and the
+    /// next snapshot's `dstarAvailable`, see the new one.
+    public func applyDStarVocoder(_ vocoder: DStarVocoder) {
+        dstarVocoder = vocoder
+        do {
+            try station.setDStarVocoder(vocoder)
+        } catch {
+            NSLog("[astar] setDStarVocoder failed: %@", String(describing: error))
         }
     }
 
@@ -1165,6 +1188,7 @@ public final class CallSession: ObservableObject {
         // A rebuilt station is a new engine: give it the same trust list, so a
         // credential save can never quietly forget the operator's sticks.
         try? station.setVocoderTrust(vocoderSerials)
+        try? station.setDStarVocoder(dstarVocoder)
         if wasRunning { start() }
     }
 
@@ -1520,13 +1544,15 @@ public final class CallSession: ObservableObject {
         /// The D-Star dial field's text names nothing in the directory and
         /// does not parse as `host[:port]/module` either.
         case badDStarTarget
-        /// D-Star was dialled with no vocoder present. Refused here rather
-        /// than at the engine so the message can say what to do about it:
-        /// D-Star voice is AMBE, astar has no software vocoder, and a
-        /// ThumbDV is the only way to hear one. Defensive — the picker does
-        /// not offer D-Star without a dongle — but reachable if the dongle is
-        /// unplugged between the picker appearing and Connect being pressed.
+        /// D-Star was dialled with the dongle chosen and none present. Refused
+        /// here rather than at the engine so the message can say what to do
+        /// about it. Defensive — the picker does not offer D-Star without a
+        /// vocoder — but reachable if the dongle is unplugged between the
+        /// picker appearing and Connect being pressed.
         case dstarUnavailable
+        /// D-Star was dialled with the software vocoder chosen in a build that
+        /// does not contain it. Never answered by quietly using the dongle.
+        case dstarSoftwareVocoderMissing
         /// The YSF dial field's text names nothing in the directory and does
         /// not parse as `host[:port]` either.
         case badYSFTarget
@@ -1621,8 +1647,12 @@ public final class CallSession: ObservableObject {
                     + "or an address as host[:port]/module."
             case .dstarUnavailable:
                 return
-                    "D-Star needs a ThumbDV vocoder dongle attached — "
-                    + "astar has no software AMBE decoder."
+                    "D-Star needs a vocoder dongle attached, or the software "
+                    + "vocoder chosen in Settings → Vocoders."
+            case .dstarSoftwareVocoderMissing:
+                return
+                    "This build of astar doesn't include the software D-Star "
+                    + "vocoder. Choose the dongle in Settings → Vocoders."
             case .badYSFTarget:
                 return
                     "Enter a reflector name, or an address as host:port "
@@ -1654,8 +1684,8 @@ public final class CallSession: ObservableObject {
                 return
                     "DMR needs a ThumbDV vocoder dongle attached — "
                     + "astar has no software AMBE decoder."
-            case .noTrustedVocoder:
-                return Station.noTrustedVocoderMessage + "."
+            case .noTrustedVocoder(let network):
+                return VocoderSetupPrompt.noTrustedVocoderMessage(for: network)
             case .missingDMRRadioID:
                 return "Enter your DMR radio ID in Settings to connect via DMR."
             case .dmrRadioIDOutOfRange:
@@ -1905,6 +1935,9 @@ public final class CallSession: ObservableObject {
             throw ConnectError.missingCallsign
         }
         guard dstarAvailable else {
+            // The software vocoder needs no stick, so "add a vocoder" would be
+            // the wrong advice; it is only ever unavailable in a build without it.
+            if dstarVocoder == .software { throw ConnectError.dstarSoftwareVocoderMissing }
             if vocoderSerials.isEmpty { throw ConnectError.noTrustedVocoder(.dstar) }
             throw ConnectError.dstarUnavailable
         }
@@ -3768,6 +3801,9 @@ public func connectFailureMessage(for error: Error, node: String) -> String {
     // and it already says what to do. Shown as-is so the popover can pair it
     // with its "Open Settings → Vocoders" button (`VocoderSetupPrompt`).
     if VocoderSetupPrompt.offersSettings(for: stationError.detail) {
+        if VocoderSetupPrompt.offersSoftwareSwitch(for: stationError.detail) {
+            return VocoderSetupPrompt.dstarNoTrustedVocoderMessage + "."
+        }
         return Station.noTrustedVocoderMessage + "."
     }
     // Raw codes, not the IAX_ERR_* constants: those live in the CAstarStation C

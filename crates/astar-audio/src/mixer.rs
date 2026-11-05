@@ -61,6 +61,21 @@ const DEFAULT_FRAME_MS: i64 = 20;
 /// Samples of silence synthesised for an interpolation before any real frame
 /// has set the length (160 = 20 ms at 8 kHz).
 const DEFAULT_FRAME_SAMPLES: usize = 160;
+/// How far behind its own schedule a lane may play before the mixer throws
+/// the overdue audio away (`astar-el-hollow`).
+///
+/// `jitterbuf.c` hands back whatever is due by `now`, however long ago it
+/// fell due: after a stall it resumes on the oldest frame it still holds,
+/// and expects its caller to drain the backlog at once. The mixer cannot
+/// play faster than the device, so a backlog it played instead would stay
+/// for the rest of the call as plain delay, the stall's length added to
+/// every word that followed. A frame (or a hole) due more than this long ago
+/// is skipped instead, counted on top of the device callback's own length
+/// (a callback pulls everything that fell due since the last one). 60 ms
+/// sits above the slack a normal pull runs with and below anything a
+/// listener would call a delay.
+const OVERDUE_MS: i64 = 60;
+
 /// How long after a timestamped frame a lane still counts as mid-talk-spurt
 /// when the jitter buffer is switched OFF, matching the buffer's own
 /// `max_contig_interp × 20 ms`.
@@ -285,10 +300,13 @@ pub struct RxJitterCells {
     /// (a slow first second, a sender clock a hair fast), and `current`
     /// follows it below zero while the cushion never moves.
     pub depth_ms: AtomicU32,
-    /// `jitterbuf.c`'s own `frames_lost`: frames the buffer expected and did
-    /// not play. Usually an interpolation over a frame that never arrived, but
-    /// it also counts one the buffer chose to skip to shrink an over-deep
-    /// cushion, and a late arrival gives one back.
+    /// Frames received or expected and not played: `jitterbuf.c`'s own
+    /// `frames_lost` (usually an interpolation over a frame that never
+    /// arrived, sometimes a skipped slot while it shrinks an empty
+    /// cushion; a late arrival gives one back), plus the frames it dropped to
+    /// shrink an over-deep cushion while frames kept coming (its
+    /// `frames_dropped`), plus the overdue frames the mixer skipped after a
+    /// stall (`OVERDUE_MS`).
     pub frames_lost: AtomicU64,
     /// Frames that arrived after their play time and were thrown away.
     pub frames_late: AtomicU64,
@@ -306,15 +324,17 @@ impl RxJitterCells {
         self.frames_ooo.store(0, Ordering::Relaxed);
     }
 
-    fn publish(&self, info: &astar_codec::jitter::JitterStats) {
+    fn publish(&self, info: &astar_codec::jitter::JitterStats, overdue: i64) {
         let clamp_u32 = |v: i64| u32::try_from(v.max(0)).unwrap_or(u32::MAX);
         let clamp_u64 = |v: i64| u64::try_from(v.max(0)).unwrap_or(u64::MAX);
         self.jitter_ms
             .store(clamp_u32(info.jitter), Ordering::Relaxed);
         self.depth_ms
             .store(clamp_u32(info.current - info.min), Ordering::Relaxed);
-        self.frames_lost
-            .store(clamp_u64(info.frames_lost), Ordering::Relaxed);
+        self.frames_lost.store(
+            clamp_u64(info.frames_lost + info.frames_dropped + overdue),
+            Ordering::Relaxed,
+        );
         self.frames_late
             .store(clamp_u64(info.frames_late), Ordering::Relaxed);
         self.frames_ooo
@@ -341,6 +361,10 @@ struct LaneJitter {
     /// Most recent frame length in samples — how much silence one
     /// interpolation is worth on this bus.
     frame_samples: usize,
+    /// Frames thrown away because they fell due more than [`OVERDUE_MS`]
+    /// before the mixer could play them. Reported with the buffer's own
+    /// lost frames: either way, audio that was received and not played.
+    overdue: i64,
 }
 
 impl LaneJitter {
@@ -351,6 +375,7 @@ impl LaneJitter {
             now_base,
             frame_ms: DEFAULT_FRAME_MS,
             frame_samples: DEFAULT_FRAME_SAMPLES,
+            overdue: 0,
         }
     }
 
@@ -476,15 +501,28 @@ impl Lane {
     fn pull(&mut self, need: usize, now: i64) {
         let Some(jb) = self.jb.as_mut() else { return };
         let now = now - jb.now_base;
+        // A callback asking for `need` samples legitimately pulls frames that
+        // fell due up to its own length ago; only what is older than that
+        // AND the allowance is overdue.
+        let callback_ms = i64::try_from(need)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(jb.frame_ms)
+            / i64::try_from(jb.frame_samples.max(1)).unwrap_or(i64::MAX);
+        let overdue_before = now - OVERDUE_MS - callback_ms;
         while self.residual.len() < need {
             // Pace against the buffer's own schedule: `get` hands frames back
             // as fast as it is asked, so without this the first callback of a
             // talk spurt would drain the whole cushion it just built.
-            match jb.buf.next() {
-                Some(due) if due <= now => {}
+            let due = match jb.buf.next() {
+                Some(due) if due <= now => due,
                 _ => break,
-            }
+            };
+            // Behind schedule (a stall, then a burst): what fell due too long
+            // ago is skipped, not played late for good. See `OVERDUE_MS`.
+            let overdue = due < overdue_before;
             match jb.buf.get(now, jb.frame_ms) {
+                GetResult::Ok(_) if overdue => jb.overdue += 1,
+                GetResult::Interpolate if overdue => {}
                 GetResult::Ok(frame) => {
                     if !frame.data.is_empty() {
                         jb.frame_samples = frame.data.len();
@@ -506,7 +544,7 @@ impl Lane {
                 GetResult::Empty | GetResult::NoFrame => break,
             }
         }
-        self.stats.publish(jb.buf.info());
+        self.stats.publish(jb.buf.info(), jb.overdue);
     }
 
     /// Has this lane run dry with somebody still talking? The buffer's own
@@ -863,6 +901,75 @@ mod tests {
         assert_eq!(holes, 0, "no gaps once the buffer has settled");
         assert!(played > 30 * 160, "and the stream keeps playing: {played}");
         assert_eq!(mixer.underruns(), 0, "a working buffer underruns nothing");
+    }
+
+    /// A stall long enough to send the buffer into silence mode (900 ms, a
+    /// Wi-Fi hiccup), with the held frames then arriving all at once, must
+    /// not leave the lane playing that far behind for the rest of the call.
+    /// `jitterbuf.c` resumes on the oldest frame it still has and leaves it to
+    /// the caller to catch up on what is overdue; the mixer, which plays at
+    /// the device's pace and never faster, has to throw the overdue audio
+    /// away, or the stall's length becomes a delay that never goes.
+    #[test]
+    fn a_stall_and_a_burst_do_not_leave_the_lane_behind() {
+        let (clock, cell) = MixerClock::fake();
+        let mut mixer = Mixer::new().with_clock(clock);
+        let (tx, rx) = channel();
+        let id = mixer.add_call(rx);
+        let stats = mixer.jitter_cells(id).expect("lane present");
+        let mut out = [0.0_f32; 160];
+        let stall = 5_000..5_900_i64;
+        let mut latency_before = Vec::new();
+        let mut latency_after = Vec::new();
+        let mut last_id = 0_i16;
+        for step in 0..1_000_i64 {
+            let now = step * 20;
+            cell.store(now, Ordering::Relaxed);
+            // Frame k is stamped k*20 and normally arrives 30 ms later; any
+            // whose arrival falls inside the stall arrives when it ends.
+            for k in 0..=step {
+                let ts = k * 20;
+                let arrive = ts + 30;
+                let at = if stall.contains(&arrive) {
+                    stall.end
+                } else {
+                    arrive
+                };
+                if at > now - 20 && at <= now {
+                    let level = i16::try_from(k + 1).unwrap();
+                    tx.send(timed(level, ts)).unwrap();
+                }
+            }
+            let n = mixer.read(&mut out);
+            if let Some(&s) = out[..n].iter().find(|s| **s != 0.0) {
+                #[allow(clippy::cast_possible_truncation)]
+                let level = (s * 32_768.0).round() as i16;
+                assert!(
+                    level >= last_id,
+                    "frame {level} played after frame {last_id}"
+                );
+                last_id = level;
+                let lat = now - (i64::from(level) - 1) * 20;
+                if now < stall.start {
+                    latency_before.push(lat);
+                } else if now > stall.end + 5_000 {
+                    latency_after.push(lat);
+                }
+            }
+        }
+        let before = *latency_before.last().unwrap();
+        let after = *latency_after.last().unwrap();
+        // The bound: the network's 30 ms, the buffer's 200 ms ceiling, the
+        // overdue allowance and its 20 ms callback, and one more callback. Played rather than
+        // skipped, the backlog would sit at the stall's own length.
+        let bound = 30 + i64::from(RxJitterConfig::default().max_ms) + OVERDUE_MS + 2 * 20;
+        assert!(
+            after <= bound,
+            "{before} ms behind before the stall, {after} ms after it, over {bound} ms ({} frames \
+             lost, {} late)",
+            stats.frames_lost.load(Ordering::Relaxed),
+            stats.frames_late.load(Ordering::Relaxed)
+        );
     }
 
     /// A single frame that is 30 ms late is absorbed by the 40 ms of slack —

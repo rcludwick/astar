@@ -113,6 +113,7 @@ Returns a point-in-time snapshot:
 | `links` | Live node-to-node links — the `app_rpt` `RPT_LINKS` analogue. |
 | `m17` | The node's M17 monitor, present only while one exists — see `POST /m17` below. It is never listed in `links`. |
 | `m17_enabled` | `true` when `node.toml` has an `[m17]` section with `enabled = true`. |
+| `m17_relay` | Present only while `m17_enabled`: `relays_to` (`allstar`, `echolink`), who would hear a monitored reflector right now, and `warning`, the sentence the admin and settings pages show. Counted the same way as the `POST /m17` reply. |
 | `m17_available` | `true` when a Codec 2 decoder was found. The status page shows an **M17: no codec** badge when M17 is enabled and this is `false`. |
 | `echolink` | The node's EchoLink leg, present only when `node.toml` has an `[echolink]` section — see `POST /echolink` below. |
 | `echolink_enabled` | `true` when `node.toml` has an `[echolink]` section. |
@@ -241,6 +242,15 @@ conference. The only packets the node sends the reflector are connect, the
 keepalive reply and disconnect. It is off unless `node.toml` has an `[m17]`
 section — see [Configuration](configuration.md).
 
+!!! warning "The reflector's audio is relayed, and linked radios transmit it"
+
+    Receive-only means the node never sends voice to the reflector. What it
+    hears there is mixed into the conference and relayed to every AllStar node
+    linked to this node and every EchoLink station on it, and a linked node
+    with a radio puts it on the air. Link only reflectors whose traffic you
+    would rebroadcast, and mind your licence's rules on retransmission. The
+    reply to a `monitor` says so, with counts (see below).
+
 ```json
 { "action": "monitor", "reflector": "M17-USA", "module": "C", "callsign": "AJ7HR" }
 ```
@@ -259,6 +269,13 @@ section — see [Configuration](configuration.md).
   uppercased, and so are `reflector` and `module`.
 * **One monitor at a time.** It can run beside AllStar links. It has its own
   `m17` field in `GET /status` and its own `m17` event.
+* A `monitor` that is accepted answers `{"ok":true}` plus two fields:
+  `relays_to`, how many members are connected at that moment and will hear
+  the reflector, and `warning`, the sentence that says so. `allstar` counts
+  the IAX2 legs that dialled in to this node and the links it dialled in
+  transceive; a monitor-only link is never sent the mix, so it is not
+  counted. `echolink` counts the EchoLink stations on the node's leg. A
+  client that reads only `ok` sees what it always did.
 * `{"ok":true}` means the monitor has **started** linking, not that the
   reflector answered. Watch for the `connected` event, or for `m17.state`
   becoming `linked`.
@@ -283,7 +300,8 @@ curl -X POST http://127.0.0.1:8730/m17 \
 | `module` is not exactly one character | `400` | `{"error":"bad request: module is one letter, A to Z"}` |
 | `disconnect` with no monitor up | `500` | `{"error":"No M17 link is up."}` |
 | The node refuses the dial | `500` | `{"error":"<one sentence>"}`, from the table below |
-| Success | `200` | `{"ok":true}` |
+| `monitor` accepted | `200` | `{"ok":true,"relays_to":{"allstar":3,"echolink":1},"warning":"The node never sends voice to an M17 reflector, … Right now that is 3 AllStar connections and 1 EchoLink station, and any of them with a radio will transmit what this reflector carries."}` |
+| `disconnect` accepted | `200` | `{"ok":true}` |
 
 The node's refusals, in the order it checks them:
 
@@ -309,7 +327,8 @@ An unknown reflector is refused before any socket opens.
 {
   "m17": {"reflector":"M17-USA","module":"C","target":"M17-USA C","callsign":"AJ7HR","state":"linked","receiving":false,"talker":"KC1ABC","talker_secs_ago":3,"up_secs":125,"dropped_packets":0,"directory_generated":"2026-09-15"},
   "m17_enabled": true,
-  "m17_available": true
+  "m17_available": true,
+  "m17_relay": {"relays_to":{"allstar":3,"echolink":1},"warning":"The node never sends voice to an M17 reflector, …"}
 }
 ```
 

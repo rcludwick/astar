@@ -23,7 +23,7 @@
         @State private var advancedExpanded = false
 
         var body: some View {
-            Section("Recording") {
+            SettingsSection(.recording) {
                 VStack(alignment: .leading, spacing: 10) {
                     Picker("Layout", selection: $session.recordingSettings.layout) {
                         Text("Stereo — Them left, you right").tag(RecordingLayout.stereo)

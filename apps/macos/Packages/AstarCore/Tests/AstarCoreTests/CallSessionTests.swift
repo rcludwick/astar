@@ -199,6 +199,10 @@ final class FakeStation: StationDriving {
         codecDirs.append(dirs)
     }
     /// Every trust list the session handed the station, in order.
+    private(set) var dstarVocoderCalls: [DStarVocoder] = []
+    func setDStarVocoder(_ vocoder: DStarVocoder) throws {
+        dstarVocoderCalls.append(vocoder)
+    }
     private(set) var vocoderTrustCalls: [[String]] = []
     func setVocoderTrust(_ serials: [String]) throws {
         vocoderTrustCalls.append(serials)

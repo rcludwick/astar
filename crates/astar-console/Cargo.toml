@@ -22,18 +22,18 @@ astar-ysf = { path = "../astar-ysf", optional = true }
 # 33-byte network frame and a link FSM, plus a loopback reflector to test
 # against. Pure but for that reflector; optional + gated behind the `nxdn`
 # feature (OFF by default — see below).
-astar-nxdn = { path = "../astar-nxdn", version = "0.1.18-beta", optional = true }
+astar-nxdn = { path = "../astar-nxdn", version = "0.1.19-beta", optional = true }
 # DMR protocol primitives (iax-d4f7): the homebrew/MMDVM wire, the 33-byte
 # burst, a link FSM and a loopback master to test against. Pure but for that
 # master; optional + gated behind the `dmr` feature (OFF by default — see
 # below).
-astar-dmr = { path = "../astar-dmr", version = "0.1.18-beta", optional = true }
+astar-dmr = { path = "../astar-dmr", version = "0.1.19-beta", optional = true }
 # Underlay socket for applying a deferred `WireGuard` link transport when the
 # engine is first built (iax-5bbd); config/status types come via `astar-iax`.
 astar-wireguard = { path = "../astar-wireguard" }
 # Recording taps only (`Tap`, `TapSlot`, `FrameEvent`): no writer, so no
 # FLAC/tar code is linked into the console.
-astar-record = { path = "../astar-record", version = "0.1.18-beta", default-features = false }
+astar-record = { path = "../astar-record", version = "0.1.19-beta", default-features = false }
 # StreamID generation for the M17 TX path (iax-f2b8 Task 3); optional, only
 # pulled in by the `m17` feature.
 rand = { workspace = true, optional = true }
@@ -78,7 +78,7 @@ default = ["m17", "device-audio", "echolink"]
 # reaches it) so astar-server's release can drop cpal; `device-audio` below
 # puts it back, and it is on by default.
 device-audio = ["astar-audio/device-audio", "astar-iax/device-audio"]
-serde = ["dep:serde", "astar-iax-core/serde", "astar-iax/serde"]
+serde = ["dep:serde", "astar-iax-core/serde", "astar-iax/serde", "astar-audio/serde"]
 # M17 digital-voice client runtime (iax-f2b8 Task 3), default ON. Pulls in
 # `astar-m17` (pure protocol code, no I/O, no extra deps) and enables
 # `astar-codec`'s `codec2-runtime` feature: a `dlopen`/`libloading`-based
@@ -103,15 +103,23 @@ m17 = ["dep:astar-m17", "dep:rand", "astar-codec/codec2-runtime"]
 codec2-static = ["astar-codec/codec2-static"]
 # D-Star (DExtra) full-transceive digital-voice client runtime (iax-a9d4
 # Task 6 built RX; iax-2f6b added TX). Unlike `m17`, this is NOT part of
-# `default`. D-Star is hardware-only (iax-b3e7 M0): it depends on
-# `astar-codec/ambe-hw` (the `ThumbDV` USB dongle backend) — no
-# software-codec fallback, no preference knob. The vocoder driver it pulls
+# `default`. It depends on `astar-codec/ambe-hw` (the `ThumbDV` USB dongle
+# backend), the default and, without `dstar-soft-ambe` below, the only D-Star
+# vocoder. There is never a fallback from one vocoder to the other. The vocoder driver it pulls
 # (`ambe-thumbdv`) is vendored in-tree as a path dependency (see
 # `vendor/ambe-thumbdv/VENDORED.md`), so no build ever needs network access
 # to fetch it. Verify with `cargo tree -p astar-console` (no ambe-*) vs
 # `cargo tree -p astar-console --features dstar` (`ambe-thumbdv`
 # present).
 dstar = ["dep:astar-dstar", "astar-codec/ambe-hw"]
+# The software D-Star vocoder beside the dongle (astar-dstar-perens): Bruce
+# Perens' AMBE 3600x2400, LGPL-3.0-or-later, vendored at
+# vendor/ham-digital-modes-ambe. Not a cargo default; the shipped builds turn
+# it on by name (ci/guard-dstar-soft-ambe.sh). It does not turn D-Star on by itself; with
+# `dstar` also on, `ConsoleSession::set_dstar_vocoder(Software)` makes D-Star
+# connects use it. D-Star ONLY: YSF, NXDN and DMR are AMBE+2 and stay
+# hardware-only whatever this says.
+dstar-soft-ambe = ["astar-codec/dstar-soft-ambe"]
 # System Fusion (iax-e8a4 link layer, astar-e7b3 §2 audio). Like `dstar` and
 # unlike `m17`, this is NOT part of `default`, and for the same reason: YSF
 # voice is AMBE+2, there is no software AMBE, so decoding it needs

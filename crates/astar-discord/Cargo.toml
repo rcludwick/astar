@@ -20,8 +20,8 @@ test-support = []
 
 [dependencies]
 # No sound devices of its own: the bridge is a conference member.
-astar-audio = { path = "../astar-audio", version = "0.1.18-beta", default-features = false }
-astar-iax = { path = "../astar-iax", version = "0.1.18-beta", default-features = false }
+astar-audio = { path = "../astar-audio", version = "0.1.19-beta", default-features = false }
+astar-iax = { path = "../astar-iax", version = "0.1.19-beta", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

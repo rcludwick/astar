@@ -850,7 +850,9 @@ fn dstar_connect_with_an_empty_trust_list_is_refused_by_name() {
     assert!(station.vocoder_trust().is_empty());
     assert!(!station.dstar_available());
     match station.dstar_connect("127.0.0.1", 30_001, 'A', "N0CALL", None) {
-        Err(StationError::Dstar(msg)) => assert_eq!(msg, astar_station::NO_TRUSTED_VOCODER),
+        Err(StationError::Dstar(msg)) => {
+            assert!(msg.starts_with(astar_station::NO_TRUSTED_VOCODER), "{msg}");
+        }
         other => panic!("expected StationError::Dstar(NO_TRUSTED_VOCODER), got {other:?}"),
     }
     assert!(station.dstar_state().is_none());

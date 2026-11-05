@@ -77,6 +77,12 @@ pub trait NodeOps {
     /// put audio on the reflector. The node resolves the name from its own
     /// configuration.
     ///
+    /// `Ok` carries the node's warning about where the reflector's audio
+    /// goes: the monitor never sends voice to the reflector, but the node
+    /// relays what it hears to every `AllStar` and `EchoLink` member, and a
+    /// linked radio transmits it. The reply and the channel line both quote
+    /// it, so nobody dials without being told.
+    ///
     /// # Errors
     /// The node's own message, which is shown to the caller verbatim.
     fn dial_m17_monitor(
@@ -84,7 +90,7 @@ pub trait NodeOps {
         reflector: &str,
         module: char,
         callsign: &str,
-    ) -> Result<(), String>;
+    ) -> Result<String, String>;
     /// Hang up one link.
     ///
     /// # Errors
@@ -1253,21 +1259,28 @@ impl Commander {
                         if !self.dial_is_clear(it, gw, node) {
                             return;
                         }
-                        if let Err(e) = node.dial_m17_monitor(&reflector, module, &callsign) {
-                            gw.reply(it, &format!("Couldn't dial: {e}"));
-                            return;
-                        }
+                        let warning = match node.dial_m17_monitor(&reflector, module, &callsign) {
+                            Ok(w) => w,
+                            Err(e) => {
+                                gw.reply(it, &format!("Couldn't dial: {e}"));
+                                return;
+                            }
+                        };
                         let target = LinkRef::m17(&reflector, module).target;
                         gw.reply(
                             it,
-                            &format!("Dialling M17 {target} as {callsign} (receive-only)…"),
+                            &format!(
+                                "Dialling M17 {target} as {callsign} (receive-only)…\n{warning}"
+                            ),
                         );
                         let id = caller.id;
                         // The callsign goes into the public line on purpose:
                         // it is the identity the reflector now shows, and
                         // this line is the only record of who presented it.
+                        // The warning goes in too: everyone in the channel
+                        // should know the node now relays this reflector.
                         gw.announce(&format!(
-                            "<@{id}> → M17 {target} (receive-only, as {callsign})"
+                            "<@{id}> → M17 {target} (receive-only, as {callsign})\n{warning}"
                         ));
                         self.link = Some(LinkInfo {
                             network: Network::M17,
@@ -1968,6 +1981,10 @@ impl GatewayOps for RecordingOps {
     }
 }
 
+/// What `TestNode::dial_m17_monitor` answers on success, standing in for
+/// the node's relay warning.
+pub const TEST_RELAY_WARNING: &str = "Relay warning: linked radios transmit this reflector.";
+
 /// A [`NodeOps`] with no node behind it.
 #[derive(Debug, Default)]
 pub struct TestNode {
@@ -2019,13 +2036,13 @@ impl NodeOps for TestNode {
         reflector: &str,
         module: char,
         callsign: &str,
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
         // Recorded first, for the same reason as above.
         self.dialled_m17
             .push((reflector.to_string(), module, callsign.to_string()));
         match &self.fail_dial {
             Some(e) => Err(e.clone()),
-            None => Ok(()),
+            None => Ok(TEST_RELAY_WARNING.to_string()),
         }
     }
 
@@ -2054,7 +2071,8 @@ mod tests {
         AUDIO_STOPPED, BOT_OFF, BRIDGE_NOT_JOINED, Commander, DSTAR_NOT_WIRED, JOIN_VOICE_FIRST,
         LinkInfo, LinkRef, MUTE_PERMISSION, NEED_CALLSIGN, NOBODY_HAS_MIC, NOT_ADMIN,
         NOT_APPROVED_DIAL, NOT_APPROVED_LINK, NOT_APPROVED_MIC, NOT_APPROVER, NOT_THE_HOLDER,
-        NOTHING_LINKED, Network, REQUEST_BANNED, RecordingOps, TestNode, WRITE_FAILED, link_labels,
+        NOTHING_LINKED, Network, REQUEST_BANNED, RecordingOps, TEST_RELAY_WARNING, TestNode,
+        WRITE_FAILED, link_labels,
     };
     use crate::approvals::{Approvals, UserEntry};
     use crate::commands::{
@@ -2801,12 +2819,16 @@ mod tests {
             gw.replies,
             vec![(
                 IT,
-                "Dialling M17 M17-USA C as AJ7HR (receive-only)…".to_string()
-            )]
+                format!("Dialling M17 M17-USA C as AJ7HR (receive-only)…\n{TEST_RELAY_WARNING}")
+            )],
+            "the caller is told, in the reply, what the node's warning says"
         );
         assert_eq!(
             gw.announced,
-            vec!["<@300> → M17 M17-USA C (receive-only, as AJ7HR)".to_string()]
+            vec![format!(
+                "<@300> → M17 M17-USA C (receive-only, as AJ7HR)\n{TEST_RELAY_WARNING}"
+            )],
+            "and so is the whole channel"
         );
         assert_eq!(
             c.view().link,

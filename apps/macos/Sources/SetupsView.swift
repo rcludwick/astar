@@ -14,6 +14,7 @@
         @EnvironmentObject private var setups: SetupController
         // Reactive, hotplug-backed device list (no enumeration on appear).
         @EnvironmentObject private var deviceMonitor: AudioDeviceMonitor
+        @EnvironmentObject private var disclosure: SettingsDisclosure
 
         /// The settings `List`'s own scroll proxy, so + can scroll a newly created
         /// card into view instead of leaving it appended below the fold.
@@ -22,7 +23,7 @@
         /// Rendered inside the Settings `List`, so `.onMove` gives a native macOS
         /// drag-to-reorder (proper move cursor — no copy "+").
         var body: some View {
-            Section {
+            SettingsSection(.savedConfigs) {
                 // The built-in System Default always sits at the top (astar-1f7d).
                 // It is a real, selectable config — not a hidden fallback — so a
                 // fresh install can see what it is running on and get back to a
@@ -59,17 +60,23 @@
                         .fixedSize(horizontal: false, vertical: true)
                         .listRowSeparator(.hidden)
                 }
-            } header: {
-                HStack {
-                    Text("Saved configs")
-                    Spacer(minLength: 8)
-                    AddButton(help: "Add a new config") {
-                        let new = setups.addNew()
-                        // The row has to mount before it can be scrolled to; the
-                        // list rebuilds on the next pass.
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                            withAnimation { scroll.scrollTo(new.id, anchor: .center) }
+            } accessory: {
+                AddButton(help: "Add a new config") {
+                    // A new card in a folded section would be invisible: open
+                    // the section first, so the card appears expanded with its
+                    // name field focused (`focusNewID`), as it always has.
+                    let wasOpen = disclosure.isExpanded(.savedConfigs)
+                    if !wasOpen {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            disclosure.setExpanded(.savedConfigs, true)
                         }
+                    }
+                    let new = setups.addNew()
+                    // The row has to mount before it can be scrolled to; the
+                    // list rebuilds on the next pass. Opening the section
+                    // mounts every row at once, so give that its animation.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + (wasOpen ? 0.05 : 0.25)) {
+                        withAnimation { scroll.scrollTo(new.id, anchor: .center) }
                     }
                 }
             }

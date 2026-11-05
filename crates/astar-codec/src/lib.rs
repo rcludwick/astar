@@ -26,6 +26,17 @@ pub mod codec2;
 #[cfg(feature = "ambe-hw")]
 pub mod ambe;
 
+/// Which vocoder D-Star uses: the dongle (the default) or, in a build with
+/// the opt-in `dstar-soft-ambe` feature, the software one. Always compiled, so
+/// configuration can name the choice in every build. D-Star only: there is no
+/// such choice for DMR, NXDN or System Fusion.
+pub mod vocoder_choice;
+
+/// The software D-Star vocoder (`dstar-soft-ambe`, off by default): Bruce
+/// Perens' AMBE 3600x2400 behind [`ambe::AmbeStream`]. D-Star only.
+#[cfg(feature = "dstar-soft-ambe")]
+pub(crate) mod ambe_soft;
+
 /// Vocoder trust and enrolment: which AMBE sticks may be opened. Always
 /// compiled, so configuration can carry it in every build.
 pub mod vocoder_trust;

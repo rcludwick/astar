@@ -414,6 +414,12 @@ pub struct NodeSnapshot {
     /// `Station::m17_available()`: a Codec 2 decoder can be loaded. With
     /// `m17_enabled` it drives the page's "M17: no codec" chip.
     pub m17_available: bool,
+    /// Who the M17 monitor's audio reaches right now, and the warning that
+    /// says so. Present exactly when `m17_enabled`: the monitor contributes
+    /// to the conference, so whatever the reflector carries is relayed to the
+    /// node's `AllStar` and `EchoLink` members.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub m17_relay: Option<crate::m17_relay::M17RelayStatus>,
     /// The node's `EchoLink` login and the stations on its leg. `Some`
     /// exactly when `[echolink]` is configured. Never carries the password.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -622,6 +628,7 @@ mod tests {
             m17: None,
             m17_enabled: false,
             m17_available: false,
+            m17_relay: None,
             echolink: None,
             echolink_enabled: false,
             public: None,
@@ -698,6 +705,7 @@ mod tests {
             m17: None,
             m17_enabled: false,
             m17_available: false,
+            m17_relay: None,
             echolink: None,
             echolink_enabled: false,
             public: None,
@@ -823,6 +831,7 @@ mod tests {
             m17: None,
             m17_enabled: false,
             m17_available: false,
+            m17_relay: None,
             echolink: None,
             echolink_enabled: false,
             public: None,

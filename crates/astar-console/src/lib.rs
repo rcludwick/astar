@@ -65,8 +65,6 @@ pub use nxdn::{NxdnConfig, NxdnLink, NxdnSnapshot};
 pub use parrot::{LocalParrot, ParrotPhase, ParrotShared, calibrate_mic};
 #[cfg(feature = "dmr")]
 pub use session::dmr_available;
-#[cfg(feature = "dstar")]
-pub use session::dstar_available;
 #[cfg(feature = "nxdn")]
 pub use session::nxdn_available;
 #[cfg(feature = "ysf")]
@@ -75,6 +73,8 @@ pub use session::{
     AnswerPolicy, ConsoleConfig, ConsoleError, ConsoleSession, LinkConnectSpec, LinkKeyResolver,
     RecordTaps, RegisterOutcome, list_devices, m17_available, resolve_device,
 };
+#[cfg(feature = "dstar")]
+pub use session::{dstar_available, dstar_available_with};
 pub use state::{CallSnapshot, CallStatus, ConsoleState, OperatingMode, VoiceFormat};
 pub use tracer::{TimelineEvent, Tracer};
 #[cfg(feature = "ysf")]

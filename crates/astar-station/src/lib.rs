@@ -40,6 +40,11 @@ mod error;
 mod event;
 mod station;
 
+/// The D-Star vocoder choice (astar-dstar-perens): the dongle by default, or
+/// the software vocoder in a `dstar-soft-ambe` build. D-Star only.
+pub use astar_codec::vocoder_choice::{
+    DstarVocoder, SOFTWARE_DSTAR_VOCODER_NOT_COMPILED, software_dstar_vocoder_compiled,
+};
 /// Vocoder trust and enrolment (on-air safety): which AMBE sticks may be
 /// opened, and the one user action that adds one.
 pub use astar_codec::vocoder_trust::{

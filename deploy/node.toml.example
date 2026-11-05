@@ -249,6 +249,14 @@ source = "file"    # "file"    → credentials.toml beside this file, mode 0600,
 # The callsign the reflector sees is the dialler's: the one they registered
 # with /register in Discord, or the `callsign` field of a POST /m17 body.
 #
+# WARNING — what the reflector carries goes out on the air. Receive-only means
+# the node never sends voice TO the reflector. What it hears there is mixed
+# into this node's conference and relayed to every AllStar node connected to
+# it (nodes that dialled in, and links this node dialled in transceive) and to
+# every EchoLink station on it, and a connected node with a radio transmits
+# it. Link only reflectors whose traffic you would rebroadcast, and mind your
+# licence's rules on retransmission.
+#
 # enabled = true          # default true once the section exists
 # directory = "bundled"   # "bundled" = the dated hamcall-db snapshot compiled
 #                         # into astar-server (CC BY 4.0; /status shows its

@@ -8,8 +8,8 @@
 //! the Rust `JitterBuf` here, the result formatted to match the C harness
 //! line-for-line, and diffed against the committed `${trace}.out` golden.
 //! See `harness/jitter_parity/README.md` for trace format details and the
-//! one known divergence (the shrink-with-frame voice branch — see
-//! ticket `iax-9c62`).
+//! history of the one known divergence (the shrink-with-frame voice branch,
+//! ticket `iax-9c62`, restored 2026-11-02).
 
 use std::fmt::Write as _;
 use std::fs;

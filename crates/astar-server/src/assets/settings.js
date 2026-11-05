@@ -1738,6 +1738,26 @@ document.addEventListener("click", (e) => {
 const M17_HINT_OFF =
   "Off: nobody can dial M17 from Discord or POST /m17. A dial presents the dialler's callsign to someone else's reflector.";
 const M17_HINT_ON = "Applies to the next dial. A monitor that is already up stays up until it is hung up.";
+// The monitor never sends voice to a reflector, but it contributes to the
+// conference: whatever the reflector carries is relayed to every AllStar node
+// and EchoLink station on this node, and a linked radio transmits it. The same
+// sentence as M17_RELAY_WARNING in m17_relay.rs (a test pins that). The count
+// of who is connected right now comes from /status, which writes it.
+const M17_RELAY_WARNING =
+  "The node never sends voice to an M17 reflector, but it relays what it hears there to every AllStar node and EchoLink station connected to it, and a connected node with a radio puts that on the air. Link only reflectors whose traffic you would rebroadcast, and mind your licence's rules on retransmission.";
+
+function m17RelayWarning() {
+  const p = el("p", "banner warn", M17_RELAY_WARNING);
+  p.id = "m17-relay-warning";
+  p.setAttribute("role", "note");
+  fetch("status", { cache: "no-store", headers: { Accept: "application/json" } })
+    .then((res) => (res.ok ? res.json() : null))
+    .then((st) => {
+      if (st && st.m17_relay && st.m17_relay.warning) p.textContent = st.m17_relay.warning;
+    })
+    .catch(() => {});
+  return p;
+}
 // A [m17.reflectors] entry's wire path is m17.reflectors."<NAME>".
 const REFLECTOR_PREFIX = 'm17.reflectors."';
 
@@ -1870,6 +1890,7 @@ function renderCardM17() {
 
   const main = el("div");
   main.append(
+    m17RelayWarning(),
     field(card, "m17.enabled", {
       label: "Listen to M17 reflectors",
       kind: "bool",
@@ -1913,6 +1934,11 @@ const VOCODER_HINT =
 const VOCODER_HOWTO =
   "To add a stick safely, run astar-server vocoder add <serial> --config <node.toml> on the node: it probes the stick with DTR/RTS held low, and writes the serial here only if an AMBE-3000 answered. astar-server vocoder list shows the candidates without opening anything. A serial typed here is trusted without that check.";
 
+// [vocoder] dstar (astar-dstar-perens): D-Star only. System Fusion, NXDN and
+// DMR have no such key, because their AMBE+2 vocoder is still patented.
+const VOCODER_DSTAR_HINT =
+  "Which vocoder D-Star uses. Software needs no stick but only exists in an astar-server built with the dstar-soft-ambe feature; the node refuses to start with it otherwise. System Fusion, NXDN and DMR always use the dongle: their AMBE+2 vocoder is covered by US patent 8,359,197 until 2028-05-20. Takes effect at the next start.";
+
 function renderCardVocoder() {
   const card = "vocoder";
   if (dirty.has(card)) return;
@@ -1928,6 +1954,16 @@ function renderCardVocoder() {
       hint: VOCODER_HINT,
     }),
     el("p", "hint", VOCODER_HOWTO),
+    field(card, "vocoder.dstar", {
+      label: "D-Star vocoder",
+      kind: "select",
+      options: [
+        { value: "", label: "default (dongle)" },
+        { value: "dongle", label: "Dongle" },
+        { value: "software", label: "Software (Bruce Perens' implementation)" },
+      ],
+      hint: VOCODER_DSTAR_HINT,
+    }),
   );
   mount(card, main, false);
 }

@@ -23,7 +23,7 @@
         @EnvironmentObject private var session: CallSession
 
         var body: some View {
-            Section("NXDN") {
+            SettingsSection(.nxdn) {
                 VStack(alignment: .leading, spacing: 4) {
                     SettingsField("NXDN ID") {
                         TextField("", text: $session.nxdnRadioID)

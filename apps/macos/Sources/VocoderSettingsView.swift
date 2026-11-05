@@ -16,13 +16,20 @@
     /// trusted until the operator adds it, one stick at a time, through the
     /// sheet below; the list stays on this Mac and never travels in an
     /// exported config.
+    ///
+    /// Above the list, which vocoder each mode uses. D-Star may use the
+    /// software vocoder instead of a stick; System Fusion, NXDN and DMR are
+    /// dongle-only, and the pane says why.
     struct VocoderSettingsView: View {
         @EnvironmentObject private var vocoders: VocoderSettings
+        @EnvironmentObject private var disclosure: SettingsDisclosure
         @State private var showingAdd = false
 
         var body: some View {
-            Section {
+            SettingsSection(.vocoders) {
                 VStack(alignment: .leading, spacing: 8) {
+                    VocoderModesView()
+                    Divider().padding(.vertical, 2)
                     if vocoders.trusted.isEmpty {
                         emptyState
                     } else {
@@ -62,11 +69,21 @@
                         try? await Task.sleep(nanoseconds: 2_000_000_000)
                     }
                 }
-            } header: {
-                HStack {
-                    Text("Vocoders")
-                    Spacer(minLength: 8)
-                    AddButton(help: "Add a vocoder…") { showingAdd = true }
+            } accessory: {
+                AddButton(help: "Add a vocoder…") {
+                    // The sheet hangs off the section's row, which a folded
+                    // section has not mounted: open it, then present on the
+                    // next turn once the row is there to present from.
+                    if disclosure.isExpanded(.vocoders) {
+                        showingAdd = true
+                    } else {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            disclosure.setExpanded(.vocoders, true)
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                            showingAdd = true
+                        }
+                    }
                 }
             }
         }
@@ -82,8 +99,9 @@
                         Text("No vocoders added")
                             .font(.callout.weight(.medium))
                         Text(
-                            "D-Star, System Fusion, NXDN and DMR need an AMBE vocoder stick "
-                                + "(DVstick 30 or ThumbDV). Add yours to use them."
+                            "System Fusion, NXDN and DMR need an AMBE vocoder stick "
+                                + "(DVstick 30 or ThumbDV), and so does D-Star unless it uses "
+                                + "the software vocoder. Add yours to use them."
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -93,6 +111,14 @@
                 HStack(spacing: 8) {
                     Button("Add Vocoder…") { showingAdd = true }
                         .controlSize(.small)
+                    // No stick yet: D-Star has another way in, one click away.
+                    if vocoders.softwareVocoderCompiled, vocoders.dstarVocoder == .dongle {
+                        Button("Use Software for D-Star") {
+                            vocoders.setDStarVocoder(.software)
+                        }
+                        .controlSize(.small)
+                        .help("D-Star runs its voice on this Mac; no stick needed for it")
+                    }
                     if vocoders.suggestsAdding {
                         Label("A possible vocoder is plugged in", systemImage: "cable.connector")
                             .font(.caption2)
@@ -105,6 +131,88 @@
             .background(
                 Color.secondary.opacity(0.06),
                 in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+    }
+
+    /// Which vocoder each mode uses. D-Star: a picker, Dongle (the default) or
+    /// Software. The others: "Dongle only", with the patent that keeps them so.
+    private struct VocoderModesView: View {
+        @EnvironmentObject private var vocoders: VocoderSettings
+
+        private var dstarChoice: Binding<DStarVocoder> {
+            Binding(
+                get: { vocoders.dstarVocoder },
+                set: { vocoders.setDStarVocoder($0) })
+        }
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(VocoderModeRow.dstar.title)
+                        .font(.callout)
+                    Spacer(minLength: 8)
+                    Picker("D-Star vocoder", selection: dstarChoice) {
+                        Text("Dongle (default)").tag(DStarVocoder.dongle)
+                        Text("Software (Bruce Perens’ implementation)")
+                            .tag(DStarVocoder.software)
+                            .disabled(!vocoders.softwareVocoderCompiled)
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .fixedSize()
+                    .help("Which vocoder D-Star uses")
+                }
+                dstarCaption
+
+                ForEach([VocoderModeRow.ysf, .nxdn, .dmr]) { row in
+                    HStack(spacing: 10) {
+                        Text(row.title)
+                            .font(.callout)
+                        Spacer(minLength: 8)
+                        Label("Dongle only", systemImage: "lock")
+                            .labelStyle(.titleAndIcon)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("\(row.title): dongle only")
+                }
+                Text(VocoderModeRow.ambePlus2Reason)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+
+        @ViewBuilder
+        private var dstarCaption: some View {
+            if vocoders.softwareChosenButMissing {
+                Label(
+                    "Software is chosen, but \(VocoderModeRow.softwareNotInBuild.lowercasedFirst) "
+                        + "D-Star won’t connect until you choose the dongle.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            } else if !vocoders.softwareVocoderCompiled {
+                Text(VocoderModeRow.softwareNotInBuild + " D-Star uses a vocoder stick.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if vocoders.dstarVocoder == .software {
+                Text("D-Star runs its voice on this Mac. No vocoder stick is needed for it.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    extension String {
+        /// "This build…" → "this build…", for a sentence spliced mid-line.
+        fileprivate var lowercasedFirst: String {
+            prefix(1).lowercased() + dropFirst()
         }
     }
 

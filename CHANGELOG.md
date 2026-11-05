@@ -13,6 +13,64 @@ pre-release to the patch number, which sorts wrongly: `0.1.10beta` is newer
 than `0.1.9beta` and a string comparison says the opposite. Shipped versions
 are left as they were spelled.
 
+## 0.1.19-beta — 2026-11-04
+
+EchoLink that stays in time on a busy conference, a built-in D-Star vocoder,
+recordings without a beat, and a Settings pane you can fold.
+
+### Added
+
+- **D-Star can run without a vocoder stick.** astar now has a built-in
+  software vocoder for D-Star: Bruce Perens' AMBE 3600×2400 implementation.
+  Choose it in **Settings → Vocoders**, or with `[vocoder] dstar =
+  "software"` in `node.toml`; the dongle stays the default, and nothing
+  switches by itself. With no stick added, the Vocoders section and a
+  refused D-Star connect offer it in one click. It is D-Star only: System
+  Fusion, NXDN and DMR still need a dongle, because their AMBE+2 codec is
+  patented until 2028-05-20. The vocoder is LGPL-3.0; see
+  `LICENSE-EXCEPTIONS.md` §9. See
+  [Vocoders](https://rcludwick.github.io/astar/macos/vocoders/).
+
+- **Settings folds.** Every Settings section sits behind a disclosure
+  triangle, with **Expand All / Collapse All** beside the title and
+  Option-click to open or fold them all. astar remembers which sections you
+  left open; a fresh install opens just Operator and Account. Buttons that
+  jump to a section, such as "Open Vocoder Settings…", open it on the way.
+
+- **The node warns that an M17 reflector it monitors goes out on your
+  links.** The monitor never sends voice to the reflector, but what it hears
+  is relayed to every AllStar node and EchoLink station on the node, and a
+  linked radio transmits it. The admin page, the settings page's M17 card,
+  the `POST /m17` reply (`relays_to`, `warning`), `/status` (`m17_relay`),
+  Discord's `/dial m17` reply and the log all say so, with how many stations
+  are connected at that moment. The 0.1.17-beta notes and the Discord page
+  understated this and are corrected.
+
+### Fixed
+
+- **EchoLink calls no longer fall further and further behind** on a busy
+  conference or repeater that never pauses, which could leave the audio
+  sounding hollow. Received EchoLink audio now plays through the same
+  adaptive jitter buffer as AllStarLink (the **Jitter buffer** switch and
+  its Min/Max apply), and the call-quality line under the meters now shows
+  on EchoLink calls too.
+
+- **The jitter buffer gives back an over-deep cushion and recovers after a
+  stall,** on AllStarLink as well as EchoLink. It now drops the odd frame to
+  shrink while audio keeps arriving, as Asterisk's does, and after a network
+  stall it skips the frames that are badly overdue instead of staying behind
+  for the rest of the call.
+
+- **Recordings no longer have a regular beat.** An app recording of an
+  EchoLink call could carry a flutter about once a second: the recorder
+  wrote short stretches of silence the speaker never played, then dropped
+  audio to catch up. Recordings of M17, D-Star, DMR, YSF and NXDN calls on a
+  44.1 or 48 kHz output had the same flaw.
+
+- **`dstar-listen` and the other listen tools build again** with the
+  software vocoder in, and the YSF, NXDN and DMR listen tools build on their
+  own.
+
 ## 0.1.18-beta — 2026-11-01
 
 Favorites shared across every network, EchoLink on the same dial row as the
@@ -157,10 +215,13 @@ why. See [Vocoders](https://rcludwick.github.io/astar/macos/vocoders/).
   admin page. See [Discord bridge](https://rcludwick.github.io/astar/server/discord/).
 
 - **The node can monitor an M17 reflector, receive-only.** Dial one module
-  from Discord or the admin page, and whoever talks there is heard on the
+  from Discord or `POST /m17`, and whoever talks there is heard on the
   node's conference. The node sends the reflector only what it takes to
-  hold the link open. It's off until `node.toml` has an `[m17]` section,
-  and the settings page edits that section.
+  hold the link open, so it never transmits toward the reflector. What it
+  hears is relayed to the node's AllStar links and EchoLink stations,
+  though, and a linked node with a radio transmits it. It's off until
+  `node.toml` has an `[m17]` section, and the settings page edits that
+  section.
 
 - **astar-server ships as one static executable.** It's a single file per
   architecture, with the public page, the streams, sign-in, Discord and DNS

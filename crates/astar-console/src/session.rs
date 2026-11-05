@@ -530,6 +530,10 @@ pub struct ConsoleSession {
     /// enumerated, until the embedder sets one with
     /// [`Self::set_vocoder_trust`].
     vocoder_trust: astar_codec::vocoder_trust::VocoderTrust,
+    /// Which vocoder D-Star connects use (astar-dstar-perens): the dongle by
+    /// default, or the software one. D-Star only — YSF, NXDN and DMR have no
+    /// such field and are always hardware.
+    dstar_vocoder: astar_codec::vocoder_choice::DstarVocoder,
     /// The recording taps, held here rather than on any one session or
     /// engine, so a session adopted while recording picks the frame tap up
     /// and an engine built later gets heard/sent on its router. See
@@ -615,6 +619,7 @@ impl ConsoleSession {
             voice_route: None,
             dtmf_digits: Vec::new(),
             vocoder_trust: astar_codec::vocoder_trust::VocoderTrust::default(),
+            dstar_vocoder: astar_codec::vocoder_choice::DstarVocoder::Dongle,
             record_taps: RecordTaps::default(),
         }
     }
@@ -749,6 +754,20 @@ impl ConsoleSession {
     #[must_use]
     pub fn vocoder_trust(&self) -> &astar_codec::vocoder_trust::VocoderTrust {
         &self.vocoder_trust
+    }
+
+    /// Choose D-Star's vocoder for every later D-Star connect, and for the
+    /// `dstar_available` snapshot field (astar-dstar-perens). A live session
+    /// keeps the vocoder it opened. There is no equivalent for YSF, NXDN or
+    /// DMR: their AMBE+2 is hardware-only.
+    pub fn set_dstar_vocoder(&mut self, vocoder: astar_codec::vocoder_choice::DstarVocoder) {
+        self.dstar_vocoder = vocoder;
+    }
+
+    /// The current D-Star vocoder choice.
+    #[must_use]
+    pub fn dstar_vocoder(&self) -> astar_codec::vocoder_choice::DstarVocoder {
+        self.dstar_vocoder
     }
 
     /// Select the primary-link transport (iax-5bbd; the session-level mirror
@@ -2949,7 +2968,7 @@ impl ConsoleSession {
         // push, all at once — see [`Self::m17_connect`].
         let audio = self.open_voice_route(input, output, || backend)?;
         let trust = self.vocoder_trust.clone();
-        match DstarSession::connect(cfg, audio, &trust) {
+        match DstarSession::connect_with_vocoder(cfg, audio, &trust, self.dstar_vocoder) {
             Ok(session) => self.dstar_adopt(session),
             Err(e) => {
                 // The route opened but the session did not: give the lanes
@@ -4519,7 +4538,7 @@ impl ConsoleSession {
             };
         }
         self.state.dstar_active = self.dstar_is_active();
-        self.state.dstar_available = dstar_available(&self.vocoder_trust);
+        self.state.dstar_available = dstar_available_with(&self.vocoder_trust, self.dstar_vocoder);
 
         // System Fusion, mirrored the same way and for the same reason the two
         // branches above are: a front-end drives ONE connection state machine
@@ -4678,6 +4697,24 @@ impl ConsoleSession {
                         reason: "echolink call ended".into(),
                     },
                 };
+                // The call's receive lane plays out of the same jitter
+                // buffer as an AllStarLink call's (astar-el-hollow), so its
+                // health goes in the same fields the call-quality line reads.
+                // The IAX2 block above has already zeroed them.
+                if let (Some(route), Some(mgr)) = (self.voice_route.as_ref(), self.manager.as_ref())
+                {
+                    let r = mgr.router();
+                    if let Some(cells) = r.bus_jitter_cells(route.out(), route.mix_id()) {
+                        self.state.rx_jitter_ms = cells.jitter_ms.load(Ordering::Relaxed);
+                        self.state.rx_jb_depth_ms = cells.depth_ms.load(Ordering::Relaxed);
+                        self.state.rx_frames_lost = cells.frames_lost.load(Ordering::Relaxed);
+                        self.state.rx_frames_late = cells.frames_late.load(Ordering::Relaxed);
+                        self.state.rx_frames_ooo = cells.frames_ooo.load(Ordering::Relaxed);
+                    }
+                    if let Some(underruns) = r.bus_underruns_cell(route.out()) {
+                        self.state.rx_underruns = underruns.load(Ordering::Relaxed);
+                    }
+                }
             }
             self.state.echolink_active = call.is_some_and(|c| c.link != CallLink::Closed)
                 || self
@@ -4963,9 +5000,9 @@ pub fn dmr_available(trust: &astar_codec::vocoder_trust::VocoderTrust) -> bool {
     }
 }
 
-/// `true` when D-Star voice is available: the `dstar` feature is compiled in
-/// AND a `ThumbDV` dongle is attached (iax-b3e7 M0 — D-Star is hardware-only,
-/// so "available" means exactly "the dongle is plugged in").
+/// `true` when D-Star voice is available through the DONGLE: the `dstar`
+/// feature is compiled in AND a `ThumbDV` dongle is attached. A session with
+/// the software vocoder chosen asks [`dstar_available_with`] instead.
 ///
 /// This is a VID/PID enumeration only
 /// ([`astar_codec::ambe::thumbdv_present`]): it opens no serial device,
@@ -4985,6 +5022,29 @@ pub fn dmr_available(trust: &astar_codec::vocoder_trust::VocoderTrust) -> bool {
 /// Always `false` when the `dstar` feature isn't compiled in.
 #[must_use]
 pub fn dstar_available(trust: &astar_codec::vocoder_trust::VocoderTrust) -> bool {
+    dstar_available_with(trust, astar_codec::vocoder_choice::DstarVocoder::Dongle)
+}
+
+/// [`dstar_available`] for a given vocoder choice (astar-dstar-perens).
+///
+/// For [`DstarVocoder::Dongle`] it is exactly [`dstar_available`]'s dongle
+/// probe. For [`DstarVocoder::Software`] it is "the `dstar` feature and the
+/// software vocoder are both compiled in" — no port is enumerated, because
+/// the software vocoder opens none, and trust does not apply. A software
+/// choice in a build without it reads `false`, never the dongle's answer:
+/// the connect would refuse, so the UI must not offer it.
+///
+/// [`DstarVocoder::Dongle`]: astar_codec::vocoder_choice::DstarVocoder::Dongle
+/// [`DstarVocoder::Software`]: astar_codec::vocoder_choice::DstarVocoder::Software
+#[must_use]
+pub fn dstar_available_with(
+    trust: &astar_codec::vocoder_trust::VocoderTrust,
+    vocoder: astar_codec::vocoder_choice::DstarVocoder,
+) -> bool {
+    if vocoder == astar_codec::vocoder_choice::DstarVocoder::Software {
+        return cfg!(feature = "dstar")
+            && astar_codec::vocoder_choice::software_dstar_vocoder_compiled();
+    }
     #[cfg(feature = "dstar")]
     {
         thumbdv_available_cached(trust)
@@ -5776,7 +5836,17 @@ mod tests {
             .dstar_connect(null(), dstar_cfg(addr), Some("no such device"), None)
             .expect_err("no trusted vocoder, no D-Star");
         match err {
-            ConsoleError::Dstar(m) => assert_eq!(m, astar_codec::vocoder_trust::NO_TRUSTED_VOCODER),
+            ConsoleError::Dstar(m) => {
+                // With the software vocoder built in, the sentence goes on to
+                // name it; either way it opens with the generic refusal, which
+                // is what front-ends key their "Open Vocoder Settings…" on.
+                let want = if astar_codec::vocoder_choice::software_dstar_vocoder_compiled() {
+                    astar_codec::vocoder_choice::NO_TRUSTED_VOCODER_DSTAR
+                } else {
+                    astar_codec::vocoder_trust::NO_TRUSTED_VOCODER
+                };
+                assert_eq!(m, want);
+            }
             other => panic!("expected ConsoleError::Dstar, got {other:?}"),
         }
         assert!(!s.snapshot().dstar_available);
@@ -5784,6 +5854,81 @@ mod tests {
             s.open_voice_route(None, None, null).is_ok(),
             "the refused connect gave the lane back"
         );
+    }
+
+    /// astar-dstar-perens: the dongle is the default D-Star vocoder.
+    #[test]
+    fn the_dstar_vocoder_defaults_to_the_dongle() {
+        let s = ConsoleSession::new();
+        assert_eq!(
+            s.dstar_vocoder(),
+            astar_codec::vocoder_choice::DstarVocoder::Dongle
+        );
+    }
+
+    /// astar-dstar-perens: choosing software in a build without it refuses
+    /// the connect by name and never falls back to the dongle; D-Star reads
+    /// unavailable, and the lane is handed back.
+    #[cfg(all(feature = "dstar", not(feature = "dstar-soft-ambe")))]
+    #[test]
+    fn software_dstar_without_the_feature_is_refused_by_name() {
+        let target = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind silent target");
+        let addr = target.local_addr().expect("local addr");
+        let mut s = ConsoleSession::new();
+        s.set_dstar_vocoder(astar_codec::vocoder_choice::DstarVocoder::Software);
+        assert!(!s.snapshot().dstar_available);
+        let err = s
+            .dstar_connect(null(), dstar_cfg(addr), Some("no such device"), None)
+            .expect_err("no software vocoder in this build");
+        match err {
+            ConsoleError::Dstar(m) => assert_eq!(
+                m,
+                astar_codec::vocoder_choice::SOFTWARE_DSTAR_VOCODER_NOT_COMPILED
+            ),
+            other => panic!("expected ConsoleError::Dstar, got {other:?}"),
+        }
+        assert!(s.open_voice_route(None, None, null).is_ok());
+    }
+
+    /// astar-dstar-perens: with the software vocoder compiled in and chosen,
+    /// D-Star is available with NOTHING trusted (it opens no port), and a
+    /// connect — to a silent socket on 127.0.0.1 — opens a session whose
+    /// backend reads "software".
+    #[cfg(all(feature = "dstar", feature = "dstar-soft-ambe"))]
+    #[test]
+    fn software_dstar_needs_no_trusted_stick() {
+        let target = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind silent target");
+        let addr = target.local_addr().expect("local addr");
+        let mut s = ConsoleSession::new();
+        assert!(s.vocoder_trust().is_empty());
+        assert!(
+            !s.snapshot().dstar_available,
+            "dongle choice, nothing trusted"
+        );
+        s.set_dstar_vocoder(astar_codec::vocoder_choice::DstarVocoder::Software);
+        assert!(s.snapshot().dstar_available);
+        s.dstar_connect(null(), dstar_cfg(addr), Some("no such device"), None)
+            .expect("the software vocoder needs no stick");
+        let backend = s.dstar_state().and_then(|st| st.backend);
+        assert_eq!(backend, Some(astar_codec::ambe::AmbeBackend::Software));
+        s.dstar_disconnect();
+    }
+
+    /// The software encoder's look-ahead slots carry D-Star's standard
+    /// silence frame — the same nine bytes as `astar_dstar::NULL_AMBE`.
+    #[cfg(all(feature = "dstar", feature = "dstar-soft-ambe"))]
+    #[test]
+    fn software_encoder_silence_is_null_ambe() {
+        let (mut stream, _) = astar_codec::ambe::open_dstar_stream(
+            astar_codec::vocoder_choice::DstarVocoder::Software,
+            &astar_codec::vocoder_trust::VocoderTrust::none(),
+        )
+        .expect("software vocoder compiled in");
+        stream.submit_encode([0i16; 160]);
+        let first = stream
+            .poll_encoded()
+            .and_then(astar_codec::ambe::ChannelFrame::as_dstar);
+        assert_eq!(first, Some(astar_dstar::NULL_AMBE));
     }
 
     #[cfg(feature = "dstar")]
@@ -7683,6 +7828,225 @@ mod tests {
             }
         }
 
+        /// The output source a [`SpeakerBackend`] was handed, so a test can
+        /// play the speaker itself.
+        type Speaker = Arc<Mutex<Option<Box<dyn OutputSource>>>>;
+
+        /// A `NullBackend` that keeps the output source instead of dropping
+        /// it, and hands the capture side a sink that discards.
+        struct SpeakerBackend {
+            inner: NullBackend,
+            speaker: Speaker,
+        }
+
+        impl AudioBackend for SpeakerBackend {
+            fn devices(&self) -> Result<Vec<astar_audio::DeviceInfo>, AudioError> {
+                self.inner.devices()
+            }
+            fn default_input(&self) -> Option<astar_audio::DeviceInfo> {
+                self.inner.default_input()
+            }
+            fn default_output(&self) -> Option<astar_audio::DeviceInfo> {
+                self.inner.default_output()
+            }
+            fn open_input(
+                &self,
+                d: &astar_audio::DeviceInfo,
+                c: StreamConfig,
+                _s: Box<dyn InputSink>,
+                o: Arc<std::sync::atomic::AtomicU64>,
+            ) -> Result<Box<dyn StreamHandle>, AudioError> {
+                self.inner.open_input(d, c, Box::new(Discard), o)
+            }
+            fn open_output(
+                &self,
+                d: &astar_audio::DeviceInfo,
+                c: StreamConfig,
+                s: Box<dyn OutputSource>,
+            ) -> Result<Box<dyn StreamHandle>, AudioError> {
+                *self.speaker.lock().unwrap() = Some(s);
+                self.inner.open_output(d, c, Box::new(Silent))
+            }
+        }
+
+        struct Silent;
+        impl OutputSource for Silent {
+            fn read(&mut self, _out: &mut [f32]) -> usize {
+                0
+            }
+        }
+
+        /// `astar-el-hollow` (hollow, reverby `EchoLink` audio): the received stream
+        /// must reach the speaker exactly once. Drives the real wiring — the
+        /// link thread on 127.0.0.1, the GSM decoder, the 8 → 16 kHz rate
+        /// bridge, the mixer lane and the output bus — with 80 ms packets of
+        /// non-periodic audio on a 16 kHz station, plays the bus on a 20 ms
+        /// device clock, and checks what the bus fed the device against the
+        /// same frames decoded and bridged offline. A second receive path, a
+        /// packet played twice or a bridge that overlaps windows would all
+        /// put samples into the output that this comparison does not allow.
+        /// Since the lane plays out of the jitter buffer, the silent frames
+        /// it fills holes with are taken out first, and a frame it had to
+        /// skip must show in the snapshot's counters.
+        #[test]
+        fn echolink_receive_reaches_the_speaker_exactly_once() {
+            use astar_codec::gsm::{FRAME_SAMPLES, GsmDecoder, GsmEncoder};
+            use astar_echolink::voice::AudioPacket;
+
+            const PACKETS: usize = 25; // 2 s of talk
+            let mut r = logged_in();
+            r.station.set_echo(false);
+            r.s.set_station_policy(CodecPolicy::PreferSlin16);
+            let speaker: Speaker = Arc::new(Mutex::new(None));
+            r.s.echolink_connect(
+                Box::new(SpeakerBackend {
+                    inner: NullBackend::new(),
+                    speaker: Arc::clone(&speaker),
+                }),
+                "9999",
+                None,
+                None,
+            )
+            .expect("connect");
+            wait_connected(&r.s);
+            assert_eq!(r.s.pipeline_sample_rate(), 16_000, "a 16 kHz station");
+            let to =
+                r.s.echolink
+                    .as_ref()
+                    .and_then(EchoLinkSession::local_addrs)
+                    .expect("the link's ports");
+
+            // A swept tone plus noise: no period a delayed copy could hide in.
+            let mut seed: u32 = 7;
+            let mut t = 0f32;
+            let pcm: Vec<[i16; FRAME_SAMPLES]> = (0..PACKETS * 4)
+                .map(|_| {
+                    std::array::from_fn(|_| {
+                        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                        let noise = (f32::from((seed >> 16) as u16) / 65_535.0 - 0.5) * 2_000.0;
+                        t += 1.0;
+                        #[allow(clippy::cast_possible_truncation)]
+                        let s =
+                            ((t * 0.07 + (t * 0.0007).sin() * 30.0).sin() * 6_000.0 + noise) as i16;
+                        s
+                    })
+                })
+                .collect();
+            let mut enc = GsmEncoder::new();
+            let coded: Vec<[u8; 33]> = pcm.iter().map(|f| enc.encode(f)).collect();
+            let mut dec = GsmDecoder::new();
+            let mut up = crate::voice_route::RateBridge::new(8_000, 16_000).expect("bridge");
+            let expected: Vec<i16> = coded
+                .iter()
+                .flat_map(|c| up.convert(&dec.decode(c)).expect("bridged"))
+                .collect();
+
+            let station = &r.station;
+            let fed: Vec<i16> = std::thread::scope(|sc| {
+                sc.spawn(|| {
+                    let start = Instant::now();
+                    for i in 0..PACKETS {
+                        let due = start + ms(80 * i as u64);
+                        if let Some(d) = due.checked_duration_since(Instant::now()) {
+                            std::thread::sleep(d);
+                        }
+                        let frames = [
+                            coded[4 * i],
+                            coded[4 * i + 1],
+                            coded[4 * i + 2],
+                            coded[4 * i + 3],
+                        ];
+                        #[allow(clippy::cast_possible_truncation)]
+                        let seq = (i + 1) as u16;
+                        station.send_raw_audio(to.audio, &AudioPacket { seq, frames }.encode());
+                    }
+                });
+                let mut src = speaker.lock().unwrap().take().expect("the speaker opened");
+                let mut fed = Vec::new();
+                let start = Instant::now() + ms(60);
+                for k in 0..(PACKETS as u64 * 4 + 100) {
+                    if let Some(d) = (start + ms(20 * k)).checked_duration_since(Instant::now()) {
+                        std::thread::sleep(d);
+                    }
+                    let mut out = vec![0f32; 320];
+                    let n = src.read(&mut out);
+                    #[allow(clippy::cast_possible_truncation)]
+                    fed.extend(out[..n].iter().map(|&s| (s * 32_768.0).round() as i16));
+                }
+                fed
+            });
+            // The lane plays out of the jitter buffer, which fills a hole (and
+            // the end of the over) with whole 20 ms frames of silence. Take
+            // those out. Real decoded audio here is noise and never holds 320
+            // zeros in a row.
+            let (heard, silent_frames) = strip_silent_frames(&fed, 320);
+            // What is left must be the received frames, each whole, each at
+            // most once, in order. A frame may be missing only if this test's
+            // own sleeping "device" fell far enough behind for the buffer to
+            // skip it (a loaded machine), and then the snapshot counts it.
+            let skipped = unplayed_frames(&heard, &expected, 320);
+            let snap = r.s.snapshot();
+            assert!(
+                skipped <= snap.rx_frames_lost + snap.rx_frames_late,
+                "{skipped} received frames were never played but only {} lost and {} late were \
+                 reported ({silent_frames} silent frames)",
+                snap.rx_frames_lost,
+                snap.rx_frames_late
+            );
+            // And the call-quality figures reach the snapshot, as on an
+            // AllStarLink call.
+            assert!(snap.rx_jb_enabled, "the buffer is on by default");
+            assert!(
+                snap.rx_jb_depth_ms > 0,
+                "an EchoLink call reports its buffer depth: {snap:?}"
+            );
+            r.s.echolink_disconnect();
+            let snap = r.s.snapshot();
+            assert_eq!(snap.rx_jb_depth_ms, 0, "and drops it with the call");
+        }
+
+        /// How many of `expected`'s frames `heard` left out, given that
+        /// `heard` must be some of them, whole, each at most once, in order.
+        /// Panics on a partial, repeated, reordered or foreign frame.
+        fn unplayed_frames(heard: &[i16], expected: &[i16], frame: usize) -> u64 {
+            let want: Vec<&[i16]> = expected.chunks(frame).collect();
+            assert_eq!(heard.len() % frame, 0, "the speaker played a partial frame");
+            let mut next = 0;
+            let mut skipped = 0;
+            for (i, got) in heard.chunks(frame).enumerate() {
+                let Some(at) = want[next..].iter().position(|w| *w == got) else {
+                    panic!(
+                        "heard frame {i} is not a received frame after frame {next}: repeated, \
+                         reordered or foreign audio"
+                    );
+                };
+                skipped += at;
+                next += at + 1;
+            }
+            (skipped + want.len() - next) as u64
+        }
+
+        /// `pcm` with every run of `frame` or more zeros cut down by whole
+        /// frames, and how many frames were cut.
+        fn strip_silent_frames(pcm: &[i16], frame: usize) -> (Vec<i16>, usize) {
+            let mut out = Vec::with_capacity(pcm.len());
+            let mut cut = 0;
+            let mut i = 0;
+            while i < pcm.len() {
+                if pcm[i] != 0 {
+                    out.push(pcm[i]);
+                    i += 1;
+                    continue;
+                }
+                let run = pcm[i..].iter().take_while(|&&s| s == 0).count();
+                let frames = run / frame;
+                cut += frames;
+                out.extend(std::iter::repeat_n(0, run - frames * frame));
+                i += run;
+            }
+            (out, cut)
+        }
+
         #[test]
         fn echolink_set_ptt_reaches_the_session() {
             let mut r = logged_in();
@@ -8074,17 +8438,26 @@ mod tests {
             frames: None,
         });
         let b = backend.clone();
-        let _audio = s
+        let audio = s
             .open_voice_route(None, None, move || Box::new(b))
             .expect("route");
         {
             let router = s.manager.as_mut().expect("engine").router_mut();
             assert!(s.voice_route.as_mut().expect("route").key(router, true));
         }
+        // The heard tap carries only what the bus feeds its device, so the
+        // call needs something received to play.
+        let received = || {
+            audio
+                .rx_frames
+                .send(astar_audio::RxFrame::from(vec![1_000_i16; 160]))
+                .unwrap();
+        };
 
         s.set_frame_tap(Some(frames));
         s.set_frame_tap(None);
 
+        received();
         backend.pull(160);
         backend.push(160);
         assert_eq!(drained(&heard), 1, "heard is still installed");
@@ -8092,6 +8465,7 @@ mod tests {
 
         // And clearing the record taps takes them off the live router.
         s.set_record_taps(RecordTaps::default());
+        received();
         backend.pull(160);
         backend.push(160);
         assert_eq!(drained(&heard), 0, "heard cleared");

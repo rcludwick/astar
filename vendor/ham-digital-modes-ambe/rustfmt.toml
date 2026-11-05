@@ -1,0 +1,4 @@
+# astar: never reformat vendored upstream source. `cargo fmt --all` also
+# formats local path dependencies, and src/ambe/ must stay as upstream
+# published it (see VENDORED.md).
+disable_all_formatting = true

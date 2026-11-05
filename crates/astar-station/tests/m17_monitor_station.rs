@@ -1204,6 +1204,9 @@ mod m17_off {
         station.m17_monitor_disconnect();
         assert_eq!(station.m17_monitor_poll(), None);
         assert_eq!(station.m17_monitor_status(), None);
-        assert!(station.m17_monitor_heard().is_empty());
+        assert_eq!(
+            station.m17_monitor_heard(),
+            [] as [astar_station::HeardEntry; 0]
+        );
     }
 }

@@ -461,3 +461,98 @@ the standard itself has expired. The one later patent sometimes cited against
 GSM full-rate implementations, US 5,943,646 (Philips, filed 1997), lapsed for
 non-payment of maintenance fees on 2007-08-24, and would have expired in 2017
 regardless.
+
+## 9. The software D-Star vocoder (LGPL) — notices and relinking (feature `dstar-soft-ambe`, in every shipped build)
+
+D-Star's voice codec is DVSI's AMBE 3600×2400. astar can run it on a ThumbDV or
+DVstick dongle, or in software with **Bruce Perens' implementation**: the AMBE
+tree of his `ham_digital_modes` crate, from
+<https://github.com/BrucePerens/hams_open> (`daemons/ham_digital_modes/`),
+vendored at `vendor/ham-digital-modes-ambe` at a pinned commit. Which one D-Star
+uses is the operator's choice in config (Settings → Vocoders in the app,
+`[vocoder] dstar` in `node.toml`); the dongle is the default choice.
+
+| Component | Where | Licence |
+|---|---|---|
+| `ham-digital-modes-ambe` (Bruce Perens) | `vendor/ham-digital-modes-ambe` | `LGPL-3.0-or-later` |
+
+**Built into every shipped build** (Rob, 2026-11-01). It is reached through
+the `dstar-soft-ambe` Cargo feature (of `astar-codec`, re-exported by
+`astar-console`, `astar-station`, `astar-sys` and `astar-server`), and:
+
+* **the macOS app** links it statically: `bindings/swift/build-xcframework.sh`
+  turns the feature on unless `ASTAR_DSTAR_SOFT_AMBE=0`, so the signed DMG
+  carries it;
+* **astar-server's single static release** (`just server-release`, the
+  `release` feature) links it statically too.
+
+A plain `cargo build` of any astar crate does not: like `codec2-static`, the
+feature is named on purpose by the builds that ship, never a cargo default
+(`ci/guard-dstar-soft-ambe.sh` checks both halves). LGPL-3.0 code may be
+combined into an AGPL-3.0 program: LGPL-3.0 is GPL-3.0 with extra
+permissions, and AGPL-3.0 section 13 allows combination with GPL-3.0 works.
+The LGPL-3.0 and GPL-3.0 texts ship beside the code.
+
+### You are free to change it and rebuild astar
+
+As for Codec 2 in section 2, and stated as plainly: **nothing here restricts
+anyone from modifying this vocoder, or astar, and building their own astar from
+the result.** Patch it, tune it, replace it, or remove it, and rebuild.
+
+### Static linking and your right to relink
+
+Where a released astar binary links this vocoder statically — the macOS app and
+astar-server's static release — LGPL-3.0 section 4 requires that a recipient
+can modify the library and relink it into the application. astar satisfies this
+the same way it does for Codec 2 and LAME, by publishing its **complete,
+buildable source**:
+
+* Source: <https://github.com/rcludwick/astar>. The vocoder's own source ships
+  in that repository, at `vendor/ham-digital-modes-ambe`, with its licence
+  texts beside it — not merely as a reference to upstream.
+* Every release is tagged, so the exact source for a given binary, the library
+  included, is `git checkout v<version>`.
+* To relink: edit `vendor/ham-digital-modes-ambe` (or point
+  `ham-digital-modes-ambe` in the root `Cargo.toml` at your own copy), then
+  rebuild with `just xcframework && just dmg` for the app or
+  `just server-release` for the server. Build instructions:
+  <https://rcludwick.github.io/astar>.
+
+**Where the source is.** The Corresponding Source of every release that
+carries this vocoder, the library included, is published at the repository
+above, at that release's tag, from the same place the binaries are offered —
+the arrangement GPL-3.0 section 6(d) describes, and the one section 2 relies on
+for Codec 2. No part of astar is withheld.
+
+The App Store question in section 2 applies here too, and section 1's
+exception does not reach this code, because it is not Rob's copyright.
+
+**Modifications.** The vendored copy is upstream's `src/ambe/` unchanged
+except that the AMBE+2 directories are removed, with a new `lib.rs` and
+`Cargo.toml`. `vendor/ham-digital-modes-ambe/VENDORED.md` lists every
+difference and is the dated modification notice LGPL-3.0 asks for.
+
+**Notices it carries.** Upstream took its D-Star quantiser tables and bit
+layout from mbelib (ISC, "Copyright (C) 2010 mbelib Author") and checked its
+interleave against DSD (ISC, "Copyright (C) 2010 DSD Author"). Both ISC
+notices are reproduced in full in `VENDORED.md`. It does not use, refer to or
+derive from `rcludwick/ambe`.
+
+**Patents: why this is D-Star only.**
+
+* **AMBE 3600×2400 (D-Star).** This generation of DVSI's codec dates from the
+  1990s, before the D-Star standard (2001) adopted it, and the patents on it
+  have run their 20-year term. That is why astar allows a software implementation for D-Star at all
+  (Rob, 2026-09-19).
+* **AMBE+2 (DMR, NXDN, System Fusion).** The half-rate AMBE+2 vocoder still
+  reads on **US 8,359,197 B2** ("Half-rate vocoder", DVSI, priority
+  2003-04-01), in force until **2028-05-20**. astar has no software backend for
+  these modes and must not gain one before then. Upstream's crate does contain
+  an AMBE+2 implementation, behind its own off-by-default feature; astar does
+  not vendor it. The two `ambe_plus_2` directories are deleted from the copy,
+  the feature is not declared, the engine refuses a software backend for every
+  mode but D-Star (`software_backend_permitted` in
+  `crates/astar-codec/src/ambe.rs`, pinned by tests), and the guard script
+  fails if AMBE+2 source or the feature reappears.
+
+This is a summary of the public record, not legal advice.

@@ -272,7 +272,7 @@ mod with_discord {
             reflector: &str,
             module: char,
             callsign: &str,
-        ) -> Result<(), String> {
+        ) -> Result<String, String> {
             // SAFETY PROPERTY. `M17Action::Monitor` is a literal and must
             // stay one. The monitor it reaches has no transmit path at all,
             // and this line is where a transmitting action would become
@@ -287,8 +287,10 @@ mod with_discord {
                     Some(module),
                     Some(callsign),
                 )
-                .map(|_| ())
-                .map_err(|e| e.message)
+                .map_err(|e| e.message)?;
+            // The monitor contributes to the conference, so the channel is
+            // told who now hears this reflector and that radios transmit it.
+            Ok(self.0.m17_relay_counts().warning())
         }
 
         fn hangup(&mut self, link: &LinkRef) -> Result<(), String> {
@@ -1684,9 +1686,16 @@ mod with_discord {
         fn dial_m17_monitor_reaches_handle_m17_as_a_monitor() {
             let refl = RecordingReflector::start(FakeReply::Ackn);
             let c = m17_controller(refl.addr);
-            ControllerNode(&c)
+            let warning = ControllerNode(&c)
                 .dial_m17_monitor("M17-TEST", 'A', "AJ7HR")
                 .expect("a table entry passes the pre-flight");
+            assert_eq!(
+                warning,
+                crate::m17_relay::RelayCounts::default().warning(),
+                "the dial hands the Discord reply the node's relay warning, \
+                 with nothing connected yet"
+            );
+            assert!(warning.starts_with(crate::m17_relay::M17_RELAY_WARNING));
             assert!(
                 wait_until(|| !refl.datagrams().is_empty(), 5_000),
                 "the monitor sent its CONN"

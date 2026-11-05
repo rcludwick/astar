@@ -2391,9 +2391,9 @@ fn echolink_entry_points_refuse_without_the_feature() {
             iax_station_echolink_set_location(st, c"Seattle".as_ptr()),
             IAX_ERR_ECHOLINK
         );
-        let mut list = vec![0 as std::ffi::c_char; 64];
-        iax_station_echolink_stations(st, list.as_mut_ptr(), list.len());
-        assert_eq!(CStr::from_ptr(list.as_ptr()).to_str().unwrap(), "[]");
+        let mut stations = vec![0 as std::ffi::c_char; 64];
+        iax_station_echolink_stations(st, stations.as_mut_ptr(), stations.len());
+        assert_eq!(CStr::from_ptr(stations.as_ptr()).to_str().unwrap(), "[]");
     }
     unsafe { iax_station_free(st) };
 }

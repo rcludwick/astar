@@ -595,7 +595,7 @@ mod tests {
     #[test]
     fn the_link_line_is_printed_once_and_names_the_backend() {
         let mut t = PrintTracker::new("nxdn.example:41400".into());
-        assert!(t.on_snapshot(&snap("linking")).is_empty());
+        assert_eq!(t.on_snapshot(&snap("linking")), Vec::<String>::new());
         let lines = t.on_snapshot(&snap("linked"));
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("nxdn.example:41400"), "{:?}", lines[0]);
@@ -675,7 +675,7 @@ mod tests {
         off.receiving = false;
         off.last_heard = Some("4242".into()); // persists — this is "last heard"
         off.last_heard_id = Some(4242);
-        assert!(t.on_snapshot(&off).is_empty());
+        assert_eq!(t.on_snapshot(&off), Vec::<String>::new());
 
         assert_eq!(t.on_snapshot(&on), vec!["▶ 4242".to_string()]);
     }

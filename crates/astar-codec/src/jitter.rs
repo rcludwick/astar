@@ -583,6 +583,19 @@ impl<T> JitterBuf<T> {
             if f.ms > 0 {
                 self.info.last_voice_ms = f.ms;
             }
+            // Shrink at one frame per 500 ms even with a frame in hand: drop
+            // it and play the next one in its slot. This is `jitterbuf.c`'s
+            // own branch (`iax-9c62`); without it a stream that never pauses
+            // can only ever deepen.
+            if diff < -self.conf.target_extra && self.info.last_adjustment + 500 < now {
+                self.info.last_adjustment = now;
+                self.info.cnt_contig_interp = 0;
+                self.info.current -= f.ms;
+                self.info.frames_out += 1;
+                self.decrement_losspct();
+                self.info.frames_dropped += 1;
+                return GetResult::Drop(f);
+            }
 
             // Normal voice delivery.
             self.info.next_voice_ts += f.ms;
@@ -592,10 +605,10 @@ impl<T> JitterBuf<T> {
             return GetResult::Ok(f);
         }
 
-        // No frame ready. Shrink? Lost?
-        let shrink_window =
-            self.info.last_adjustment + 80 < now || self.info.last_adjustment + 500 < now;
-        if diff < -self.conf.target_extra && shrink_window {
+        // No frame ready: shrink one frame every 80 ms (or 500 ms, which the
+        // C condition also admits and 80 already covers), without losing
+        // audio.
+        if diff < -self.conf.target_extra && self.info.last_adjustment + 80 < now {
             self.info.last_adjustment = now;
             self.info.cnt_contig_interp = 0;
             // No frame to drop — shrink by last_voice_ms.
@@ -891,6 +904,54 @@ mod tests {
             jb.info().silence_begin_ts > 0,
             "silence_begin_ts not set, info = {:?}",
             jb.info()
+        );
+    }
+
+    /// `jitterbuf.c` shrinks by dropping a frame every 500 ms even while
+    /// frames keep coming (its "shrink at 1 frame / 500ms" branch,
+    /// `iax-9c62`). Without that a sender whose clock runs fast fills the
+    /// buffer for as long as it talks: there is never a moment with no frame
+    /// ready, which is the only other place it shrinks.
+    #[test]
+    fn a_fast_sender_that_never_pauses_is_shrunk_by_dropping_frames() {
+        let mut jb: JitterBuf<Vec<u8>> = JitterBuf::new(JitterConfig {
+            max_jitterbuf: 200,
+            max_contig_interp: 10,
+            ..JitterConfig::default()
+        });
+        // 1% fast: a 20 ms frame every 19.8 ms, for 30 s.
+        let frames = 1_500_i64;
+        let arrival = |i: i64| i * 198 / 10 + 30;
+        let mut next_put = 0_i64;
+        let mut deepest = 0_i64;
+        for now in (0..frames * 20 + 1_000).step_by(20) {
+            while next_put < frames && arrival(next_put) <= now {
+                jb.put(voice(next_put * 20 + 20, 0), now).unwrap();
+                next_put += 1;
+            }
+            // One frame's worth of playout per 20 ms tick.
+            loop {
+                match jb.next() {
+                    Some(due) if due <= now => {}
+                    _ => break,
+                }
+                match jb.get(now, 20) {
+                    GetResult::Drop(_) => {}
+                    _ => break,
+                }
+            }
+            deepest = deepest.max(jb.info().frames_cur);
+        }
+        let info = jb.info();
+        assert!(
+            info.frames_dropped >= 5,
+            "300 ms of surplus but only {} frames dropped to shrink",
+            info.frames_dropped
+        );
+        assert!(
+            deepest <= 15,
+            "the buffer grew to {deepest} frames ({} ms)",
+            deepest * 20
         );
     }
 

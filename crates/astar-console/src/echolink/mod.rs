@@ -21,6 +21,7 @@ mod link;
 pub(crate) mod net;
 mod node;
 mod presence;
+mod rx_clock;
 
 // `astar-station` has no normal dependency on `astar-echolink`, so the types
 // its `EchoLink` surface hands out are re-exported from here.

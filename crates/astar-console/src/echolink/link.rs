@@ -34,9 +34,11 @@
 //! # Receiving audio
 //!
 //! A packet whose sequence number is not newer than the last one played
-//! (counting around the 16-bit wrap) is dropped; that is the whole jitter
-//! handling here. Each packet's four frames go to the voice route in order,
-//! and the route's own playout smooths the rest.
+//! (counting around the 16-bit wrap) is dropped. Each packet's four frames
+//! go to the voice route in order, stamped on a sender clock built from the
+//! sequence number ([`RxTimeline`]), so the station mixer plays them out of
+//! the same adaptive jitter buffer an `AllStarLink` call uses. That is what
+//! keeps a busy conference, which never pauses, from building up delay.
 //!
 //! # Sending audio
 //!
@@ -76,6 +78,7 @@ use astar_echolink::{PeerAddr, Timings};
 use tracing::{debug, warn};
 
 use super::client::ChatLine;
+use super::rx_clock::RxTimeline;
 use super::{EchoLinkNetwork, net};
 use crate::voice_route::RateBridge;
 
@@ -243,6 +246,8 @@ pub(crate) struct PeerSlot {
     enc: GsmEncoder,
     dec: GsmDecoder,
     last_seq: Option<u16>,
+    /// The sender clock the app's receive lane is played out against.
+    rx_clock: RxTimeline,
     audio: PeerAudio,
     shared: Arc<PeerShared>,
     tx: TxState,
@@ -315,6 +320,7 @@ impl EchoLinkLink {
             enc: GsmEncoder::new(),
             dec: GsmDecoder::new(),
             last_seq: None,
+            rx_clock: RxTimeline::new(Instant::now()),
             audio,
             shared: Arc::clone(&shared),
             tx: TxState {
@@ -563,7 +569,7 @@ impl Run {
                 }
                 let actions = slot.qso.on_audio(Instant::now());
                 apply(sockets, slot, actions, &self.location);
-                receive(slot, &packet);
+                receive(slot, &packet, Instant::now());
             }
             Datagram::Info(text) => *lock(&slot.shared.info) = Some(text),
             Datagram::Chat { from, text } => {
@@ -673,8 +679,10 @@ fn apply(sockets: &Sockets, slot: &mut PeerSlot, actions: Vec<QsoAction>, locati
             QsoAction::Event(QsoEvent::TalkStop) => {
                 slot.shared.talking.store(false, Ordering::Relaxed);
                 // A new transmission may restart its sequence numbers, so
-                // the gate starts afresh rather than muting it.
+                // the gate starts afresh rather than muting it, and so does
+                // the receive clock.
                 slot.last_seq = None;
+                slot.rx_clock.end_over();
             }
         }
     }
@@ -701,7 +709,12 @@ fn hang_up(sockets: &Sockets, slot: &mut PeerSlot, location: &str) {
 }
 
 /// Play one received packet, unless it is older than the last one played.
-fn receive(slot: &mut PeerSlot, packet: &AudioPacket) {
+///
+/// The app's frames go out stamped on the sender's clock (see
+/// [`RxTimeline`]), so the station mixer plays them out of its jitter
+/// buffer. A conference member's go out bare: the conference mixes on its
+/// own tick and ignores a sender clock.
+fn receive(slot: &mut PeerSlot, packet: &AudioPacket, now: Instant) {
     if slot
         .last_seq
         .is_some_and(|last| !voice::seq_is_newer(packet.seq, last))
@@ -709,17 +722,23 @@ fn receive(slot: &mut PeerSlot, packet: &AudioPacket) {
         return;
     }
     slot.last_seq = Some(packet.seq);
-    for frame in &packet.frames {
-        let pcm = slot.dec.decode(frame).to_vec();
-        match &mut slot.audio {
-            PeerAudio::Client { call_audio, .. } => {
-                let _ = call_audio.rx_frames.send(RxFrame::from(pcm));
+    let pcm: Vec<Vec<i16>> = packet
+        .frames
+        .iter()
+        .map(|frame| slot.dec.decode(frame).to_vec())
+        .collect();
+    match &mut slot.audio {
+        PeerAudio::Client { call_audio, .. } => {
+            for frame in slot.rx_clock.stamp(packet.seq, now, pcm) {
+                let _ = call_audio.rx_frames.send(frame);
             }
-            PeerAudio::Member {
-                to_conference,
-                rx_bridge,
-                ..
-            } => {
+        }
+        PeerAudio::Member {
+            to_conference,
+            rx_bridge,
+            ..
+        } => {
+            for pcm in pcm {
                 let pcm = match rx_bridge {
                     Some(bridge) => match bridge.convert(&pcm) {
                         Some(pcm) => pcm,

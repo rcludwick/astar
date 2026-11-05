@@ -122,4 +122,17 @@ source = "file"
 # callsign = "N0CALL-L"
 # servers  = ["servers.echolink.org", "naeast.echolink.org", "nasouth.echolink.org", "backup.echolink.org"]
 # location = "Anytown, ST"
+
+# [m17]
+# Let /dial m17 (Discord) and POST /m17 link the node to one module of an M17
+# reflector as a monitor. Off until this section exists.
+# WARNING: the node never sends voice to the reflector, but it relays what it
+# hears there to every AllStar node and EchoLink station connected to this
+# node, and a connected node with a radio puts that on the air. Link only
+# reflectors whose traffic you would rebroadcast, and mind your licence's
+# rules on retransmission.
+# enabled = true
+# directory = "bundled"
+# [m17.reflectors]
+# "M17-XYZ" = "m17.example.net:17000"
 "#;

@@ -71,6 +71,10 @@ public protocol StationDriving {
     /// `Station.setVocoderTrust(_:)` 1:1.
     func setVocoderTrust(_ serials: [String]) throws
 
+    /// Choose D-Star's vocoder: the dongle (the default) or the software
+    /// vocoder. D-Star only. Mirrors `Station.setDStarVocoder(_:)` 1:1.
+    func setDStarVocoder(_ vocoder: DStarVocoder) throws
+
     // MARK: D-Star (iax-4c8e)
 
     /// Connect to a D-Star reflector over DExtra and open a full-transceive
@@ -78,10 +82,10 @@ public protocol StationDriving {
     /// session. Mirrors `Station.connectDStar(host:port:module:callsign:
     /// reflectorCallsign:)` 1:1.
     ///
-    /// HARDWARE-ONLY: this opens a ThumbDV AMBE dongle and fails when there
-    /// is none. There is no software vocoder to fall back to, which is why
-    /// callers gate on `CallSnapshot.dstarAvailable` rather than calling
-    /// speculatively.
+    /// This opens the vocoder `setDStarVocoder(_:)` chose — a ThumbDV AMBE
+    /// dongle by default — and fails when it is not there. Nothing falls back
+    /// to the other vocoder, which is why callers gate on
+    /// `CallSnapshot.dstarAvailable` rather than calling speculatively.
     ///
     /// `reflectorCallsign` names the destination the way the directories list
     /// it ("XRF836") and fills the transmitted header's RPT1/RPT2. `nil`
@@ -328,4 +332,10 @@ public protocol StationDriving {
     func characterize(harmonicComb: Bool, peakMarginDb: Float?, thresholdDbfs: Float?) throws
         -> String
     func setMicProfile(_ json: String?) throws
+}
+
+extension StationDriving {
+    /// Stations that have no engine (and test fakes that do not care) accept
+    /// the choice and do nothing with it. The real `Station` implements it.
+    public func setDStarVocoder(_ vocoder: DStarVocoder) throws {}
 }

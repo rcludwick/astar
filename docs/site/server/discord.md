@@ -192,8 +192,13 @@ does not depend on a Discord message nobody deleted.
     An M17 dial is the same kind of dial. The reflector's audio is mixed into
     the conference exactly like a monitored AllStar node's, so the same peers
     hear it, and the node speaks *"Monitoring M17 reflector …"* to them as it
-    does for an AllStar dial. Reflector audio on its own does not key an
-    AllStar link this node holds in transceive. What is new is that an M17
+    does for an AllStar dial. Nothing about the dial uses the AllStar link
+    protocol to key anything, but the relayed audio is still transmitted: a
+    node that dialled in hears the reflector all the time, and a link this
+    node holds in transceive hears it whenever someone else on the
+    conference talks. A linked node with a radio puts it on the air (see
+    [Monitoring an M17 reflector](#monitoring-an-m17-reflector)). What is
+    also new is that an M17
     dial puts a person's identity on a third-party network: for as long as
     the link is up, the reflector lists the dialler's registered callsign as
     a connected client. Nothing is ever transmitted under it, but anyone
@@ -218,11 +223,26 @@ does not depend on a Discord message nobody deleted.
 `/dial m17 reflector:<name> module:<letter>` links the node to one module of
 an M17 reflector as a **receive-only monitor**. Whoever talks on that module
 is heard in the voice channel and by every conference member that receives
-the mix (handsets and inbound nodes; see the warning above for AllStar
-links). The only packets the node ever sends the reflector are the three the
+the mix. The only packets the node ever sends the reflector are the three the
 protocol needs to hold a link open — connect, the keepalive reply, and
 disconnect. The code that does the sending has no way to build a voice packet,
 and no `/mic`, PTT or `POST /key` reaches it.
+
+!!! warning "A dial puts the reflector on the air"
+
+    The monitor never sends voice to the reflector, but what it hears there is
+    relayed to every AllStar node linked to this node and every EchoLink
+    station on it, and a linked node with a radio transmits it. Nodes that
+    dialled in hear it all the time; links this node dialled in transceive,
+    and EchoLink stations, hear it while someone else on the conference
+    talks. So dial only reflectors whose traffic you would rebroadcast, and
+    mind your licence's rules on retransmission.
+
+    The bot says so every time. Your reply and the channel's line both carry
+    the warning, with how many AllStar connections and EchoLink stations are
+    on the node at that moment, for example: *"Right now that is 3 AllStar
+    connections and 1 EchoLink station, and any of them with a radio will
+    transmit what this reflector carries."*
 
 It needs four things before it works:
 
@@ -249,8 +269,8 @@ What the channel sees when AJ7HR dials module C of M17-USA:
 
 | Moment | Where | Text |
 |---|---|---|
-| The dial | your reply | *"Dialling M17 M17-USA C as AJ7HR (receive-only)…"* |
-| The dial | the channel | *"@you → M17 M17-USA C (receive-only, as AJ7HR)"* |
+| The dial | your reply | *"Dialling M17 M17-USA C as AJ7HR (receive-only)…"*, then the relay warning on its own line |
+| The dial | the channel | *"@you → M17 M17-USA C (receive-only, as AJ7HR)"*, then the same warning |
 | The reflector accepts | the channel | *"Connected to M17 M17-USA C."* |
 | No answer within 30 s | the channel | *"M17 M17-USA C did not answer."* |
 | The link ends by itself | the channel | *"The link to M17 M17-USA C has ended: reflector refused the link."* The reason can also be `reflector sent DISC`, `no reply for 30 s`, `could not resolve <host>: <error>`, `no Codec 2 decoder`, `conference gone` or `monitor stopped`. |

@@ -396,6 +396,7 @@ mod tests {
             m17: None,
             m17_enabled: false,
             m17_available: false,
+            m17_relay: None,
             echolink: None,
             echolink_enabled: false,
             public: None,

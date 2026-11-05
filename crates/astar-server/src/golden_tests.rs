@@ -345,8 +345,16 @@ fn public_cases() -> Vec<Case> {
             false,
         ),
         ("mp3_not_built_503", get("/stream.mp3", HOST), false, false),
+        // `/stream.ws` answers per feature set: with `stream` the upgrade
+        // reaches the hub; without it every request gets the one 503 saying
+        // live audio is not built in (`public::http::websocket`). Each build
+        // checks the fixtures its own code produces.
+        #[cfg(feature = "stream")]
         ("ws_no_upgrade_400", get("/stream.ws", HOST), false, false),
+        #[cfg(feature = "stream")]
         ("ws_full_503", ws_upgrade(), false, false),
+        #[cfg(not(feature = "stream"))]
+        ("ws_not_built_503", ws_upgrade(), false, false),
         ("events", get("/public/events", HOST), false, true),
     ]
 }
@@ -419,6 +427,9 @@ fn public_bind_fixtures() {
     run_public("public", &ctrl(), Limits::default(), false, public_cases());
 }
 
+/// The per-address stream limit sits behind the WebSocket upgrade, which a
+/// build without `stream` never performs.
+#[cfg(feature = "stream")]
 #[test]
 fn public_stream_429_fixture() {
     let limits = Limits {

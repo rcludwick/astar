@@ -81,11 +81,12 @@ public struct RxQuality: Equatable {
 /// line — views format through this and nowhere else, so the Mac and the Iced
 /// client can be held to the same wording.
 ///
-/// AllStarLink only, and only while a call is up. The jitter buffer schedules
-/// against a sender's wire clock, and only the IAX2 path carries one: on M17,
-/// D-Star, YSF, NXDN and DMR the decoded frames go straight to the bus, so
-/// every number here would be a flat zero and the line would be a lie of
-/// omission. A call still ringing has received no audio for the same reason,
+/// AllStarLink and EchoLink only, and only while a call is up. The jitter
+/// buffer schedules against a sender's clock, and only those two paths carry
+/// one (IAX2's on the wire, EchoLink's built from its packet sequence numbers,
+/// astar-el-hollow): on M17, D-Star, YSF, NXDN and DMR the decoded frames go
+/// straight to the bus, so every number here would be a flat zero and the
+/// line would be a lie of omission. A call still ringing has received no audio for the same reason,
 /// which is what `connected` is for — four zeros under the meters would read
 /// as a measurement rather than an absence.
 ///
@@ -97,9 +98,9 @@ public enum CallQualityLine {
     /// is the thing that went wrong, and a permanent "underruns 0" is one
     /// more number to read past before you find it.
     ///
-    /// `nil` when there is no answered AllStarLink call to describe.
+    /// `nil` when there is no answered AllStarLink or EchoLink call to describe.
     public static func text(connected: Bool, network: Network?, quality: RxQuality) -> String? {
-        guard connected, network == .allstar else { return nil }
+        guard connected, carriesASenderClock(network) else { return nil }
         guard quality.jitterBufferEnabled else { return "jitter buffer off" }
         var line =
             "jitter \(quality.jitterMS) ms · buffer \(quality.bufferDepthMS) ms"
@@ -112,7 +113,7 @@ public enum CallQualityLine {
     /// as "12 ms" is a unit abbreviation a screen reader has to guess at, and
     /// the interpuncts are read as nothing at all.
     public static func spoken(connected: Bool, network: Network?, quality: RxQuality) -> String? {
-        guard connected, network == .allstar else { return nil }
+        guard connected, carriesASenderClock(network) else { return nil }
         guard quality.jitterBufferEnabled else { return "Jitter buffer off" }
         var line =
             "Network jitter \(quality.jitterMS) milliseconds,"
@@ -120,5 +121,10 @@ public enum CallQualityLine {
             + " \(quality.framesLost) frames lost, \(quality.framesLate) frames late"
         if quality.underruns > 0 { line += ", \(quality.underruns) underruns" }
         return line
+    }
+
+    /// The networks whose receive lane plays out of the jitter buffer.
+    private static func carriesASenderClock(_ network: Network?) -> Bool {
+        network == .allstar || network == .echolink
     }
 }

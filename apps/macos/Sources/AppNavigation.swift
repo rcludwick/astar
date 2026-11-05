@@ -3,6 +3,7 @@
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 
 #if os(macOS)
+    import AstarCore
     import Combine
     import Foundation
 
@@ -27,13 +28,8 @@
         case micAnalyzer
     }
 
-    /// A place inside the Settings pane that something outside it can send
-    /// the operator to — a connect error's "Open Vocoder Settings…", say.
-    enum SettingsAnchor: Hashable {
-        case vocoders
-        /// Settings → EchoLink: the callsign, password and login.
-        case echolink
-    }
+    // `SettingsAnchor` lives in AstarCore (SettingsSections.swift) beside the
+    // collapsible sections it opens, so its section mapping is unit-tested.
 
     /// Which pane the main window is showing (astar-1f7d).
     ///

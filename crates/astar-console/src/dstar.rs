@@ -149,16 +149,17 @@
 //! [`STREAM_IDLE_TIMEOUT`]) it *discards* the previous talker's residue so
 //! it can never be played out attributed to the new one.
 //!
-//! # Hardware-only (iax-b3e7 M0)
+//! # The vocoder: dongle by default, software by choice
 //!
-//! D-Star runs through the `ThumbDV` dongle only: [`DstarSession::connect`]
-//! requests [`AmbeBackend::Hardware`] from
-//! [`open_ambe_stream`](astar_codec::ambe::open_ambe_stream)
-//! unconditionally — no preference knob, no software-codec fallback. There is
-//! no software AMBE backend in this workspace at all. A build without
-//! `ambe-hw` compiled in, or a
-//! `dstar` build with no dongle attached, fails [`DstarSession::connect`]
-//! outright rather than silently substituting software decode. Since the
+//! D-Star runs through the `ThumbDV` dongle by default:
+//! [`DstarSession::connect`] requests [`AmbeBackend::Hardware`]. The operator
+//! may instead choose the software vocoder
+//! ([`DstarVocoder::Software`](astar_codec::vocoder_choice::DstarVocoder),
+//! astar-dstar-perens), which [`DstarSession::connect_with_vocoder`] opens
+//! through [`open_dstar_stream`](astar_codec::ambe::open_dstar_stream) — only
+//! in a build with `dstar-soft-ambe`. Neither is ever substituted for the
+//! other: a dongle choice with no dongle attached, or a software choice in a
+//! build without it, fails the connect outright with a sentence saying which. Since the
 //! same handle now also serves TX (`submit_encode`/`poll_encoded`),
 //! `tx_capable` is unconditionally `true` for every session that exists at
 //! all — there is no partially-hardware-only, RX-but-not-TX state.
@@ -171,9 +172,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use astar_audio::CallAudio;
-use astar_codec::ambe::{
-    AMBE_STREAM_MAX_IN_FLIGHT, AmbeBackend, AmbeStream, VocoderMode, open_ambe_stream,
-};
+use astar_codec::ambe::{AMBE_STREAM_MAX_IN_FLIGHT, AmbeBackend, AmbeStream};
 use astar_dstar::tx::general_call_header;
 use astar_dstar::{
     DSVT_MAGIC, DextraFsm, DsvtPacket, FsmAction, LinkState, NULL_AMBE, RfHeader, SYNC_INTERVAL,
@@ -595,8 +594,12 @@ pub struct DstarSession {
 
 /// Where [`DstarSession::connect_inner`] gets its vocoder from.
 enum Vocoder<'a> {
-    /// Open a trusted `ThumbDV` (only serials in this list).
-    Open(&'a astar_codec::vocoder_trust::VocoderTrust),
+    /// Open the chosen vocoder: a trusted `ThumbDV` (only serials in this
+    /// list) for the dongle, the in-process one for software.
+    Open(
+        &'a astar_codec::vocoder_trust::VocoderTrust,
+        astar_codec::vocoder_choice::DstarVocoder,
+    ),
     /// The caller already opened one.
     Given(Box<dyn AmbeStream>, AmbeBackend),
 }
@@ -613,9 +616,9 @@ impl DstarSession {
     /// carries no preference and never touches the PTT gate — see the module
     /// docs.
     ///
-    /// D-Star is hardware-only (iax-b3e7 M0): this always requests
-    /// [`AmbeBackend::Hardware`] from [`open_ambe_stream`] — there is no
-    /// preference knob and no software-codec fallback.
+    /// This always requests [`AmbeBackend::Hardware`], the dongle, with no
+    /// software fallback. [`Self::connect_with_vocoder`] takes the operator's
+    /// choice instead.
     ///
     /// # Errors
     /// [`ConsoleError::Device`] for an invalid callsign; [`ConsoleError::Dstar`]
@@ -637,7 +640,31 @@ impl DstarSession {
         audio: CallAudio,
         trust: &astar_codec::vocoder_trust::VocoderTrust,
     ) -> Result<DstarSession, ConsoleError> {
-        Self::connect_inner(cfg, audio, Vocoder::Open(trust))
+        Self::connect_with_vocoder(
+            cfg,
+            audio,
+            trust,
+            astar_codec::vocoder_choice::DstarVocoder::Dongle,
+        )
+    }
+
+    /// [`DstarSession::connect`] with the operator's vocoder choice
+    /// (astar-dstar-perens): the dongle, or the software vocoder.
+    ///
+    /// # Errors
+    /// As [`DstarSession::connect`]; for [`DstarVocoder::Software`] in a build
+    /// without `dstar-soft-ambe`, [`ConsoleError::Dstar`] with
+    /// [`SOFTWARE_DSTAR_VOCODER_NOT_COMPILED`](astar_codec::vocoder_choice::SOFTWARE_DSTAR_VOCODER_NOT_COMPILED).
+    ///
+    /// [`DstarVocoder::Software`]: astar_codec::vocoder_choice::DstarVocoder::Software
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn connect_with_vocoder(
+        cfg: DstarConfig,
+        audio: CallAudio,
+        trust: &astar_codec::vocoder_trust::VocoderTrust,
+        vocoder: astar_codec::vocoder_choice::DstarVocoder,
+    ) -> Result<DstarSession, ConsoleError> {
+        Self::connect_inner(cfg, audio, Vocoder::Open(trust, vocoder))
     }
 
     /// [`DstarSession::connect`] with the AMBE decoder supplied by the
@@ -691,10 +718,10 @@ impl DstarSession {
             tx_repeater_fields(cfg.reflector_callsign.as_deref(), &cfg.host, cfg.module);
         let header = general_call_header(rpt2, rpt1, fsm.callsign());
 
-        // Hardware-only (iax-b3e7 M0): request Hardware unconditionally, no
-        // preference knob and no software-codec fallback.
+        // The operator's choice, opened as chosen: the dongle (the default)
+        // or the software vocoder, never one in place of the other.
         //
-        // On failure, classify WHY (iax-b3e7 spec §4) instead of surfacing a
+        // On a dongle failure, classify WHY (iax-b3e7 spec §4) instead of surfacing a
         // generic message: `open_ambe_stream` collapses "no dongle" and
         // "dongle busy" into one `None`, exactly the ambiguity that left
         // `ambe-bench` holding the port indistinguishable from an unplugged
@@ -703,13 +730,8 @@ impl DstarSession {
         // in the busy case.
         let (ambe, backend) = match vocoder {
             Vocoder::Given(ambe, backend) => (ambe, backend),
-            Vocoder::Open(trust) => {
-                open_ambe_stream(Some(AmbeBackend::Hardware), VocoderMode::Dstar, trust)
-                    .ok_or_else(|| {
-                        ConsoleError::Dstar(
-                            astar_codec::ambe::classify_thumbdv_failure(trust).message(),
-                        )
-                    })?
+            Vocoder::Open(trust, choice) => {
+                astar_codec::ambe::open_dstar_stream(choice, trust).map_err(ConsoleError::Dstar)?
             }
         };
 

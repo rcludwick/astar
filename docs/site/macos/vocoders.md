@@ -7,7 +7,42 @@ icon: lucide/cpu
 D-Star, System Fusion, NXDN and DMR carry their voice as AMBE, which astar
 decodes on a USB **vocoder stick**: a DVMEGA DVstick 30, or a ThumbDV / DV3000.
 Before astar will use a stick, you add it once in **Settings → Vocoders**.
-This page explains why, how to add and remove one, and which sticks work.
+D-Star can also use the **software vocoder** built into astar instead. This page explains both: which vocoder each mode uses, why you
+have to add a stick, how to add and remove one, and which sticks work.
+
+## Which vocoder each mode uses
+
+At the top of **Settings → Vocoders** is one row per mode.
+
+**D-Star** has a picker with two choices:
+
+| Choice | What it does |
+|---|---|
+| **Dongle (default)** | D-Star uses a vocoder stick you have added below, exactly as before. |
+| **Software (Bruce Perens' implementation)** | D-Star runs its voice on this Mac's processor, with Bruce Perens' AMBE implementation. No stick is needed for D-Star, and no port is opened. |
+
+The software vocoder is possible because D-Star's codec, AMBE 3600×2400, is
+old enough that its patents have expired. It has been checked against the
+real DVSI AMBE-3000 chip, and it uses well under a tenth of one core.
+
+The software vocoder is **built into astar**, but D-Star keeps using the dongle
+until you choose **Software** — astar never switches vocoders for you. If you
+have no stick at all, the empty list below offers **Use Software for D-Star**,
+and a D-Star connect refused for want of a trusted stick offers **Use the
+Software Vocoder for D-Star** next to **Open Vocoder Settings…**.
+
+A build of astar made with `ASTAR_DSTAR_SOFT_AMBE=0` leaves the software
+vocoder out; there, Software is greyed out and the row says so (see
+[Building the engine](../build/engine.md)). If you move a Mac from a build that
+had it to one that does not, the row turns orange and D-Star connects are
+refused until you choose **Dongle**.
+
+**System Fusion, NXDN and DMR** read **Dongle only**. Their codec is AMBE+2,
+which is still covered by US patent 8,359,197 until 2028-05-20, so astar has
+no software vocoder for them, and the choice is not offered.
+
+The choice is kept in this Mac's preferences under `vocoder.dstar`. Like the
+stick list, it is never included in an exported config.
 
 ## Why you have to add the stick
 
@@ -113,4 +148,5 @@ that names a port whose serial is not on the list is refused. See
 
 The node daemon keeps the same kind of list in `node.toml`, as
 `[vocoder] trusted_serials`, and adds sticks with `astar-server vocoder add`.
+Its D-Star vocoder choice is `[vocoder] dstar`.
 See [Configuration](../server/configuration.md#vocoder-trusted-ambe-vocoder-sticks).

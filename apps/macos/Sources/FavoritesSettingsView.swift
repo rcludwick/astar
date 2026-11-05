@@ -51,7 +51,7 @@
         }
 
         var body: some View {
-            Section("Favorites") {
+            SettingsSection(.favorites) {
                 talkTimerDefaultRow
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 4, leading: 6, bottom: 8, trailing: 6))

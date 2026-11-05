@@ -39,7 +39,7 @@ by per-file headers.
 
 ## Third-party components
 
-Four paths in the repository, and two upstream dependencies (plus a system
+Five paths in the repository, and two upstream dependencies (plus a system
 `libcodec2`, if the opt-in `codec2-runtime` feature loads one), are **not**
 AGPL-3.0. This list matches the table in the repository's `README.md`; if the
 two ever disagree, the licence files shipped alongside the code win.
@@ -48,6 +48,7 @@ two ever disagree, the licence files shipped alongside the code win.
 |---|---|---|
 | `vendor/ambe-thumbdv` | ThumbDV / DV3000 AMBE driver | MIT **OR** Apache-2.0 |
 | `vendor/codec2` / system `libcodec2` | Codec 2 — the M17 voice codec (the `codec2` crate, vendored unmodified). Opt-in features only | `LGPL-2.1-only AND MIT` / LGPL-2.1 |
+| `vendor/ham-digital-modes-ambe` | Bruce Perens' software D-Star vocoder (AMBE 3600×2400), without its AMBE+2 code. Linked into the macOS app and astar-server's static release | `LGPL-3.0-or-later` |
 | `apps/gui/assets/fonts` | The Inter typeface, bundled with the Iced client | SIL Open Font License 1.1 (`LICENSE-Inter.txt`) |
 | `harness/asterisk_parity/c_iaxclient/vendored/libiax2` | The historical C libiax2, used only as a parity reference by the test harness — never linked into a shipped binary | GPL v2 (`COPYING`) / LGPL v2 (`COPYING.LIB`) |
 | `nnnoiseless` crate | RNNoise — mic noise reduction, compiled into every build | BSD-3-Clause |
@@ -101,6 +102,28 @@ rebuild. Its notices:
 * `vendor/codec2/VENDORED.md` — provenance: upstream crate and repository, the
   exact version, commit and checksum vendored, and how to update it.
 * `LICENSE-EXCEPTIONS.md` §2 — the LGPL notices and the relink offer.
+
+### `vendor/ham-digital-modes-ambe`
+
+`vendor/ham-digital-modes-ambe` is Bruce Perens' software vocoder for D-Star's
+AMBE 3600×2400: the AMBE part of his `ham_digital_modes` crate, from
+`BrucePerens/hams_open`, at a pinned commit. It is licensed
+**LGPL-3.0-or-later** and keeps those terms. astar removed upstream's AMBE+2
+code (DMR, NXDN, System Fusion), which is still patented, and replaced its
+`lib.rs` and `Cargo.toml`; everything else is as upstream published it.
+
+It is built by the `dstar-soft-ambe` feature, which the macOS app and
+astar-server's static release both turn on, so both link it statically and its
+source ships in this repository next to astar's; anyone can change it and
+rebuild. A plain `cargo build` leaves it out. D-Star uses it only when the
+operator chooses it; the dongle is the default. Its notices:
+
+* `vendor/ham-digital-modes-ambe/LICENSE`, `LICENSE-LGPL-3.0.txt`,
+  `LICENSE-GPL-3.0.txt`
+* `vendor/ham-digital-modes-ambe/VENDORED.md` — provenance, the exact commit,
+  every change, and the ISC notices of mbelib and DSD, whose tables it uses.
+* `LICENSE-EXCEPTIONS.md` §9 — the LGPL notices, the relinking terms, and the
+  patent reasoning.
 
 ### `apps/gui/assets/fonts`
 

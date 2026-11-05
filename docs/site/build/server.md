@@ -64,9 +64,9 @@ and carries on with safe defaults rather than exiting — a daemon under
 ## One file: the static release
 
 For a server, astar-server builds as **one static executable**: no shared
-library, no sound-device stack, no package to install beside it. LAME and
-Codec 2 (both LGPL, see `LICENSE-EXCEPTIONS.md`), the Opus codec, the TLS
-stack and the web pages are all inside.
+library, no sound-device stack, no package to install beside it. LAME,
+Codec 2 and the software D-Star vocoder (all LGPL, see `LICENSE-EXCEPTIONS.md`),
+the Opus codec, the TLS stack and the web pages are all inside.
 
 ```bash
 just server-release                              # x86_64-unknown-linux-musl

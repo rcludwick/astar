@@ -3,6 +3,9 @@
 
 # ── Rust ─────────────────────────────────────────────────────────────────────
 target/
+# ...and a `target` symlink to another drive (ci/link-builds.sh): a pattern
+# ending in `/` matches only directories, never a link.
+/target
 
 # cargo-fuzz artifacts
 fuzz/target/
@@ -26,6 +29,7 @@ bindings/swift-serial/astarserial.xcframework/
 # on disk) and 404'd in CI (they were never committed).
 DerivedData/
 /apps/macos/build/
+/apps/macos/build
 .build/
 *.xcuserstate
 xcuserdata/

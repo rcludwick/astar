@@ -385,14 +385,11 @@ impl PrintTracker {
 
         if !self.printed_link && state.link == LinkState::Linked {
             self.printed_link = true;
-            // D-Star is hardware-only since iax-b3e7 M0: the only backend is
-            // the ThumbDV. `None` would mean a session with no backend at
-            // all, which `DstarSession::connect` refuses to produce — name it
-            // rather than inventing a backend.
-            let backend = match state.backend {
-                Some(AmbeBackend::Hardware) => "thumbdv",
-                None => "unknown",
-            };
+            // The ThumbDV, or the software D-Star vocoder when the build has
+            // it, by the backend's own stable name. `None` would mean a
+            // session with no backend at all, which `DstarSession::connect`
+            // refuses to produce — name it rather than inventing a backend.
+            let backend = state.backend.map_or("unknown", AmbeBackend::as_str);
             lines.push(format!(
                 "linked {} module {} (backend: {backend})",
                 self.host, self.module
@@ -669,7 +666,7 @@ mod tests {
             t.on_snapshot(&snapshot(None, None)),
             vec!["linked 127.0.0.1 module B (backend: thumbdv)".to_string()]
         );
-        assert!(t.on_snapshot(&snapshot(None, None)).is_empty());
+        assert_eq!(t.on_snapshot(&snapshot(None, None)), Vec::<String>::new());
     }
 
     #[test]
@@ -696,9 +693,9 @@ mod tests {
             vec!["▶ AJ7HR hello".to_string()]
         );
         // An unchanged snapshot prints nothing further.
-        assert!(
-            t.on_snapshot(&snapshot(Some("AJ7HR"), Some("hello")))
-                .is_empty()
+        assert_eq!(
+            t.on_snapshot(&snapshot(Some("AJ7HR"), Some("hello"))),
+            Vec::<String>::new()
         );
     }
 

@@ -39,7 +39,10 @@ engine the [macOS app](../macos/index.md) uses, with no UI attached.
 * **Node-to-node links** — connect (`*3`), monitor (`*2`), disconnect (`*1`).
 * **M17 reflector monitor** — link to one module of an M17 reflector,
   receive-only, from Discord (`/dial m17`) or `POST /m17`. Off until
-  `node.toml` has an `[m17]` section.
+  `node.toml` has an `[m17]` section. The node never sends voice to the
+  reflector, but what it hears there is relayed to every AllStar node and
+  EchoLink station linked to this node, and a linked radio transmits it —
+  see the warning in [Configuration](configuration.md#m17-receive-only-m17-reflector-monitor).
 * **Conference bridge** — mix-minus by default, so each member hears everyone
   but themselves; switchable live between handset, bridge and conference
   topologies.
@@ -110,7 +113,9 @@ carries on with safe defaults rather than exiting — a daemon under
     [Control API](control-api.md#ptt).
 
     IAX2 and the console's own M17 client session are remotely keyable; the
-    node's M17 *monitor* has no transmit path, and `POST /key` cannot reach it.
+    node's M17 *monitor* has no transmit path toward the reflector, and
+    `POST /key` cannot reach it. What the monitor hears is still relayed to
+    the node's AllStar and EchoLink members, and their radios transmit it.
 
 ## Working on it
 

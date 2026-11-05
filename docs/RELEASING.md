@@ -5,7 +5,7 @@ Two commands, plus one thing you write by hand first.
 ```console
 $ just release 0.1.13-beta --dry-run   # read-only: prints everything it would do
 $ just release 0.1.13-beta             # bump, gates, commit, tag, push to ORIGIN
-$ just publish 0.1.13-beta             # ONLY when Rob says to publish
+$ just publish 0.1.13-beta             # ONLY when Rob says to publish; cleans up after
 ```
 
 `release` goes as far as the private repo and stops. `publish` is the second,
@@ -78,9 +78,9 @@ astar-server ships as one static executable per architecture, built by
 `just server-release x86_64-unknown-linux-musl` (and `aarch64-unknown-linux-musl`).
 The recipe runs `ci/check-server-release.sh`, which must pass: the binary is
 statically linked, carries the listener page and LAME, and its `--features`
-are exactly the `release` set. `just release` does not build it yet; attach
+are exactly the `release` set (`dstar-soft-ambe` included). `just release` does not build it yet; attach
 it to a GitHub release by hand when Rob publishes one. It statically links
-LGPL code (LAME, Codec 2), so the release notes point at
+LGPL code (LAME, Codec 2, the software D-Star vocoder), so the release notes point at
 `LICENSE-EXCEPTIONS.md` and the matching source tag.
 
 ## `just publish <version>`
@@ -90,8 +90,11 @@ Preconditions:
 * you are on `main` — `main` is the branch that gets pushed, so `main` is what
   every other check is about;
 * the tag exists locally, is reachable from `main`, and is on `origin`;
-* `public/main` is an ancestor of `main` (both repos share one history, so
-  publishing is a fast-forward and never a merge);
+* the tag is not already on `public`, and public's `main` doesn't already
+  carry exactly the tag's files;
+* it is not Monday–Friday between 7 AM and 5 PM MST (UTC−7 all year). No
+  push goes to the public repo in those hours (Rob's rule). A dry run only
+  says whether a push would be allowed right now;
 * `CHANGELOG.md`'s **newest** heading is the version being published. Anything
   below the top is a release that is already out, and publishing its notes as
   `--latest` would put stale notes on the release the docs link to;
@@ -104,8 +107,32 @@ Preconditions:
   shipping an artifact that script already refused;
 * `gh auth status` is happy.
 
-Then it pushes `main` and the tag to `public`, and creates the release with
-`gh release create`, with:
+Then it adds **one squashed commit** to `public`, and creates the release
+with `gh release create`.
+
+The public repo has its own history, which shares no commit with the private
+one (Rob, 2026-11-01: "Private should stay private always"). Public `main` is
+one commit per release, named `astar <version>`:
+
+* it carries exactly the files of the release tag, so the public code is the
+  release, byte for byte;
+* it sits on top of the previous release's public commit, so the push is a
+  plain fast-forward on public;
+* it is dated at a random evening time, 18:00 to 22:59 MST, on the day the
+  release was tagged, and never before the commit it sits on;
+* its tag on public is a separate tag object with the same name and date,
+  pointing at the squashed commit. The private tag of the same name is left
+  alone.
+
+The commit and the tag go up in one atomic push. No private commit object
+ever reaches public. This clone's `public` remote fetches `main` only and no
+tags (`remote.public.tagOpt=--no-tags`), because public's tags name different
+commits from the private tags of the same name, and fetching them would
+overwrite the private ones. The old shared history was squashed this way on
+2026-11-01, and a bundle of it is kept at
+`/Volumes/data/backups/astar-public-pre-squash-2026-11-01.bundle` on Rob's Mac.
+
+The release itself is created with:
 
 * the notes lifted verbatim from this version's `CHANGELOG.md` section (heading
   stripped, `Full changelog: https://rcludwick.github.io/astar/changelog/`
@@ -117,6 +144,32 @@ Then it pushes `main` and the tag to `public`, and creates the release with
 
 Afterwards it reads `repos/rcludwick/astar/releases/latest` back and checks the
 tag, rather than assuming the flag took.
+
+## Cleaning up afterwards
+
+Once GitHub confirms the release is live, `just publish` runs
+`ci/clean-builds.sh --after-publish`. It removes the build output the release
+needed and nothing needs any more: the host Rust builds (`target/debug`,
+`target/release`, the Intel and Linux cross builds), the xcframework slices'
+incremental caches, the Release app, the DMGs of older releases, the DMG just
+uploaded, and any worktree that is clean and merged into `main` (with its
+branch). A release's gates leave 20–30 GB behind, and nothing else prunes it.
+
+It keeps the Debug app (`just run` launches it, and it may be running), the
+xcframeworks, `target/server-release`, and every worktree that is dirty or
+unmerged. While cargo, rustc or xcodebuild is running it leaves `target/` and
+the app build alone and says so. A failure here never undoes the publish; it
+prints `just clean-builds` to run again.
+
+`just clean-builds` runs the same clean by hand at any time (without
+`--after-publish`, so it keeps `astar.dmg`), and `--dry-run` lists what it
+would remove. The next `just ci` after a clean rebuilds from scratch, which
+takes a few minutes longer than usual.
+
+When a checkout's build folders are linked to another drive
+(`just link-builds`), the clean works through the links, removes a merged
+worktree's linked folders along with it, and sweeps linked folders whose
+worktree no longer exists.
 
 ## When a gate fails
 

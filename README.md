@@ -127,6 +127,7 @@ One cargo workspace, one git history, three deliverables:
 | `bindings/` | The engine's own bindings: Swift (`AstarStation`, `AstarSerial`) and Python. |
 | `vendor/ambe-thumbdv` | The ThumbDV / DV3000 AMBE vocoder driver. An MIT/Apache-2.0 island — see [Licence](#licence). |
 | `vendor/codec2` | Codec 2, the M17 voice codec (the pure-Rust `codec2` crate, unmodified). An LGPL-2.1-only AND MIT island — see [Licence](#licence). |
+| `vendor/ham-digital-modes-ambe` | Bruce Perens' software D-Star vocoder (AMBE 3600×2400), without its AMBE+2 code. An LGPL-3.0-or-later island, built into the shipped app and server release — see [Licence](#licence). |
 
 **Architecture rule: fat core, thin views.** All protocol / audio / PTT logic
 lives in `crates/`. The macOS and Iced clients are views over the same engine,
@@ -367,6 +368,7 @@ rows are paths in this repository; the last two are upstream dependencies:
 |---|---|---|
 | `vendor/ambe-thumbdv` | ThumbDV / DV3000 AMBE driver (Rob's own, vendored in) | MIT **OR** Apache-2.0 — see its `LICENSE-MIT`, `LICENSE-APACHE`, and `VENDORED.md` |
 | `vendor/codec2` (the `codec2` crate, vendored unmodified) / system `libcodec2` | Codec 2 — the M17 voice codec. Opt-in features only, never in a default feature set | `LGPL-2.1-only AND MIT` / LGPL-2.1 — see its `LICENSE-LGPL-2.1` and `VENDORED.md`; notices and relink offer in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) |
+| `vendor/ham-digital-modes-ambe` | Bruce Perens' software D-Star vocoder. The `dstar-soft-ambe` feature: not a cargo default, but linked statically into the macOS app and astar-server's static release; D-Star only, and the dongle stays the default choice | `LGPL-3.0-or-later` — see its `LICENSE` and `VENDORED.md`; notices and patent reasoning in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) §9 |
 | `apps/gui/assets/fonts` | Inter typeface | SIL Open Font License 1.1 |
 | `harness/asterisk_parity/c_iaxclient/vendored/libiax2` | The historical C libiax2, used only as a parity reference by the test harness — never linked into a shipped binary | GPL / LGPL, see its `COPYING` and `COPYING.LIB` |
 | `nnnoiseless` crate (dependency, not vendored) | RNNoise — mic noise reduction. Compiled into every build; the model is a const array in the crate | BSD-3-Clause — five copyright lines reproduced in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) |

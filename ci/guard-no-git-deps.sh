@@ -4,9 +4,10 @@
 # Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 # Merge invariant: this repo has NO git dependencies.
 #
-# The only AMBE code here is the ThumbDV driver, a vendored path crate at
-# vendor/ambe-thumbdv — there is no software vocoder and never will be. Codec 2
-# (M17) is likewise a vendored path crate, at vendor/codec2. That is what
+# Every AMBE code path here is a vendored path crate: the ThumbDV driver at
+# vendor/ambe-thumbdv, and Bruce Perens' software D-Star vocoder at
+# vendor/ham-digital-modes-ambe (D-Star only; see CLAUDE.md). Codec 2 (M17) is
+# likewise a vendored path crate, at vendor/codec2. That is what
 # makes `cargo build --locked --offline` work and what keeps the build from
 # reaching out to an external repo mid-CI. If a `git = "..."` dependency ever
 # comes back, the offline/locked guarantee dies quietly — so fail loudly here.

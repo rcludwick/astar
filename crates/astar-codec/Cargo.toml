@@ -26,7 +26,7 @@ astar-ysf = { path = "../astar-ysf" }
 # `nxdn.rs` — two 49-bit AMBE+2 frames per 14-byte block, at bit offsets 0
 # and 49 — was read out of other people's implementations, so it is exactly
 # the code that must be under test on every `just ci` run.
-astar-nxdn = { path = "../astar-nxdn", version = "0.1.18-beta" }
+astar-nxdn = { path = "../astar-nxdn", version = "0.1.19-beta" }
 # DMR protocol primitives. Same reasoning as `astar-ysf` and `astar-nxdn`
 # above: pure protocol, no licensing question, and deliberately NOT behind a
 # feature. `dmr.rs`'s rate word and 72-bit frame layout were read out of
@@ -34,13 +34,16 @@ astar-nxdn = { path = "../astar-nxdn", version = "0.1.18-beta" }
 # AMBE-3000 answers a wrongly-configured link with confident noise rather
 # than an error — so that byte layout must be under test on every `just ci`
 # run, not behind a flag nobody turns on.
-astar-dmr = { path = "../astar-dmr", version = "0.1.18-beta" }
+astar-dmr = { path = "../astar-dmr", version = "0.1.19-beta" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 codec2 = { workspace = true, optional = true }
 libloading = { workspace = true, optional = true }
 # Vendored MIT/Apache-2.0 ThumbDV driver — see vendor/ambe-thumbdv/VENDORED.md.
 ambe-thumbdv = { path = "../../vendor/ambe-thumbdv", optional = true }
+# Vendored LGPL-3.0-or-later D-Star AMBE vocoder (Bruce Perens) — see
+# vendor/ham-digital-modes-ambe/VENDORED.md and LICENSE-EXCEPTIONS.md §9.
+ham-digital-modes-ambe = { workspace = true, optional = true }
 # GSM 06.10 full-rate (EchoLink's voice codec, and IAX2's GSM format):
 # pure-Rust, MIT, `#![deny(unsafe_code)]`, no build script. Pinned exactly —
 # the 0.0.6–0.0.8 releases carried a libgsm-derived licence and are yanked,
@@ -64,10 +67,24 @@ ilbc = []
 codec2-static = ["dep:codec2"]
 codec2-runtime = ["dep:libloading"]
 # AMBE vocoder backend (iax-a9d4): the ThumbDV dongle. OFF by default, like
-# codec2-*: a plain `cargo build` must never pull the vocoder driver. D-Star
-# is hardware-only — there is no software AMBE backend. Verify with
-# `cargo tree -p astar-codec` (no ambe-thumbdv) vs `--features ambe-hw`.
+# codec2-*: a plain `cargo build` must never pull the vocoder driver. Verify
+# with `cargo tree -p astar-codec` (no ambe-thumbdv) vs `--features ambe-hw`.
 ambe-hw = ["dep:ambe-thumbdv"]
+# LICENSING + PATENTS: a software vocoder for D-STAR ONLY (astar-dstar-perens),
+# Bruce Perens' AMBE 3600x2400, LGPL-3.0-or-later. Every shipped build turns it
+# on by name (Rob, 2026-11-01: the macOS app via build-xcframework.sh, and
+# astar-server's `release` set), but it is not a cargo default, for the reason
+# codec2-static is not: a plain `cargo build` links no LGPL code, and the
+# feature-off path stays tested (ci/guard-dstar-soft-ambe.sh). It sits BESIDE
+# the dongle, never instead of it: it pulls
+# `ambe-hw` too, the dongle stays the default backend, and the software one is
+# opened only for `VocoderMode::Dstar` when a caller asks for
+# `AmbeBackend::Software` by name. DMR, NXDN and System Fusion are AMBE+2,
+# still read on US 8,359,197 until 2028-05-20, and stay hardware-only: the
+# vendored crate does not even contain their code. Verify with
+# `cargo tree -p astar-codec` (no ham-digital-modes-ambe) vs
+# `--features dstar-soft-ambe`.
+dstar-soft-ambe = ["ambe-hw", "dep:ham-digital-modes-ambe"]
 
 [dev-dependencies]
 # `tests/gsm_etsi.rs` checks the ETSI vectors against ETSI-SHA256SUMS.

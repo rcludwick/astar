@@ -23,7 +23,7 @@
         @AppStorage(SpectrumDecayPref.key) private var decay = SpectrumDecayPref.defaultValue
 
         var body: some View {
-            Section("Spectrum") {
+            SettingsSection(.spectrum) {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
                         Text("Decay")

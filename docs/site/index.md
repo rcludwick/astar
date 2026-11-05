@@ -59,10 +59,11 @@ native front-end over it rather than a shared web shell.
 M17 transmits your callsign on the air; AllStarLink identifies by node number
 instead, and authenticates against the portal rather than a per-node secret.
 
-D-Star voice is AMBE+2, which has no software implementation in astar: it runs
-on a hardware vocoder dongle, and the network appears in the client's picker
-only while one is attached. [Digital voice](macos/hardware.md#digital-voice)
-covers why, and what to buy.
+D-Star voice is AMBE, which runs on a hardware vocoder dongle by default.
+Because D-Star's AMBE is out of patent, astar also has a built-in software
+vocoder for D-Star alone, which you can choose in Settings → Vocoders instead
+of a dongle. System Fusion, NXDN and DMR always need the dongle.
+[Digital voice](macos/hardware.md#digital-voice) covers why, and what to buy.
 
 ## Where to start
 

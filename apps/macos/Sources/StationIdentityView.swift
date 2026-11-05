@@ -27,7 +27,7 @@
         @EnvironmentObject private var session: CallSession
 
         var body: some View {
-            Section("Operator") {
+            SettingsSection(.operatorIdentity) {
                 VStack(alignment: .leading, spacing: 4) {
                     SettingsField("Callsign") {
                         // No placeholder: the label carries the name, and an

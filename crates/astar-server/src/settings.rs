@@ -337,6 +337,14 @@ fn rule(segments: &[&str]) -> Option<Rule> {
 
         ["vocoder"] => Table,
         ["vocoder", "trusted_serials"] => VocoderSerials,
+        // D-Star only (astar-dstar-perens): no ysf/nxdn/dmr path exists, so
+        // the page cannot offer a software vocoder for an AMBE+2 mode.
+        // Whether "software" is in this build is the loader's oracle check.
+        ["vocoder", "dstar"] => Pick {
+            options: &["dongle", "software"],
+            nullable: true,
+            exact_case: true,
+        },
 
         // `[web]` and `[stream]`: restart-tier, because the public listener,
         // its certificate and the stream tap are all built once at start-up.
@@ -1125,6 +1133,7 @@ impl RedactedConfig {
         // holds nothing else, so this one key is how the page sees it exists.
         if let Some(v) = &cfg.vocoder {
             put(&mut m, "vocoder.trusted_serials", v.trusted_serials.clone());
+            put_opt(&mut m, "vocoder.dstar", v.dstar.as_deref());
         }
         Self(m)
     }
@@ -3954,6 +3963,31 @@ enabled = false
         }
         assert!(is_removable("vocoder"));
         assert!(!is_removable("vocoder.trusted_serials"));
+    }
+
+    /// astar-dstar-perens: `vocoder.dstar` is a closed, exact-case picker of
+    /// "dongle" and "software", restart-tier like the rest of the section,
+    /// and no other mode has a vocoder path at all.
+    #[test]
+    fn the_dstar_vocoder_is_a_closed_picker_and_dstar_only() {
+        let path = "vocoder.dstar";
+        assert_eq!(tier(path), Some(Tier::Restart));
+        assert_eq!(validate_field(path, &json!("dongle")), Ok(()));
+        assert_eq!(validate_field(path, &json!("software")), Ok(()));
+        assert_eq!(validate_field(path, &Value::Null), Ok(()));
+        for bad in ["Software", "hardware", "auto", ""] {
+            assert!(validate_field(path, &json!(bad)).is_err(), "{bad:?}");
+        }
+        for other in [
+            "vocoder.ysf",
+            "vocoder.nxdn",
+            "vocoder.dmr",
+            "vocoder.software",
+        ] {
+            assert_eq!(tier(other), None, "{other}");
+        }
+        let v = redacted(&(minimal() + "[vocoder]\ndstar = \"dongle\"\n"));
+        assert_eq!(v.get("vocoder.dstar"), Some(&json!("dongle")));
     }
 
     #[test]

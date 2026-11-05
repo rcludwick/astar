@@ -88,19 +88,24 @@ install the driver above.
 
 ## Digital voice
 
-**D-Star needs a hardware vocoder dongle.** That is not a recommendation — it
-is the only way astar does D-Star voice at all. Add the dongle once in
-**Settings → Vocoders** (see [Vocoders](vocoders.md)); after that the D-Star
-option appears in the network picker while it is attached and disappears when
-you unplug it.
+**System Fusion, NXDN and DMR need a hardware vocoder dongle. D-Star uses one
+by default**, or the built-in software vocoder if you choose it. Add the dongle once in **Settings → Vocoders** (see
+[Vocoders](vocoders.md)); after that those networks appear in the network
+picker while it is attached and disappear when you unplug it.
 
 ### Why the hardware is required
 
-D-Star voice is **AMBE+2**, a proprietary codec licensed by DVSI. astar
-contains no software AMBE implementation and will not gain one: there is
-nothing we can ship and redistribute under the AGPL. A dongle carries a
-licensed implementation on a chip, so the codec runs there instead of in the
-app — in practice you buy the licence along with the hardware.
+These modes carry their voice as AMBE, DVSI's codec. A dongle carries an
+implementation on a chip, so the codec runs there instead of in the app.
+
+D-Star uses the older **AMBE 3600×2400**, whose patents have expired. astar can
+therefore be built with a **software vocoder for D-Star** (Bruce Perens'
+implementation), chosen in [Settings → Vocoders](vocoders.md#which-vocoder-each-mode-uses).
+It is built into astar; D-Star uses it only when you choose it.
+
+System Fusion, NXDN and DMR use **AMBE+2**, which is still covered by
+US patent 8,359,197 until 2028-05-20. For them the dongle is the only way, and
+astar has no software vocoder.
 
 This is specific to AMBE. **M17** uses Codec 2, which is free software, and
 **AllStarLink** uses G.711 — neither needs a dongle, and neither is affected by

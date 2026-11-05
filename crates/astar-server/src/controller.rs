@@ -29,6 +29,7 @@ use crate::{
         M17Settings, ReflectorEntry, module_list, validate_m17_callsign, validate_module,
         validate_reflector_name,
     },
+    m17_relay::RelayCounts,
     secrets::SecretProvider,
 };
 
@@ -2050,6 +2051,18 @@ impl NodeController {
                     })
                 };
                 if let Some((reflector, module)) = linked {
+                    // The reflector's audio now reaches every member the
+                    // conference sends to. Say so in the log, with how many.
+                    let reach = self.m17_relay_counts();
+                    tracing::warn!(
+                        reflector = %reflector,
+                        module = %module,
+                        allstar = reach.allstar,
+                        echolink = reach.echolink,
+                        "m17 monitor linked: relaying {reflector} {module} to {} AllStar connection(s) and {} EchoLink station(s); a linked node with a radio transmits it",
+                        reach.allstar,
+                        reach.echolink,
+                    );
                     self.broadcast_m17("connected", &reflector, module, None);
                 }
             }
@@ -2098,6 +2111,14 @@ impl NodeController {
             reason: reason.map(str::to_string),
         });
         self.broadcast(&NodeEvent::Snapshot(self.snapshot()));
+    }
+
+    /// Who the M17 monitor's audio reaches right now: the IAX2 legs and
+    /// `EchoLink` stations the conference sends to. See [`crate::m17_relay`].
+    #[must_use]
+    pub(crate) fn m17_relay_counts(&self) -> RelayCounts {
+        let s = self.snapshot();
+        RelayCounts::from_parts(&s.calls, &s.links, s.echolink.as_ref())
     }
 
     /// The newest station the monitor heard, as (callsign, seconds ago).
@@ -2447,16 +2468,20 @@ impl NodeController {
                 &self.station.echolink_node_peers(),
             )
         });
+        let links = self.station.link_roster().links;
+        let m17_relay = m17_enabled
+            .then(|| RelayCounts::from_parts(&state.calls, &links, echolink.as_ref()).into());
         NodeSnapshot {
             node_id: self.node_id.clone(),
             listening: self.station.is_listening(),
             registered: self.station.is_registered(),
             calls: state.calls,
-            links: self.station.link_roster().links,
+            links,
             discord,
             m17,
             m17_enabled,
             m17_available: self.station.m17_available(),
+            m17_relay,
             echolink_enabled: echolink_cfg.is_some(),
             echolink,
             public: self
@@ -3770,6 +3795,7 @@ mod tests {
             m17: None,
             m17_enabled: false,
             m17_available: false,
+            m17_relay: None,
             echolink: None,
             echolink_enabled: false,
             public: None,

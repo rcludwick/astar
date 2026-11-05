@@ -24,6 +24,9 @@
 #                        AllStarLink portal, and wants ASL_USER / ASL_PASS /
 #                        ASL_NODE — credentials that must never enter a CI env.
 #   IAX_PARROT_LIVE=1    dials live AllStar node 55553.
+#   IAX_BLE_TESTS=1      arms the Bluetooth push-to-talk hardware checks
+#                        (the B02PTT button), which talk to a real device
+#                        and can key a transmitter.
 #
 # Nothing in CI transmits. Nothing in CI leaves 127.0.0.1. Rob is the only one
 # who keys on air.
@@ -34,6 +37,7 @@ FORBIDDEN=(
   IAX_THUMBDV_PORT
   IAX_PORTAL_LIVE
   IAX_PARROT_LIVE
+  IAX_BLE_TESTS
   ASL_USER
   ASL_PASS
   ASL_NODE

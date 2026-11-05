@@ -186,13 +186,19 @@ impl Drop for Bridge {
     }
 }
 
-/// What a bridged frame carries. A digital-voice session and a mic lane both
-/// send bare `Vec<i16>`; the output bus's end of the lane is an
-/// [`astar_audio::RxFrame`]. None of these codecs has a sender clock — their
-/// frames arrive decoded, one per protocol tick — so the bridge only ever
-/// needs the samples (iax-rxjb).
+/// What a bridged frame carries. A digital-voice session and a mic lane send
+/// bare `Vec<i16>`; the output bus's end of the lane is an
+/// [`astar_audio::RxFrame`], which may carry the sender's clock (an
+/// `EchoLink` call's does; M17, D-Star and System Fusion frames arrive
+/// decoded, one per protocol tick, and do not). The bridge converts the
+/// samples and hands the clock through untouched: one frame in, one frame
+/// out, so the stamp still names the same 20 ms of audio (iax-rxjb,
+/// `astar-el-hollow`).
 trait BridgedPcm {
     fn samples(&self) -> &[i16];
+    fn clock(&self) -> Option<astar_audio::RxClock> {
+        None
+    }
 }
 
 impl BridgedPcm for Vec<i16> {
@@ -205,11 +211,32 @@ impl BridgedPcm for astar_audio::RxFrame {
     fn samples(&self) -> &[i16] {
         &self.pcm
     }
+    fn clock(&self) -> Option<astar_audio::RxClock> {
+        self.clock
+    }
+}
+
+/// What a bridge sends on: the converted samples, with the input's clock
+/// where the output can carry one.
+trait FromBridged {
+    fn from_bridged(pcm: Vec<i16>, clock: Option<astar_audio::RxClock>) -> Self;
+}
+
+impl FromBridged for Vec<i16> {
+    fn from_bridged(pcm: Vec<i16>, _clock: Option<astar_audio::RxClock>) -> Self {
+        pcm
+    }
+}
+
+impl FromBridged for astar_audio::RxFrame {
+    fn from_bridged(pcm: Vec<i16>, clock: Option<astar_audio::RxClock>) -> Self {
+        Self { pcm, clock }
+    }
 }
 
 /// Convert every frame from `rx` and forward it to `tx` until either end
 /// disconnects or `stop` is set.
-fn pump<I: BridgedPcm, O: From<Vec<i16>>>(
+fn pump<I: BridgedPcm, O: FromBridged>(
     rx: &Receiver<I>,
     tx: &Sender<O>,
     mut bridge: RateBridge,
@@ -219,7 +246,7 @@ fn pump<I: BridgedPcm, O: From<Vec<i16>>>(
         match rx.recv_timeout(POLL) {
             Ok(frame) => {
                 if let Some(out) = bridge.convert(frame.samples())
-                    && tx.send(O::from(out)).is_err()
+                    && tx.send(O::from_bridged(out, frame.clock())).is_err()
                 {
                     return;
                 }
@@ -356,6 +383,11 @@ impl VoiceRoute {
 
     pub(crate) fn out(&self) -> &OutputId {
         &self.out
+    }
+
+    /// This route's lane on the output bus, for its jitter-buffer counters.
+    pub(crate) fn mix_id(&self) -> MixCallId {
+        self.mix_id
     }
 
     /// The mic id whenever a device resolved — open or not — so meters and
@@ -563,6 +595,38 @@ mod tests {
             "downsampled tone changed pitch: {got_dn} zero crossings vs {want_dn}"
         );
 
+        bridge.join();
+    }
+
+    /// A frame stamped on the sender's clock (an `EchoLink` call's) keeps
+    /// its stamp across the bridge. Dropping it would put a 16 kHz
+    /// station's receive lane back on the plain queue the jitter buffer
+    /// exists to replace (`astar-el-hollow`).
+    #[test]
+    fn a_16k_bridge_keeps_the_sender_clock() {
+        let (bus, from_bridge, _to_bridge) = bus_pair();
+        let (sess, bridge) = spawn_bridge(bus, 16_000).expect("bridge spawns");
+        sess.rx_frames
+            .send(astar_audio::RxFrame::timed(vec![100; 160], 1_240, 20))
+            .expect("session -> bridge");
+        sess.rx_frames
+            .send(vec![100; 160].into())
+            .expect("session -> bridge");
+        let timed = from_bridge
+            .recv_timeout(Duration::from_secs(2))
+            .expect("bus frame");
+        assert_eq!(timed.pcm.len(), 320);
+        assert_eq!(
+            timed.clock,
+            Some(astar_audio::RxClock {
+                ts_ms: 1_240,
+                ms: 20
+            })
+        );
+        let bare = from_bridge
+            .recv_timeout(Duration::from_secs(2))
+            .expect("bus frame");
+        assert_eq!(bare.clock, None, "and a bare frame stays bare");
         bridge.join();
     }
 

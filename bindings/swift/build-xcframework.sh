@@ -96,6 +96,17 @@ build_slice() {
   if [ "${ASTAR_CODEC2:-static}" = "static" ]; then
     codec_features=(--features codec2-static)
   fi
+  # The software D-Star vocoder (astar-dstar-perens; Bruce Perens' AMBE
+  # 3600x2400, LGPL-3.0-or-later, LICENSE-EXCEPTIONS.md section 9). Built in by
+  # default — Rob, 2026-11-01: every shipped app carries it, and the operator
+  # picks dongle or software for D-Star in Settings → Vocoders (the dongle
+  # stays the default choice). LICENSING: like Codec 2 above, this links LGPL
+  # code statically, which the notices and written offer in
+  # LICENSE-EXCEPTIONS.md cover. ASTAR_DSTAR_SOFT_AMBE=0 builds without it;
+  # Settings → Vocoders then shows Software greyed out.
+  if [ "${ASTAR_DSTAR_SOFT_AMBE:-1}" = "1" ]; then
+    codec_features+=(--features dstar-soft-ambe)
+  fi
   ( cd "$REPO" && env "${dep_env[@]}" cargo build -p astar-sys --target "$target" $cargo_profile_flag "${codec_features[@]}" )
   echo "$REPO/target/$target/$profile_dir/$LIB_NAME"
 }

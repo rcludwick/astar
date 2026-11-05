@@ -3287,6 +3287,74 @@ pub unsafe extern "C" fn iax_station_vocoder_trust(
     .unwrap_or(IAX_ERR_PANIC)
 }
 
+/// Choose D-Star's vocoder (astar-dstar-perens): `"dongle"` (the default) or
+/// `"software"`, exactly. Applies to every later D-Star connect and to the
+/// snapshot's `dstar_available`; a live session keeps the vocoder it opened.
+///
+/// **D-Star only.** There is no such call for System Fusion, NXDN or DMR:
+/// their AMBE+2 vocoder is hardware-only (US 8,359,197 until 2028-05-20).
+///
+/// `"software"` is accepted in every build; in one without the
+/// `dstar-soft-ambe` feature (see [`astar_dstar_software_vocoder_compiled`])
+/// the next D-Star connect fails with a sentence saying so, rather than
+/// quietly using the dongle.
+///
+/// Returns [`IAX_OK`], [`IAX_ERR_NULL`] (NULL `st` or `vocoder`),
+/// [`IAX_ERR_UTF8`], [`IAX_ERR_UNSUPPORTED`] (any other string), or
+/// [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_set_dstar_vocoder(
+    st: *mut IaxStation,
+    vocoder: *const c_char,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let name = match unsafe { req_str(vocoder) } {
+            Ok(s) => s,
+            Err(code) => return code,
+        };
+        match astar_station::DstarVocoder::parse(name) {
+            Some(v) => {
+                station.inner.set_dstar_vocoder(v);
+                IAX_OK
+            }
+            None => IAX_ERR_UNSUPPORTED,
+        }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Write the station's D-Star vocoder choice (`"dongle"` or `"software"`)
+/// into `buf` (NUL-terminated, truncate-safe). Returns the bytes the name
+/// needs (excluding the NUL), or a negative `IAX_ERR_*`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_dstar_vocoder(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let name = station.inner.dstar_vocoder().as_str();
+        unsafe { fill_buf(name, buf, len) }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// `1` when this build contains the software D-Star vocoder (the
+/// `dstar-soft-ambe` feature), `0` when it does not. A front-end greys the
+/// Software choice out on `0`. Shipped builds return `1`.
+#[unsafe(no_mangle)]
+pub extern "C" fn astar_dstar_software_vocoder_compiled() -> c_int {
+    c_int::from(astar_station::software_dstar_vocoder_compiled())
+}
+
 /// List the vocoder-class USB serial ports that could be enrolled, as a JSON
 /// array `[{"serial":"…","port":"/dev/cu.…"}, …]`, into `buf`
 /// (NUL-terminated, truncate-safe). **Enumeration only: no port is opened.**
@@ -3344,6 +3412,75 @@ pub unsafe extern "C" fn astar_vocoder_enrol(
         enrol_code(&outcome) as c_int
     }))
     .unwrap_or(IAX_ERR_PANIC)
+}
+
+#[cfg(test)]
+mod dstar_vocoder_tests {
+    use super::*;
+    use std::ffi::CString;
+
+    fn read(st: *mut IaxStation) -> String {
+        let mut buf = [0 as c_char; 32];
+        let n = unsafe { iax_station_dstar_vocoder(st, buf.as_mut_ptr(), buf.len()) };
+        assert!(n > 0);
+        unsafe { CStr::from_ptr(buf.as_ptr()) }
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn defaults_to_the_dongle_and_takes_only_the_two_names() {
+        let cfg = IaxConfig {
+            input: std::ptr::null(),
+            output: std::ptr::null(),
+            portal_user: std::ptr::null(),
+            portal_pass: std::ptr::null(),
+            portal_node: std::ptr::null(),
+            secret: std::ptr::null(),
+            codec_policy: std::ptr::null(),
+        };
+        let st = unsafe { iax_station_new(std::ptr::from_ref(&cfg)) };
+        assert!(!st.is_null());
+        assert_eq!(read(st), "dongle");
+        for (name, rc, after) in [
+            ("software", IAX_OK, "software"),
+            ("SOFTWARE", IAX_ERR_UNSUPPORTED, "software"),
+            ("hardware", IAX_ERR_UNSUPPORTED, "software"),
+            ("", IAX_ERR_UNSUPPORTED, "software"),
+            ("dongle", IAX_OK, "dongle"),
+        ] {
+            let c = CString::new(name).unwrap();
+            assert_eq!(
+                unsafe { iax_station_set_dstar_vocoder(st, c.as_ptr()) },
+                rc,
+                "{name:?}"
+            );
+            assert_eq!(read(st), after, "{name:?}");
+        }
+        assert_eq!(
+            unsafe { iax_station_set_dstar_vocoder(st, std::ptr::null()) },
+            IAX_ERR_NULL
+        );
+        unsafe { iax_station_free(st) };
+    }
+
+    #[test]
+    fn null_station_is_refused() {
+        let c = CString::new("dongle").unwrap();
+        assert_eq!(
+            unsafe { iax_station_set_dstar_vocoder(std::ptr::null_mut(), c.as_ptr()) },
+            IAX_ERR_NULL
+        );
+    }
+
+    #[test]
+    fn compiled_flag_follows_the_feature() {
+        assert_eq!(
+            astar_dstar_software_vocoder_compiled(),
+            c_int::from(cfg!(feature = "dstar-soft-ambe"))
+        );
+    }
 }
 
 #[cfg(test)]

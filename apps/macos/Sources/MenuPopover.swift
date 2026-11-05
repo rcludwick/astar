@@ -148,6 +148,9 @@
         @AppStorage("ui.spectrumExpanded") private var spectrumExpanded = false
         /// Polls the live TX/RX FFT only while the disclosure is open AND connected.
         @StateObject private var callSpectrum = CallSpectrum()
+        /// Which Settings sections are open (`SettingsSection`), remembered
+        /// under `ui.settings.<id>.expanded`.
+        @StateObject private var settingsDisclosure = SettingsDisclosure()
 
         private var isInCall: Bool { session.status == .dialing || session.status == .answered }
 
@@ -297,10 +300,30 @@
                             // Vocoder trust: the one connect failure with a
                             // single obvious fix gets a button to it.
                             if VocoderSetupPrompt.offersSettings(for: errorText) {
-                                Button {
-                                    navigation.showSettings(at: .vocoders)
-                                } label: {
-                                    Label("Open Vocoder Settings…", systemImage: "memorychip")
+                                HStack(spacing: 8) {
+                                    Button {
+                                        navigation.showSettings(at: .vocoders)
+                                    } label: {
+                                        Label("Open Vocoder Settings…", systemImage: "memorychip")
+                                    }
+                                    // D-Star only, and only where this build
+                                    // has the software vocoder: the one-click
+                                    // alternative to finding a stick. Still the
+                                    // operator's choice, never automatic.
+                                    if VocoderSetupPrompt.offersSoftwareSwitch(for: errorText),
+                                        vocoders.softwareVocoderCompiled
+                                    {
+                                        Button {
+                                            vocoders.setDStarVocoder(.software)
+                                        } label: {
+                                            Label(
+                                                "Use the Software Vocoder for D-Star",
+                                                systemImage: "cpu")
+                                        }
+                                        .help(
+                                            "D-Star runs its voice on this Mac instead of a "
+                                                + "vocoder stick. Change it back in Settings → Vocoders.")
+                                    }
                                 }
                                 .controlSize(.small)
                                 .padding(.horizontal, 6)
@@ -379,6 +402,7 @@
                     .keyboardShortcut("[", modifiers: .command)  // ⌘[ to go back
                     Text("Settings").font(.headline)
                     Spacer()
+                    SettingsExpandAllButton()
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
@@ -393,7 +417,7 @@
                         // radio ID identify the operator, everything below is
                         // equipment (astar-c9d2).
                         StationIdentityView()
-                        Section("Account") {
+                        SettingsSection(.account) {
                             CredentialsView()
                                 .listRowSeparator(.hidden)
                         }
@@ -438,13 +462,17 @@
             // appears it would spontaneously re-expand and steal the keyboard,
             // long after "new" stopped being true.
             .onDisappear { setups.focusNewID = nil }
+            .environmentObject(settingsDisclosure)
         }
 
         /// Scroll Settings to the anchor something outside it asked for. On the
-        /// next turn, so the List has laid its rows out first.
+        /// next turn, so the List has laid its rows out first. A folded section
+        /// has no rows to scroll to, so the anchor's section opens first, and
+        /// the scroll waits a little longer for the rows that opening mounts.
         private func scrollToSettingsAnchor(_ proxy: ScrollViewProxy) {
             guard let anchor = navigation.settingsAnchor else { return }
-            DispatchQueue.main.async {
+            let opened = settingsDisclosure.reveal(anchor)
+            DispatchQueue.main.asyncAfter(deadline: .now() + (opened ? 0.05 : 0)) {
                 withAnimation(.easeInOut(duration: 0.25)) {
                     proxy.scrollTo(anchor, anchor: .top)
                 }
@@ -2044,6 +2072,30 @@
             Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
             ?? "unknown"
 
+        /// A development build's stamp — "dev 2026-11-01 19:30 MST · 31e675c" —
+        /// written into Info.plist by `Tools/build.sh` for Debug builds only,
+        /// because every Debug build shares its release's marketing version and
+        /// the version alone can't say which build is running. Release builds
+        /// have none, so a published DMG shows its plain version.
+        static let buildStamp: String? =
+            Bundle.main.object(forInfoDictionaryKey: "AstarBuildStamp") as? String
+
+        /// What the footer shows: the version, plus the build's date and time
+        /// for a development build. The commit is in the tooltip and in the
+        /// selectable full text, so the footer stays short.
+        static let versionLabel: String = {
+            guard let stamp = buildStamp else { return appVersion }
+            // "dev 2026-11-01 19:30", without the zone, to keep the footer
+            // short at the window's narrowest width.
+            let when = stamp.components(separatedBy: " ").prefix(3).joined(separator: " ")
+            return "\(appVersion) · \(when)"
+        }()
+
+        static let versionFull: String = {
+            guard let stamp = buildStamp else { return appVersion }
+            return "\(appVersion) (\(stamp))"
+        }()
+
         private var footer: some View {
             HStack(spacing: 12) {
                 Button {
@@ -2064,15 +2116,15 @@
                 // resizable (minWidth 310) with a text size the user controls, so it
                 // would drift off-centre or collide. fixedSize + lineLimit(1) keep it
                 // from ever truncating; the Spacer absorbs the slack instead.
-                Text(Self.appVersion)
+                Text(Self.versionLabel)
                     .font(.caption2)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .fixedSize()
                     .textSelection(.enabled)
-                    .help("astar version \(Self.appVersion)")
-                    .accessibilityLabel("astar version \(Self.appVersion)")
+                    .help("astar version \(Self.versionFull)")
+                    .accessibilityLabel("astar version \(Self.versionFull)")
                 Spacer(minLength: 8)
                 Button {
                     NSApp.terminate(nil)
@@ -2383,7 +2435,7 @@
                     label: "RX", db: meters.rxDBHeld, tint: .green, active: session.receiving)
                 // The call-quality line (iax-rxjb): what the receive path is
                 // costing right now, directly under the RX meter it explains.
-                // AllStarLink only, and only once answered — the formatter
+                // AllStarLink and EchoLink only, and only once answered — the formatter
                 // owns both gates, shared with the Iced client's twin; this
                 // only paints.
                 //

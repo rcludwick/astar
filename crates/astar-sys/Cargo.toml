@@ -29,6 +29,11 @@ workspace = true
 # node is built without `dstar`: in a workspace build, it is not.
 default = ["dstar", "ysf", "m17", "nxdn", "dmr", "echolink"]
 dstar = ["astar-station/dstar"]
+# The software D-Star vocoder (astar-dstar-perens; LGPL-3.0-or-later, see
+# LICENSE-EXCEPTIONS.md section 9). Not a cargo default, like codec2-static,
+# but the shipped app turns it on: bindings/swift/build-xcframework.sh builds
+# it in unless ASTAR_DSTAR_SOFT_AMBE=0 (Rob, 2026-11-01). D-Star only.
+dstar-soft-ambe = ["astar-station/dstar-soft-ambe"]
 # M17, ON by default — it mirrors `astar-station`'s OWN default, so this
 # feature does not turn anything on that a plain build did not already have.
 # It exists so the M17-shaped entry points (`iax_station_m17_state`) have a
@@ -88,7 +93,7 @@ echolink = ["astar-station/echolink"]
 codec2-static = ["astar-station/codec2-static"]
 
 [dependencies]
-astar-station = { path = "../astar-station", version = "0.1.18-beta" }
+astar-station = { path = "../astar-station", version = "0.1.19-beta" }
 # Serialize the secret-free MicProfile to/from JSON for the characterize /
 # set-mic-profile FFI (iax-5fb6 / iax-2095).
 serde_json.workspace = true
@@ -100,12 +105,12 @@ zeroize.workspace = true
 # Every EchoLink socket refuses a non-loopback address in a test build. No
 # test here logs in or calls anyone, and this makes that a property of the
 # code rather than a promise.
-astar-station = { path = "../astar-station", version = "0.1.18-beta", features = [
+astar-station = { path = "../astar-station", version = "0.1.19-beta", features = [
     "echolink-loopback-only",
 ] }
 # The FFI tests build the real station; the test-backend feature keeps any
 # device-enumeration path hardware-free.
-astar-audio = { path = "../astar-audio", version = "0.1.18-beta", features = [
+astar-audio = { path = "../astar-audio", version = "0.1.19-beta", features = [
     "test-backend",
 ] }
 

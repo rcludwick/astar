@@ -76,8 +76,9 @@ public struct CallSnapshot: Equatable {
     public var m17Active: Bool
     /// Whether the engine can dial D-Star: the `dstar` feature is compiled in
     /// AND a working AMBE vocoder was found. Unlike `m17Available` this is a
-    /// fact about the HARDWARE on the desk — D-Star has no software vocoder,
-    /// so this is false whenever no ThumbDV is attached. Defaults `false` so
+    /// fact about the HARDWARE on the desk when the dongle is D-Star's
+    /// vocoder (the default): false whenever no ThumbDV is attached. With the
+    /// software vocoder chosen it is true in a build that contains it. Defaults `false` so
     /// pre-existing fixtures (and `NullStation`) need no change.
     ///
     /// The engine's probe is memoized process-wide, so a dongle plugged in

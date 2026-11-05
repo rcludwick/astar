@@ -295,6 +295,24 @@ phones. It is narrowband, about 13 kilobits a second, so EchoLink sounds like
 a phone call rather than like a wideband AllStarLink link. That's EchoLink's
 format, not a setting: every EchoLink program uses it, so astar does too.
 
+Received audio plays through the same **jitter buffer** as an AllStarLink
+call. EchoLink sends voice in packets of 80 ms, and they never arrive exactly
+80 ms apart: one is a little late, the next two come together, and now and
+then the network stalls for a moment and delivers a burst. The buffer holds a
+small cushion back so the speaker always has the next piece ready, and it
+keeps that cushion between the **Min** and **Max** you set under **Jitter
+buffer** (see [Jitter buffer](first-run.md#jitter-buffer-leave-it-on)). When
+the cushion grows past what the network needs, it gives the extra back by
+skipping a 20 ms piece now and then. That matters most on a busy conference
+or repeater, where one station follows another with no pause: the delay stays
+the same for the whole call instead of creeping up.
+
+While a call is up, the line under the meters shows what the buffer is doing,
+for example `jitter 30 ms · buffer 120 ms · lost 2 · late 0`. **lost** counts
+the pieces that never arrived and the ones skipped to keep the delay down;
+**late** counts the ones that arrived after their turn to play and were
+thrown away. A few of each over a long call is normal.
+
 ## Things worth knowing
 
 * **One sign-in per callsign.** EchoLink allows one program at a time to be

@@ -29,7 +29,7 @@
         @State private var syncing = false
 
         var body: some View {
-            Section("Reflector directory") {
+            SettingsSection(.reflectorDirectory) {
                 VStack(alignment: .leading, spacing: 6) {
                     counts
                     HStack(alignment: .firstTextBaseline, spacing: 8) {

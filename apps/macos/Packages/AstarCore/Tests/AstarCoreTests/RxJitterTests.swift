@@ -77,10 +77,22 @@ final class CallQualityLineTests: XCTestCase {
             "jitter buffer off")
     }
 
+    func testEchoLinkGetsTheLineToo() {
+        // An EchoLink call's receive lane plays out of the same jitter buffer
+        // (astar-el-hollow), so its figures are real and the line shows.
+        XCTAssertEqual(
+            CallQualityLine.text(connected: true, network: .echolink, quality: healthy),
+            CallQualityLine.text(connected: true, network: .allstar, quality: healthy))
+        XCTAssertEqual(
+            CallQualityLine.spoken(connected: true, network: .echolink, quality: healthy),
+            CallQualityLine.spoken(connected: true, network: .allstar, quality: healthy))
+        XCTAssertNil(CallQualityLine.text(connected: false, network: .echolink, quality: healthy))
+    }
+
     func testNothingAtAllOffAllStarLink() {
-        // Only the IAX2 path carries a sender clock to schedule against, so
-        // on every other network these numbers are flat zeros and the line
-        // would be a lie of omission.
+        // Only the IAX2 and EchoLink paths carry a sender clock to schedule
+        // against, so on every other network these numbers are flat zeros
+        // and the line would be a lie of omission.
         for network in [Network.m17, .dstar, .ysf, .nxdn, .dmr, .hamlink] {
             XCTAssertNil(
                 CallQualityLine.text(connected: true, network: network, quality: healthy),

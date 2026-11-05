@@ -12,7 +12,7 @@ inline. All 228 issues (164 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (170)
+## Open items (174)
 
 ### iax-vtrust — DONE 2026-10-31: A D-Star connect could key a radio on an FT-X CAT/PTT cable
 *P1 high · safety · labels: dstar, ambe, thumbdv, serial, on-air-safety*
@@ -647,6 +647,319 @@ Discord's gateway. The fix is a `serenity` (and `songbird`) release on
 tungstenite 0.2x with `rustls` 0.23, or a `[patch]` if upstream lags.
 Re-check `cargo tree -p astar-server --features release -i rustls@0.22.4`
 and `-i libcrux-chacha20poly1305` after any bump.
+
+### astar-dstar-perens — vendor Bruce Perens' D-Star vocoder as a software option beside the dongle
+*P2 medium · feature · labels: dstar, ambe, codec, vendor, licensing, cx:4*
+
+Rob (2026-11-01): vendor Bruce Perens' D-Star library, so D-Star can use either
+the ThumbDV/DVstick dongle or Perens' software implementation. This is the case
+CLAUDE.md already allows: D-Star's AMBE 3600×2400 is out of patent, and a
+software backend is permitted if its licence is AGPL-compatible.
+
+Confirm before writing any code:
+
+- **Which code, exactly.** Rob: the implementation is in one of Bruce
+  Perens' GitHub repositories (an open-hams-style repo), and it isn't
+  labelled "dstar". Find it there, and confirm it implements D-Star's AMBE
+  3600×2400 and what state it's in.
+- **Licence**: must be AGPL-3.0-compatible. Record it in
+  `LICENSE-EXCEPTIONS.md`, following the `codec2` entry.
+- **Provenance**: it must not derive from `rcludwick/ambe`, which astar never
+  references or vendors.
+
+The rules it has to follow, from CLAUDE.md "D-Star / AMBE":
+
+- an opt-in cargo feature, off by default, vendored as its own licence island
+  under `vendor/` with a `VENDORED.md` (hard-coded licence and version in its
+  `Cargo.toml`, never `.workspace = true`);
+- the dongle stays the default;
+- the software/hardware choice is **per mode, D-Star only**: it must never reach
+  DMR, NXDN or YSF (AMBE+2, US8359197 until 2028-05-20), and a UI that greys
+  those out says why;
+- vocoder trust (`iax-vtrust`) is unaffected, because a software backend opens
+  no port.
+
+Then: a vocoder choice for D-Star in the macOS app's Settings → Vocoders, the
+same in `node.toml` for astar-server, a `docs/FEATURES.md` row, and user docs.
+Check it against the dongle by decoding the same frames both ways. Fixtures
+must come from a source that can be committed, and the hardware half is Rob's
+to run.
+
+**Built 2026-11-01 on `work/dstar-perens`, unmerged.** Still open for the
+hardware half.
+
+- Found: `BrucePerens/hams_open`, `daemons/ham_digital_modes/src/ambe/`
+  (crate `ham_digital_modes`), pinned at
+  `f3c12933ff17bcd2a710adc11c64ca407f8f0e12`. Pure Rust, D-Star AMBE
+  3600×2400 encode and decode, validated by upstream against a real
+  AMBE-3000R. `LGPL-3.0-or-later`; tables from mbelib/DSD (ISC). No sign of
+  `rcludwick/ambe`.
+- Vendored at `vendor/ham-digital-modes-ambe` without its AMBE+2 directories
+  (`VENDORED.md`, `LICENSE-EXCEPTIONS.md` §9, `ci/guard-dstar-soft-ambe.sh`).
+- Feature `dstar-soft-ambe` (codec/console/station/sys/server), off by
+  default; `AmbeBackend::Software` behind `AmbeStream`, refused for every
+  mode but D-Star. macOS Settings → Vocoders picker; `node.toml`
+  `[vocoder] dstar`.
+- Rob decided 2026-11-01: build it in by default, with a config switch.
+  `just xcframework` builds it in (`ASTAR_DSTAR_SOFT_AMBE=0` opts out) and the
+  server `release` set includes it; the cargo feature stays explicit. The
+  dongle stays the default choice; Settings → Vocoders and a refused D-Star
+  connect offer Software one click away.
+- Rob still owes: decode the same received frames through the dongle and the
+  software vocoder and compare by ear; transmit through each to a parrot and
+  compare.
+
+### astar-rec-echolink-beat — an EchoLink recording had a beat about once a second
+*P2 medium · bug · labels: recording, echolink, audio, cx:2*
+
+Rob (2026-11-01): one of two app recordings of the same EchoLink station has a
+regular beat, roughly every second, which sounds like a buffering problem. Both
+are in `~/Music/astar Recordings/` on Rob's Mac. They aren't committed, because
+they hold other people's audio.
+
+- `2026-11-01 15-57-14 EchoLink 592473.flac` is the **good** one (a voice with
+  FM noise in it).
+- `2026-11-01 16-03-39 EchoLink 592473.flac` has the **beat**.
+
+Things to check:
+
+- EchoLink frames carry four GSM 06.10 frames, 80 ms of audio per packet. Find
+  out whether the recorder's receive tap writes per packet or per playback
+  callback, and whether a late or duplicated packet leaves a gap or a repeat.
+- How the jitter buffer's output and the recorder's clock relate on EchoLink,
+  whose packets carry no sender clock the way IAX2's do.
+- A gap or a doubled block at a fixed interval in the bad file. Its spectrogram
+  and the sample-level timing between bursts should show which.
+- Whether the receive and transmit channels in the stereo layout drift
+  against each other.
+
+Write a test that feeds the recorder EchoLink-shaped packets with realistic
+jitter and checks the output has no gaps and no repeats.
+
+**Fixed on `work/rec-echolink-beat` (2026-11-01), pending Rob's listen.**
+
+What the bad file shows: both files are 16 kHz stereo, with the far station
+on the left and the right channel all zeros. In the bad file the left
+channel is exactly 1280 samples of voice (80 ms, one EchoLink packet), then
+84 zero samples, then 1280 of voice, then 511 zeros, over and over: 101 gaps
+of each, a 197 ms cycle for every 160 ms of audio, and 4.2 s of digital
+silence in 21.2 s. About 30 times, every 0.63 to 0.83 s, the pattern breaks
+with a short segment or a 117 ms one. The good file has no zero run
+longer than 17 samples during the voice.
+
+The cause: the heard tap at the end of `OutputBus::read` copied the whole
+buffer it was handed, zeroed tail included. But `fill_output` asks for more
+than one callback needs (the callback's share at the bus rate plus 512
+samples of headroom on a resampled device) and passes only the first `n`
+samples to the device. So the tail is request headroom that nobody heard.
+An EchoLink lane is bare PCM with no jitter buffer, and four frames land at
+once, so it hovers near empty and most reads come up short. Each short read
+put its unplayed tail into the recording: 511 or 84 zeros a packet at
+48 kHz with 512-frame callbacks, which is the pattern above. That made the
+receive tap run about 23% faster than real time. The recorder's aligner
+then kept hitting its 200 ms backlog cap and throwing 140 ms of queued audio
+away. At 23% too fast, 140 ms builds up every 0.61 s, which matches the
+breaks in the file and the beat Rob heard. The speaker never had
+the gaps. IAX2 lanes are filled to the full request by the jitter buffer,
+so they were rarely short. The good recording most likely had a standing
+cushion in the lane, so no read came up short, but that part isn't
+verified.
+
+The fix: the tap offers only `out[..n]`, and nothing on a dry read. The
+aligner already fills real underruns and the quiet between overs with
+silence on its own 20 ms clock. Tests:
+`stream::heard_tap_timing::an_echolink_call_records_without_gaps_or_repeats_*`
+drive the real `Mixer`, `OutputBus`, `fill_output` and resampler with 80 ms
+packets (no jitter, and up to 30 ms) on 48 kHz/512, 48 kHz/480, 44.1 kHz/512
+and 16 kHz/320 devices. Each run feeds the heard tap through the recorder's
+`Aligner`, then asserts three things: the tap equals what the device was
+fed, the recording has no gap the speaker didn't play, and nothing in it
+was lost or repeated. Both tests failed before the fix (the tap carried
+4.1 to 5.8 s of extra audio for 6 s of talk) and pass after it. The same
+bug would have hit any bare-PCM lane (M17, D-Star, DMR, YSF, NXDN) on a
+resampled device.
+
+Still to do: Rob records an EchoLink call and listens.
+
+### astar-el-hollow — EchoLink receive audio turns hollow and reverby during a call (delay creep fixed; hollowness unconfirmed)
+*P2 medium · bug · labels: echolink, audio, cx:3*
+
+Rob (2026-11-02): on an EchoLink call in the macOS app the received audio
+develops a hollow, reverby sound. It isn't a growing delay, his own voice
+coming back, or discrete repeats. It gets worse as the call goes on, and
+hanging up and calling again clears it. A sound like that usually means
+comb filtering: the audio added to a copy of itself a few milliseconds
+later, with the gap between the two copies growing.
+
+**What has been ruled out (work/el-echo, 2026-11-02).** In the engine, the
+received stream reaches the speaker exactly once.
+
+- The test
+  `session::tests::echolink_wiring::echolink_receive_reaches_the_speaker_exactly_once`
+  drives the real wiring on a 16 kHz station: the link thread on 127.0.0.1,
+  the GSM decoder, the 8 to 16 kHz rate bridge, the mixer lane and the output
+  bus. It sends 80 ms packets of non-periodic audio and checks what the bus
+  fed the device against the same frames decoded offline. They match sample
+  for sample. Making the link send each frame twice makes the test fail (it
+  sees 64,000 samples where 32,000 were received). A 10 s version of the
+  same run also matched exactly.
+- The rate bridge (`RateBridge`, 8 to 16 kHz) stays exactly 320 samples out
+  for each 160 in, with a constant delay and an empty FIFO over 30,000
+  frames (10 minutes).
+- The bus-to-device path (`Mixer`, `OutputBus`, `fill_output`, resampler)
+  plays every sample once and in order (`stream::heard_tap_timing`). The
+  recording tap only reads the audio and can't change what is played.
+- There is no second voice route or monitor lane. `open_voice_route`
+  refuses a second one, the Swift `connectEchoLink` calls
+  `echolinkConnect` once per dial, and EchoLink's sequence-number gate
+  drops a duplicate packet.
+- Rob's two recordings from 2026-11-01 (22 s each, made before the symptom)
+  show no stable autocorrelation peak outside the pitch range (r of 0.1 or
+  less), so they hold no delayed copy of the audio.
+
+**The delay creep, fixed (work/el-echo, 2026-11-02).** An EchoLink lane was
+plain PCM with no jitter buffer, so its queue never shrank while the far end
+kept sending: each late packet added its lateness to the delay for good, and
+a sender clock faster than the sound card's added to it as well. A busy
+conference or repeater, which is what Rob was on, never pauses long enough
+for it to empty. Three changes:
+
+- `echolink/rx_clock.rs` (`RxTimeline`) stamps every received frame on a
+  sender clock built from the packet sequence number (80 ms a packet, 20 ms a
+  frame), anchored afresh at each over. EchoLink's RTP timestamp field cannot
+  be relied on (astar itself sends zero). The station mixer then plays the
+  lane out of the same adaptive jitter buffer an AllStarLink call uses, with
+  the same switch and Min/Max. The 16 kHz rate bridge now carries the stamp
+  through (`voice_route::a_16k_bridge_keeps_the_sender_clock`).
+- The jitter buffer's port had dropped `jitterbuf.c`'s "shrink one frame per
+  500 ms while frames keep coming" branch (`iax-9c62`, noted in
+  `harness/jitter_parity/README.md`). Without it a stream that never pauses
+  could only deepen. Restored; pinned by
+  `jitter::tests::a_fast_sender_that_never_pauses_is_shrunk_by_dropping_frames`.
+  This changes AllStarLink playout too, towards Asterisk's own behaviour.
+- After a stall `jitterbuf.c` resumes on the oldest frame it holds and
+  expects the caller to drain the backlog at once; the mixer plays at the
+  device's pace, so the stall's length stayed as delay for the rest of the
+  call. The mixer now skips frames more than 60 ms (plus one callback)
+  overdue (`OVERDUE_MS`; `mixer::tests::a_stall_and_a_burst_do_not_leave_the_lane_behind`:
+  600 ms behind without it, within 310 ms with it). Also affects AllStarLink.
+  Skipped and shrink-dropped frames are counted in `rx_frames_lost`.
+
+The simulation (`echolink::rx_clock::tests`, 10 minutes of back-to-back
+80 ms packets, 30 to 70 ms of network delay, a 250 ms spike every ~32 s and
+one 600 ms outage at minute 3) ends 562 to 719 ms behind on the old path
+(±200 ppm and exact sender) and 182 to 220 ms behind with the fix, never
+repeating or reordering a frame and dropping 0.4 to 0.5% of them. The
+EchoLink call now fills `rx_jitter_ms`, `rx_jb_depth_ms`, `rx_frames_*` and
+`rx_underruns`, and the macOS call-quality line shows on EchoLink calls.
+
+**Still unproven.** Whether this is what Rob heard. A growing delay on its
+own does not sound hollow; it would if a second copy of the same audio was
+also reaching him, and the code has no such path (below). The other
+explanations stay open: comb filtering added after the app (the USB
+interface's own hardware monitor or sidetone, macOS input monitoring, a
+radio on the same net), or present in the far end's audio. Not changed: the
+node leg (astar-server conference members) still hands the conference bare
+frames; the conference mixes on its own tick.
+
+**USB radio interface, ruled out in code.** No path plays captured audio, or
+astar's own output, back to the speaker, or replays it to EchoLink: there is
+no monitor, sidetone or local-radio lane (every output-bus lane is network
+RX); the mic lane's only destination is the call's TX channel; the record and
+analyzer taps only read; `set_echo` is the test fake's; and the EchoLink link
+drains captured frames whenever PTT is not applied. One gap found, which is
+about transmitting, not hearing: on macOS a serial PTT source's COS (CTS)
+edge keys EchoLink through `pttSourceTick` with no half-duplex "not while
+receiving" check, unlike VOX (`CallSession.swift` ~1491), and the link does
+not refuse TX while the far end talks. Whether COS should be blocked while
+receiving is Rob's call (on a radio link it may be wanted).
+
+**What we need from Rob.**
+
+1. Listen to a busy conference for 10+ minutes on a build with this fix. The
+   delay should stay put, and the call-quality line should show a buffer
+   between Min and Max with `lost` rising slowly. If it still goes hollow,
+   record the call (the recording captures exactly what the speaker was fed):
+   a comb in the file is in the engine or the far end, a clean file means it
+   is added after the app.
+2. Check the USB interface for a hardware monitor/sidetone (mixer setting,
+   Audio MIDI Setup "Play Through"), and whether a radio nearby carries the
+   same net.
+3. Whether RX compression is on.
+
+### astar-feature-matrix — DONE 2026-11-01: builds outside `just ci`'s feature set didn't compile or pass
+*P3 low · chore · labels: ci, build, cli, cx:2*
+
+**Closed** on `work/feature-matrix`. `just ci` builds the workspace once, and
+Cargo unifies features across a workspace build, so a crate that forgot to ask
+for a feature it uses still compiled there because a neighbour asked for it.
+Each break below was of that shape, or in code only an opt-in feature compiles:
+
+- **astar-cli `dstar`/`ysf`/`nxdn`/`dmr`** called `Station::new` (the real
+  `CpalBackend`, gated on `astar-station/device-audio`) while depending on
+  astar-station with `default-features = false`. A listen tool plays to the
+  default output device, so each listen feature now turns on
+  `astar-station/device-audio` (no new dependency: astar-cli already links
+  cpal through astar-audio). Eight `assert!(x.is_empty())` in those files'
+  tests tripped clippy's `assert_is_empty`; now `assert_eq!`.
+- **astar-console `serde`** didn't forward to `astar-audio/serde`, so
+  `DenoiseStatus` had no `Serialize` built alone. It does now.
+- **astar-server without `stream`**: `/stream.ws` answers 503 "Live audio
+  isn't built into this server" there, but the golden fixtures
+  `ws_no_upgrade_400`, `ws_full_503` and `public_stream_429_fixture` assumed
+  the stream path. They are `stream`-only now, and a no-`stream` build checks
+  a new `ws_not_built_503` fixture instead.
+- **D-Star flake** `losing_the_link_while_keyed_forces_an_unkey_and_stops_transmitting`
+  (4 in 100 runs): `key_up` publishes `ptt = false` before the flush and the
+  EOT, on purpose (a UI must not show "keyed" during the flush), and the test
+  read the last frame the instant `ptt` dropped. It now waits, bounded, for
+  the EOT frame. 0 in 200 idle and 0 in 100 under CPU load after.
+- Found by the matrix: astar-station's no-`echolink`/no-`m17` tests and
+  astar-sys's no-`echolink` FFI test (`similar_names`) failed clippy.
+
+`just feature-matrix` (`ci/feature-matrix.sh`, and the `feature-matrix` CI
+job) runs 103 steps: clippy per crate with `--all-features` and with each
+feature alone (features read from `cargo metadata`, so new ones join by
+themselves), full tests for astar-cli, astar-console and astar-server under
+`--all-features` and for astar-server without `stream`, and astar-server's
+`--no-default-features --features release`. Exclusions and their reasons are
+in the script header. Not in `just ci`.
+
+Left over: `m17_session_connects_via_localhost_to_a_dual_stack_reflector`
+(astar-console `tests/m17_session.rs`) failed once in a matrix run, its v4
+client's 200 ms read timing out waiting for ACKN. It did not recur in 470
+runs (alone, whole binary, six binaries at once under CPU load), so its cause
+is unproven; see `astar-m17-dualstack-flake`.
+
+### astar-m17-dualstack-flake — M17 dual-stack test timed out once
+*P3 low · bug · labels: m17, test, flaky, cx:1*
+
+`m17_session_connects_via_localhost_to_a_dual_stack_reflector` failed once on
+2026-11-01 during `just feature-matrix` (`tests astar-console
+--all-features`): "v4 client must be ACKN'd by the same dual-stack reflector:
+WouldBlock", the far v4 client's 200 ms `recv_from` getting nothing. Not
+reproduced in 470 runs afterwards. Two candidates, neither shown: a stall
+longer than 200 ms (the reflector replies to CONN at once, and the rest of the
+test allows 2 s), or a parallel test's `127.0.0.1:0` socket sharing the
+dual-stack reflector's port on macOS and taking the v4 datagram. Next time it
+fails, keep the run's output and check which.
+
+### astar-acme-ca-change — switching ACME from staging to production keeps the staging certificate
+*P3 low · bug · labels: server, acme, tls, cx:1*
+
+Found 2026-11-02 while preparing the node's public page. astar-server keeps a
+stored certificate whichever CA issued it, and renews only 30 days before
+expiry or when the hostnames change. So turning `acme_staging` from true to
+false keeps serving the untrusted staging certificate for about two months.
+`issued.json`, astar's own count of three orders a week, also counts staging
+orders against production.
+
+The gh-runners role works around it by moving `state/acme/cert-bundle.json`,
+`issued.json` and the legacy certificate files aside when the CA changes.
+The fix belongs in astar: record which CA issued the stored certificate,
+order a new one when `acme_staging` (or the directory URL) no longer matches,
+and keep the weekly count per CA. A test pins it: issue against a staging
+fake, flip the setting, and expect a fresh order on start.
 
 ### astar-glib-unsound — glib 0.18 is unsound (Dependabot alert #2), Linux client only
 *P3 low · security · labels: deps, gui, linux, cx:1*

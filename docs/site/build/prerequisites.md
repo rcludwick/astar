@@ -174,18 +174,21 @@ export IAX_CODEC2_PATH=/path/to/libcodec2.dylib
     and MIT, so `codec2-static` and `codec2-runtime` are both opt-in and a
     plain `cargo build` stays free of LGPL code. `ci/guard-codec2-licensing.sh`
     fails the build if that ever stops being true. Linking it into the app is
-    the one deliberate exception, covered by the notices and written offer in
-    `LICENSE-EXCEPTIONS.md`.
+    deliberate, as is linking the software D-Star vocoder (LGPL-3.0), both
+    covered by the notices and relinking terms in `LICENSE-EXCEPTIONS.md`.
 
 ### A vocoder dongle — only for D-Star
 
-D-Star voice is **AMBE+2**, a proprietary codec licensed by DVSI. astar ships
-no software AMBE implementation and will not gain one — there is nothing we can
-include and redistribute under the AGPL. The codec runs on a **ThumbDV or
-DV3000** USB dongle instead, which carries a licensed implementation on a chip.
+D-Star voice is **AMBE**, DVSI's codec. It can run on a **ThumbDV or DV3000**
+USB dongle, which carries an implementation on a chip, or — because D-Star's
+AMBE 3600×2400 is out of patent — on the Mac itself, with the software vocoder
+that `just xcframework` builds into the app (the `dstar-soft-ambe` feature;
+`ASTAR_DSTAR_SOFT_AMBE=0` leaves it out). Which one D-Star uses is your choice
+in Settings → Vocoders; the dongle is the default. Like Codec 2, the software
+vocoder is LGPL code linked into the app, covered by `LICENSE-EXCEPTIONS.md`.
 
-So D-Star is hardware-only in a way M17 is not: Codec 2 you can install, AMBE
-you have to own. See [Digital voice](../macos/hardware.md#digital-voice) for
+System Fusion, NXDN and DMR use AMBE+2, which is still patented, and always
+need the dongle: AMBE+2 you have to own. See [Digital voice](../macos/hardware.md#digital-voice) for
 where to buy one.
 
 Nothing needs installing on macOS. The dongle is an FTDI part

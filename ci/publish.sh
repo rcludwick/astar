@@ -12,8 +12,15 @@
 # (rcludwick/astar-private) on purpose: CLAUDE.md says publishing is Rob's
 # call and never a step in a task. Nothing may run this script on his behalf.
 #
-# Both repositories share one history, so the push to `public` is a
-# fast-forward and never a merge.
+# The public repo does NOT share the private history (Rob, 2026-11-01:
+# "Private should stay private always"). Public `main` is one squashed commit
+# per release: each carries exactly the files of the release tag, sits on top
+# of the previous public release, and is dated at a random evening time (18:00
+# to 22:59 MST) on the day the release was tagged. Its tag on public is a
+# separate tag object with the same name and date. No private commit object is
+# ever pushed to public. This clone's `public` remote fetches main only and no
+# tags (remote.public.tagOpt=--no-tags), because public's tags name different
+# commits from the private tags of the same name.
 #
 # What it does:
 #   1. Preconditions — HEAD is `main` (it is main that gets pushed), the tag
@@ -25,16 +32,20 @@
 #      section as --latest would put stale notes on the release the docs link
 #      to, and the changelog is in descending order, so anything below the top
 #      is already out.
-#   3. `git push public main v<version>`
+#   3. Builds the squashed release commit and its tag (see above) and pushes
+#      both to public in one atomic, fast-forward push.
 #   4. `gh release create` with astar.dmg attached, marked --latest (NOT a
 #      prerelease: the docs link to /releases/latest and it must resolve).
 #   5. Reads the published tag back from the API and checks it.
+#   6. ci/clean-builds.sh --after-publish: removes the build output the
+#      release no longer needs (see that script for exactly what).
 #
 # Bash 3.2 (what macOS ships) — no associative arrays, no `mapfile`, and no
 # `timeout` command anywhere.
 set -euo pipefail
 
-ROOT="${ASTAR_RELEASE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${ASTAR_RELEASE_ROOT:-$(cd "$HERE/.." && pwd)}"
 cd "$ROOT"
 
 PUBLIC_REPO="rcludwick/astar"
@@ -110,16 +121,58 @@ if [ -z "$(git ls-remote --tags origin "refs/tags/$TAG")" ]; then
   die "$TAG is not on origin. \`just release $VERSION\` pushes it; publish never skips that."
 fi
 
-# The public repo must be a fast-forward of what is being published: both
-# repos share one history, and a divergence means something was committed
-# straight to public.
-echo ">> git fetch public"
-git fetch public --quiet || die "could not fetch the public remote"
-if git rev-parse --verify --quiet public/main >/dev/null; then
-  if ! git merge-base --is-ancestor public/main main; then
-    die "public/main is not an ancestor of main — the public repo has diverged."
-  fi
+# Never push to the public repo Monday-Friday, 7 AM to 5 PM MST (Rob's rule,
+# ~/.claude/CLAUDE.md). MST is UTC-7 all year, as the rule says. A dry run
+# only reports it; a real publish refuses. ASTAR_PUBLISH_NOW (a Unix time)
+# stands in for the clock, for the tests.
+now_epoch="${ASTAR_PUBLISH_NOW:-$(date +%s)}"
+PUSH_BLOCKED="$(python3 - "$now_epoch" <<'PY'
+import datetime as dt, sys
+t = dt.datetime.fromtimestamp(int(sys.argv[1]), dt.timezone(dt.timedelta(hours=-7)))
+print("yes" if t.weekday() < 5 and 7 <= t.hour < 17 else "no")
+print(t.strftime("%a %Y-%m-%d %H:%M MST"))
+PY
+)"
+NOW_MST="$(printf '%s\n' "$PUSH_BLOCKED" | sed -n 2p)"
+PUSH_BLOCKED="$(printf '%s\n' "$PUSH_BLOCKED" | sed -n 1p)"
+if [ "$PUSH_BLOCKED" = yes ] && [ "$DRY_RUN" != 1 ]; then
+  die "it is $NOW_MST: no pushes to the public repo Monday-Friday, 7 AM to 5 PM MST. Publish after 5 PM, or at the weekend."
 fi
+
+# Public main is fetched on its own, never with tags: public's tags name the
+# squashed commits, and fetching them would clobber the private tags of the
+# same names in this clone.
+echo ">> git fetch public main"
+git fetch --quiet --no-tags public "+refs/heads/main:refs/remotes/public/main" ||
+  die "could not fetch the public remote's main"
+PUBLIC_PARENT="$(git rev-parse --verify --quiet refs/remotes/public/main || true)"
+if [ -n "$(git ls-remote --tags public "refs/tags/$TAG")" ]; then
+  die "$TAG is already on the public repo. It was published before."
+fi
+if [ -n "$PUBLIC_PARENT" ] &&
+  [ "$(git rev-parse "$PUBLIC_PARENT^{tree}")" = "$(git rev-parse "$TAG^{tree}")" ]; then
+  die "public main already carries exactly $TAG's files. Nothing to publish."
+fi
+
+# The squashed commit's date: a random evening time, 18:00 to 22:59 MST, on
+# the day $TAG was tagged (Mountain local), and never before the public
+# commit it sits on. Python for the date arithmetic, because BSD and GNU
+# `date` disagree on every flag needed here.
+tag_epoch="$(git for-each-ref --format='%(taggerdate:unix)' "refs/tags/$TAG")"
+[ -n "$tag_epoch" ] || tag_epoch="$(git log -1 --format=%ct "$TAG^{commit}")"
+parent_epoch="0"
+[ -z "$PUBLIC_PARENT" ] || parent_epoch="$(git log -1 --format=%ct "$PUBLIC_PARENT")"
+SQUASH_EPOCH="$(python3 - "$tag_epoch" "$parent_epoch" <<'PY'
+import datetime as dt, random, sys, zoneinfo
+tag, parent = int(sys.argv[1]), int(sys.argv[2])
+day = dt.datetime.fromtimestamp(tag, zoneinfo.ZoneInfo("America/Denver")).date()
+mst = dt.timezone(dt.timedelta(hours=-7))
+start = int(dt.datetime(day.year, day.month, day.day, 18, tzinfo=mst).timestamp())
+t = start + random.SystemRandom().randrange(5 * 3600)
+print(max(t, parent + 60))
+PY
+)"
+SQUASH_WHEN="$(python3 -c 'import datetime as d,sys; print(d.datetime.fromtimestamp(int(sys.argv[1]), d.timezone(d.timedelta(hours=-7))).strftime("%Y-%m-%d %H:%M MST"))' "$SQUASH_EPOCH")"
 
 [ -f "$DMG_PATH" ] ||
   die "no $DMG_PATH. \`just release $VERSION\` builds it via \`just dmg\`."
@@ -229,17 +282,37 @@ sed 's/^/   | /' "$NOTES"
 if [ "$DRY_RUN" = 1 ]; then
   echo
   echo "== what publishing would do:"
-  echo "   would run: git push public main $TAG"
+  echo "   would build: one commit with $TAG's files on top of public main ($([ -n "$PUBLIC_PARENT" ] && git rev-parse --short "$PUBLIC_PARENT" || echo "a new root")),"
+  echo "                dated $SQUASH_WHEN, and a public tag $TAG on it"
+  echo "   would run: git push --atomic public <that commit>:main <that tag>:refs/tags/$TAG"
+  if [ "$PUSH_BLOCKED" = yes ]; then
+    echo "   NOT NOW: it is $NOW_MST, and pushes to public wait until after 5 PM MST on weekdays"
+  else
+    echo "   allowed now: it is $NOW_MST"
+  fi
   echo "   would run: gh release create $TAG $DMG_PATH -R $PUBLIC_REPO \\"
   echo "                --title \"astar $VERSION\" --notes-file <the notes above> --latest"
   echo "   would run: gh api repos/$PUBLIC_REPO/releases/latest --jq .tag_name"
+  echo "   would run: ci/clean-builds.sh --after-publish"
+  echo
+  "$HERE/clean-builds.sh" --dry-run --after-publish
   echo
   echo "== dry run OK — nothing was pushed or created."
   exit 0
 fi
 
-echo ">> git push public main $TAG"
-git push public main "$TAG"
+name="$(git log -1 --format=%an "$TAG^{commit}")"
+email="$(git log -1 --format=%ae "$TAG^{commit}")"
+stamp="$SQUASH_EPOCH -0700" # git's raw date format
+parent_args=()
+[ -z "$PUBLIC_PARENT" ] || parent_args=(-p "$PUBLIC_PARENT")
+squash="$(GIT_AUTHOR_NAME="$name" GIT_AUTHOR_EMAIL="$email" GIT_AUTHOR_DATE="$stamp" \
+  GIT_COMMITTER_NAME="$name" GIT_COMMITTER_EMAIL="$email" GIT_COMMITTER_DATE="$stamp" \
+  git commit-tree "$TAG^{tree}" ${parent_args[@]+"${parent_args[@]}"} -m "astar $VERSION")"
+public_tag="$(printf 'object %s\ntype commit\ntag %s\ntagger %s <%s> %s -0700\n\nastar %s\n' \
+  "$squash" "$TAG" "$name" "$email" "$SQUASH_EPOCH" "$VERSION" | git mktag)"
+echo ">> git push public: one squashed commit for $TAG, dated $SQUASH_WHEN"
+git push --atomic public "$squash:refs/heads/main" "$public_tag:refs/tags/$TAG"
 
 # --latest, never --prerelease: the docs and the in-app update check both read
 # /releases/latest, and a prerelease does not answer there.
@@ -260,3 +333,9 @@ latest="$(gh api "repos/$PUBLIC_REPO/releases/latest" --jq .tag_name)"
 echo
 echo "== published $VERSION."
 echo "   https://github.com/$PUBLIC_REPO/releases/tag/$TAG"
+
+# 6. The release is live, so the build output that made it is no longer
+#    needed. A failure here never un-publishes anything: it only says so.
+echo
+"$HERE/clean-builds.sh" --after-publish ||
+  echo "!! publishing worked, but cleaning the build output failed; run: just clean-builds" >&2

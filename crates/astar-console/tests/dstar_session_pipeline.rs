@@ -1502,19 +1502,29 @@ fn losing_the_link_while_keyed_forces_an_unkey_and_stops_transmitting() {
 
     // Terminated, then silent: the last voice frame carries EOT and nothing
     // more goes out, even though PTT is still held down.
-    let after = reflector.voice_frames_seen();
-    let last = reflector
-        .dsvt_seen
-        .lock()
-        .unwrap()
-        .last()
-        .cloned()
-        .expect("frames were transmitted");
-    let (_, _, end, _) = as_voice(&last);
+    //
+    // `ptt` reading false does not mean the EOT is on the wire yet. Key-up
+    // publishes `ptt = false` FIRST, on purpose (`key_up` in dstar.rs: a UI
+    // must not show "keyed" during the flush), and only then drains the mic
+    // queue, waits out the frames still in the vocoder and sends the
+    // terminating frame. Reading the last frame the instant `ptt` drops
+    // raced that flush and saw an ordinary voice frame about 4 runs in 100.
+    // So wait, bounded, for the frame that ends the stream.
+    let last_is_eot = || {
+        reflector
+            .dsvt_seen
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|b| matches!(DsvtPacket::parse(b), Ok(DsvtPacket::Voice { .. })))
+            .is_some_and(|b| as_voice(b).2)
+    };
     assert!(
-        end,
+        wait_until(last_is_eot, 2_000),
         "a forced unkey must still terminate the stream with an EOT frame"
     );
+    let after = reflector.voice_frames_seen();
     push_mic_level(&f.mic_sink, 9_000, 200);
     thread::sleep(Duration::from_millis(250));
     assert_eq!(

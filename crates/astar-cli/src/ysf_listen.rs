@@ -457,7 +457,7 @@ mod tests {
     #[test]
     fn the_link_line_is_printed_once_and_names_the_backend() {
         let mut t = PrintTracker::new("ysf.example:42000".into());
-        assert!(t.on_snapshot(&snap("linking")).is_empty());
+        assert_eq!(t.on_snapshot(&snap("linking")), Vec::<String>::new());
         let lines = t.on_snapshot(&snap("linked"));
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("ysf.example:42000"), "{:?}", lines[0]);
@@ -544,7 +544,7 @@ mod tests {
         let mut off = snap("linked");
         off.receiving = false;
         off.last_heard = Some("AJ7HR".into()); // persists — this is "last heard"
-        assert!(t.on_snapshot(&off).is_empty());
+        assert_eq!(t.on_snapshot(&off), Vec::<String>::new());
 
         assert_eq!(t.on_snapshot(&on), vec!["▶ AJ7HR".to_string()]);
     }

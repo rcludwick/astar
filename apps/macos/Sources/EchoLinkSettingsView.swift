@@ -67,7 +67,7 @@
         }
 
         var body: some View {
-            Section("EchoLink") {
+            SettingsSection(.echolink) {
                 VStack(alignment: .leading, spacing: 8) {
                     statusRow
                     callsignField
@@ -440,6 +440,7 @@
             EchoLinkSettingsView()
         }
         .environmentObject(CallSession(station: NullStation()))
+        .environmentObject(SettingsDisclosure())
         .frame(width: 320, height: 420)
     }
 #endif

@@ -1699,6 +1699,39 @@ int iax_station_set_vocoder_trust(IaxStation *st, const char *serials);
 int iax_station_vocoder_trust(IaxStation *st, char *buf, uintptr_t len);
 
 /**
+ * Choose D-Star's vocoder (astar-dstar-perens): `"dongle"` (the default) or
+ * `"software"`, exactly. Applies to every later D-Star connect and to the
+ * snapshot's `dstar_available`; a live session keeps the vocoder it opened.
+ *
+ * **D-Star only.** There is no such call for System Fusion, NXDN or DMR:
+ * their AMBE+2 vocoder is hardware-only (US 8,359,197 until 2028-05-20).
+ *
+ * `"software"` is accepted in every build; in one without the
+ * `dstar-soft-ambe` feature (see [`astar_dstar_software_vocoder_compiled`])
+ * the next D-Star connect fails with a sentence saying so, rather than
+ * quietly using the dongle.
+ *
+ * Returns [`IAX_OK`], [`IAX_ERR_NULL`] (NULL `st` or `vocoder`),
+ * [`IAX_ERR_UTF8`], [`IAX_ERR_UNSUPPORTED`] (any other string), or
+ * [`IAX_ERR_PANIC`].
+ */
+int iax_station_set_dstar_vocoder(IaxStation *st, const char *vocoder);
+
+/**
+ * Write the station's D-Star vocoder choice (`"dongle"` or `"software"`)
+ * into `buf` (NUL-terminated, truncate-safe). Returns the bytes the name
+ * needs (excluding the NUL), or a negative `IAX_ERR_*`.
+ */
+int iax_station_dstar_vocoder(IaxStation *st, char *buf, uintptr_t len);
+
+/**
+ * `1` when this build contains the software D-Star vocoder (the
+ * `dstar-soft-ambe` feature), `0` when it does not. A front-end greys the
+ * Software choice out on `0`. Shipped builds return `1`.
+ */
+int astar_dstar_software_vocoder_compiled(void);
+
+/**
  * List the vocoder-class USB serial ports that could be enrolled, as a JSON
  * array `[{"serial":"…","port":"/dev/cu.…"}, …]`, into `buf`
  * (NUL-terminated, truncate-safe). **Enumeration only: no port is opened.**

@@ -856,7 +856,7 @@ mod tests {
     #[test]
     fn the_link_line_is_printed_once_and_names_the_backend() {
         let mut t = PrintTracker::new("m.example:62031".into());
-        assert!(t.on_snapshot(&snap("logging_in")).is_empty());
+        assert_eq!(t.on_snapshot(&snap("logging_in")), Vec::<String>::new());
         let lines = t.on_snapshot(&snap("linked"));
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("m.example:62031"), "{:?}", lines[0]);
@@ -920,7 +920,7 @@ mod tests {
         off.receiving = false;
         off.last_heard = Some("3153591".into());
         off.last_heard_id = Some(3_153_591);
-        assert!(t.on_snapshot(&off).is_empty());
+        assert_eq!(t.on_snapshot(&off), Vec::<String>::new());
 
         assert_eq!(t.on_snapshot(&on), vec!["▶ 3153591".to_string()]);
     }

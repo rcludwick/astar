@@ -28,6 +28,8 @@ mod golden_tests;
 pub mod http;
 /// M17 reflector names → addresses, from operator-owned data only.
 pub mod m17_directory;
+/// What the M17 monitor's audio reaches, and the warning every surface shows.
+pub mod m17_relay;
 /// The public, read-only listener page: a separate router, never the admin one.
 pub mod public;
 /// The node logger (`[recording]`): one file per over, with size and age caps.

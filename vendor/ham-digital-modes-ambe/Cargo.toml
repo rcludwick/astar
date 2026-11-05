@@ -1,0 +1,41 @@
+[package]
+# NOTE (astar): this manifest is astar's, not upstream's. The source under
+# src/ambe/ is a subset of Bruce Perens' `ham_digital_modes` crate, kept as
+# published (see VENDORED.md). `license`, `version`, `edition` and
+# `repository` are deliberately hard-coded, never inherited from the
+# workspace: this crate is an LGPL-3.0-or-later island inside an
+# AGPL-3.0-only workspace, and `license.workspace = true` would silently
+# relicense it. It is also listed in the workspace's `exclude` and has its own
+# empty `[workspace]` below, so it builds with its own edition and none of
+# astar's lints.
+name = "ham-digital-modes-ambe"
+# Upstream's crate version (`ham_digital_modes` 0.1.0); the pinned commit is in
+# VENDORED.md.
+version = "0.1.0"
+description = "Bruce Perens' D-Star AMBE 3600x2400 vocoder (the AMBE tree of ham_digital_modes, without AMBE+2)"
+authors = ["Bruce Perens"]
+license = "LGPL-3.0-or-later"
+edition = "2021"
+repository = "https://github.com/BrucePerens/hams_open"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+# No dependencies: the AMBE tree uses `std` only.
+
+# No [features]. Upstream gates its AMBE+2 code behind an `ambe_plus_2`
+# feature; that code is not vendored here, and the feature is deliberately
+# NOT declared, so `--features ambe_plus_2` is a hard error rather than a
+# switch (ci/guard-dstar-soft-ambe.sh checks both). The `cfg` below only tells
+# rustc the name is known, so the two upstream `#[cfg(feature = "ambe_plus_2")]`
+# lines that now always evaluate false do not warn.
+[lints.rust]
+# astar: silence rustc warnings for this crate, as Cargo does for any
+# crates.io dependency (--cap-lints allow). A path dependency is not capped.
+warnings = "allow"
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("ambe_plus_2"))'] }
+
+# astar: an empty workspace table makes this crate its own workspace root, so
+# Cargo never adopts it into an enclosing workspace (see VENDORED.md).
+[workspace]

@@ -229,9 +229,17 @@ public struct ConfigArchive: Codable, Equatable {
     /// meaning.
     public static let machineLocalPrefixes = ["vocoder."]
 
+    /// Interface state that stays on this Mac even though it sits under
+    /// `ui.`: which Settings sections are folded (`SettingsSectionID`). How
+    /// you arranged your own Settings pane is not something another Mac
+    /// should inherit from a shared file. Refused both ways, like
+    /// `machineLocalPrefixes`. Not a `ConfigVersion` bump: these keys were
+    /// never exported, so no file changes meaning.
+    public static let localOnlyPrefixes = [SettingsSectionID.keyPrefix]
+
     /// Whether an imported scalar under `key` may be written to defaults.
     public static func isImportable(key: String) -> Bool {
-        !machineLocalPrefixes.contains(where: { key.hasPrefix($0) })
+        !(machineLocalPrefixes + localOnlyPrefixes).contains(where: { key.hasPrefix($0) })
     }
 
     /// Prefix-driven rather than an enumerated list, so a preference added

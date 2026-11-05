@@ -105,6 +105,59 @@ public final class UserDefaultsVocoderTrustStore: VocoderTrustStore {
     public func serials() -> [String] { load().map(\.serial) }
 }
 
+// MARK: - D-Star vocoder choice
+
+/// Where D-Star's vocoder choice lives: `vocoder.dstar` in this Mac's
+/// preferences, `"dongle"` or `"software"` (the engine's own spelling).
+///
+/// Machine-local, like the trust list: the whole `vocoder.` prefix is kept out
+/// of exported configs (`ConfigArchive.machineLocalPrefixes`), which is right
+/// here too — whether the software vocoder exists depends on the build, not
+/// on the operator. Anything absent or unreadable reads as the dongle, the
+/// default.
+public enum DStarVocoderPreference {
+    public static let key = "vocoder.dstar"
+
+    public static func load(_ defaults: UserDefaults = .standard) -> DStarVocoder {
+        defaults.string(forKey: key).flatMap(DStarVocoder.init(rawValue:)) ?? .dongle
+    }
+
+    public static func save(_ vocoder: DStarVocoder, _ defaults: UserDefaults = .standard) {
+        defaults.set(vocoder.rawValue, forKey: key)
+    }
+}
+
+/// The modes Settings → Vocoders lists, and what each may use. Pure, so the
+/// rule — a software vocoder for D-Star only — is pinned by tests rather than
+/// buried in a view.
+public enum VocoderModeRow: String, CaseIterable, Identifiable, Sendable {
+    case dstar, ysf, nxdn, dmr
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .dstar: return "D-Star"
+        case .ysf: return "System Fusion"
+        case .nxdn: return "NXDN"
+        case .dmr: return "DMR"
+        }
+    }
+
+    /// Only D-Star's AMBE 3600×2400 is out of patent, so only D-Star may
+    /// offer the software vocoder.
+    public var allowsSoftwareVocoder: Bool { self == .dstar }
+
+    /// Why a mode is dongle-only, shown beside it.
+    public static let ambePlus2Reason =
+        "Dongle only. These modes use AMBE+2, which is covered by US patent "
+        + "8,359,197 until 2028-05-20, so astar has no software vocoder for them."
+
+    /// Why Software is greyed out in a build without it.
+    public static let softwareNotInBuild =
+        "This build of astar doesn’t include the software vocoder."
+}
+
 // MARK: - Engine seam
 
 /// The two engine calls Settings → Vocoders makes. A protocol so tests run
@@ -148,17 +201,49 @@ public final class VocoderSettings: ObservableObject {
     private let now: () -> Date
     private let onTrustChanged: ([String]) -> Void
 
+    /// D-Star's vocoder: the dongle unless the operator chose software.
+    @Published public private(set) var dstarVocoder: DStarVocoder
+    /// Whether this build contains the software D-Star vocoder. When it does
+    /// not, Software is offered greyed out with the reason.
+    public let softwareVocoderCompiled: Bool
+    private let dstarDefaults: UserDefaults
+    private let onDStarVocoderChanged: (DStarVocoder) -> Void
+
     public init(
         store: VocoderTrustStore = UserDefaultsVocoderTrustStore(),
         enroller: VocoderEnrolling = LiveVocoderEnroller(),
         now: @escaping () -> Date = Date.init,
-        onTrustChanged: @escaping ([String]) -> Void = { _ in }
+        onTrustChanged: @escaping ([String]) -> Void = { _ in },
+        dstarDefaults: UserDefaults = .standard,
+        softwareVocoderCompiled: Bool = Station.dstarSoftwareVocoderCompiled,
+        onDStarVocoderChanged: @escaping (DStarVocoder) -> Void = { _ in }
     ) {
         self.store = store
         self.enroller = enroller
         self.now = now
         self.onTrustChanged = onTrustChanged
         self.trusted = TrustedVocoder.sanitized(store.load())
+        self.dstarDefaults = dstarDefaults
+        self.softwareVocoderCompiled = softwareVocoderCompiled
+        self.onDStarVocoderChanged = onDStarVocoderChanged
+        self.dstarVocoder = DStarVocoderPreference.load(dstarDefaults)
+    }
+
+    /// The software choice is stored, but this build cannot honour it (a
+    /// preference written by a build that had it). D-Star connects will be
+    /// refused until the operator picks the dongle; the pane says so.
+    public var softwareChosenButMissing: Bool {
+        dstarVocoder == .software && !softwareVocoderCompiled
+    }
+
+    /// Choose D-Star's vocoder. Software is refused in a build without it, so
+    /// the picker can never store a choice that cannot work.
+    public func setDStarVocoder(_ vocoder: DStarVocoder) {
+        guard vocoder != dstarVocoder else { return }
+        if vocoder == .software && !softwareVocoderCompiled { return }
+        dstarVocoder = vocoder
+        DStarVocoderPreference.save(vocoder, dstarDefaults)
+        onDStarVocoderChanged(vocoder)
     }
 
     /// The serials, in the order they were added.
@@ -289,5 +374,31 @@ public enum VocoderSetupPrompt {
     public static func offersSettings(for message: String?) -> Bool {
         guard let message else { return false }
         return message.localizedCaseInsensitiveContains("No trusted vocoder")
+    }
+
+    /// D-Star's "no trusted vocoder" refusal in a build with the software
+    /// vocoder: the shared sentence, plus the other way to get D-Star going.
+    /// The same words as the engine's `NO_TRUSTED_VOCODER_DSTAR`.
+    public static let dstarNoTrustedVocoderMessage =
+        Station.noTrustedVocoderMessage
+        + ", or switch D-Star to the software vocoder there"
+
+    /// Whether a connect failure should also carry "Use the Software Vocoder
+    /// for D-Star": true exactly for D-Star's own no-trusted-vocoder refusal,
+    /// which only a build with the software vocoder produces.
+    public static func offersSoftwareSwitch(for message: String?) -> Bool {
+        guard let message else { return false }
+        return message.localizedCaseInsensitiveContains("switch D-Star to the software vocoder")
+    }
+
+    /// The refusal for `network` when nothing is trusted. D-Star names the
+    /// software vocoder when this build has it; the AMBE+2 networks never do.
+    public static func noTrustedVocoderMessage(
+        for network: Network, softwareCompiled: Bool = Station.dstarSoftwareVocoderCompiled
+    ) -> String {
+        if network == .dstar && softwareCompiled {
+            return dstarNoTrustedVocoderMessage + "."
+        }
+        return Station.noTrustedVocoderMessage + "."
     }
 }

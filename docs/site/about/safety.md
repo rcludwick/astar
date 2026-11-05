@@ -75,7 +75,8 @@ D-Star transmit is not remotely keyable
 D-Star is the one network the daemon must never key remotely, and the check
 lives at the caller so it cannot be bypassed by reaching the station directly.
 IAX2 and the console's own M17 client session are remotely keyable; the node's
-M17 *monitor* has no transmit path, and `POST /key` cannot reach it.
+M17 *monitor* has no transmit path toward the reflector, and `POST /key` cannot
+reach it.
 
 ## Listening is always safe
 
@@ -85,6 +86,16 @@ listening only** mode, and links can be established as monitor-only
 astar-server can also monitor an M17 reflector
 ([`POST /m17`](../server/control-api.md) or `/dial m17`): it sends the
 reflector only the packets that hold a link open, never audio.
+
+!!! warning "A monitored M17 reflector is relayed to your links"
+
+    The M17 monitor is listen-only toward the reflector, but not toward your
+    own network. What it hears is mixed into the node's conference and
+    relayed to every AllStar node linked to the node and every EchoLink
+    station on it, and a linked node with a radio puts it on the air. Link
+    only reflectors whose traffic you would rebroadcast, and mind your
+    licence's rules on retransmission. See
+    [Configuration](../server/configuration.md#m17-receive-only-m17-reflector-monitor).
 
 When in doubt, monitor.
 

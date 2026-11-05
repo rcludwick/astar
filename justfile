@@ -200,11 +200,11 @@ cbindgen:
     ./scripts/check-cbindgen.sh
     ./scripts/check-cbindgen-serial.sh
 
-# The eight merge invariants CI's `guard` stage enforces: no armed hardware /
+# The nine merge invariants CI's `guard` stage enforces: no armed hardware /
 # live-network opt-in, no git dependencies (ambe-thumbdv stays vendored, with
 # its licences), no invented install channel, an AGPL SPDX header on every
 # first-party rs/swift/sh/py file, no LGPL code in a default build (Codec 2
-# stays opt-in), no async runtime / voice stack in a default build (the
+# stays opt-in; the software D-Star vocoder stays opt-in and D-Star only), no async runtime / voice stack in a default build (the
 # discord feature stays opt-in), no tiny_http anywhere (every HTTP server
 # runs on astar-http), and the EchoLink test fences (no EchoLink host name in
 # the engine; the loopback-only features never reach a real build). Each
@@ -215,6 +215,7 @@ guards:
     ./ci/guard-distribution-claims.sh
     ./ci/guard-spdx-headers.sh
     ./ci/guard-codec2-licensing.sh
+    ./ci/guard-dstar-soft-ambe.sh
     ./ci/guard-discord-feature.sh
     ./ci/guard-no-tiny-http.sh
     ./ci/guard-echolink.sh
@@ -449,11 +450,11 @@ discord-check:
 # deliberately, so a default-features build staying tokio/songbird-free is
 # checked on every `just ci`, not just before a push. The feature's own code
 # is gated by `just discord-check` / ci.yml's `discord` job, not here.
-ci: fmt-check clippy test cbindgen version-check release-test deploy-verify-test public-check dns-check auth-check http-check gsm-check
+ci: fmt-check clippy test cbindgen version-check release-test deploy-verify-test public-check dns-check auth-check http-check gsm-check soft-ambe-check
     ./ci/guard-discord-feature.sh
     ./ci/guard-no-tiny-http.sh
     ./ci/guard-echolink.sh
-    @echo "✓ ci: fmt + clippy + test + cbindgen + version-check + release-test + deploy-verify-test + public-check + dns-check + auth-check + http-check + gsm-check + discord-guard + tiny-http-guard + echolink-guard passed"
+    @echo "✓ ci: fmt + clippy + test + cbindgen + version-check + release-test + deploy-verify-test + public-check + dns-check + auth-check + http-check + gsm-check + soft-ambe-check + discord-guard + tiny-http-guard + echolink-guard passed"
 
 # astar-server's opt-in public-tls (HTTPS, ACME, Porkbun) and stream-mp3 (LAME)
 # features, which a default-features `just clippy`/`just test` never compiles. Unlike discord it
@@ -473,6 +474,30 @@ gsm-check:
     cargo clippy -p astar-codec --all-targets --features gsm -- -D warnings
     cargo test -p astar-codec --features gsm
     @echo "✓ gsm-check: clippy + tests with --features gsm passed"
+
+# The software D-Star vocoder (astar-dstar-perens, feature `dstar-soft-ambe`,
+# off by default), which a default `just clippy`/`just test` never compiles.
+# One small pure-Rust crate with no dependencies, so it rides in `just ci`:
+# the selection tests, the encode/decode round trip, and the console session
+# opening a software D-Star link to 127.0.0.1 with nothing trusted.
+soft-ambe-check:
+    cargo clippy -p astar-codec -p astar-console -p astar-station -p astar-sys -p astar-server --all-targets --features astar-codec/dstar-soft-ambe,astar-console/dstar,astar-console/dstar-soft-ambe,astar-station/dstar-soft-ambe,astar-sys/dstar-soft-ambe,astar-server/dstar-soft-ambe -- -D warnings
+    cargo test -p astar-codec --features dstar-soft-ambe --lib
+    cargo test -p astar-console --features dstar,dstar-soft-ambe --lib -- software_ dstar_vocoder
+    cargo test -p astar-sys --features dstar-soft-ambe --lib -- dstar_vocoder
+    cargo test -p astar-server --features dstar-soft-ambe --lib -- vocoder
+    ./ci/guard-dstar-soft-ambe.sh
+    @echo "✓ soft-ambe-check: clippy + tests with --features dstar-soft-ambe passed"
+
+# The feature combinations `just ci` never builds: clippy for every crate with
+# --all-features and with each feature alone (no defaults), full tests for
+# astar-cli, astar-console and astar-server with --all-features and for
+# astar-server without `stream`, and the server's `release` set. Not part of
+# `just ci`: it takes several times as long (see ci/feature-matrix.sh for the
+# steps, the exclusions and why). `just feature-matrix --list` prints the
+# steps; `just feature-matrix <regex>` runs the matching ones.
+feature-matrix *args:
+    ./ci/feature-matrix.sh {{args}}
 
 # astar-server's opt-in dns-providers feature (dns-update on a contained
 # tokio thread). Not in default clippy/test; its tests use only dns-update's
@@ -555,9 +580,22 @@ release version *args:
 publish version *args:
     ci/publish.sh {{version}} {{args}}
 
+# Remove build output a published release no longer needs (`just publish`
+# runs this itself afterwards). Keeps the Debug app, the xcframeworks and any
+# unmerged or dirty worktree. `--dry-run` lists what it would remove.
+clean-builds *args:
+    ci/clean-builds.sh {{args}}
+
+# Keep this checkout's target/ and apps/macos/build/ on another drive, behind
+# symlinks: `just link-builds /Volumes/data/builds` (or set ASTAR_BUILD_ROOT).
+# Run it once in each new worktree; it moves anything already built.
+link-builds root="":
+    ci/link-builds.sh {{root}}
+
 # Tests for both release scripts: a throwaway repo in a temp dir, with gh /
 # spctl / stapler stubbed on PATH for the publish half. No cargo, no network,
 # nothing real is ever pushed. Part of `just ci` — hermetic, about two seconds.
 release-test:
     ./ci/test_release_sh.sh
     ./ci/test_publish_sh.sh
+    ./ci/test_clean_builds_sh.sh

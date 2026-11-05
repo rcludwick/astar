@@ -590,6 +590,27 @@ impl Station {
         self.session.lock().unwrap().vocoder_trust().clone()
     }
 
+    /// Choose D-Star's vocoder (astar-dstar-perens): the dongle (the
+    /// default) or the software vocoder. Applies to every later
+    /// [`Station::dstar_connect`] and to [`Station::dstar_available`]; a live
+    /// session keeps the vocoder it opened.
+    ///
+    /// D-Star only, deliberately: System Fusion, NXDN and DMR are AMBE+2
+    /// (US 8,359,197 until 2028-05-20) and have no such setting. Choosing
+    /// software in a build without the `dstar-soft-ambe` feature is
+    /// accepted here and refused at connect, with
+    /// [`crate::SOFTWARE_DSTAR_VOCODER_NOT_COMPILED`]; it is never quietly
+    /// turned into the dongle.
+    pub fn set_dstar_vocoder(&self, vocoder: crate::DstarVocoder) {
+        self.session.lock().unwrap().set_dstar_vocoder(vocoder);
+    }
+
+    /// The current D-Star vocoder choice.
+    #[must_use]
+    pub fn dstar_vocoder(&self) -> crate::DstarVocoder {
+        self.session.lock().unwrap().dstar_vocoder()
+    }
+
     /// Step 1 of every AMBE-network connect, under the session lock: open and
     /// reserve the ONE audio lane, and take a copy of the vocoder trust list
     /// the off-lock vocoder open will use.
@@ -1993,11 +2014,12 @@ impl Station {
     /// adopt, or `m17_connect`, while D-Star is live) are enforced by the
     /// same session.
     ///
-    /// D-Star is hardware-only (iax-b3e7 M0): this always opens the `ThumbDV`
-    /// AMBE dongle — there is no software-codec fallback and no preference
-    /// knob (removed; see the crate-level docs). A build without the `dstar`
-    /// feature, or a `dstar` build with no dongle attached, fails the connect
-    /// outright rather than silently substituting a software decoder.
+    /// The vocoder is the one [`Station::set_dstar_vocoder`] chose: the
+    /// `ThumbDV` dongle by default, or the software vocoder
+    /// (astar-dstar-perens). Neither is substituted for the other: a build
+    /// without the `dstar` feature, a dongle choice with no dongle attached,
+    /// or a software choice in a build without `dstar-soft-ambe`, fails the
+    /// connect outright.
     ///
     /// # Blocking
     /// The `ThumbDV` probe/init handshake and the socket bind run with the
@@ -2061,6 +2083,7 @@ impl Station {
             // every other connect path refuses while it is held — and the
             // pref push, so the session starts at the operator's chosen
             // volume rather than the router's unity default.
+            let vocoder = self.dstar_vocoder();
             let (audio, trust) =
                 self.open_voice_route_with_trust(input.as_deref(), output.as_deref())?;
 
@@ -2070,7 +2093,9 @@ impl Station {
             // the socket bind — seconds, on a flaky dongle. Holding the
             // mutex across that blocked every snapshot/state poll for the
             // whole window.
-            let session = match astar_console::DstarSession::connect(cfg, audio, &trust) {
+            let session = match astar_console::DstarSession::connect_with_vocoder(
+                cfg, audio, &trust, vocoder,
+            ) {
                 Ok(s) => s,
                 Err(e) => {
                     // The lane opened but the session did not: give it back,
@@ -2119,7 +2144,11 @@ impl Station {
     pub fn dstar_available(&self) -> bool {
         #[cfg(feature = "dstar")]
         {
-            astar_console::dstar_available(&self.vocoder_trust())
+            let (trust, vocoder) = {
+                let s = self.session.lock().unwrap();
+                (s.vocoder_trust().clone(), s.dstar_vocoder())
+            };
+            astar_console::dstar_available_with(&trust, vocoder)
         }
         #[cfg(not(feature = "dstar"))]
         {
@@ -3988,9 +4017,15 @@ mod tests {
         assert!(not_compiled(station.echolink_node_disconnect("KX7ABC")));
         assert!(station.echolink_state().is_none());
         assert!(station.echolink_last_error().is_none());
-        assert!(station.echolink_stations().is_empty());
-        assert!(station.echolink_node_poll().is_empty());
-        assert!(station.echolink_node_peers().is_empty());
+        assert_eq!(
+            station.echolink_stations(),
+            Vec::<EchoLinkStationInfo>::new()
+        );
+        assert_eq!(station.echolink_node_poll(), Vec::<EchoLinkNodeEdge>::new());
+        assert_eq!(
+            station.echolink_node_peers(),
+            Vec::<EchoLinkPeerStatus>::new()
+        );
         station.echolink_set_location("Denver");
         station.echolink_disconnect();
         station.echolink_logout();

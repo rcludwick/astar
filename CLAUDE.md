@@ -3,8 +3,10 @@
 Native multi-network ham-radio client and node: AllStarLink (IAX2), M17, and
 D-Star. One cargo workspace, one git history. AGPL-3.0-only throughout, except
 the vendored licence islands: `vendor/ambe-thumbdv` (MIT/Apache-2.0),
-`vendor/codec2` (LGPL-2.1-only AND MIT), and `vendor/mp3lame-sys` +
-`vendor/mp3lame-encoder` (LAME, LGPL; astar-server's opt-in `stream-mp3` only).
+`vendor/codec2` (LGPL-2.1-only AND MIT), `vendor/ham-digital-modes-ambe`
+(Bruce Perens' software D-Star vocoder, LGPL-3.0-or-later, no AMBE+2 code), and
+`vendor/mp3lame-sys` + `vendor/mp3lame-encoder` (LAME, LGPL; astar-server's
+opt-in `stream-mp3` only).
 
 Design polish is a first-class requirement: astar should be pretty and easy to
 use, not just functional.
@@ -17,8 +19,16 @@ use, not just functional.
 | `public` | `rcludwick/astar` | **public.** The release target — Rob merges to it deliberately. |
 
 Everyday work goes to `origin`. **Publishing is Rob's call, not a step in a
-task**: never `git push public` unless he asks for it in those words. Both
-repos share one history, so a release is a fast-forward.
+task**: never `git push public` unless he asks for it in those words.
+
+**The two repos do not share history** (Rob, 2026-11-01: "Private should stay
+private always"). Public `main` is one squashed commit per release, carrying
+the release tag's files and dated at a random evening time (18:00–22:59 MST)
+on the tag's day; `just publish` builds and pushes it. It refuses to push Monday–Friday,
+7 AM–5 PM MST. Never push a private
+commit, branch or tag to `public` by any other route, and never fetch
+public's tags into this clone: they name different commits from the private
+tags of the same names (`remote.public.tagOpt=--no-tags`).
 
 Consequences worth knowing:
 
@@ -42,6 +52,7 @@ apps/macos/      The SwiftUI app (macOS menu-bar; iOS targeted).
 apps/gui/        The Iced client for Windows/Linux (crate astar-gui).
 vendor/          ambe-thumbdv — the ThumbDV vocoder driver, MIT/Apache island;
                  codec2 — the M17 voice codec (pure Rust), LGPL-2.1/MIT island;
+                 ham-digital-modes-ambe — Bruce Perens' D-Star AMBE vocoder, LGPL-3.0 island;
                  mp3lame-sys / mp3lame-encoder — LAME for /stream.mp3, LGPL island.
 docs/            Engine docs + docs/app/ for the app's own backlog/design.
 ```
@@ -78,6 +89,13 @@ just nodebench-up / just nodebench-down       # leave the rig up / tear it down
 just nodebench-soak 24 / just nodebench-serve # hold one link for hours / browse
                  # runs on 127.0.0.1:8740
 ```
+
+Build output can live on another drive: `just link-builds <root>` (or
+`ASTAR_BUILD_ROOT`) moves `target/` and `apps/macos/build/` to
+`<root>/astar/<checkout>/` behind symlinks. Rob's Mac keeps them under
+`/Volumes/data/builds`, so run `just link-builds /Volumes/data/builds` in each
+new worktree before its first build. `just clean-builds` removes a merged
+worktree's linked folders with it and sweeps folders whose worktree is gone.
 
 There is no vendoring step and no sibling repo any more: `apps/macos/project.yml`
 points straight at `bindings/swift` and `bindings/swift-serial`. A fresh worktree
@@ -126,6 +144,18 @@ everywhere, and `astar-codec`'s `ambe-hw` feature is off by default.
 licence is AGPL-compatible — which today means D-Star's AMBE and nothing
 else.** Decided 2026-09-19 (Rob), reversing the previous hardware-only rule.
 
+**Built in since 2026-11-01** (Rob: "We want to build it in by default. But we
+want a switch for d-star to use the dongle (dvstick) or bruce perens' codec in
+the config."). Bruce Perens' D-Star vocoder (`vendor/ham-digital-modes-ambe`,
+feature `dstar-soft-ambe`) is in every shipped build: `just xcframework`
+builds it in (`ASTAR_DSTAR_SOFT_AMBE=0` leaves it out) and astar-server's
+`release` set includes it. The cargo feature itself stays explicit, never a
+cargo default, like `codec2-static`. The **dongle stays the default choice**:
+Settings → Vocoders (`vocoder.dstar`) and `node.toml` `[vocoder] dstar =
+"dongle" | "software"`, and nothing switches by itself. D-Star only:
+`ci/guard-dstar-soft-ambe.sh` enforces no AMBE+2 source, D-Star-only
+permission, the hard-coded licence and the shipped-build opt-in.
+
 | Generation | Modes | Status |
 |---|---|---|
 | AMBE 3600×2400 | D-Star | Patent term expired. A software backend is allowed. |
@@ -135,7 +165,8 @@ So the software/hardware selector is **per-mode, never global**: offering it
 for DMR, NXDN or YSF would ship an encumbered codec. A UI that greys those out
 needs to say why.
 
-Any software backend is an **opt-in cargo feature, off by default**, with its
+Any software backend is an **opt-in cargo feature, off by default** (a shipped
+build may turn it on by name, as `dstar-soft-ambe` is), with its
 licence and the patent reasoning recorded in `LICENSE-EXCEPTIONS.md` — the
 `codec2` entry is the pattern. The ThumbDV path stays the default even where a
 software backend exists.
@@ -144,7 +175,8 @@ software backend exists.
 `rcludwick/ambe`.** That prohibition is about that specific effort and is not
 lifted by any of the above.
 
-`vendor/ambe-thumbdv/Cargo.toml` and `vendor/codec2/Cargo.toml` hard-code
+`vendor/ambe-thumbdv/Cargo.toml`, `vendor/codec2/Cargo.toml` and
+`vendor/ham-digital-modes-ambe/Cargo.toml` hard-code
 `license`/`version`/`edition`/`repository` (and `codec2` its `authors`) on
 purpose. Do not convert them to `.workspace = true` — that would relicense
 someone else's MIT/Apache or LGPL code as AGPL. See each one's `VENDORED.md`.

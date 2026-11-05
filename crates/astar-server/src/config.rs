@@ -1401,6 +1401,36 @@ pub struct VocoderCfg {
     /// USB serial numbers of the trusted sticks.
     #[serde(default)]
     pub trusted_serials: Vec<String>,
+    /// D-Star's vocoder (astar-dstar-perens): `"dongle"` (the default when
+    /// absent) or `"software"`. D-Star ONLY: there is deliberately no `ysf`,
+    /// `nxdn` or `dmr` key — their AMBE+2 is hardware-only (US 8,359,197 until
+    /// 2028-05-20) — and `deny_unknown_fields` turns one into a startup error.
+    /// `"software"` needs a build with the `dstar-soft-ambe` feature; without
+    /// it, the node refuses to start rather than quietly use the dongle.
+    #[serde(default)]
+    pub dstar: Option<String>,
+}
+
+/// `[vocoder] dstar`, checked: the parsed choice, or the start-up error.
+///
+/// Takes the "is the software vocoder compiled" answer as an argument so both
+/// builds' behaviour is testable from either.
+pub fn check_dstar_vocoder(
+    value: Option<&str>,
+    software_compiled: bool,
+) -> Result<astar_station::DstarVocoder, String> {
+    let Some(value) = value else {
+        return Ok(astar_station::DstarVocoder::Dongle);
+    };
+    match astar_station::DstarVocoder::parse(value) {
+        None => Err(format!(
+            "vocoder.dstar: unknown value {value:?} (expected \"dongle\" or \"software\")"
+        )),
+        Some(astar_station::DstarVocoder::Software) if !software_compiled => Err(
+            "vocoder.dstar: \"software\" needs an astar-server built with the dstar-soft-ambe feature, and this one was not; use \"dongle\", or rebuild with --features dstar-soft-ambe".to_string(),
+        ),
+        Some(v) => Ok(v),
+    }
 }
 
 /// The longest serial `[vocoder] trusted_serials` accepts. FTDI's own are 8
@@ -2132,7 +2162,20 @@ impl NodeFileConfig {
         self.vocoder
             .iter()
             .flat_map(|v| &v.trusted_serials)
-            .try_for_each(|s| check_vocoder_serial(s))
+            .try_for_each(|s| check_vocoder_serial(s))?;
+        self.dstar_vocoder().map(|_| ())
+    }
+
+    /// `[vocoder] dstar`: which vocoder D-Star uses. The dongle when absent.
+    ///
+    /// # Errors
+    /// An unknown value, or `"software"` in a build without
+    /// `dstar-soft-ambe` — see [`check_dstar_vocoder`].
+    pub fn dstar_vocoder(&self) -> Result<astar_station::DstarVocoder, String> {
+        check_dstar_vocoder(
+            self.vocoder.as_ref().and_then(|v| v.dstar.as_deref()),
+            astar_station::software_dstar_vocoder_compiled(),
+        )
     }
 
     /// The trust list the station opens vocoders by: `[vocoder]
@@ -4087,6 +4130,52 @@ peer_connected = { enabled = true, destination = "to_air" }
 
     fn vocoder_toml(block: &str) -> String {
         format!("{}\n{block}\n", minimal_toml())
+    }
+
+    #[test]
+    fn dstar_vocoder_defaults_to_the_dongle() {
+        let cfg = NodeFileConfig::from_toml_str(&vocoder_toml("")).unwrap();
+        assert_eq!(cfg.dstar_vocoder(), Ok(astar_station::DstarVocoder::Dongle));
+        let cfg = NodeFileConfig::from_toml_str(&vocoder_toml("[vocoder]\ntrusted_serials = []\n"))
+            .unwrap();
+        assert_eq!(cfg.dstar_vocoder(), Ok(astar_station::DstarVocoder::Dongle));
+        let cfg = NodeFileConfig::from_toml_str(&vocoder_toml("[vocoder]\ndstar = \"dongle\"\n"))
+            .unwrap();
+        assert_eq!(cfg.dstar_vocoder(), Ok(astar_station::DstarVocoder::Dongle));
+    }
+
+    #[test]
+    fn dstar_vocoder_software_depends_on_the_build() {
+        use astar_station::DstarVocoder;
+        assert_eq!(
+            check_dstar_vocoder(Some("software"), true),
+            Ok(DstarVocoder::Software)
+        );
+        let err = check_dstar_vocoder(Some("software"), false).unwrap_err();
+        assert!(err.contains("dstar-soft-ambe"), "{err}");
+        for bad in ["Software", "hardware", "auto", ""] {
+            assert!(check_dstar_vocoder(Some(bad), true).is_err(), "{bad:?}");
+        }
+        // And the loader agrees with this build.
+        let loaded =
+            NodeFileConfig::from_toml_str(&vocoder_toml("[vocoder]\ndstar = \"software\"\n"));
+        assert_eq!(
+            loaded.is_ok(),
+            astar_station::software_dstar_vocoder_compiled()
+        );
+    }
+
+    /// The software vocoder is D-Star only: no other mode has a key, so
+    /// naming one is a start-up error rather than an ignored line.
+    #[test]
+    fn no_vocoder_choice_exists_for_ambe_plus_2_modes() {
+        for key in ["ysf", "nxdn", "dmr", "fusion", "software"] {
+            let toml = vocoder_toml(&format!("[vocoder]\n{key} = \"software\"\n"));
+            assert!(
+                NodeFileConfig::from_toml_str(&toml).is_err(),
+                "[vocoder] {key} must not be accepted"
+            );
+        }
     }
 
     #[test]

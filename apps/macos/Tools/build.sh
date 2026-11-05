@@ -90,6 +90,29 @@ fi
 
 APP="$DD/Build/Products/$CONFIG/astar.app"
 [ -d "$APP" ] || { echo "!! build reported success but no app at $APP" >&2; exit 1; }
+# 3b. Stamp a Debug build with when it was built and from what.
+#
+# Every Debug build carries the same marketing version as the release it
+# grew from, so "0.1.18-beta" alone can't say which build is running. The
+# footer shows AstarBuildStamp when it is there: the local build time, then
+# the commit, with "+dirty" when the tree had uncommitted changes. Release
+# builds (make-dmg.sh) get no stamp, so a published DMG shows its plain
+# version. Editing Info.plist breaks the signature, so step 4 always signs
+# a stamped build again, ad-hoc when there is no identity.
+STAMPED=0
+if [ "$CONFIG" = "Debug" ]; then
+  commit="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    commit="$commit+dirty"
+  fi
+  stamp="dev $(date '+%Y-%m-%d %H:%M %Z') · $commit"
+  PLIST="$APP/Contents/Info.plist"
+  /usr/libexec/PlistBuddy -c "Delete :AstarBuildStamp" "$PLIST" >/dev/null 2>&1 || true
+  /usr/libexec/PlistBuddy -c "Add :AstarBuildStamp string $stamp" "$PLIST"
+  STAMPED=1
+  echo ">> stamped: $stamp"
+fi
+
 # 4. Re-sign with a stable identity when this Mac has one.
 #
 # An ad-hoc signature identifies the app only by the hash of this exact
@@ -115,9 +138,15 @@ if [ "${ASTAR_ADHOC:-0}" != "1" ]; then
       --sign "$SIGN_IDENTITY" "$APP" >/dev/null 2>&1; then
       echo ">> signed as: $SIGN_IDENTITY (stable across rebuilds, so Keychain access sticks)"
     else
-      echo "!! re-signing with \"$SIGN_IDENTITY\" failed — the build stays ad-hoc" >&2
+      echo "!! re-signing with \"$SIGN_IDENTITY\" failed — signing it ad-hoc" >&2
+      SIGN_IDENTITY=""
     fi
   fi
+fi
+# A stamped build that step 4 didn't sign still needs a valid signature.
+if [ "$STAMPED" = 1 ] && [ -z "${SIGN_IDENTITY:-}" ]; then
+  codesign --force --sign - --entitlements astar.entitlements "$APP" >/dev/null 2>&1 ||
+    { echo "!! ad-hoc signing the stamped build failed" >&2; exit 1; }
 fi
 
 echo ">> build ok → $APP"

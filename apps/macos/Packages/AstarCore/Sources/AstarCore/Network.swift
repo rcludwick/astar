@@ -21,10 +21,11 @@ public enum Network: String, CaseIterable, Codable, Sendable {
     /// `dstar_available`, RX and TX — and this case is what lets the app
     /// reach it.
     ///
-    /// Availability is HARDWARE, not a build flag: D-Star voice is AMBE, and
-    /// astar has no software vocoder. `dstarAvailable` is true only when the
-    /// engine found a ThumbDV, so this segment appears when a dongle is
-    /// attached and not otherwise. That is the honest gate — a picker entry
+    /// Availability is usually HARDWARE, not a build flag: with the dongle
+    /// chosen (the default) `dstarAvailable` is true only when the engine
+    /// found a ThumbDV, so this segment appears when a dongle is attached and
+    /// not otherwise. With the software vocoder chosen, it appears in a build
+    /// that contains it. That is the honest gate — a picker entry
     /// that always failed to connect would be worse than no entry.
     case dstar
     /// System Fusion (YSF) reflector dialing.
