@@ -18,6 +18,7 @@ use astar_audio::CallAudio;
 use astar_echolink::PeerAddr;
 use astar_echolink::directory::StationEntry;
 use astar_echolink::qso::QsoState;
+use astar_record::packet_tap::{PacketCallId, PacketSlot};
 use tracing::warn;
 
 use super::EchoLinkNetwork;
@@ -77,6 +78,7 @@ pub struct EchoLinkSession {
     shared: Arc<PeerShared>,
     ptt: Arc<AtomicBool>,
     entry: StationEntry,
+    packet_slot: PacketSlot,
 }
 
 impl EchoLinkSession {
@@ -94,10 +96,12 @@ impl EchoLinkSession {
         if my_call.is_empty() {
             return Err(ConsoleError::EchoLink(NO_CALLSIGN.to_owned()));
         }
-        let link = EchoLinkLink::start(&my_call, location, net).map_err(|e| {
-            warn!(error = %e, "echolink: link thread did not start");
-            ConsoleError::EchoLink(NO_THREAD.to_owned())
-        })?;
+        let packet_slot = PacketSlot::default();
+        let link =
+            EchoLinkLink::start(&my_call, location, net, packet_slot.clone()).map_err(|e| {
+                warn!(error = %e, "echolink: link thread did not start");
+                ConsoleError::EchoLink(NO_THREAD.to_owned())
+            })?;
         let ptt = Arc::new(AtomicBool::new(false));
         let shared = link
             .add(
@@ -116,6 +120,7 @@ impl EchoLinkSession {
             shared,
             ptt,
             entry: station,
+            packet_slot,
         })
     }
 
@@ -147,6 +152,18 @@ impl EchoLinkSession {
             chat: lock(&self.shared.chat).clone(),
             notice: lock(&self.shared.notice).clone(),
         }
+    }
+
+    /// The slot the call's packet tap offers to. Install a tap to log it.
+    #[must_use]
+    pub fn packet_slot(&self) -> PacketSlot {
+        self.packet_slot.clone()
+    }
+
+    /// The call's id in the packet log.
+    #[must_use]
+    pub fn packet_call(&self) -> PacketCallId {
+        self.shared.packet_call
     }
 
     /// The link's bound audio and control addresses, or `None` once the call

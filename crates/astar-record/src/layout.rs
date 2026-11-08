@@ -76,7 +76,7 @@ pub struct LayoutWriter {
     scratch: Vec<i16>,
 }
 
-fn with_suffix(base: &Path, suffix: &str) -> PathBuf {
+pub(crate) fn with_suffix(base: &Path, suffix: &str) -> PathBuf {
     let mut s: OsString = base.as_os_str().to_owned();
     s.push(suffix);
     PathBuf::from(s)

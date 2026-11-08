@@ -23,6 +23,12 @@ pub mod layout;
 pub mod naming;
 pub mod over;
 #[cfg(feature = "writer")]
+pub mod packet_log;
+pub mod packet_pool;
+pub mod packet_tap;
+#[cfg(feature = "writer")]
+pub mod pcap;
+#[cfg(feature = "writer")]
 pub mod recorder;
 pub mod tap;
 #[cfg(feature = "writer")]

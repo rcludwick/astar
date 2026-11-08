@@ -1,0 +1,64 @@
+[package]
+name = "astar-netrec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "astar-netrec: receive-only daemon that records amateur-radio nets."
+
+[lib]
+name = "astar_netrec"
+path = "src/lib.rs"
+
+[[bin]]
+name = "astar-netrec"
+path = "src/main.rs"
+
+# LICENSING: the two LGPL codecs stay off in a plain `cargo build`, the same
+# contract as every other astar crate (ci/guard-codec2-licensing.sh and
+# ci/guard-dstar-soft-ambe.sh, which read the resolved graph). A shipped
+# recorder names them through `release`. Without them M17 looks for a system
+# libcodec2 at run time, and a D-Star net on `[vocoder] dstar = "software"` is
+# refused by `check` and `run`.
+[features]
+default = []
+codec2-static = ["astar-station/codec2-static"]
+dstar-soft-ambe = ["astar-station/dstar-soft-ambe"]
+release = ["codec2-static", "dstar-soft-ambe"]
+
+[dependencies]
+# `default-features = false` on every crate that reaches astar-audio: the
+# recorder has no sound device, so cpal stays out.
+astar-audio = { path = "../astar-audio", version = "0.1.20-beta", default-features = false, features = ["pull-backend"] }
+astar-console = { path = "../astar-console", version = "0.1.20-beta", default-features = false, features = ["m17", "dstar"] }
+astar-iax = { path = "../astar-iax", version = "0.1.20-beta", default-features = false }
+astar-record = { path = "../astar-record", version = "0.1.20-beta" }
+astar-netarchive = { path = "../astar-netarchive", version = "0.1.20-beta" }
+astar-station = { path = "../astar-station", version = "0.1.20-beta", default-features = false, features = ["m17", "dstar"] }
+clap = { workspace = true }
+ctrlc = { version = "3", features = ["termination"] }
+jiff = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+# Forces the LGPL `codec2-static` backend on for every TEST build of this
+# crate, as astar-station and astar-server do, so the M17 tests need no system
+# libcodec2. The licensing guards walk normal edges only. `dstar-soft-ambe` is
+# deliberately NOT forced the same way: `cargo test --workspace` unifies dev
+# features, which would turn off the feature-off refusal tests in astar-codec
+# and astar-console. The D-Star tests here run under `--features release`
+# instead (`just soft-ambe-check`).
+astar-codec = { path = "../astar-codec", version = "0.1.20-beta", features = ["codec2-static"] }
+astar-dstar = { path = "../astar-dstar", version = "0.1.20-beta" }
+astar-m17 = { path = "../astar-m17", version = "0.1.20-beta" }
+claxon = "=0.4.3"
+
+[lints]
+workspace = true

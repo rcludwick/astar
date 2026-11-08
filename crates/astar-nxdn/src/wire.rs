@@ -280,6 +280,12 @@ pub fn data(packet: &DataPacket) -> [u8; DATA_LEN] {
     out
 }
 
+/// True when `datagram` is a full `NXDND` frame.
+#[must_use]
+pub fn is_media(datagram: &[u8]) -> bool {
+    datagram.len() == DATA_LEN && datagram.starts_with(TAG_DATA)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,5 +420,38 @@ mod tests {
             Callsign::new("KC0\nABC"),
             Err(CallsignError::NotPrintableAscii)
         );
+    }
+
+    #[test]
+    fn is_media_accepts_voice() {
+        assert!(is_media(&data(&sample_data())));
+    }
+
+    #[test]
+    fn is_media_refuses_every_non_media_packet() {
+        let c = call("KC0ABC");
+        let d = data(&sample_data());
+        for w in [
+            poll(&c, 100).to_vec(),
+            unlink(&c, 100).to_vec(),
+            d[..40].to_vec(),
+            // Wrong tag at exactly the media length.
+            {
+                let mut p = vec![0u8; DATA_LEN];
+                p[..5].copy_from_slice(b"NXDNP");
+                p
+            },
+        ] {
+            assert!(!is_media(&w), "{w:02x?}");
+        }
+    }
+
+    #[test]
+    fn is_media_never_panics_on_short_input() {
+        for len in 0..=64 {
+            for fill in [0x00u8, 0xff] {
+                let _ = is_media(&vec![fill; len]);
+            }
+        }
     }
 }

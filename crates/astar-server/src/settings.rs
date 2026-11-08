@@ -57,6 +57,9 @@ use crate::config::{NodeFileConfig, state_file_parent_problem};
 /// reads them at dial time and nothing else holds them. `m17.directory` (a
 /// file read) and `m17.codec_dirs` (which decides the library the node loads
 /// and runs) are not, and must never be.
+///
+/// `[packet_log]` is live because nothing starts from it at boot: a capture
+/// starts at a press, and a save stops any capture that's running.
 pub const LIVE_PREFIXES: &[&str] = &[
     "bridge.",
     "parrot.",
@@ -64,6 +67,7 @@ pub const LIVE_PREFIXES: &[&str] = &[
     "audio.output",
     "m17.enabled",
     "m17.reflectors",
+    "packet_log.",
 ];
 
 /// The event names `[announce.events]` understands.
@@ -390,6 +394,12 @@ fn rule(segments: &[&str]) -> Option<Rule> {
         ["recording", "dir"] => NonEmptyStr { nullable: true },
         ["recording", "max_bytes"] => Str { nullable: true },
         ["recording", "max_age_days"] => Uint { nullable: true },
+        // `[packet_log]`: live, unlike `[recording]`; `validate_packet_log`
+        // checks the folder and the 100 MB floor.
+        ["packet_log"] => Table,
+        ["packet_log", "debug_mode"] => Bool { nullable: false },
+        ["packet_log", "dir"] => NonEmptyStr { nullable: true },
+        ["packet_log", "max_bytes"] => Str { nullable: true },
 
         ["control", "bind"] => ControlBind,
         ["control", "loopback_login"] => Bool { nullable: true },
@@ -512,7 +522,7 @@ pub fn tier(path: &str) -> Option<Tier> {
     let (segments, _) = segments_of(path)?;
     let whole_live_table = matches!(
         segments.as_slice(),
-        [only] if matches!(only.as_str(), "audio" | "bridge" | "parrot")
+        [only] if matches!(only.as_str(), "audio" | "bridge" | "packet_log" | "parrot")
     );
     // The joined segments, not the raw path: the two agree for every path
     // `vocab` accepts, and liveness should never hang on a spelling.
@@ -1070,6 +1080,15 @@ impl RedactedConfig {
             put(&mut m, "recording.max_bytes", r.max_bytes.text.as_str());
             put(&mut m, "recording.max_age_days", r.max_age_days);
             put(&mut m, "recording.frames", r.frames);
+        }
+        if let Some(p) = &cfg.packet_log {
+            put(&mut m, "packet_log.debug_mode", p.debug_mode);
+            put(
+                &mut m,
+                "packet_log.dir",
+                p.dir.to_string_lossy().into_owned(),
+            );
+            put(&mut m, "packet_log.max_bytes", p.max_bytes.text.as_str());
         }
         put(&mut m, "control.bind", cfg.control.bind.as_str());
         put(&mut m, "control.loopback_login", cfg.control.loopback_login);
@@ -3522,7 +3541,8 @@ enabled = false
                 "audio.input",
                 "audio.output",
                 "m17.enabled",
-                "m17.reflectors"
+                "m17.reflectors",
+                "packet_log."
             ]
         );
     }
@@ -4190,6 +4210,50 @@ enabled = false
             m.get("web.public_hostnames"),
             Some(&json!(["Node.Example.net"]))
         );
+    }
+
+    // ---- [packet_log] ------------------------------------------------------
+
+    #[test]
+    fn packet_log_paths_are_live_tier() {
+        for p in [
+            "packet_log",
+            "packet_log.debug_mode",
+            "packet_log.dir",
+            "packet_log.max_bytes",
+        ] {
+            assert_eq!(tier(p), Some(Tier::Live), "{p}");
+        }
+        assert_eq!(tier("packet_log.enabled"), None);
+        assert_eq!(tier("packet_log.keep"), None);
+        assert!(is_removable("packet_log"));
+        assert!(!is_removable("packet_log.dir"));
+        ok("packet_log.debug_mode", json!(true));
+        ok("packet_log.max_bytes", json!("2 GB"));
+        assert!(validate_field("packet_log.debug_mode", &json!(null)).is_err());
+        assert!(validate_field("packet_log.dir", &json!("")).is_err());
+    }
+
+    #[test]
+    fn packet_log_reaches_the_mirror_as_written() {
+        let text = format!("{}[packet_log]\nmax_bytes = \"500MB\"\n", minimal());
+        let m = redacted(&text);
+        assert_eq!(m.get("packet_log.max_bytes"), Some(&json!("500MB")));
+        assert_eq!(m.get("packet_log.debug_mode"), Some(&json!(false)));
+        assert_eq!(
+            m.get("packet_log.dir"),
+            Some(&json!("/var/lib/astar/packet-logs"))
+        );
+        assert_eq!(redacted(&minimal()).get("packet_log.max_bytes"), None);
+        let patch: BTreeMap<String, Value> =
+            m.0.iter()
+                .filter(|(k, _)| k.starts_with("packet_log."))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+        assert_eq!(patch.len(), 3, "{patch:?}");
+        let saved = apply_patch(&minimal(), &patch).expect("the mirror saves back");
+        let p = oracle(&saved).expect("and loads").packet_log.unwrap();
+        assert_eq!(p.max_bytes.text, "500MB");
     }
 
     // ---- [recording] -------------------------------------------------------

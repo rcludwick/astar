@@ -42,7 +42,7 @@ site_dir = "docs/.site"
 
 # The version chip. `copyright` accepts raw HTML; astar.css styles the span.
 # Bump this in lockstep with MARKETING_VERSION in apps/macos/project.yml.
-copyright = "Copyright &copy; 2026 Rob Ludwick — AGPL-3.0-only &nbsp;<span class=\"astar-version\">v0.1.19-beta</span>"
+copyright = "Copyright &copy; 2026 Rob Ludwick — AGPL-3.0-only &nbsp;<span class=\"astar-version\">v0.1.20-beta</span>"
 
 extra_css = ["stylesheets/astar.css"]
 
@@ -66,9 +66,11 @@ nav = [
     "server/echolink.md",
     "server/listening.md",
     "server/recording.md",
+    "server/packet-log.md",
     "server/admin.md",
     "server/control-api.md",
   ] },
+  { "Net recorder" = [ "netrec.md" ] },
   { "macOS app" = [
     "macos/index.md",
     "macos/first-run.md",
@@ -79,11 +81,13 @@ nav = [
     "macos/usage.md",
     "macos/echolink.md",
     "macos/recording.md",
+    "macos/packet-log.md",
   ] },
   { "Protocol notes" = [
     "reference/index.md",
     "reference/app-rpt-text-commands.md",
     "reference/web-transceiver-call-flow.md",
+    "reference/packet-logs.md",
   ] },
   { "About" = [
     "about/safety.md",

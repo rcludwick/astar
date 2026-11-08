@@ -39,6 +39,7 @@ use astar_audio::RxFrame;
 use astar_codec::codec2::{Codec2Voice, open_codec2};
 use astar_m17::{ControlPacket, FsmAction, LinkState, SessionFsm, StreamPacket, encode_callsign};
 use astar_record::frames::FrameEvent;
+use astar_record::packet_tap::{CallMeta, CallPacketTap, PacketCallId, PacketNetwork, PacketSlot};
 use astar_record::tap::TapSlot;
 
 use super::rx::{RxEnd, RxTrack, StreamGate, TalkerLog, connect_udp_socket_with, recv_step};
@@ -198,6 +199,10 @@ pub struct M17Monitor {
     thread: Option<JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
     shared: Arc<MonitorShared>,
+    /// The packet log's slot ([`M17Monitor::packet_slot`]).
+    packet_slot: PacketSlot,
+    /// The id of this monitor's [`CallPacketTap`], which the thread owns.
+    packet_call: PacketCallId,
 }
 
 impl M17Monitor {
@@ -236,6 +241,20 @@ impl M17Monitor {
     #[must_use]
     pub fn heard(&self) -> Vec<HeardEntry> {
         self.shared.talkers.heard()
+    }
+
+    /// The packet log's slot: install a tap here and the thread offers it
+    /// every media datagram it receives, ahead of the flood gate. The slot is
+    /// shared: setting it on the returned handle reaches the live thread.
+    #[must_use]
+    pub fn packet_slot(&self) -> PacketSlot {
+        self.packet_slot.clone()
+    }
+
+    /// The id this monitor's packet events carry.
+    #[must_use]
+    pub fn packet_call(&self) -> PacketCallId {
+        self.packet_call
     }
 
     /// The codec-frame recording tap: install a [`astar_record::Tap`] here
@@ -329,17 +348,34 @@ fn spawn_inner(
     let callsign = encode_callsign(&cfg.callsign).ok_or_else(|| bad_callsign(&cfg.callsign))?;
     let shutdown = Arc::new(AtomicBool::new(false));
     let shared = Arc::new(MonitorShared::new());
+    let module = cfg.module.to_ascii_uppercase();
+    // The thread resolves the host, so it fills in both addresses.
+    let unknown = SocketAddr::from(([0, 0, 0, 0], 0));
+    let packet_slot = PacketSlot::default();
+    let packet_tap = CallPacketTap::new(
+        packet_slot.clone(),
+        astar_m17::frame::is_media,
+        CallMeta {
+            network: PacketNetwork::M17,
+            codec: None,
+            label: format!("M17 {} {}", cfg.host, char::from(module)),
+            local: unknown,
+            peer: unknown,
+        },
+    );
+    let packet_call = packet_tap.id();
     let params = RunParams {
         host: cfg.host,
         port: cfg.port,
         callsign,
-        module: cfg.module.to_ascii_uppercase(),
+        module,
         codec_dirs: cfg.codec_dirs,
         keepalive_timeout: cfg.keepalive_timeout,
         sink,
         resolve,
         shutdown: Arc::clone(&shutdown),
         shared: Arc::clone(&shared),
+        packet_tap,
     };
     let thread = std::thread::Builder::new()
         .name("iax-m17-mon".to_string())
@@ -349,6 +385,8 @@ fn spawn_inner(
         thread: Some(thread),
         shutdown,
         shared,
+        packet_slot,
+        packet_call,
     })
 }
 
@@ -391,9 +429,10 @@ impl ControlOnlySocket {
         self.socket.send(bytes).is_ok()
     }
 
-    /// One bounded read (the socket's 50 ms read timeout).
-    fn recv(&self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.socket.recv(buf)
+    /// One bounded read (the socket's 50 ms read timeout). The socket is
+    /// connected, so the sender is always the reflector.
+    fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+        self.socket.recv_from(buf)
     }
 }
 
@@ -481,6 +520,7 @@ struct RunParams {
     resolve: Resolver,
     shutdown: Arc<AtomicBool>,
     shared: Arc<MonitorShared>,
+    packet_tap: CallPacketTap,
 }
 
 /// The "iax-m17-mon" thread: codec, bridge, resolve, CONN, then `serve`
@@ -498,6 +538,7 @@ fn run(p: RunParams) {
         resolve,
         shutdown,
         shared,
+        mut packet_tap,
     } = p;
     let _exit = FinishOnExit(Arc::clone(&shared));
 
@@ -522,6 +563,12 @@ fn run(p: RunParams) {
             return;
         }
     };
+    if let Ok(local) = socket.local_addr() {
+        packet_tap.set_local(local);
+    }
+    if let Ok(peer) = socket.peer_addr() {
+        packet_tap.set_peer(peer);
+    }
     // From here a CONN may go out, so `stop()` must join and let this thread
     // send DISC. SeqCst pairs with `stop()`: either it sees `on_wire` and
     // joins, or this load sees its shutdown and the thread leaves unheard.
@@ -552,6 +599,7 @@ fn run(p: RunParams) {
         &shared,
         &shutdown,
         keepalive_timeout,
+        &mut packet_tap,
     ) {
         shared.fail(&reason);
     }
@@ -574,13 +622,22 @@ fn serve(
     shared: &MonitorShared,
     shutdown: &AtomicBool,
     keepalive_timeout: Duration,
+    packet_tap: &mut CallPacketTap,
 ) -> Option<String> {
     let mut buf = [0u8; 2_048];
     loop {
         if shutdown.load(Ordering::Relaxed) {
             return None;
         }
-        let step = recv_step(|b| sock.recv(b), &mut buf, fsm);
+        let step = recv_step(
+            |b| {
+                let (n, from) = sock.recv_from(b)?;
+                packet_tap.capture(from, &b[..n]);
+                Ok(n)
+            },
+            &mut buf,
+            fsm,
+        );
         if let Some(reply) = step.reply {
             sock.send_control(&reply);
         }

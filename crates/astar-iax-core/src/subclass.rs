@@ -409,6 +409,29 @@ impl VoiceFormat {
             _ => None,
         }
     }
+
+    /// Asterisk's name for this format, as `allow=` and `disallow=` spell it.
+    #[must_use]
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::G723_1 => "g723",
+            Self::Gsm => "gsm",
+            Self::G711U => "ulaw",
+            Self::G711A => "alaw",
+            Self::G726 => "g726",
+            Self::Adpcm => "adpcm",
+            Self::Slin => "slin",
+            Self::Lpc10 => "lpc10",
+            Self::G729 => "g729",
+            Self::Speex => "speex",
+            Self::Ilbc => "ilbc",
+            Self::G726Aal2 => "g726aal2",
+            Self::G722 => "g722",
+            Self::Siren7 => "siren7",
+            Self::Siren14 => "siren14",
+            Self::Slin16 => "slin16",
+        }
+    }
 }
 
 // --- Subclass byte compression (RFC 5456 §6.2) ----------------------------
@@ -573,5 +596,25 @@ mod tests {
         assert_eq!(VoiceFormat::Slin.sample_rate(), Some(8000));
         assert_eq!(VoiceFormat::Slin16.sample_rate(), Some(16000));
         assert_eq!(VoiceFormat::Gsm.sample_rate(), Some(8000));
+    }
+
+    #[test]
+    fn every_voice_format_has_a_distinct_wire_name() {
+        let names: Vec<&str> = (0..16)
+            .map(|bit| {
+                VoiceFormat::from_u32(1 << bit)
+                    .expect("one format per bit")
+                    .wire_name()
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "g723", "gsm", "ulaw", "alaw", "g726", "adpcm", "slin", "lpc10", "g729", "speex",
+                "ilbc", "g726aal2", "g722", "siren7", "siren14", "slin16",
+            ]
+        );
+        let distinct: std::collections::HashSet<_> = names.iter().collect();
+        assert_eq!(distinct.len(), names.len());
     }
 }

@@ -17,8 +17,8 @@
 #      as codec2-static), and the feature-off refusal stays tested. Shipped
 #      builds name it on purpose.
 #   2. The opt-in works, and the shipped recipes do turn it on: astar-server's
-#      `release` feature pulls it, and build-xcframework.sh enables it unless
-#      ASTAR_DSTAR_SOFT_AMBE=0.
+#      and astar-netrec's `release` features pull it, and
+#      build-xcframework.sh enables it unless ASTAR_DSTAR_SOFT_AMBE=0.
 #   3. It stays D-Star only. AMBE+2 (DMR, NXDN, System Fusion) reads on
 #      US 8,359,197 until 2028-05-20: the vendored copy must contain no
 #      ambe_plus_2 source and declare no ambe_plus_2 feature, and the engine's
@@ -33,7 +33,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 VENDOR=vendor/ham-digital-modes-ambe
-DEFAULT_CLEAN=(astar-codec astar-console astar-station astar-sys astar-server astar-cli astar-gui)
+DEFAULT_CLEAN=(astar-codec astar-console astar-station astar-sys astar-server astar-netrec astar-cli astar-gui)
 
 fail=0
 for crate in "${DEFAULT_CLEAN[@]}"; do
@@ -51,7 +51,7 @@ for crate in "${DEFAULT_CLEAN[@]}"; do
   fi
 done
 
-for crate in astar-codec astar-console astar-station astar-sys astar-server; do
+for crate in astar-codec astar-console astar-station astar-sys astar-server astar-netrec; do
   if ! cargo tree -p "$crate" -e normal --prefix none --features dstar-soft-ambe 2>/dev/null |
     grep -qE '^ham-digital-modes-ambe v'; then
     echo "FAIL: $crate --features dstar-soft-ambe does NOT pull in the software vocoder." >&2
@@ -63,6 +63,11 @@ done
 if ! cargo tree -p astar-server -e normal --prefix none --no-default-features --features release 2>/dev/null |
   grep -qE '^ham-digital-modes-ambe v'; then
   echo "FAIL: astar-server's release feature set does not include dstar-soft-ambe." >&2
+  fail=1
+fi
+if ! cargo tree -p astar-netrec -e normal --prefix none --features release 2>/dev/null |
+  grep -qE '^ham-digital-modes-ambe v'; then
+  echo "FAIL: astar-netrec's release feature set does not include dstar-soft-ambe." >&2
   fail=1
 fi
 if ! grep -qE 'ASTAR_DSTAR_SOFT_AMBE:-1\}' bindings/swift/build-xcframework.sh ||

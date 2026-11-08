@@ -218,6 +218,12 @@ pub fn manager_with_monitor_only_call() -> (Manager, CallId) {
     (mgr, id)
 }
 
+/// A `Manager` on the null backend with no call yet.
+#[allow(dead_code)]
+pub fn null_manager() -> Manager {
+    Manager::new(Box::new(MultiNullBackend))
+}
+
 /// A `Manager` with one call + a `NullControls` handle that can push mic
 /// frames, enabling `drive_capture` / `poll_announcements` integration tests.
 #[allow(dead_code)]

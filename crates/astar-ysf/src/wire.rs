@@ -240,6 +240,12 @@ pub fn data(packet: &DataPacket) -> [u8; DATA_LEN] {
     out
 }
 
+/// True when `datagram` is a full `YSFD` voice frame.
+#[must_use]
+pub fn is_media(datagram: &[u8]) -> bool {
+    datagram.len() == DATA_LEN && datagram.starts_with(TAG_DATA)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,5 +386,45 @@ mod tests {
         let long = options(&call("KC0ABC"), &"x".repeat(200));
         assert_eq!(long.len(), 50);
         assert!(long[14..].iter().all(|&b| b == b'x'));
+    }
+
+    #[test]
+    fn is_media_accepts_voice() {
+        assert!(is_media(&data(&sample_data())));
+    }
+
+    #[test]
+    fn is_media_refuses_every_non_media_packet() {
+        let c = call("KC0ABC");
+        let mut status_pkt = vec![0u8; 42];
+        status_pkt[..4].copy_from_slice(b"YSFS");
+        let mut info_pkt = vec![0u8; 20];
+        info_pkt[..4].copy_from_slice(b"YSFI");
+        let d = data(&sample_data());
+        for w in [
+            poll(&c).to_vec(),
+            unlink(&c).to_vec(),
+            options(&c, "x").to_vec(),
+            status_pkt,
+            info_pkt,
+            d[..40].to_vec(),
+            // Wrong tag at exactly the media length.
+            {
+                let mut p = vec![0u8; DATA_LEN];
+                p[..4].copy_from_slice(b"YSFP");
+                p
+            },
+        ] {
+            assert!(!is_media(&w), "{w:02x?}");
+        }
+    }
+
+    #[test]
+    fn is_media_never_panics_on_short_input() {
+        for len in 0..=64 {
+            for fill in [0x00u8, 0xff] {
+                let _ = is_media(&vec![fill; len]);
+            }
+        }
     }
 }

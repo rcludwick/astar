@@ -31,8 +31,8 @@ pub enum RouteClass {
 }
 
 /// Every route the admin router answers, as `(method, path)`. `GET /events`
-/// and the two recording downloads are answered by the server layer before
-/// the router, and are listed so they are classified like the rest.
+/// and the recording and packet log downloads are answered by the server
+/// layer before the router, and are listed so they are classified like the rest.
 pub const ADMIN_ROUTES: &[(&str, &str)] = &[
     // The status page and its assets.
     ("GET", "/"),
@@ -83,6 +83,11 @@ pub const ADMIN_ROUTES: &[(&str, &str)] = &[
     ("GET", "/recordings/file"),
     ("POST", "/recordings/delete"),
     ("GET", "/recordings.tar"),
+    // The packet logs on that page. The file is a stream too.
+    ("GET", "/packet-logs/state"),
+    ("GET", "/packet-logs/file"),
+    ("POST", "/packet-logs/delete"),
+    ("POST", "/packet-logs/capture"),
     // Lifecycle.
     ("POST", "/shutdown"),
 ];
@@ -181,9 +186,29 @@ mod tests {
             ("GET", "/recordings/file"),
             ("POST", "/recordings/delete"),
             ("GET", "/recordings.tar"),
+            ("GET", "/packet-logs/state"),
+            ("GET", "/packet-logs/file"),
+            ("POST", "/packet-logs/delete"),
+            ("POST", "/packet-logs/capture"),
         ] {
             assert_eq!(route_class(m, p), Some(RouteClass::Admin), "{m} {p}");
         }
+    }
+
+    #[test]
+    fn packet_log_routes_are_admin_class() {
+        for (m, p) in [
+            ("GET", "/packet-logs/state"),
+            ("GET", "/packet-logs/file"),
+            ("POST", "/packet-logs/delete"),
+            ("POST", "/packet-logs/capture"),
+        ] {
+            assert!(is_admin_route(m, p), "{m} {p} is not in ADMIN_ROUTES");
+            assert_eq!(route_class(m, p), Some(RouteClass::Admin), "{m} {p}");
+        }
+        assert_eq!(route_class("GET", "/packet-logs/delete"), None);
+        assert_eq!(route_class("POST", "/packet-logs/file"), None);
+        assert_eq!(route_class("GET", "/packet-logs/capture"), None);
     }
 
     #[test]

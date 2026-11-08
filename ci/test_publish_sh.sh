@@ -76,6 +76,8 @@ lacks() { # description, needle, haystack
   esac
 }
 
+OLD_ROOT_DATE="2026-09-07T12:00:00 -0700"
+RELEASE_TAG_DATE="2026-09-08T12:00:00 -0700"
 git_q() { git -C "$REPO" -c user.name=test -c user.email=test@example.com -c commit.gpgsign=false "$@"; }
 
 # The stubs read these, so a check can say "Apple says the ticket is missing".
@@ -164,14 +166,18 @@ git_q tag -a "v$NEW" -m "astar $NEW"
 git_q push -q origin main "v$NEW"
 # Public has its own history: one squashed root commit that shares no object
 # with the private one, as the real public repo does.
-old_root="$(git -C "$REPO" -c user.name=t -c user.email=t@e commit-tree "$(git -C "$REPO" rev-parse "HEAD^{tree}")" -m "astar $OLD")"
+# Its date and the release tag's are fixed: publish never dates a squash before
+# its parent plus a minute, so a fixture dated now would land past 22:59 when
+# this runs late in the evening.
+old_root="$(GIT_AUTHOR_DATE="$OLD_ROOT_DATE" GIT_COMMITTER_DATE="$OLD_ROOT_DATE" \
+  git -C "$REPO" -c user.name=t -c user.email=t@e commit-tree "$(git -C "$REPO" rev-parse "HEAD^{tree}")" -m "astar $OLD")"
 git_q push -q public "$old_root:refs/heads/main"
 # The private work after it: a second commit, then the release tag.
 echo "more private work" >"$REPO/private.txt"
 git_q add private.txt
 git_q commit -qm "a private commit that must never reach public"
 git_q tag -d "v$NEW" >/dev/null
-git_q tag -a "v$NEW" -m "astar $NEW"
+GIT_COMMITTER_DATE="$RELEASE_TAG_DATE" git_q tag -a "v$NEW" -m "astar $NEW"
 git_q push -q -f origin main "v$NEW"
 
 # ---------------------------------------------------------------------------

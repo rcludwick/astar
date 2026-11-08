@@ -380,6 +380,111 @@ fn wg_call_between_two_managers_answers_and_audio_flows_both_ways() {
     drop(mgr_a);
 }
 
+/// The packet log sits above the tunnel: a `WireGuard` call is logged as the
+/// inner IAX2 datagram between the tunnel addresses, never as underlay
+/// ciphertext.
+#[test]
+fn wg_call_is_logged_as_the_inner_datagram() {
+    use astar_iax_core::frame::is_media;
+    use astar_record::packet_tap::{PacketEvent, PacketSlot, packet_tap_channel};
+
+    let (underlay_a, underlay_b) = paired_underlays();
+
+    let (backend_b, _probe_b) = tone_capture();
+    let mut mgr_b = Manager::new(backend_b);
+    mgr_b
+        .set_wireguard_transport_over(&wg_config(B_TUNNEL, 1), &resolver(2), underlay_b)
+        .expect("B enters WG mode");
+    let (listener, levents) = IncomingCallListener::builder()
+        .bind("0.0.0.0:4569".parse().unwrap())
+        .net(mgr_b.net_stack())
+        .policy(auto_accept_policy())
+        .start()
+        .expect("listener starts on the tunnel");
+
+    // The dialing side logs; the slot is set before it dials.
+    let (tap, events) = packet_tap_channel(256, 256);
+    let slot = PacketSlot::default();
+    slot.set(Some(tap));
+    let (backend_a, probe_a) = tone_capture();
+    let mut mgr_a = Manager::new(backend_a);
+    mgr_a.set_packet_slot(slot);
+    mgr_a
+        .set_wireguard_transport_over(&wg_config(A_TUNNEL, 2), &resolver(1), underlay_a)
+        .expect("A enters WG mode");
+    let id_a = mgr_a
+        .dial(DialSpec {
+            id: CallId::from_raw(1),
+            node: "wg-b".to_string(),
+            peer: SocketAddr::V4(SocketAddrV4::new(B_TUNNEL, 4569)),
+            output: OutputId::new("out:cap"),
+            caller_id: "wg-test".to_string(),
+            secret: String::new(),
+            mode: CallMode::Standard,
+            dest: "s".to_string(),
+            frame_observer: None,
+            codec_policy: CodecPolicy::default(),
+        })
+        .expect("dial through the tunnel");
+    mgr_a
+        .route(id_a, &MicId::new("in:cap"))
+        .expect("route A mic");
+    let a_events = mgr_a.take_events(id_a).expect("A event stream");
+
+    let mgr_b = Mutex::new(mgr_b);
+    let mut answered = false;
+    let mut adopted: Option<CallId> = None;
+    wait_for("answer + adopt", || {
+        if adopted.is_none()
+            && let Ok(IncomingCallEvent::Answered { call, .. }) = levents.try_recv()
+        {
+            let mut b = mgr_b.lock().unwrap();
+            let id = b.adopt(call, &OutputId::new("out:cap")).expect("B adopts");
+            b.route(id, &MicId::new("in:cap")).expect("route B mic");
+            adopted = Some(id);
+        }
+        while let Ok(ev) = a_events.try_recv() {
+            if matches!(ev, CallEvent::Answered { .. }) {
+                answered = true;
+            }
+        }
+        (answered && adopted.is_some()).then_some(())
+    });
+    let id_b = adopted.expect("adopted");
+
+    // B keys, so voice arrives at A through the tunnel.
+    mgr_b.lock().unwrap().key(id_b).expect("key B");
+    wait_for("B's voice at A's output", || {
+        (probe_a.peak() > 0.1 && probe_a.loud_reads() > 5).then_some(())
+    });
+
+    let mut meta = None;
+    let mut media = Vec::new();
+    while let Ok(ev) = events.try_recv() {
+        match ev {
+            PacketEvent::Start { meta: m, .. } => meta = Some(m),
+            PacketEvent::Packet { from, bytes, .. } => media.push((from, bytes.to_vec())),
+            _ => {}
+        }
+    }
+    let meta = meta.expect("the call started on the log");
+    assert_eq!(meta.peer.ip(), std::net::IpAddr::V4(B_TUNNEL));
+    assert_eq!(meta.local.ip(), std::net::IpAddr::V4(A_TUNNEL));
+    assert!(!media.is_empty(), "voice packets were logged");
+    for (from, bytes) in &media {
+        assert_eq!(from.ip(), std::net::IpAddr::V4(B_TUNNEL));
+        assert!(is_media(bytes), "an IAX2 voice frame in the clear");
+    }
+
+    mgr_b.lock().unwrap().unkey(id_b).expect("unkey B");
+    mgr_a.hangup(id_a, None).expect("A hangs up");
+    let mut mgr_b = mgr_b.into_inner().unwrap();
+    mgr_b.hangup(id_b, None).expect("B drops the leg");
+    drop(listener);
+    drop(mgr_b);
+    drop(mgr_a);
+}
+
 #[test]
 fn also_bind_udp_admits_a_plain_udp_peer_while_wg_is_active() {
     // Manager in WG mode over a dead underlay (no WG peer involved here —

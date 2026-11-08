@@ -165,7 +165,7 @@
 //! all — there is no partially-hardware-only, RX-but-not-TX state.
 
 use std::collections::VecDeque;
-use std::net::{ToSocketAddrs, UdpSocket};
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -179,6 +179,7 @@ use astar_dstar::{
     SlowDataRx, TxStream, generate_stream_id, repeater_fields,
 };
 use astar_record::frames::{CaptureMode, Dir, FrameEvent, Seq};
+use astar_record::packet_tap::{CallMeta, CallPacketTap, PacketCallId, PacketNetwork, PacketSlot};
 use astar_record::tap::{StartedOn, TapSlot};
 
 use crate::heard::{HeardEntry, HeardLog};
@@ -590,6 +591,10 @@ pub struct DstarSession {
     /// The AMBE backend this session opened with (fixed for the session's
     /// lifetime — there is no live backend-switching knob).
     backend: AmbeBackend,
+    /// The packet log's slot ([`DstarSession::packet_slot`]).
+    packet_slot: PacketSlot,
+    /// The id of this session's [`CallPacketTap`], which the run loop owns.
+    packet_call: PacketCallId,
 }
 
 /// Where [`DstarSession::connect_inner`] gets its vocoder from.
@@ -737,6 +742,25 @@ impl DstarSession {
 
         let socket = connect_udp_socket(&cfg.host, cfg.port)?;
 
+        let unknown = SocketAddr::from(([0, 0, 0, 0], 0));
+        let packet_slot = PacketSlot::default();
+        let packet_tap = CallPacketTap::new(
+            packet_slot.clone(),
+            astar_dstar::dsvt::is_media,
+            CallMeta {
+                network: PacketNetwork::DStar,
+                codec: None,
+                label: format!(
+                    "D-Star {} {}",
+                    cfg.reflector_callsign.as_deref().unwrap_or(&cfg.host),
+                    char::from(cfg.module)
+                ),
+                local: socket.local_addr().unwrap_or(unknown),
+                peer: socket.peer_addr().unwrap_or(unknown),
+            },
+        );
+        let packet_call = packet_tap.id();
+
         let shutdown = Arc::new(AtomicBool::new(false));
         let ptt_request = Arc::new(AtomicBool::new(false));
         let shared = Arc::new(SharedState::with_vocoder(backend));
@@ -756,6 +780,7 @@ impl DstarSession {
                     shutdown: thread_shutdown,
                     ptt_request: thread_ptt_request,
                     shared: thread_shared,
+                    packet_tap,
                 });
             })
             .map_err(|e| ConsoleError::Resolve {
@@ -769,6 +794,8 @@ impl DstarSession {
             ptt_request,
             shared,
             backend,
+            packet_slot,
+            packet_call,
         })
     }
 
@@ -797,6 +824,20 @@ impl DstarSession {
     #[must_use]
     pub fn heard(&self) -> Vec<HeardEntry> {
         self.shared.heard.snapshot()
+    }
+
+    /// The packet log's slot: install a tap here and the run loop offers
+    /// every media datagram it receives to it. The slot is shared: setting it
+    /// on the returned handle reaches the live session.
+    #[must_use]
+    pub fn packet_slot(&self) -> PacketSlot {
+        self.packet_slot.clone()
+    }
+
+    /// The id this session's packet events carry.
+    #[must_use]
+    pub fn packet_call(&self) -> PacketCallId {
+        self.packet_call
     }
 
     /// The codec-frame recording tap: install a [`astar_record::Tap`] here
@@ -872,7 +913,7 @@ fn connect_udp_socket(host: &str, port: u16) -> Result<UdpSocket, ConsoleError> 
             format!("could not resolve {host}:{port}"),
         ),
     };
-    let candidates: Vec<std::net::SocketAddr> = (host, port)
+    let candidates: Vec<SocketAddr> = (host, port)
         .to_socket_addrs()
         .map(Iterator::collect)
         .unwrap_or_default();
@@ -1019,6 +1060,9 @@ fn send_terminating_frame(socket: &UdpSocket, bytes: &[u8]) {
 /// Everything [`run_loop`] needs, bundled to keep the spawn call's arity
 /// sane (`clippy::too_many_arguments`).
 struct RunLoopParams {
+    /// The packet log's tap, owned by the loop so the call's last event goes
+    /// out when the loop ends.
+    packet_tap: CallPacketTap,
     socket: UdpSocket,
     fsm: DextraFsm,
     ambe: Box<dyn AmbeStream>,
@@ -1926,6 +1970,7 @@ fn run_loop(p: RunLoopParams) {
         shutdown,
         ptt_request,
         shared,
+        mut packet_tap,
     } = p;
 
     let now = Instant::now();
@@ -2036,6 +2081,7 @@ fn run_loop(p: RunLoopParams) {
             &shared,
             &shutdown,
             keyed,
+            &mut packet_tap,
         );
 
         // AFTER the RX poll, so the half-duplex handoff ordering is
@@ -2086,10 +2132,12 @@ fn poll_socket(
     fsm: &mut DextraFsm,
     rx: &mut RxState<'_>,
     keyed: bool,
+    packet_tap: &mut CallPacketTap,
 ) {
-    match socket.recv(buf) {
-        Ok(n) => {
+    match socket.recv_from(buf) {
+        Ok((n, from)) => {
             let data = &buf[..n];
+            packet_tap.capture(from, data);
             if data.len() >= DSVT_MAGIC.len() && data[..DSVT_MAGIC.len()] == DSVT_MAGIC {
                 if keyed {
                     tracing::trace!("dstar: dropping inbound DSVT traffic while transmitting");
@@ -2142,6 +2190,7 @@ fn run_rx_poll_step(
     shared: &SharedState,
     shutdown: &AtomicBool,
     keyed: bool,
+    packet_tap: &mut CallPacketTap,
 ) {
     let mut rx = RxState {
         ambe,
@@ -2152,7 +2201,7 @@ fn run_rx_poll_step(
         shared,
         shutdown,
     };
-    poll_socket(socket, buf, fsm, &mut rx, keyed);
+    poll_socket(socket, buf, fsm, &mut rx, keyed, packet_tap);
     if !keyed {
         // Keep the pipeline moving even when nothing arrived this pass.
         pump(&mut rx);
@@ -2342,6 +2391,82 @@ mod tx_tests {
         fn in_flight_encoded(&self) -> usize {
             self.done.len() + self.working.len()
         }
+    }
+
+    /// The tap sits ahead of the half-duplex drop: the log shows what the far
+    /// side sent, even while the vocoder is busy transmitting.
+    #[test]
+    fn a_dstar_packet_arriving_while_keyed_is_still_logged() {
+        use astar_record::packet_tap::{PacketEvent, packet_tap_channel};
+
+        let peer = UdpSocket::bind("127.0.0.1:0").expect("bind peer");
+        let peer_addr = peer.local_addr().expect("peer addr");
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind session socket");
+        socket.connect(peer_addr).expect("connect");
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout");
+        let voice = DsvtPacket::Voice {
+            stream_id: 7,
+            seq: 0,
+            end: false,
+            ambe: [1; 9],
+            slow_data: [0; 3],
+        }
+        .encode();
+        peer.send_to(&voice, socket.local_addr().expect("addr"))
+            .expect("send");
+
+        let (tap, events) = packet_tap_channel(8, 8);
+        let slot = PacketSlot::default();
+        slot.set(Some(tap));
+        let mut packet_tap = CallPacketTap::new(
+            slot,
+            astar_dstar::dsvt::is_media,
+            CallMeta {
+                network: PacketNetwork::DStar,
+                codec: None,
+                label: "test".into(),
+                local: socket.local_addr().expect("addr"),
+                peer: peer_addr,
+            },
+        );
+
+        let (tx_end, tx_frames) = channel::<Vec<i16>>();
+        let (rx_frames, _speaker) = channel();
+        let call_audio = CallAudio {
+            tx_frames,
+            rx_frames,
+            preroll_lead: Arc::new(AtomicU32::new(0)),
+        };
+        let mut ambe = FakeEncoder::new();
+        let mut pending = VecDeque::new();
+        let mut tracker = StreamTracker::new();
+        let mut slow_rx = SlowDataRx::new();
+        let shared = SharedState::new();
+        let shutdown = AtomicBool::new(false);
+        let mut rx = RxState {
+            ambe: &mut ambe,
+            pending: &mut pending,
+            tracker: &mut tracker,
+            slow_rx: &mut slow_rx,
+            call_audio: &call_audio,
+            shared: &shared,
+            shutdown: &shutdown,
+        };
+        let mut fsm = DextraFsm::new("N0CALL", b'A').expect("callsign");
+        let mut buf = [0u8; 256];
+
+        poll_socket(&socket, &mut buf, &mut fsm, &mut rx, true, &mut packet_tap);
+        drop(tx_end);
+
+        assert!(pending.is_empty(), "keyed, so nothing reached the vocoder");
+        let logged: Vec<PacketEvent> = events.try_iter().collect();
+        assert!(matches!(
+            logged.as_slice(),
+            [PacketEvent::Start { .. }, PacketEvent::Packet { from, bytes, .. }]
+                if *from == peer_addr && **bytes == voice
+        ));
     }
 
     fn tx_events(rx: &Receiver<FrameEvent>) -> Vec<FrameEvent> {

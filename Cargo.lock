@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "astar-asl3"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "astar-http",
  "serde_json",
@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "astar-audio"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "astar-audio",
  "astar-codec",
@@ -342,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "astar-cli"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "astar-asl3",
  "astar-audio",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "astar-codec"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "ambe-thumbdv",
  "astar-dmr",
@@ -376,7 +376,7 @@ dependencies = [
 
 [[package]]
 name = "astar-conformance"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "astar-iax-core",
  "pcap-parser",
@@ -387,7 +387,7 @@ dependencies = [
 
 [[package]]
 name = "astar-console"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "astar-asl3",
  "astar-audio",
@@ -415,7 +415,7 @@ dependencies = [
 
 [[package]]
 name = "astar-discord"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "astar-audio",
  "astar-iax",
@@ -429,18 +429,18 @@ dependencies = [
 
 [[package]]
 name = "astar-dmr"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "sha2 0.10.9",
 ]
 
 [[package]]
 name = "astar-dstar"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 
 [[package]]
 name = "astar-echolink"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "astar-codec",
  "miniz_oxide 0.9.1",
@@ -450,7 +450,7 @@ dependencies = [
 
 [[package]]
 name = "astar-gui"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "astar-station",
  "directories",
@@ -465,7 +465,7 @@ dependencies = [
 
 [[package]]
 name = "astar-http"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "proptest",
  "rcgen",
@@ -477,11 +477,12 @@ dependencies = [
 
 [[package]]
 name = "astar-iax"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "astar-audio",
  "astar-codec",
  "astar-iax-core",
+ "astar-record",
  "astar-wireguard",
  "base64 0.23.1",
  "mio",
@@ -495,7 +496,7 @@ dependencies = [
 
 [[package]]
 name = "astar-iax-core"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "bitflags 2.13.2",
  "bytes",
@@ -511,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "astar-inspect"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "astar-asl3",
  "astar-audio",
@@ -528,14 +529,50 @@ dependencies = [
 
 [[package]]
 name = "astar-m17"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "rand 0.10.3",
 ]
 
 [[package]]
+name = "astar-netarchive"
+version = "0.1.20-beta"
+dependencies = [
+ "astar-record",
+ "jiff",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
+name = "astar-netrec"
+version = "0.1.20-beta"
+dependencies = [
+ "astar-audio",
+ "astar-codec",
+ "astar-console",
+ "astar-dstar",
+ "astar-iax",
+ "astar-m17",
+ "astar-netarchive",
+ "astar-record",
+ "astar-station",
+ "clap",
+ "claxon",
+ "ctrlc",
+ "jiff",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "toml 1.1.8+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "astar-nodebench"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "astar-audio",
  "astar-http",
@@ -551,11 +588,11 @@ dependencies = [
 
 [[package]]
 name = "astar-nxdn"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 
 [[package]]
 name = "astar-ptt"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "nusb",
  "serialport",
@@ -563,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "astar-record"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "claxon",
  "flacenc",
@@ -578,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "astar-serial-sys"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "astar-ptt",
  "futures-lite",
@@ -587,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "astar-server"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "astar-audio",
  "astar-codec",
@@ -634,7 +671,7 @@ dependencies = [
 
 [[package]]
 name = "astar-station"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "astar-asl3",
  "astar-audio",
@@ -657,7 +694,7 @@ dependencies = [
 
 [[package]]
 name = "astar-sys"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "astar-audio",
  "astar-station",
@@ -667,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "astar-wireguard"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 dependencies = [
  "base64 0.23.1",
  "boringtun",
@@ -677,7 +714,7 @@ dependencies = [
 
 [[package]]
 name = "astar-ysf"
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 
 [[package]]
 name = "async-broadcast"

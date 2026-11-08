@@ -613,6 +613,10 @@ fn run_serve_mode(
         logger
     });
 
+    // The packet log (`[packet_log]`). Only the table is noted here, so its
+    // logs can be reached; nothing starts, because a capture starts at a press.
+    ctrl.set_packet_log_settings(cfg.packet_log.as_ref());
+
     // The public, read-only side: `[web]` (page, HTTPS, dynamic DNS). It
     // needs the shared controller, so it starts here; a bind it cannot take
     // is logged and the node carries on without it — the control port and
@@ -640,6 +644,9 @@ fn run_serve_mode(
     if let Some(logger) = recordings {
         logger.stop();
     }
+    // Ends the open packet logs: `ctrl` is never dropped here, and neither an
+    // exit nor the exec below runs the station's drop.
+    ctrl.stop_packet_log();
     #[cfg(feature = "auth")]
     if let Some(auth) = ctrl.auth() {
         auth.flush_last_seen();

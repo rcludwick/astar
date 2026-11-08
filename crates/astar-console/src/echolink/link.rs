@@ -40,6 +40,14 @@
 //! the same adaptive jitter buffer an `AllStarLink` call uses. That is what
 //! keeps a busy conference, which never pauses, from building up delay.
 //!
+//! # The packet log
+//!
+//! Each slot has its own [`CallPacketTap`], so each station is its own call
+//! in the log. The tap reads the audio port only, as soon as a datagram is
+//! matched to a slot and before anything decides what to do with it, so a
+//! repeat the sequence gate drops is still logged. Its filter keeps the voice
+//! packets and refuses the port's text. The control port has no tap.
+//!
 //! # Sending audio
 //!
 //! While PTT is applied, the capture channel's 160-sample frames are
@@ -75,6 +83,7 @@ use astar_echolink::directory::StationEntry;
 use astar_echolink::qso::{Qso, QsoAction, QsoEvent, QsoState};
 use astar_echolink::voice::{self, AudioPacket, Datagram, FRAMES_PER_PACKET, GSM_FRAME_LEN};
 use astar_echolink::{PeerAddr, Timings};
+use astar_record::packet_tap::{CallMeta, CallPacketTap, PacketCallId, PacketNetwork, PacketSlot};
 use tracing::{debug, warn};
 
 use super::client::ChatLine;
@@ -134,10 +143,12 @@ pub(crate) struct PeerShared {
     pub(crate) notice: Mutex<Option<String>>,
     /// How many times the transmit cap has fired on this station.
     pub(crate) caps: AtomicU32,
+    /// This station's call in the packet log.
+    pub(crate) packet_call: PacketCallId,
 }
 
 impl PeerShared {
-    fn new() -> Self {
+    fn new(packet_call: PacketCallId) -> Self {
         Self {
             state: Mutex::new(QsoState::Connecting),
             talking: AtomicBool::new(false),
@@ -146,6 +157,7 @@ impl PeerShared {
             chat: Mutex::new(Vec::new()),
             notice: Mutex::new(None),
             caps: AtomicU32::new(0),
+            packet_call,
         }
     }
 
@@ -255,6 +267,9 @@ pub(crate) struct PeerSlot {
     /// What [`Qso::start`] asked for (the first SDES), sent once the slot is
     /// in the table and the sockets are open.
     first: Vec<QsoAction>,
+    /// Copies this station's voice packets to the packet log. Dropped with
+    /// the slot, which is what ends the call there.
+    packet_tap: CallPacketTap,
 }
 
 enum Command {
@@ -274,13 +289,22 @@ pub(crate) struct EchoLinkLink {
     peer_addr: Arc<dyn Fn(&StationEntry) -> PeerAddr + Send + Sync>,
     my_call: String,
     timings: Timings,
+    /// Where each station's packet tap offers its packets.
+    packet_slot: PacketSlot,
+    /// A tap's local address until the sockets are open.
+    audio_bind: SocketAddr,
     thread: Option<JoinHandle<()>>,
 }
 
 impl EchoLinkLink {
     /// Start the link thread for `my_call`. No socket is opened until the
     /// first station is added.
-    pub(crate) fn start(my_call: &str, location: &str, net: &EchoLinkNetwork) -> io::Result<Self> {
+    pub(crate) fn start(
+        my_call: &str,
+        location: &str,
+        net: &EchoLinkNetwork,
+        packet_slot: PacketSlot,
+    ) -> io::Result<Self> {
         let (commands, inbox) = mpsc::channel();
         let local = Arc::new(Mutex::new(None));
         let run = Run {
@@ -303,6 +327,8 @@ impl EchoLinkLink {
             peer_addr: Arc::clone(&net.peer_addr),
             my_call: my_call.to_owned(),
             timings: net.timings.clone(),
+            packet_slot,
+            audio_bind: net.audio_bind,
             thread: Some(thread),
         })
     }
@@ -312,7 +338,18 @@ impl EchoLinkLink {
     pub(crate) fn add(&self, entry: StationEntry, audio: PeerAudio) -> io::Result<Arc<PeerShared>> {
         let addr = (self.peer_addr)(&entry);
         let (qso, first) = Qso::start(&self.my_call, self.timings.clone(), Instant::now());
-        let shared = Arc::new(PeerShared::new());
+        let packet_tap = CallPacketTap::new(
+            self.packet_slot.clone(),
+            voice::is_media,
+            CallMeta {
+                network: PacketNetwork::EchoLink,
+                codec: None,
+                label: format!("EchoLink {}", entry.call),
+                local: self.audio_bind,
+                peer: addr.audio,
+            },
+        );
+        let shared = Arc::new(PeerShared::new(packet_tap.id()));
         let slot = PeerSlot {
             entry,
             addr,
@@ -333,6 +370,7 @@ impl EchoLinkLink {
             },
             info_sent: false,
             first,
+            packet_tap,
         };
         let (reply, answer) = mpsc::channel();
         let stopped = || io::Error::other("echolink: the link thread has stopped");
@@ -487,6 +525,9 @@ impl Run {
             debug!(local = ?sockets.local().ok(), "echolink: UDP ports open");
             self.sockets = Some(sockets);
         }
+        if let Some(local) = *lock(&self.local) {
+            slot.packet_tap.set_local(local.audio);
+        }
         if let Some(sockets) = self.sockets.as_ref() {
             let first = std::mem::take(&mut slot.first);
             apply(sockets, &mut slot, first, &self.location);
@@ -558,10 +599,12 @@ impl Run {
                 return;
             }
         };
+        let at = Instant::now();
         let Some(slot) = find(&mut self.peers, from, self.match_by_ip, |a| a.audio) else {
             debug!(%from, "echolink: audio datagram from a station we did not call");
             return;
         };
+        slot.packet_tap.capture_at(at, from, &buf[..n]);
         match voice::classify(&buf[..n]) {
             Datagram::Audio(packet) => {
                 if *lock(&slot.shared.state) != QsoState::Connected {

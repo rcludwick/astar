@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  ~/Library/LaunchAgents/org.astar.netrec.plist
+
+  Replace YOU with your user name (launchd does not expand "~"), then:
+
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.astar.netrec.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>org.astar.netrec</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/astar-netrec</string>
+    <string>--config</string>
+    <string>/Users/YOU/Library/Application Support/astar-netrec/netrec.toml</string>
+    <string>run</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <!-- Wait this long before a restart, so a refused start does not spin. -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/Library/Logs/astar-netrec.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/Library/Logs/astar-netrec.log</string>
+</dict>
+</plist>

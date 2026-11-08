@@ -100,6 +100,43 @@ final class StationTests: XCTestCase {
         }
     }
 
+    // MARK: Packet log
+
+    func testPacketLogStateDecodes() throws {
+        let st = try Station()
+        XCTAssertEqual(
+            try st.packetLogState(),
+            PacketLogState(capturing: false, openCalls: 0, usedBytes: 0, dropped: 0, error: nil))
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("astar-swift-packet-log-\(ProcessInfo.processInfo.processIdentifier)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try st.packetLogConfigure(
+            enabled: true, directory: dir, maxBytes: 1 << 30, utcOffsetSeconds: 0)
+        XCTAssertTrue(try st.packetLogState().capturing)
+        try st.packetLogConfigure(enabled: false, directory: nil, maxBytes: 0, utcOffsetSeconds: 0)
+        XCTAssertFalse(try st.packetLogState().capturing)
+        let json = Data(
+            #"{"capturing":true,"open_calls":1,"used_bytes":123,"dropped":2,"error":"disk full"}"#.utf8)
+        XCTAssertEqual(
+            try JSONDecoder().decode(PacketLogState.self, from: json),
+            PacketLogState(
+                capturing: true, openCalls: 1, usedBytes: 123, dropped: 2, error: "disk full"))
+    }
+
+    func testPacketLogCallEndedStopsCapture() throws {
+        let st = try Station()
+        // Nothing running: a no-op.
+        try st.packetLogCallEnded()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("astar-swift-packet-log-ended-\(ProcessInfo.processInfo.processIdentifier)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try st.packetLogConfigure(
+            enabled: true, directory: dir, maxBytes: 1 << 30, utcOffsetSeconds: 0)
+        XCTAssertTrue(try st.packetLogState().capturing)
+        try st.packetLogCallEnded()
+        XCTAssertFalse(try st.packetLogState().capturing)
+    }
+
     func testRecordErrorCodeHasItsOwnText() {
         // IAX_ERR_RECORD == -23
         XCTAssertEqual(StationError.from(-23).text, "recording error")

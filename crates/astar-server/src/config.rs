@@ -1073,6 +1073,45 @@ impl Default for RecordingCfg {
     }
 }
 
+fn default_packet_log_dir() -> PathBuf {
+    PathBuf::from("/var/lib/astar/packet-logs")
+}
+
+fn default_packet_log_max_bytes() -> ByteSize {
+    ByteSize {
+        bytes: astar_station::DEFAULT_PACKET_LOG_BYTES,
+        text: "1 GB".to_string(),
+    }
+}
+
+/// `[packet_log]` — a debug log of received media packets: one pcap per call
+/// plus jitter-buffer history. Nothing is captured until someone presses the
+/// capture button, which `debug_mode` shows, so nothing here waits for a
+/// restart. Oldest logs go first once the folder passes `max_bytes`.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PacketLogCfg {
+    /// Whether a capture may be started. It starts nothing itself.
+    #[serde(default)]
+    pub debug_mode: bool,
+    /// Where logs go. Default `/var/lib/astar/packet-logs`.
+    #[serde(default = "default_packet_log_dir")]
+    pub dir: PathBuf,
+    /// The most the folder may hold, at least 100 MB. Default `"1 GB"`.
+    #[serde(default = "default_packet_log_max_bytes")]
+    pub max_bytes: ByteSize,
+}
+
+impl Default for PacketLogCfg {
+    fn default() -> Self {
+        Self {
+            debug_mode: false,
+            dir: default_packet_log_dir(),
+            max_bytes: default_packet_log_max_bytes(),
+        }
+    }
+}
+
 /// The token a hostname template carries for this node's number.
 pub const NODE_TOKEN: &str = "{node}";
 
@@ -1558,6 +1597,9 @@ pub struct NodeFileConfig {
     pub stream: Option<StreamCfg>,
     /// `[recording]` — the node's transmission log. Absent ⇒ off.
     pub recording: Option<RecordingCfg>,
+    /// `[packet_log]` — the received-packet debug log. Absent ⇒ no capture
+    /// button and no logs to reach.
+    pub packet_log: Option<PacketLogCfg>,
     /// Raw top-level `codec_policy` string (iax-31f7); absent ⇒ `None` ⇒
     /// `PreferSlin16`. Parsed eagerly into [`Self::codec_policy`] by
     /// [`NodeFileConfig::from_toml_str`]; see [`parse_codec_policy`].
@@ -1598,6 +1640,7 @@ impl std::fmt::Debug for NodeFileConfig {
             .field("web", &self.web)
             .field("stream", &self.stream)
             .field("recording", &self.recording)
+            .field("packet_log", &self.packet_log)
             .finish()
     }
 }
@@ -1695,6 +1738,7 @@ impl NodeFileConfig {
         self.validate_web()?;
         self.validate_stream()?;
         self.validate_recording()?;
+        self.validate_packet_log()?;
         self.codec_policy = parse_codec_policy(self.codec_policy_raw.as_deref())?;
         for (node, link) in &self.links {
             if let Some(shape) = link.shape.as_deref()
@@ -2411,6 +2455,31 @@ impl NodeFileConfig {
             return Err(format!(
                 "recording.max_age_days: {} is outside 1–3650",
                 r.max_age_days
+            ));
+        }
+        Ok(())
+    }
+
+    /// Check `[packet_log]`'s folder and limit.
+    fn validate_packet_log(&self) -> Result<(), String> {
+        let Some(p) = &self.packet_log else {
+            return Ok(());
+        };
+        if p.dir.as_os_str().is_empty() {
+            return Err("packet_log.dir: must not be empty".to_string());
+        }
+        // Retention deletes files under this folder, so a relative path,
+        // which would move with the working directory, is refused.
+        if !p.dir.is_absolute() {
+            return Err(format!(
+                "packet_log.dir: {} must be an absolute path",
+                p.dir.display()
+            ));
+        }
+        if p.max_bytes.bytes < astar_station::MIN_PACKET_LOG_BYTES {
+            return Err(format!(
+                "packet_log.max_bytes: {} is below the 100 MB minimum",
+                p.max_bytes.text
             ));
         }
         Ok(())
@@ -4342,6 +4411,81 @@ peer_connected = { enabled = true, destination = "to_air" }
         assert_eq!(r.max_age_days, 30);
         assert!(r.frames);
         assert!(parse_ok("").recording.is_none(), "absent stays absent");
+    }
+
+    // ---- [packet_log] ---------------------------------------------------------
+
+    #[test]
+    fn packet_log_absent_means_off() {
+        assert!(parse_ok("").packet_log.is_none());
+    }
+
+    #[test]
+    fn packet_log_defaults() {
+        let p = parse_ok("[packet_log]\n")
+            .packet_log
+            .expect("[packet_log] is present");
+        assert!(!p.debug_mode);
+        assert_eq!(
+            p.dir,
+            std::path::PathBuf::from("/var/lib/astar/packet-logs")
+        );
+        assert_eq!(p.max_bytes.bytes, 1_000_000_000);
+        assert_eq!(p.max_bytes.text, "1 GB");
+    }
+
+    #[test]
+    fn packet_log_refuses_unknown_keys() {
+        let e = parse_err("[packet_log]\nkeep = 3\n");
+        assert!(e.contains("keep"), "{e}");
+    }
+
+    #[test]
+    fn packet_log_refuses_the_old_enabled_key() {
+        let e = parse_err("[packet_log]\nenabled = true\n");
+        assert!(e.contains("enabled"), "{e}");
+    }
+
+    #[test]
+    fn packet_log_dir_must_be_absolute() {
+        assert_eq!(
+            parse_err("[packet_log]\ndir = \"logs\"\n"),
+            "packet_log.dir: logs must be an absolute path"
+        );
+        assert_eq!(
+            parse_err("[packet_log]\ndir = \"\"\n"),
+            "packet_log.dir: must not be empty"
+        );
+    }
+
+    #[test]
+    fn packet_log_refuses_below_100_mb() {
+        assert_eq!(
+            parse_err("[packet_log]\nmax_bytes = \"10 MB\"\n"),
+            "packet_log.max_bytes: 10 MB is below the 100 MB minimum"
+        );
+        let p = parse_ok("[packet_log]\nmax_bytes = \"100 MB\"\n")
+            .packet_log
+            .unwrap();
+        assert_eq!(p.max_bytes.bytes, 100_000_000);
+    }
+
+    #[test]
+    fn packet_log_is_not_refused_in_parrot_mode() {
+        let p = parse_ok("[bridge]\nmode = \"parrot\"\n[packet_log]\ndebug_mode = true\n")
+            .packet_log
+            .unwrap();
+        assert!(p.debug_mode);
+    }
+
+    #[test]
+    fn node_toml_without_packet_log_loads_and_stays_off() {
+        // As Ansible first wrote it, and as the Settings page keeps it.
+        let cfg = NodeFileConfig::from_toml_str(minimal_toml()).expect("loads");
+        assert!(cfg.packet_log.is_none());
+        let saved = format!("{}\n[packet_log]\ndebug_mode = true\n", minimal_toml());
+        let cfg = NodeFileConfig::from_toml_str(&saved).expect("loads");
+        assert!(cfg.packet_log.unwrap().debug_mode);
     }
 
     #[test]

@@ -66,4 +66,41 @@ final class RecordingSettingsTests: XCTestCase {
         XCTAssertTrue(ConfigArchive.interfaceSlice(from: defaults).isEmpty)
         XCTAssertEqual(ConfigVersion.current, 1)
     }
+
+    func testPacketLogDefaultsToOff() {
+        let stored = UserDefaultsRecordingSettingsStore(scratchDefaults()).load()
+        for settings in [RecordingSettings(), stored] {
+            XCTAssertFalse(settings.debugMode)
+            XCTAssertEqual(settings.packetLogFolder, RecordingSettings.defaultPacketLogFolder)
+            XCTAssertEqual(
+                RecordingSettings.defaultPacketLogFolder.path,
+                NSHomeDirectory() + "/Music/astar Recordings/Packet Logs")
+            XCTAssertEqual(settings.packetLogMaxBytes, 1_000_000_000)
+        }
+        XCTAssertTrue(
+            RecordingSettings.packetLogLimits.contains(RecordingSettings().packetLogMaxBytes))
+    }
+
+    func testPacketLogSettingsRoundTrip() {
+        let defaults = scratchDefaults()
+        let store = UserDefaultsRecordingSettingsStore(defaults)
+        var chosen = RecordingSettings()
+        chosen.debugMode = true
+        chosen.packetLogFolder = URL(fileURLWithPath: "/tmp/pkts", isDirectory: true)
+        chosen.packetLogMaxBytes = 5_000_000_000
+        store.save(chosen)
+        XCTAssertEqual(defaults.bool(forKey: "recording.packetLogDebugMode"), true)
+        XCTAssertEqual(defaults.string(forKey: "recording.packetLogFolder"), "/tmp/pkts")
+        XCTAssertEqual(
+            defaults.object(forKey: "recording.packetLogMaxBytes") as? Int64, 5_000_000_000)
+        let loaded = UserDefaultsRecordingSettingsStore(defaults).load()
+        XCTAssertEqual(loaded, chosen)
+    }
+
+    func testAnUnknownLimitFallsBackToTheDefault() {
+        let defaults = scratchDefaults()
+        defaults.set(Int64(123_456), forKey: "recording.packetLogMaxBytes")
+        XCTAssertEqual(
+            UserDefaultsRecordingSettingsStore(defaults).load().packetLogMaxBytes, 1_000_000_000)
+    }
 }

@@ -137,6 +137,7 @@ use astar_codec::dmr::unpack_voice;
 use astar_dmr::frame::DT_TERMINATOR_WITH_LC;
 use astar_dmr::{CallType, DmrFsm, DmrNetwork, FailureStage, FsmAction, LinkState, Timeslot, wire};
 use astar_record::frames::{CaptureMode, Dir, FrameEvent};
+use astar_record::packet_tap::{CallMeta, CallPacketTap, PacketCallId, PacketNetwork, PacketSlot};
 use astar_record::tap::TapSlot;
 
 use crate::heard::{HeardEntry, HeardLog};
@@ -340,6 +341,10 @@ pub struct DmrLink {
     /// The codec-frame recording tap ([`DmrLink::frame_tap`]). A link with
     /// no audio decodes nothing, so its slot is never offered to.
     frame_tap: TapSlot<FrameEvent>,
+    /// The packet log's slot ([`DmrLink::packet_slot`]).
+    packet_slot: PacketSlot,
+    /// The id of this link's [`CallPacketTap`], which the thread owns.
+    packet_call: PacketCallId,
 }
 
 #[derive(Debug)]
@@ -695,11 +700,25 @@ impl DmrLink {
             cfg.password,
         );
 
+        let packet_slot = PacketSlot::default();
+        let packet_tap = CallPacketTap::new(
+            packet_slot.clone(),
+            wire::is_media,
+            CallMeta {
+                network: PacketNetwork::Dmr,
+                codec: None,
+                label: format!("DMR {} {}", cfg.system, cfg.talkgroup),
+                local: socket.local_addr().unwrap_or(bind),
+                peer: addr,
+            },
+        );
+        let packet_call = packet_tap.id();
+
         let thread = {
             let shared = Arc::clone(&shared);
             thread::Builder::new()
                 .name("astar-dmr-link".into())
-                .spawn(move || run(&socket, addr, fsm, &shared, audio))
+                .spawn(move || run(&socket, addr, fsm, &shared, audio, packet_tap))
                 .map_err(|e| ConsoleError::Dmr(format!("thread: {e}")))?
         };
 
@@ -708,6 +727,8 @@ impl DmrLink {
             thread: Some(thread),
             backend,
             frame_tap,
+            packet_slot,
+            packet_call,
         })
     }
 
@@ -734,6 +755,20 @@ impl DmrLink {
             tx_dbfs: -60.0,
             rx_dbfs: -60.0,
         }
+    }
+
+    /// The packet log's slot: install a tap here and the link thread offers
+    /// every media datagram it receives to it. The slot is shared: setting it
+    /// on the returned handle reaches the live link.
+    #[must_use]
+    pub fn packet_slot(&self) -> PacketSlot {
+        self.packet_slot.clone()
+    }
+
+    /// The id this link's packet events carry.
+    #[must_use]
+    pub fn packet_call(&self) -> PacketCallId {
+        self.packet_call
     }
 
     /// The codec-frame recording tap: install a [`astar_record::Tap`] here
@@ -817,6 +852,7 @@ fn run(
     mut fsm: DmrFsm,
     shared: &Arc<Shared>,
     mut audio: Option<Audio>,
+    mut packet_tap: CallPacketTap,
 ) {
     let publish = |fsm: &DmrFsm| {
         shared
@@ -840,6 +876,7 @@ fn run(
     while !shared.stop.load(Ordering::Relaxed) {
         match socket.recv_from(&mut buf) {
             Ok((n, from)) if from == addr => {
+                packet_tap.capture(from, &buf[..n]);
                 let action = fsm.on_packet(&buf[..n], Instant::now());
                 if matches!(action, FsmAction::Data(_)) {
                     last_data = Some(Instant::now());

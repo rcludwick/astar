@@ -565,6 +565,18 @@ fn logical_subclass_value(s: Subclass) -> u32 {
     }
 }
 
+/// True when `datagram` carries voice: a full voice frame, or a mini frame
+/// (which only ever carries voice). Everything else, including logins and
+/// authentication, is refused; so is a meta frame (two zero bytes up front).
+#[must_use]
+pub fn is_media(datagram: &[u8]) -> bool {
+    if datagram.first().is_some_and(|b| b & 0x80 != 0) {
+        datagram.len() >= FULL_HEADER_LEN && datagram[10] == FrameType::Voice as u8
+    } else {
+        datagram.len() >= MINI_HEADER_LEN && (datagram[0] != 0 || datagram[1] != 0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -805,5 +817,119 @@ mod tests {
             matches!(result, Err(crate::error::EncodeError::IeTooLong { .. })),
             "256-byte IE payload must surface IeTooLong, got {result:?}",
         );
+    }
+
+    fn full_wire(ft: FrameType, sc: Subclass, payload: &[u8]) -> Vec<u8> {
+        let f = FullFrame {
+            source_call: 1,
+            dest_call: 2,
+            retransmission: false,
+            timestamp: 7,
+            oseqno: 0,
+            iseqno: 0,
+            frame_type: ft,
+            subclass: sc,
+            ies: Ies::empty(),
+            payload,
+        };
+        let mut buf = Vec::new();
+        encode(&Frame::Full(Box::new(f)), &mut buf).expect("test frame must encode");
+        buf
+    }
+
+    fn voice_wire() -> Vec<u8> {
+        full_wire(
+            FrameType::Voice,
+            Subclass::Voice(VoiceFormat::G711U),
+            &[0xff; 160],
+        )
+    }
+
+    fn non_media_wires() -> Vec<Vec<u8>> {
+        let mut out: Vec<Vec<u8>> = [
+            IaxCommand::New,
+            IaxCommand::AuthReq,
+            IaxCommand::AuthRep,
+            IaxCommand::RegReq,
+            IaxCommand::RegAuth,
+            IaxCommand::RegAck,
+            IaxCommand::CallToken,
+            IaxCommand::Ack,
+            IaxCommand::Ping,
+            IaxCommand::Poke,
+            IaxCommand::Hangup,
+        ]
+        .into_iter()
+        .map(|c| full_wire(FrameType::Iax, Subclass::Iax(c), &[]))
+        .collect();
+        out.push(full_wire(
+            FrameType::Control,
+            Subclass::Control(ControlSubclass::RadioKey),
+            &[],
+        ));
+        out.push(full_wire(FrameType::DtmfEnd, Subclass::Dtmf('5'), &[]));
+        out.push(full_wire(FrameType::Text, Subclass::Raw(0), b"hello"));
+        let mut meta = vec![0u8; 12];
+        meta[2] = 0x80;
+        out.push(meta);
+        out
+    }
+
+    #[test]
+    fn is_media_accepts_voice() {
+        assert!(is_media(&voice_wire()));
+        let mini = MiniFrame {
+            source_call: 0x1234,
+            timestamp: 0x5678,
+            payload: &[0xff; 160],
+        };
+        let mut buf = Vec::new();
+        encode(&Frame::Mini(mini), &mut buf).expect("test frame must encode");
+        assert!(is_media(&buf));
+    }
+
+    #[test]
+    fn is_media_refuses_every_non_media_packet() {
+        for w in non_media_wires() {
+            assert!(!is_media(&w), "{w:02x?}");
+        }
+        // A meta frame is two zero bytes up front, mini-sized or longer.
+        assert!(!is_media(&[0, 0, 0x01, 0x02, 0x03]));
+    }
+
+    #[test]
+    fn is_media_agrees_with_the_parser() {
+        let mut all = non_media_wires();
+        all.push(voice_wire());
+        let mut mini = Vec::new();
+        encode(
+            &Frame::Mini(MiniFrame {
+                source_call: 0x1234,
+                timestamp: 0x5678,
+                payload: &[0xff; 160],
+            }),
+            &mut mini,
+        )
+        .expect("test frame must encode");
+        all.push(mini);
+        for w in all {
+            let voice = matches!(
+                parse(&w),
+                Ok(Frame::Full(f)) if f.frame_type == FrameType::Voice
+            ) || matches!(parse(&w), Ok(Frame::Mini(_)))
+                // The parser reads a meta frame as a mini frame; the
+                // allowlist deliberately does not.
+                && (w[0] != 0 || w[1] != 0);
+            assert_eq!(is_media(&w), voice, "{w:02x?}");
+        }
+    }
+
+    #[test]
+    fn is_media_never_panics_on_short_input() {
+        for len in 0..=64 {
+            for fill in [0x00u8, 0xff] {
+                let _ = is_media(&vec![fill; len]);
+            }
+        }
     }
 }

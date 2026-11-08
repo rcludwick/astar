@@ -257,6 +257,7 @@ pub(crate) fn clone_policy(p: &IncomingCallPolicy) -> IncomingCallPolicy {
         // `Arc` clone — shares the resolver, copies no plaintext (iax-99cd).
         credential_resolver: p.credential_resolver.clone(),
         codec_policy: p.codec_policy,
+        packet_slot: p.packet_slot.clone(),
     }
 }
 

@@ -4,6 +4,7 @@
 //! Helpers shared by this crate's `#[cfg(test)]` modules.
 
 use std::net::{SocketAddr, UdpSocket};
+use std::path::Path;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -11,6 +12,28 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use astar_m17::{BROADCAST, ControlPacket, Lsf, StreamPacket, encode_callsign};
+
+/// `[packet_log]` with debug mode on, over `dir`.
+pub(crate) fn packet_log_cfg(dir: &Path) -> crate::config::PacketLogCfg {
+    crate::config::PacketLogCfg {
+        debug_mode: true,
+        dir: dir.to_path_buf(),
+        ..crate::config::PacketLogCfg::default()
+    }
+}
+
+/// A closed packet log as the logger would have left it: a pcap of `body`
+/// and its companion. Returns the pcap's name.
+pub(crate) fn seed_packet_log(dir: &Path, stem: &str, body: &[u8]) -> String {
+    let name = format!("{stem}.pcap");
+    std::fs::write(dir.join(&name), body).unwrap();
+    std::fs::write(
+        dir.join(format!("{stem}.jitter.jsonl")),
+        "{\"astar_packet_log\":1}\n{\"end\":\"hangup\"}\n",
+    )
+    .unwrap();
+    name
+}
 
 /// A loopback UDP address that is open but will never answer, plus the
 /// socket that makes it so.

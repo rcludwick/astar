@@ -8,7 +8,7 @@
 //! secrets never escape through any outbound type.
 
 use std::sync::{
-    Arc, Mutex,
+    Arc, Mutex, MutexGuard,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -248,6 +248,17 @@ fn m17_preflight(
     })
 }
 
+/// Why [`NodeController::packet_capture`] would not start a capture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PacketCaptureRefused {
+    /// `node.toml` has no `[packet_log]` table.
+    NoTable,
+    /// The table has `debug_mode` off.
+    DebugModeOff,
+    /// The station's message: the folder can't be used, or the disk is short.
+    Station(String),
+}
+
 /// Core in-process controller that wraps a [`Station`].
 ///
 /// All adapters (HTTP, stdin, TUI) call into this struct; it never leaks
@@ -305,6 +316,11 @@ pub struct NodeController {
     /// The node logger, once `serve` has started one (`[recording]`). No
     /// feature gate: recording needs neither `auth` nor `stream`.
     recordings: std::sync::OnceLock<Arc<crate::recording::logger::NodeLogger>>,
+    /// `[packet_log]`, when the table exists. Held across a capture change,
+    /// a listing or a delete, so a listing can't interleave with a change.
+    /// All of those run on per-connection threads, so the wait costs one
+    /// connection.
+    packet_log: Mutex<Option<crate::config::PacketLogCfg>>,
     /// M17 monitor state. Held only to clone or take a field, and never
     /// across a `Station` call, so `/status` never waits on a join.
     pub(crate) m17: Mutex<M17NodeState>,
@@ -506,6 +522,7 @@ impl NodeController {
             #[cfg(feature = "auth")]
             auth: std::sync::OnceLock::new(),
             recordings: std::sync::OnceLock::new(),
+            packet_log: Mutex::new(None),
             m17: Mutex::new(M17NodeState::default()),
             m17_op: Mutex::new(()),
             echolink: Mutex::new(EchoLinkNodeState::default()),
@@ -616,6 +633,7 @@ impl NodeController {
             #[cfg(feature = "auth")]
             auth: std::sync::OnceLock::new(),
             recordings: std::sync::OnceLock::new(),
+            packet_log: Mutex::new(None),
             m17: Mutex::new(M17NodeState::default()),
             m17_op: Mutex::new(()),
             echolink: Mutex::new(EchoLinkNodeState::default()),
@@ -3091,6 +3109,151 @@ impl NodeController {
     #[must_use]
     pub fn recordings(&self) -> Option<&Arc<crate::recording::logger::NodeLogger>> {
         self.recordings.get()
+    }
+
+    fn packet_log_table(&self) -> MutexGuard<'_, Option<crate::config::PacketLogCfg>> {
+        self.packet_log.lock().expect("packet log table poisoned")
+    }
+
+    /// Take `[packet_log]` as the file now has it, or `None` with no table.
+    /// Any capture stops first, whatever changed, so a log never outlives
+    /// the settings it started under. Starts nothing, which is what lets
+    /// `serve` call this at boot. Waits for the writer, so it stays off any
+    /// async executor.
+    pub fn set_packet_log_settings(&self, cfg: Option<&crate::config::PacketLogCfg>) {
+        let mut table = self.packet_log_table();
+        // Turning off has no way to fail: the only error is a refused start.
+        let _ = self.station.packet_log_configure(None);
+        // With no button to press again, the error would have nothing to
+        // clear it until a restart.
+        if !cfg.is_some_and(|cfg| cfg.debug_mode) {
+            self.station.packet_log_clear_error();
+        }
+        *table = cfg.cloned();
+    }
+
+    /// Whether `[packet_log]` allows a capture, which is what shows the
+    /// button. Waits out a capture change, so it stays off any async
+    /// executor.
+    #[must_use]
+    pub fn packet_debug_mode(&self) -> bool {
+        self.packet_log_table()
+            .as_ref()
+            .is_some_and(|cfg| cfg.debug_mode)
+    }
+
+    /// Start or stop capturing every live call, and every call that starts
+    /// meanwhile. A capture already running is left alone, and stopping is
+    /// never refused, so two tabs asking for the same state don't disturb
+    /// each other. The directory goes to the station unchanged, because its
+    /// open-file checks compare exact paths. File names carry UTC. Call it
+    /// off any async executor: the station may join a thread.
+    ///
+    /// # Errors
+    /// Starting needs a table with `debug_mode` on, and a folder the station
+    /// can use.
+    pub fn packet_capture(&self, on: bool) -> Result<(), PacketCaptureRefused> {
+        let outcome = self.change_packet_capture(on);
+        tracing::info!(capturing = on, ?outcome, "packet capture change");
+        outcome
+    }
+
+    fn change_packet_capture(&self, on: bool) -> Result<(), PacketCaptureRefused> {
+        if !on {
+            self.stop_packet_log();
+            return Ok(());
+        }
+        let table = self.packet_log_table();
+        let cfg = table.as_ref().ok_or(PacketCaptureRefused::NoTable)?;
+        if !cfg.debug_mode {
+            return Err(PacketCaptureRefused::DebugModeOff);
+        }
+        // Otherwise the same settings again would leave it running as it is.
+        self.stop_capture_if_failed();
+        self.station
+            .packet_log_configure(Some(astar_station::PacketLogConfig {
+                dir: cfg.dir.clone(),
+                max_bytes: cfg.max_bytes.bytes,
+                utc_offset_secs: 0,
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            }))
+            .map_err(|e| PacketCaptureRefused::Station(e.to_string()))
+    }
+
+    /// End any capture, so every open file gets its end line. `serve` calls
+    /// this on its way out: the controller is never dropped there, so the
+    /// station's own drop does not run, and an exit or a restart would
+    /// otherwise leave files that read as a crash. Waits for the writer, so
+    /// it stays off any async executor. Nothing started, it does nothing.
+    pub fn stop_packet_log(&self) {
+        let _table = self.packet_log_table();
+        // Turning off has no way to fail: the only error is a refused start.
+        let _ = self.station.packet_log_configure(None);
+    }
+
+    /// End a capture the size limit, low disk or a write error has stopped
+    /// from writing, as the app does, leaving the error for the page. The
+    /// admin presses again after freeing space. `GET /packet-logs/state` calls
+    /// this, so the page never says "Capturing" over a capture that isn't.
+    /// Waits for the writer, so it stays off the pump and any async executor.
+    pub fn stop_failed_capture(&self) {
+        let _table = self.packet_log_table();
+        self.stop_capture_if_failed();
+    }
+
+    /// [`Self::stop_failed_capture`], for a caller holding the table.
+    fn stop_capture_if_failed(&self) {
+        let state = self.station.packet_log_state();
+        if let (true, Some(error)) = (state.capturing, &state.error) {
+            tracing::warn!(%error, "packet capture stopped itself");
+            // Turning off has no way to fail: the only error is a refused start.
+            let _ = self.station.packet_log_configure(None);
+        }
+    }
+
+    /// `[packet_log]`'s folder. `None` is no table, which is the log being
+    /// off; with a table the folder is there whether or not a capture is.
+    #[must_use]
+    pub fn packet_log_dir(&self) -> Option<std::path::PathBuf> {
+        self.packet_log_table().as_ref().map(|cfg| cfg.dir.clone())
+    }
+
+    /// What the packet log is doing.
+    #[must_use]
+    pub fn packet_log_status(&self) -> astar_station::PacketLogState {
+        self.station.packet_log_state()
+    }
+
+    /// The logs in the folder, newest first; none with no table. Reads the
+    /// disk and waits out a capture change, so it stays off any async
+    /// executor. Only a running capture can have a file open, and the
+    /// station knows which. With none running, the folder is read directly
+    /// and nothing is open.
+    #[must_use]
+    pub fn packet_log_rows(&self) -> Vec<astar_station::PacketLogRow> {
+        let table = self.packet_log_table();
+        match table.as_ref() {
+            None => Vec::new(),
+            Some(_) if self.station.packet_log_state().capturing => self.station.packet_log_list(),
+            Some(cfg) => astar_record::packet_log::list_logs(&cfg.dir, &[]),
+        }
+    }
+
+    /// Delete the log whose pcap is called `name`. Waits as
+    /// [`Self::packet_log_rows`] does, and likewise asks the station only
+    /// during a capture.
+    ///
+    /// # Errors
+    /// The refusal: no such log, or a call still writing to it.
+    pub fn packet_log_delete(&self, name: &str) -> Result<(), astar_station::DeleteRefused> {
+        let table = self.packet_log_table();
+        match table.as_ref() {
+            None => Err(astar_station::DeleteRefused::NoSuchLog),
+            Some(_) if self.station.packet_log_state().capturing => {
+                self.station.packet_log_delete(name)
+            }
+            Some(cfg) => astar_record::packet_log::delete_log(&cfg.dir, name, &[]),
+        }
     }
 
     /// Show the public listener's state on the admin snapshot.
@@ -6688,6 +6851,480 @@ mod m17_tests {
 
         hang_up(&c).expect("hang up");
         c.station_for_test().remove_bridge_member(listener.id);
+        handle.shutdown();
+    }
+
+    /// A far talker on the monitor, stopped short of the packet that would
+    /// end the over, so the monitor's log stays open.
+    fn talk_until_a_log_opens(c: &NodeController, addr: std::net::SocketAddr) {
+        talk_short_of_the_end(addr);
+        assert!(
+            wait_until(|| c.packet_log_rows().iter().any(|r| r.open), 3_000),
+            "the monitor's log is open: {:?}",
+            c.packet_log_rows()
+        );
+    }
+
+    /// Everything of a far talker's over but the packet that would end it.
+    fn talk_short_of_the_end(addr: std::net::SocketAddr) {
+        let far = UdpSocket::bind("127.0.0.1:0").expect("bind the far talker");
+        far.set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("set the far talker's read timeout");
+        let conn = ControlPacket::Conn {
+            callsign: cs("KC1ABC"),
+            module: b'A',
+        }
+        .to_bytes();
+        far.send_to(&conn, addr)
+            .expect("CONN to the loopback reflector");
+        let mut buf = [0u8; 64];
+        assert!(
+            wait_until(
+                || far
+                    .recv_from(&mut buf)
+                    .is_ok_and(|(n, _)| buf[..n] == *b"ACKN"),
+                2_000
+            ),
+            "the far talker is linked to module A"
+        );
+        // All but the last packet, which would end the over.
+        let packets = far_talker_packets("KC1ABC", 25);
+        for pkt in &packets[..packets.len() - 1] {
+            far.send_to(pkt, addr)
+                .expect("stream packet to the loopback reflector");
+            // A radio's pace, inside the monitor's flood gate.
+            std::thread::sleep(Duration::from_millis(40));
+        }
+    }
+
+    /// A monitor up on `addr` with `[packet_log]` over `dir` and a capture
+    /// running, and a far talker holding a log open.
+    fn node_capturing_a_call(addr: std::net::SocketAddr, dir: &std::path::Path) -> NodeController {
+        let c = m17_node(
+            astar_station::StationConfig::default(),
+            Some(table_settings(addr)),
+        );
+        c.set_packet_log_settings(Some(&crate::test_support::packet_log_cfg(dir)));
+        c.packet_capture(true).expect("the folder is usable");
+        monitor(&c, "M17-TEST", 'A', "AJ7HR").expect("monitor");
+        assert!(pump_until(&c, linked, 3_000), "{:?}", c.snapshot().m17);
+        talk_until_a_log_opens(&c, addr);
+        c
+    }
+
+    /// The log that's open now, by name.
+    fn open_log(c: &NodeController) -> String {
+        c.packet_log_rows()
+            .into_iter()
+            .find(|r| r.open)
+            .expect("the open log")
+            .name
+    }
+
+    /// The last line of the companion to the pcap called `name`.
+    fn last_companion_line(dir: &std::path::Path, name: &str) -> serde_json::Value {
+        let companion = dir.join(name.replace(".pcap", ".jitter.jsonl"));
+        let text = std::fs::read_to_string(companion).expect("the companion");
+        let line = text.lines().last().expect("a line");
+        serde_json::from_str(line).expect("a JSON line")
+    }
+
+    /// Change the settings under a capture with a log open. The capture must
+    /// stop and the open file end as `stopped`, and the monitor stays up, so
+    /// no hang-up can be what ended it.
+    fn a_settings_change_ends_the_capture(
+        change: impl FnOnce(&crate::config::PacketLogCfg) -> Option<crate::config::PacketLogCfg>,
+        check: impl FnOnce(&NodeController),
+    ) {
+        let reflector = Reflector::bind("127.0.0.1:0".parse().expect("loopback"))
+            .expect("bind the in-process reflector");
+        let addr = reflector.local_addr();
+        let handle = reflector.run();
+        let dir = tempfile::tempdir().expect("a folder");
+        let c = node_capturing_a_call(addr, dir.path());
+        let name = open_log(&c);
+        assert!(last_companion_line(dir.path(), &name).get("end").is_none());
+
+        let new = change(&crate::test_support::packet_log_cfg(dir.path()));
+        c.set_packet_log_settings(new.as_ref());
+
+        assert_eq!(last_companion_line(dir.path(), &name)["end"], "stopped");
+        assert!(!c.packet_log_status().capturing);
+        check(&c);
+
+        hang_up(&c).expect("hang up");
+        handle.shutdown();
+    }
+
+    #[test]
+    fn nothing_is_captured_at_boot_even_with_debug_mode_on() {
+        let root = tempfile::tempdir().expect("a folder");
+        let dir = root.path().join("logs");
+        let c = m17_node(astar_station::StationConfig::default(), None);
+
+        // What `serve` does with the table, and all it does.
+        c.set_packet_log_settings(Some(&crate::test_support::packet_log_cfg(&dir)));
+
+        assert!(c.packet_debug_mode());
+        assert!(!c.packet_log_status().capturing);
+        assert!(!dir.exists(), "no logger looked at the folder");
+    }
+
+    #[test]
+    fn capture_refuses_with_no_table() {
+        let c = m17_node(astar_station::StationConfig::default(), None);
+        assert!(!c.packet_debug_mode());
+        assert_eq!(c.packet_capture(true), Err(PacketCaptureRefused::NoTable));
+        assert!(!c.packet_log_status().capturing);
+    }
+
+    #[test]
+    fn capture_refuses_with_debug_mode_off() {
+        let dir = tempfile::tempdir().expect("a folder");
+        let c = m17_node(astar_station::StationConfig::default(), None);
+        c.set_packet_log_settings(Some(&crate::config::PacketLogCfg {
+            debug_mode: false,
+            ..crate::test_support::packet_log_cfg(dir.path())
+        }));
+        assert_eq!(
+            c.packet_capture(true),
+            Err(PacketCaptureRefused::DebugModeOff)
+        );
+        assert!(!c.packet_log_status().capturing);
+    }
+
+    /// Stopping is never refused: a tab left open across a settings change
+    /// asks for the state the node is already in.
+    #[test]
+    fn stopping_a_capture_that_is_not_running_is_fine() {
+        let c = m17_node(astar_station::StationConfig::default(), None);
+        assert_eq!(c.packet_capture(false), Ok(()));
+    }
+
+    #[test]
+    fn a_bad_folder_refuses_with_the_station_message() {
+        let not_a_folder = tempfile::NamedTempFile::new().expect("a file");
+        let c = m17_node(astar_station::StationConfig::default(), None);
+        c.set_packet_log_settings(Some(&crate::test_support::packet_log_cfg(
+            not_a_folder.path(),
+        )));
+
+        let Err(PacketCaptureRefused::Station(message)) = c.packet_capture(true) else {
+            panic!("a file is not a folder");
+        };
+
+        let state = c.packet_log_status();
+        assert!(!state.capturing);
+        let error = state.error.expect("the state says why");
+        assert!(message.contains(&error), "{message:?} and {error:?}");
+    }
+
+    /// A monitor under a limit too small for any log: a far talker fills the
+    /// folder, which leaves a capture that says it runs and writes nothing.
+    fn node_with_a_full_capture(
+        addr: std::net::SocketAddr,
+        dir: &std::path::Path,
+    ) -> NodeController {
+        let c = m17_node(
+            astar_station::StationConfig::default(),
+            Some(table_settings(addr)),
+        );
+        c.set_packet_log_settings(Some(&crate::config::PacketLogCfg {
+            max_bytes: crate::config::ByteSize {
+                bytes: 1,
+                text: "1 B".to_owned(),
+            },
+            ..crate::test_support::packet_log_cfg(dir)
+        }));
+        c.packet_capture(true).expect("the folder is usable");
+        monitor(&c, "M17-TEST", 'A', "AJ7HR").expect("monitor");
+        assert!(pump_until(&c, linked, 3_000), "{:?}", c.snapshot().m17);
+        talk_short_of_the_end(addr);
+        assert!(
+            wait_until(|| c.packet_log_status().error.is_some(), 3_000),
+            "the folder fills: {:?}",
+            c.packet_log_status()
+        );
+        assert!(
+            c.packet_log_status().capturing,
+            "nothing has stopped it yet"
+        );
+        c
+    }
+
+    #[test]
+    fn a_capture_that_can_no_longer_write_stops_itself_and_keeps_its_error() {
+        let reflector = Reflector::bind("127.0.0.1:0".parse().expect("loopback"))
+            .expect("bind the in-process reflector");
+        let addr = reflector.local_addr();
+        let handle = reflector.run();
+        let dir = tempfile::tempdir().expect("a folder");
+        let c = node_with_a_full_capture(addr, dir.path());
+
+        let resp = crate::recording::http::packet_log_state(&c);
+
+        let body: serde_json::Value = serde_json::from_slice(&resp.body).expect("JSON");
+        assert_eq!(body["state"]["capturing"], false, "{body}");
+        assert!(
+            body["state"]["error"].is_string(),
+            "the page says why: {body}"
+        );
+        hang_up(&c).expect("hang up");
+        handle.shutdown();
+    }
+
+    #[test]
+    fn pressing_after_a_failed_capture_starts_a_clean_one() {
+        let reflector = Reflector::bind("127.0.0.1:0".parse().expect("loopback"))
+            .expect("bind the in-process reflector");
+        let addr = reflector.local_addr();
+        let handle = reflector.run();
+        let dir = tempfile::tempdir().expect("a folder");
+        let c = node_with_a_full_capture(addr, dir.path());
+
+        c.packet_capture(true).expect("the folder is usable");
+
+        let state = c.packet_log_status();
+        assert!(state.capturing);
+        assert_eq!(state.error, None);
+        hang_up(&c).expect("hang up");
+        handle.shutdown();
+    }
+
+    #[test]
+    fn a_healthy_capture_is_left_alone() {
+        let dir = tempfile::tempdir().expect("a folder");
+        let c = m17_node(astar_station::StationConfig::default(), None);
+        c.set_packet_log_settings(Some(&crate::test_support::packet_log_cfg(dir.path())));
+        c.packet_capture(true).expect("the folder is usable");
+        c.stop_failed_capture();
+        assert!(c.packet_log_status().capturing);
+    }
+
+    #[test]
+    fn debug_mode_going_off_clears_a_refusal() {
+        let not_a_folder = tempfile::NamedTempFile::new().expect("a file");
+        let c = m17_node(astar_station::StationConfig::default(), None);
+        let cfg = crate::test_support::packet_log_cfg(not_a_folder.path());
+        c.set_packet_log_settings(Some(&cfg));
+        c.packet_capture(true).unwrap_err();
+
+        c.set_packet_log_settings(Some(&cfg));
+        assert!(
+            c.packet_log_status().error.is_some(),
+            "with Debug mode on the button can still act on it"
+        );
+
+        c.set_packet_log_settings(Some(&crate::config::PacketLogCfg {
+            debug_mode: false,
+            ..cfg
+        }));
+        assert_eq!(c.packet_log_status().error, None);
+    }
+
+    #[test]
+    fn a_capture_runs_across_calls_until_stopped() {
+        let reflector = Reflector::bind("127.0.0.1:0".parse().expect("loopback"))
+            .expect("bind the in-process reflector");
+        let addr = reflector.local_addr();
+        let handle = reflector.run();
+        let dir = tempfile::tempdir().expect("a folder");
+        let c = node_capturing_a_call(addr, dir.path());
+        let first = open_log(&c);
+
+        hang_up(&c).expect("hang up");
+        assert!(
+            wait_until(|| c.packet_log_rows().iter().all(|r| !r.open), 3_000),
+            "the first call's log closes: {:?}",
+            c.packet_log_rows()
+        );
+        assert_eq!(last_companion_line(dir.path(), &first)["end"], "hangup");
+        assert!(
+            c.packet_log_status().capturing,
+            "the call ending isn't a stop"
+        );
+
+        monitor(&c, "M17-TEST", 'A', "AJ7HR").expect("monitor again");
+        assert!(pump_until(&c, linked, 3_000), "{:?}", c.snapshot().m17);
+        talk_until_a_log_opens(&c, addr);
+        let second = open_log(&c);
+        assert_ne!(second, first, "the second call has a file of its own");
+
+        c.packet_capture(false).expect("stopping");
+        assert!(!c.packet_log_status().capturing);
+        assert_eq!(last_companion_line(dir.path(), &second)["end"], "stopped");
+
+        hang_up(&c).expect("hang up");
+        handle.shutdown();
+    }
+
+    #[test]
+    fn new_settings_stop_a_capture() {
+        a_settings_change_ends_the_capture(
+            |cfg| {
+                Some(crate::config::PacketLogCfg {
+                    max_bytes: crate::config::ByteSize {
+                        bytes: 2_000_000_000,
+                        text: "2 GB".to_string(),
+                    },
+                    ..cfg.clone()
+                })
+            },
+            |c| assert!(c.packet_debug_mode(), "the new table is stored"),
+        );
+    }
+
+    #[test]
+    fn turning_debug_mode_off_stops_a_capture() {
+        a_settings_change_ends_the_capture(
+            |cfg| {
+                Some(crate::config::PacketLogCfg {
+                    debug_mode: false,
+                    ..cfg.clone()
+                })
+            },
+            |c| {
+                assert_eq!(
+                    c.packet_capture(true),
+                    Err(PacketCaptureRefused::DebugModeOff)
+                );
+                assert!(c.packet_log_rows().iter().all(|r| !r.open));
+            },
+        );
+    }
+
+    #[test]
+    fn removing_the_table_stops_a_capture() {
+        a_settings_change_ends_the_capture(
+            |_| None,
+            |c| {
+                assert_eq!(c.packet_log_dir(), None);
+                assert_eq!(c.packet_capture(true), Err(PacketCaptureRefused::NoTable));
+                assert_eq!(c.packet_log_rows(), Vec::new());
+            },
+        );
+    }
+
+    #[test]
+    fn logs_stay_listed_and_deletable_with_capture_off() {
+        let dir = tempfile::tempdir().expect("a folder");
+        let name = crate::test_support::seed_packet_log(dir.path(), "call", b"pcap");
+        let c = m17_node(astar_station::StationConfig::default(), None);
+        c.set_packet_log_settings(Some(&crate::config::PacketLogCfg {
+            debug_mode: false,
+            ..crate::test_support::packet_log_cfg(dir.path())
+        }));
+
+        assert_eq!(c.packet_log_dir().as_deref(), Some(dir.path()));
+        let rows = c.packet_log_rows();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].name, name);
+        assert!(!rows[0].open);
+
+        c.packet_log_delete(&name).expect("nothing is writing");
+        assert_eq!(c.packet_log_rows(), Vec::new());
+        assert!(!dir.path().join(&name).exists());
+    }
+
+    /// A far talker on the monitor holds a real log open, through the same
+    /// route a browser uses. The variant spelling of its name matters most
+    /// here: on a case-insensitive disk it would miss the open-file check
+    /// and remove the file under the call.
+    #[test]
+    fn an_open_packet_log_refuses_delete_with_a_409() {
+        let reflector = Reflector::bind("127.0.0.1:0".parse().expect("loopback"))
+            .expect("bind the in-process reflector");
+        let addr = reflector.local_addr();
+        let handle = reflector.run();
+        let dir = tempfile::tempdir().expect("a folder");
+        let c = node_capturing_a_call(addr, dir.path());
+
+        let rows = c.packet_log_rows();
+        let row = rows.iter().find(|r| r.open).expect("the open log");
+        let ask = |name: &str| {
+            let body = serde_json::json!({ "name": name }).to_string();
+            crate::http::handle_request_with_headers(
+                &c,
+                "POST",
+                "/packet-logs/delete",
+                body.as_bytes(),
+                &crate::http::RequestHeaders {
+                    host: Some("127.0.0.1:8730"),
+                    content_type: Some("application/json"),
+                    loopback_peer: true,
+                    ..crate::http::RequestHeaders::default()
+                },
+            )
+        };
+        assert_eq!(ask(&row.name).status, 409);
+        let variant = row.name.to_lowercase();
+        assert_ne!(variant, row.name, "the name has letters to change");
+        assert_eq!(ask(&variant).status, 404);
+        assert!(dir.path().join(&row.name).exists(), "the log survives");
+
+        hang_up(&c).expect("hang up");
+        handle.shutdown();
+    }
+
+    /// Two tabs both asking to start must leave one file open, not two.
+    #[test]
+    fn a_second_start_keeps_the_open_file() {
+        let reflector = Reflector::bind("127.0.0.1:0".parse().expect("loopback"))
+            .expect("bind the in-process reflector");
+        let addr = reflector.local_addr();
+        let handle = reflector.run();
+        let dir = tempfile::tempdir().expect("a folder");
+        let c = node_capturing_a_call(addr, dir.path());
+        let name = open_log(&c);
+        let post = || {
+            crate::http::handle_request_with_headers(
+                &c,
+                "POST",
+                "/packet-logs/capture",
+                br#"{"capturing":true}"#,
+                &crate::http::RequestHeaders {
+                    host: Some("127.0.0.1:8730"),
+                    content_type: Some("application/json"),
+                    loopback_peer: true,
+                    ..crate::http::RequestHeaders::default()
+                },
+            )
+        };
+        assert_eq!(post().status, 200);
+        assert_eq!(post().status, 200);
+        let rows = c.packet_log_rows();
+        let open: Vec<_> = rows.iter().filter(|r| r.open).collect();
+        assert_eq!(open.len(), 1, "{rows:?}");
+        assert_eq!(open[0].name, name);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+
+        hang_up(&c).expect("hang up");
+        handle.shutdown();
+    }
+
+    /// `serve` never drops the controller, so this stop is all that gives an
+    /// open file its end line on the way out. The monitor stays up on
+    /// purpose: the log must end without a hang-up to do it.
+    #[test]
+    fn stopping_the_packet_log_ends_the_open_file() {
+        let reflector = Reflector::bind("127.0.0.1:0".parse().expect("loopback"))
+            .expect("bind the in-process reflector");
+        let addr = reflector.local_addr();
+        let handle = reflector.run();
+        let dir = tempfile::tempdir().expect("a folder");
+        let c = node_capturing_a_call(addr, dir.path());
+        let name = open_log(&c);
+        assert!(
+            last_companion_line(dir.path(), &name).get("end").is_none(),
+            "still open"
+        );
+
+        c.stop_packet_log();
+
+        assert_eq!(last_companion_line(dir.path(), &name)["end"], "stopped");
+        assert!(c.packet_log_rows().iter().all(|r| !r.open));
+
+        hang_up(&c).expect("hang up");
         handle.shutdown();
     }
 

@@ -696,6 +696,14 @@ pub fn data(packet: &DataPacket) -> Result<[u8; DATA_LEN], DataError> {
     Ok(out)
 }
 
+/// True when `datagram` starts `DMRD` and is 53 to 55 bytes long. The two
+/// real burst lengths are 53 and 55; the range also admits 54, which the
+/// brief mandates. Logins, salts, keepalives and everything else are refused.
+#[must_use]
+pub fn is_media(datagram: &[u8]) -> bool {
+    (DATA_LEN_MIN..=DATA_LEN).contains(&datagram.len()) && datagram.starts_with(TAG_DATA)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1021,5 +1029,50 @@ mod tests {
             Some(Packet::Unknown(b"RPTSBKN\x00\x00\x00\x01".to_vec()))
         );
         assert_eq!(parse(&[]), None);
+    }
+
+    #[test]
+    fn is_media_accepts_voice() {
+        assert!(is_media(&data(&sample_data()).unwrap()));
+        let d = data(&sample_data()).unwrap();
+        assert!(is_media(&d[..DATA_LEN_MIN]));
+    }
+
+    #[test]
+    fn is_media_refuses_every_non_media_packet() {
+        let tagged = |tag: &[u8], len: usize| {
+            let mut v = vec![0x5Au8; len];
+            v[..tag.len()].copy_from_slice(tag);
+            v
+        };
+        let cfg = config(id(), &ConfigFields::softclient("KC0ABC", "astar"));
+        let mut dmrd52 = vec![0u8; 52];
+        dmrd52[..4].copy_from_slice(b"DMRD");
+        for w in [
+            tagged(b"RPTACK", ACK_LEN),
+            tagged(b"MSTNAK", NAK_LEN),
+            tagged(b"MSTPONG", PONG_LEN),
+            tagged(b"MSTCL", CLOSE_LEN),
+            login(id()).to_vec(),
+            auth(id(), [1, 2, 3, 4], "pw").to_vec(),
+            cfg.to_vec(),
+            ping(id()).to_vec(),
+            close(id()).to_vec(),
+            dmrd52,
+            // Wrong tag at exactly the media lengths.
+            tagged(b"RPTK", DATA_LEN),
+            tagged(b"RPTK", DATA_LEN_MIN),
+        ] {
+            assert!(!is_media(&w), "{w:02x?}");
+        }
+    }
+
+    #[test]
+    fn is_media_never_panics_on_short_input() {
+        for len in 0..=64 {
+            for fill in [0x00u8, 0xff] {
+                let _ = is_media(&vec![fill; len]);
+            }
+        }
     }
 }

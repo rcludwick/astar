@@ -271,6 +271,20 @@
                                         .padding(.horizontal, 14)
                                         .padding(.bottom, 8)
                                 }
+                                if session.recordingSettings.debugMode,
+                                    let packetLogError = session.packetLogError
+                                {
+                                    // A press that was refused or a capture
+                                    // that stopped by itself, shown here.
+                                    Text(packetLogError)
+                                        .font(.caption)
+                                        .foregroundStyle(.red)
+                                        .lineLimit(1)
+                                        .truncationMode(.tail)
+                                        .help(packetLogError)
+                                        .padding(.horizontal, 14)
+                                        .padding(.bottom, 8)
+                                }
                             }
                             .mainCard()
 
@@ -1848,6 +1862,7 @@
                     pttButton
                 }
                 RecordButton()
+                PacketCaptureButton()
                 // Every control in this row wears `callControlChrome`, which
                 // fixes one height for all of them (this button's natural one).
                 Button(role: .destructive, action: disconnect) {

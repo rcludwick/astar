@@ -200,6 +200,20 @@ impl DsvtPacket {
     }
 }
 
+/// True when `datagram` is a DSVT header or voice packet of the right length.
+/// Connect, ack, keepalive and unlink packets are refused.
+#[must_use]
+pub fn is_media(datagram: &[u8]) -> bool {
+    if !datagram.starts_with(&DSVT_MAGIC) || datagram.len() < 5 {
+        return false;
+    }
+    match datagram[4] {
+        TYPE_HEADER => datagram.len() == HEADER_PACKET_LEN,
+        TYPE_VOICE => datagram.len() == VOICE_PACKET_LEN,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,5 +417,79 @@ mod tests {
     #[test]
     fn sync_interval_is_21() {
         assert_eq!(SYNC_INTERVAL, 21);
+    }
+
+    fn voice_wire() -> Vec<u8> {
+        DsvtPacket::Voice {
+            stream_id: 0x1234,
+            seq: 3,
+            end: false,
+            ambe: [0x11; 9],
+            slow_data: [0x22; 3],
+        }
+        .encode()
+    }
+
+    #[test]
+    fn is_media_accepts_voice() {
+        assert!(is_media(&voice_wire()));
+        let header = DsvtPacket::Header {
+            stream_id: 0x1234,
+            header: sample_header(),
+        };
+        assert!(is_media(&header.encode()));
+    }
+
+    #[test]
+    fn is_media_refuses_every_non_media_packet() {
+        use crate::fsm::DextraFsm;
+        use std::time::Instant;
+        let mut fsm = DextraFsm::new("N0CALL", b'B').unwrap();
+        let now = Instant::now();
+        let mut ack = b"XRF757 GB".to_vec();
+        ack.extend_from_slice(b"B");
+        ack.extend_from_slice(b"ACK\0");
+        let mut nak = ack[..10].to_vec();
+        nak.extend_from_slice(b"NAK\0");
+        let mut keepalive = b"XRF757 G".to_vec();
+        keepalive.push(0);
+        let mut unknown = voice_wire();
+        unknown[4] = 0x30;
+        for w in [
+            fsm.connect(now),
+            fsm.unlink(now),
+            ack,
+            nak,
+            keepalive,
+            b"DISCONNECTED".to_vec(),
+            unknown,
+            voice_wire()[..26].to_vec(),
+            // Right type byte and length, wrong magic.
+            {
+                let mut p = voice_wire();
+                p[..4].copy_from_slice(b"XSVT");
+                p
+            },
+            {
+                let mut p = DsvtPacket::Header {
+                    stream_id: 1,
+                    header: sample_header(),
+                }
+                .encode();
+                p[..4].copy_from_slice(b"XSVT");
+                p
+            },
+        ] {
+            assert!(!is_media(&w), "{w:02x?}");
+        }
+    }
+
+    #[test]
+    fn is_media_never_panics_on_short_input() {
+        for len in 0..=64 {
+            for fill in [0x00u8, 0xff] {
+                let _ = is_media(&vec![fill; len]);
+            }
+        }
     }
 }

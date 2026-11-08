@@ -279,6 +279,73 @@ final class FakeStation: StationDriving {
                 utcOffsetSeconds: utcOffsetSeconds))
         callLog.append("recordStart")
     }
+    struct PacketLogCall: Equatable {
+        var enabled: Bool
+        var directory: URL?
+        var maxBytes: Int64
+        var utcOffsetSeconds: Int32
+    }
+    private let packetLogLock = NSLock()
+    private var _packetLogCalls: [PacketLogCall] = []
+    private var _packetLogOnMainThread: [Bool] = []
+    /// Every `packetLogConfigure` asked for; read from any thread.
+    var packetLogCalls: [PacketLogCall] {
+        packetLogLock.lock()
+        defer { packetLogLock.unlock() }
+        return _packetLogCalls
+    }
+    var packetLogOnMainThread: [Bool] {
+        packetLogLock.lock()
+        defer { packetLogLock.unlock() }
+        return _packetLogOnMainThread
+    }
+    /// Called after each `packetLogConfigure`, on its thread.
+    var onPacketLogConfigure: (() -> Void)?
+    /// When set, `packetLogConfigure` throws.
+    var packetLogConfigureError: Error?
+    /// What `packetLogState()` reports.
+    var packetLogStateValue = PacketLogState(
+        capturing: false, openCalls: 0, usedBytes: 0, dropped: 0, error: nil)
+    private var _packetLogStateReads = 0
+    /// How many times `packetLogState` was called; read from any thread.
+    var packetLogStateReads: Int {
+        packetLogLock.lock()
+        defer { packetLogLock.unlock() }
+        return _packetLogStateReads
+    }
+    private var _packetLogCallEndedCount = 0
+    /// How many times `packetLogCallEnded` was called; read from any thread.
+    var packetLogCallEndedCount: Int {
+        packetLogLock.lock()
+        defer { packetLogLock.unlock() }
+        return _packetLogCallEndedCount
+    }
+    func packetLogCallEnded() throws {
+        packetLogLock.lock()
+        _packetLogCallEndedCount += 1
+        packetLogLock.unlock()
+    }
+    func packetLogConfigure(
+        enabled: Bool, directory: URL?, maxBytes: Int64, utcOffsetSeconds: Int32
+    ) throws {
+        packetLogLock.lock()
+        _packetLogOnMainThread.append(Thread.isMainThread)
+        if packetLogConfigureError == nil {
+            _packetLogCalls.append(
+                PacketLogCall(
+                    enabled: enabled, directory: directory, maxBytes: maxBytes,
+                    utcOffsetSeconds: utcOffsetSeconds))
+        }
+        packetLogLock.unlock()
+        defer { onPacketLogConfigure?() }
+        if let packetLogConfigureError { throw packetLogConfigureError }
+    }
+    func packetLogState() throws -> PacketLogState {
+        packetLogLock.lock()
+        defer { packetLogLock.unlock() }
+        _packetLogStateReads += 1
+        return packetLogStateValue
+    }
     func recordStop() throws {
         recordStopOnMainThread.append(Thread.isMainThread)
         recordStopCount += 1
@@ -480,6 +547,11 @@ private struct ThrowingStation: StationDriving {
         utcOffsetSeconds: Int32
     ) throws { throw Boom() }
     func recordStop() throws { throw Boom() }
+    func packetLogConfigure(
+        enabled: Bool, directory: URL?, maxBytes: Int64, utcOffsetSeconds: Int32
+    ) throws { throw Boom() }
+    func packetLogCallEnded() throws { throw Boom() }
+    func packetLogState() throws -> PacketLogState { throw Boom() }
     func recordState() throws -> RecordState { throw Boom() }
     func setCodecDirs(_ dirs: [String]) throws { throw Boom() }
     func setVocoderTrust(_ serials: [String]) throws { throw Boom() }

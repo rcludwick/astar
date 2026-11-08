@@ -52,7 +52,7 @@ selection.
 ## Finding your way around Settings
 
 Open Settings with the sliders button in the popover footer, or with ⌘,
-from the menu bar. It is one long list of sections: Operator, Account, EchoLink, DMR, NXDN,
+from the menu bar. It is one long list of sections: Operator, AllStarLink, EchoLink, DMR, NXDN,
 Vocoders, Saved configs, Favorites, Mic Profiles, Reflector directory,
 Spectrum, Recording and Backup.
 
@@ -81,7 +81,7 @@ A few things make this quicker:
 
 astar remembers which sections you left open and which you folded, and
 Settings comes back the same way the next time, even after a restart. The
-first time you open it, only Operator and Account are open, so it fits on
+first time you open it, only Operator and AllStarLink are open, so it fits on
 about one screen. This is a choice about your own Mac's window, so it is not
 part of an exported config: importing someone's `.astarconfig` never
 rearranges your Settings.

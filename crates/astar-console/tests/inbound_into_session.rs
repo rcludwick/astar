@@ -18,9 +18,10 @@ use astar_audio::NullBackend;
 use astar_console::{AnswerPolicy, ConsoleSession};
 use astar_iax::{IncomingAuthPolicy, IncomingCallPolicy, IncomingDecisionPolicy, KnownNodes};
 use astar_iax_core::Subclass;
-use astar_iax_core::frame::{Frame, FullFrame, encode, parse_lenient};
+use astar_iax_core::frame::{Frame, FullFrame, MiniFrame, encode, parse_lenient};
 use astar_iax_core::ie::Ies;
 use astar_iax_core::subclass::{FrameType, IaxCommand, VoiceFormat};
+use astar_record::packet_tap::{PacketEvent, packet_tap_channel};
 
 const PEER_CALL: u16 = 13885;
 
@@ -598,4 +599,42 @@ fn inbound_with_empty_allowlist_admits_as_today() {
         "empty allowlist must admit as today (call_count == 1)"
     );
     assert_eq!(session.call_count(), 1);
+}
+
+/// The listener keeps the policy it started with for life, so the packet log
+/// has to reach it through the slot in that policy. Turning the log on AFTER
+/// the listener is up must still log the next caller.
+#[test]
+fn a_tap_set_after_the_listener_starts_logs_an_inbound_call() {
+    let (mut session, addr) = session_listening_auto();
+    let (tap, events) = packet_tap_channel(64, 64);
+    session.set_packet_tap(Some(tap));
+
+    let (peer, _pa) = peer_socket();
+    peer.send_to(&new_datagram(valid_new_ies(), PEER_CALL), addr)
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline && session.call_count() == 0 {
+        session.poll_inbound();
+        pump_acks(&peer, addr, PEER_CALL);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(session.call_count(), 1, "the call was adopted");
+
+    let voice = enc(&Frame::Mini(MiniFrame {
+        source_call: PEER_CALL,
+        timestamp: 40,
+        payload: &[0x11; 160],
+    }));
+    peer.send_to(&voice, addr).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut logged = false;
+    while !logged && Instant::now() < deadline {
+        logged = events
+            .try_iter()
+            .any(|e| matches!(e, PacketEvent::Packet { bytes, .. } if *bytes == *voice));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(logged, "the inbound leg offers to the session's slot");
 }

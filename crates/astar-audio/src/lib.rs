@@ -53,6 +53,8 @@ pub mod mixer;
 pub mod monitor;
 #[cfg(any(test, feature = "test-backend"))]
 pub mod null_backend;
+#[cfg(feature = "pull-backend")]
+pub mod pull_backend;
 pub mod resample;
 pub mod rnnoise;
 pub mod router;
@@ -79,6 +81,8 @@ pub use mixer::{
 pub use monitor::MicMonitor;
 #[cfg(any(test, feature = "test-backend"))]
 pub use null_backend::NullBackend;
+#[cfg(feature = "pull-backend")]
+pub use pull_backend::{PullBackend, PullSink, PulledFrame};
 pub use resample::{AntiAliasResampler, Resampler1, resample_offline};
 pub use rnnoise::{
     DenoiseChain, DenoiseMode, DenoiseStatus, RNNOISE_FRAME, RNNOISE_RATE, RnnoiseStage,

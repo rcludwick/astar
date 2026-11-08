@@ -21,6 +21,7 @@ use astar_iax_core::session::fsm::{
     Action, AppCommand, AppEvent, Event, Fsm, SessionState, TimerKind,
 };
 use astar_iax_core::session::reliability::{Reliability, ReliabilityConfig, RxOutcome};
+use astar_record::packet_tap::CallPacketTap;
 use mio::{Poll, Waker};
 
 use crate::audio_bridge::PttGate;
@@ -68,6 +69,9 @@ pub(crate) struct SpawnParams {
     /// Transport seam (iax-b6f5): the socket factory the runtime binds its
     /// per-call socket from. [`crate::transport::OsNetStack`] everywhere today.
     pub net: Arc<dyn NetStack>,
+    /// The packet log's tap, owned by the run loop so the call's last event
+    /// goes out when the loop ends. `None` on the raw-dial path.
+    pub packet_tap: Option<CallPacketTap>,
 }
 
 /// Spawn the per-call runtime thread and return the canonical [`Call`] handle
@@ -127,7 +131,9 @@ pub(crate) fn spawn_call_runtime(
         pooled,
         sample_rate,
         net,
+        packet_tap,
     } = p;
+    let packet_call = packet_tap.as_ref().map(CallPacketTap::id);
     let mic_rx = audio.tx_frames;
     let spk_tx = audio.rx_frames;
     let preroll_lead = audio.preroll_lead;
@@ -157,6 +163,7 @@ pub(crate) fn spawn_call_runtime(
                 format_bits_for_loop,
                 sample_rate,
                 remote_keyed_for_loop,
+                packet_tap,
             );
         })?;
 
@@ -174,6 +181,7 @@ pub(crate) fn spawn_call_runtime(
             tx_reanchors,
             format_bits,
             remote_keyed,
+            packet_call,
         )
     } else {
         Call::new(
@@ -359,6 +367,7 @@ fn run_loop(
     format_bits: Arc<AtomicU32>,
     sample_rate: u32,
     remote_keyed: Arc<AtomicBool>,
+    mut packet_tap: Option<CallPacketTap>,
 ) {
     use mio::{Events, Token};
 
@@ -372,6 +381,10 @@ fn run_loop(
     }
     if sock.register(poll.registry(), SOCK, waker).is_err() {
         return;
+    }
+    // Read after `connect`, so the route has replaced the wildcard bind.
+    if let (Some(tap), Ok(local)) = (packet_tap.as_mut(), sock.local_addr()) {
+        tap.set_local(local);
     }
 
     // iax-3fca: real secret from the builder; empty string when unset.
@@ -624,7 +637,17 @@ fn run_loop(
         // (iax-b6f5).
         loop {
             match sock.recv_from(&mut buf) {
-                Ok((n, _src)) => {
+                Ok((n, src)) => {
+                    // No source check here: once connected, `LinkSocket`
+                    // only hands us datagrams from `peer`. Something queued
+                    // between `bind` and `connect` could still reach this
+                    // line, but that window closes before the first send.
+                    if let Some(tap) = packet_tap.as_mut() {
+                        if let Some(format) = fsm.negotiated_format() {
+                            tap.set_codec(format.wire_name());
+                        }
+                        tap.capture(src, &buf[..n]);
+                    }
                     let bytes = buf[..n].to_vec();
                     tracer.record(crate::trace::Direction::In, &bytes);
                     let Ok(frame) = parse_lenient(&bytes) else {

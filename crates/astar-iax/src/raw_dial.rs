@@ -181,6 +181,8 @@ fn spawn_raw(
         sample_rate: profile_rate,
         // Transport seam (iax-b6f5): plain OS UDP, byte-identical default.
         net: Arc::new(crate::transport::OsNetStack),
+        // Bench and test dials never reach a Manager, so nothing logs them.
+        packet_tap: None,
     })?;
 
     Ok(RawDial {

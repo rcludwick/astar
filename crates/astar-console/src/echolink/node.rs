@@ -53,6 +53,7 @@ use astar_echolink::PeerAddr;
 use astar_echolink::directory::StationEntry;
 use astar_echolink::qso::{CloseReason, QsoState};
 use astar_iax::{Manager, PeerMemberHandle};
+use astar_record::packet_tap::{PacketCallId, PacketSlot};
 
 use super::EchoLinkNetwork;
 use super::client::CallLink;
@@ -131,18 +132,21 @@ pub struct EchoLinkNodeLeg {
     location: String,
     net: EchoLinkNetwork,
     peers: Vec<NodePeer>,
+    packet_slot: PacketSlot,
 }
 
 impl EchoLinkNodeLeg {
     /// Start the link thread for `my_call`. No port is open until the first
     /// station is called.
     pub(crate) fn start(my_call: &str, location: &str, net: &EchoLinkNetwork) -> io::Result<Self> {
+        let packet_slot = PacketSlot::default();
         Ok(Self {
-            link: EchoLinkLink::start(my_call, location, net)?,
+            link: EchoLinkLink::start(my_call, location, net, packet_slot.clone())?,
             my_call: my_call.to_owned(),
             location: location.to_owned(),
             net: net.clone(),
             peers: Vec::new(),
+            packet_slot,
         })
     }
 
@@ -299,6 +303,19 @@ impl EchoLinkNodeLeg {
                 notice: lock(&p.shared.notice).clone(),
             })
             .collect()
+    }
+
+    /// The slot every station's packet tap offers to, one slot for the leg.
+    /// Install a tap to log them.
+    #[must_use]
+    pub fn packet_slot(&self) -> PacketSlot {
+        self.packet_slot.clone()
+    }
+
+    /// Each station's id in the packet log, in the order they were called.
+    #[must_use]
+    pub fn packet_calls(&self) -> Vec<PacketCallId> {
+        self.peers.iter().map(|p| p.shared.packet_call).collect()
     }
 
     /// The link's bound audio and control addresses, or `None` while no

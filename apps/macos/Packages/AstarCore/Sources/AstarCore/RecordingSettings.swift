@@ -19,6 +19,23 @@ public struct RecordingSettings: Equatable {
     public var saveCodecFrames: Bool
     /// Where the files go. Created on the first recording if missing.
     public var folder: URL
+    /// Show the capture button. Nothing is captured until it's pressed. Off
+    /// by default; kept on this Mac, never in an `.astarconfig`.
+    public var debugMode: Bool = false
+    /// Where the packet logs go.
+    public var packetLogFolder: URL = RecordingSettings.defaultPacketLogFolder
+    /// The most the packet logs may take up in total; the oldest go first.
+    public var packetLogMaxBytes: Int64 = 1_000_000_000
+
+    /// The sizes Settings offers, in bytes.
+    public static let packetLogLimits: [Int64] = [
+        250_000_000, 500_000_000, 1_000_000_000, 2_000_000_000, 5_000_000_000,
+    ]
+
+    /// `~/Music/astar Recordings/Packet Logs`.
+    public static var defaultPacketLogFolder: URL {
+        defaultFolder.appendingPathComponent("Packet Logs", isDirectory: true)
+    }
 
     /// `~/Music/astar Recordings`.
     public static var defaultFolder: URL {
@@ -51,6 +68,9 @@ public final class UserDefaultsRecordingSettingsStore: RecordingSettingsStore {
         static let always = "recording.always"
         static let frames = "recording.frames"
         static let folder = "recording.folder"
+        static let debugMode = "recording.packetLogDebugMode"
+        static let packetLogFolder = "recording.packetLogFolder"
+        static let packetLogMaxBytes = "recording.packetLogMaxBytes"
     }
 
     private let defaults: UserDefaults
@@ -72,6 +92,16 @@ public final class UserDefaultsRecordingSettingsStore: RecordingSettingsStore {
         if let path = defaults.string(forKey: Key.folder), !path.isEmpty {
             settings.folder = URL(fileURLWithPath: path, isDirectory: true)
         }
+        settings.debugMode = defaults.bool(forKey: Key.debugMode)
+        if let path = defaults.string(forKey: Key.packetLogFolder), !path.isEmpty {
+            settings.packetLogFolder = URL(fileURLWithPath: path, isDirectory: true)
+        }
+        // A size this build does not offer reads as the default.
+        if let stored = defaults.object(forKey: Key.packetLogMaxBytes) as? NSNumber,
+            RecordingSettings.packetLogLimits.contains(stored.int64Value)
+        {
+            settings.packetLogMaxBytes = stored.int64Value
+        }
         return settings
     }
 
@@ -80,5 +110,8 @@ public final class UserDefaultsRecordingSettingsStore: RecordingSettingsStore {
         defaults.set(settings.alwaysRecord, forKey: Key.always)
         defaults.set(settings.saveCodecFrames, forKey: Key.frames)
         defaults.set(settings.folder.path, forKey: Key.folder)
+        defaults.set(settings.debugMode, forKey: Key.debugMode)
+        defaults.set(settings.packetLogFolder.path, forKey: Key.packetLogFolder)
+        defaults.set(settings.packetLogMaxBytes, forKey: Key.packetLogMaxBytes)
     }
 }

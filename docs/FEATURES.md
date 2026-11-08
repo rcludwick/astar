@@ -31,6 +31,8 @@ its page on the public site. See CLAUDE.md, "Feature list", for the rules.
 |---|---|---|---|---|
 | Record a connection (button, Always record, three layouts, codec frames) | yes | paused | — | [macOS → Recording](site/macos/recording.md) |
 | Record every transmission on the node, admin page, tarball for unamblify | — | — | yes | [astar-server → Recording](site/server/recording.md) |
+| Packet capture for debugging: a Debug mode switch adds a capture button that writes received media packets, on every network, to a pcap for Wireshark with a jitter-buffer history beside it; nothing is captured until it's pressed; the app captures the current call until pressed again or the call ends, and the server captures all live calls until pressed again; size-limited | yes | paused | yes | [Packet logs](site/reference/packet-logs.md) |
+| Record scheduled M17 and D-Star nets, listen-only, as session archives: one whole-session FLAC, one FLAC per over, a log (JSON and CSV), a check-in list and `session.json` per night, joined as `<call> R` shortly before each net and left after it; retention by size and age; D-Star on a trusted dongle or the software vocoder. A separate daemon, `astar-netrec`, on Linux and macOS; it is not a client feature and not part of `astar-server` | — | — | — | [Net recorder](site/netrec.md) |
 
 ## Digital voice
 

@@ -62,6 +62,11 @@ pub use station::{
 // The recording surface: what `Station::record_start` takes and
 // `record_state` returns, so a consumer needs no direct `astar-record` dep.
 pub use astar_record::{Layout, RecordState};
+// The packet log's surface, for the same reason.
+pub use astar_record::packet_log::{
+    DEFAULT_PACKET_LOG_BYTES, DeleteRefused, MIN_PACKET_LOG_BYTES, PacketLogConfig, PacketLogEnd,
+    PacketLogRow, PacketLogState,
+};
 
 // Re-export the consumer surface behind one dependency.
 pub use astar_asl3::{Asl3Error, PortalCredentials};

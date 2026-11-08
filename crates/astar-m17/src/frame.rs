@@ -112,6 +112,13 @@ impl StreamPacket {
     }
 }
 
+/// True when `datagram` is an M17 stream packet by length and magic. The CRC
+/// is not checked: a corrupt packet is worth keeping.
+#[must_use]
+pub fn is_media(datagram: &[u8]) -> bool {
+    datagram.len() == PACKET_LEN && datagram.starts_with(MAGIC)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,5 +180,63 @@ mod tests {
         // Flipped payload bit invalidates the CRC.
         bytes[36] ^= 0x01;
         assert!(StreamPacket::parse(&bytes).is_none());
+    }
+
+    fn voice_wire() -> [u8; PACKET_LEN] {
+        StreamPacket {
+            stream_id: 0xBEEF,
+            lsf: Lsf {
+                dst: BROADCAST,
+                src: encode_callsign("N0CALL").unwrap(),
+                type_field: Lsf::TYPE_VOICE_3200_STREAM,
+                meta: [0; 14],
+            },
+            frame_number: 3,
+            payload: [0xAB; 16],
+        }
+        .to_bytes()
+    }
+
+    #[test]
+    fn is_media_accepts_voice() {
+        assert!(is_media(&voice_wire()));
+        // A corrupt packet is still worth keeping.
+        let mut bad = voice_wire();
+        bad[40] ^= 0xff;
+        assert!(is_media(&bad));
+    }
+
+    #[test]
+    fn is_media_refuses_every_non_media_packet() {
+        use crate::control::ControlPacket;
+        let cs = [1u8; 6];
+        for c in [
+            ControlPacket::Conn {
+                callsign: cs,
+                module: b'A',
+            },
+            ControlPacket::Ackn,
+            ControlPacket::Nack,
+            ControlPacket::Ping { callsign: cs },
+            ControlPacket::Pong { callsign: cs },
+            ControlPacket::Disc { callsign: Some(cs) },
+            ControlPacket::Disc { callsign: None },
+        ] {
+            assert!(!is_media(&c.to_bytes()), "{c:?}");
+        }
+        assert!(!is_media(&voice_wire()[..53]));
+        // Wrong magic at exactly the media length.
+        let mut conn = vec![0u8; PACKET_LEN];
+        conn[..4].copy_from_slice(b"CONN");
+        assert!(!is_media(&conn));
+    }
+
+    #[test]
+    fn is_media_never_panics_on_short_input() {
+        for len in 0..=64 {
+            for fill in [0x00u8, 0xff] {
+                let _ = is_media(&vec![fill; len]);
+            }
+        }
     }
 }

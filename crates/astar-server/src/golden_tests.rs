@@ -291,6 +291,9 @@ fn control_cases() -> Vec<Case> {
         ("recordings_page", get("/recordings", h), false, false),
         ("recordings_state_off", get("/recordings/state", h), false, false),
         ("recordings_tar_off", get("/recordings.tar", h), false, false),
+        ("packet_logs_state_off", get("/packet-logs/state", h), false, false),
+        ("packet_logs_file_off", get("/packet-logs/file?name=x.pcap", h), false, false),
+        ("packet_logs_capture_off", "POST /packet-logs/capture HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: 18\r\nConnection: close\r\n\r\n{\"capturing\":true}".into(), false, false),
         ("events", get("/events", h), false, true),
     ]
 }

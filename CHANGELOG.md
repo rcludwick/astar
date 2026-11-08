@@ -13,6 +13,55 @@ pre-release to the patch number, which sorts wrongly: `0.1.10beta` is newer
 than `0.1.9beta` and a string comparison says the opposite. Shipped versions
 are left as they were spelled.
 
+## 0.1.20-beta — 2026-11-07
+
+A way to capture exactly what a call receives, so a bad moment on the air
+can be studied afterwards, and a net recorder that joins a reflector on a
+schedule and keeps what it hears.
+
+### Added
+
+- **Packet capture, for chasing audio problems.** Some problems, like the
+  hollow echo heard on a long EchoLink call, only show up on the air and are
+  gone by the time you reconnect. Packet capture keeps the evidence. Turn on
+  **Debug mode** in **Settings → Recording → Advanced**, and a capture button
+  with a ladybug appears next to Record (⇧⌘R). Press it during a call and
+  astar writes every packet that call receives to a `.pcap` file, which
+  Wireshark opens, with a small `.jitter.jsonl` file beside it recording how
+  late each packet arrived. Press it again, or hang up, and it stops. The
+  packets are saved as they arrived, after any decryption, and they are
+  written on their own thread, so a capture can't disturb what you hear.
+  The folder keeps itself under a size limit you choose, deleting the oldest
+  files first. These files hold other people's voices, so keep them to
+  yourself. See
+  [Packet capture](https://rcludwick.github.io/astar/macos/packet-log/).
+
+- **The node can capture packets too.** astar-server has the same switch
+  (`[packet_log] debug_mode` in `node.toml`, or Debug mode on its Settings
+  page) and a capture button on its Recordings page, where the captures can
+  also be downloaded. See
+  [Packet capture on the node](https://rcludwick.github.io/astar/server/packet-log/).
+
+- **A net recorder.** `astar-netrec` is a small receive-only program for a
+  Linux machine or a Mac. You list your nets (which M17 or D-Star reflector,
+  which day, what time) and shortly before each one it joins, records the
+  whole evening plus one file per over, logs who talked when, and leaves. It
+  has no microphone or push-to-talk line, and three separate layers keep it
+  from ever keying. It is built from source for now. See
+  [Net recorder](https://rcludwick.github.io/astar/netrec/).
+
+### Changed
+
+- **The Account section of Settings is now called AllStarLink,** which is
+  what it holds: your callsign, node number and allstarlink.org password.
+
+### Fixed
+
+- **Settings → Recording → Advanced opens.** Clicking it turned the
+  triangle, but nothing appeared below it, because the whole group sat
+  inside one row of the Settings list and the row never grew. Each setting
+  under it is now a row of its own.
+
 ## 0.1.19-beta — 2026-11-04
 
 EchoLink that stays in time on a busy conference, a built-in D-Star vocoder,

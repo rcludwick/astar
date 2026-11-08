@@ -606,4 +606,482 @@ final class CallSessionRecordingTests: XCTestCase {
         XCTAssertEqual(store.settings, changed)
         XCTAssertEqual(store.saves, 1)
     }
+
+    // MARK: - Packet log
+
+    private func plSettings(
+        debugMode: Bool = false, folder: String = "/tmp/pl-a", max: Int64 = 1_000_000_000
+    ) -> RecordingSettings {
+        var s = RecordingSettings()
+        s.debugMode = debugMode
+        s.packetLogFolder = URL(fileURLWithPath: folder, isDirectory: true)
+        s.packetLogMaxBytes = max
+        return s
+    }
+
+    /// Answered on AllStar 2000 with Debug mode on and the engine reporting a
+    /// live capture, so a poll leaves the button alone.
+    private func answeredWithDebugMode(
+        folder: String = "/tmp/pl-a"
+    ) throws -> (CallSession, FakeStation, MemoryRecordingSettingsStore) {
+        let (session, fake, store) = try answeredAllStar2000(
+            settings: plSettings(debugMode: true, folder: folder))
+        fake.packetLogStateValue = plState()
+        return (session, fake, store)
+    }
+
+    private func plState(
+        capturing: Bool = true, usedBytes: UInt64 = 0, error: String? = nil
+    ) -> PacketLogState {
+        PacketLogState(
+            capturing: capturing, openCalls: 0, usedBytes: usedBytes, dropped: 0, error: error)
+    }
+
+    /// Hold recording work until the test runs it, one job at a time.
+    private final class HeldWork {
+        private var jobs: [() -> Void] = []
+        func hold(_ session: CallSession) { session.runRecordingWork = { self.jobs.append($0) } }
+        var count: Int { jobs.count }
+        func runNext() { jobs.removeFirst()() }
+    }
+
+    func testDebugModeAloneTouchesNothing() {
+        let (session, fake, _) = session()
+        session.recordingSettings = plSettings(debugMode: true)
+        XCTAssertTrue(fake.packetLogCalls.isEmpty)
+        XCTAssertFalse(session.packetCapturing)
+    }
+
+    func testLaunchWithDebugModeOnTouchesNothing() {
+        let fake = FakeStation()
+        let store = MemoryRecordingSettingsStore()
+        store.settings = plSettings(debugMode: true)
+        let session = CallSession(
+            station: fake, hasCredentials: true, audioStore: MemoryAudioStore(),
+            directoryStore: MemoryNodeDirectoryStore(), userDefaults: scratchDefaults(),
+            recordingStore: store, now: { [unowned self] in self.clock })
+        // Waits behind anything the launch queued on the real runner.
+        XCTAssertTrue(session.finishPacketLogBeforeQuit(timeout: 5))
+        XCTAssertTrue(fake.packetLogCalls.isEmpty)
+    }
+
+    func testPressStartsACaptureOnTheAnsweredCall() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        XCTAssertEqual(
+            fake.packetLogCalls,
+            [
+                FakeStation.PacketLogCall(
+                    enabled: true, directory: URL(fileURLWithPath: "/tmp/pl-a", isDirectory: true),
+                    maxBytes: 1_000_000_000, utcOffsetSeconds: offset)
+            ])
+        XCTAssertTrue(session.packetCapturing)
+    }
+
+    func testPressAnswersBeforeTheStartHasRun() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        HeldWork().hold(session)
+        session.togglePacketCapture()
+        XCTAssertTrue(session.packetCapturing, "the button answers the click")
+        XCTAssertTrue(fake.packetLogCalls.isEmpty)
+    }
+
+    func testPressDoesNothingWithDebugModeOff() throws {
+        let (session, fake, _) = try answeredAllStar2000()
+        session.togglePacketCapture()
+        XCTAssertTrue(fake.packetLogCalls.isEmpty)
+        XCTAssertFalse(session.packetCapturing)
+    }
+
+    func testPressDoesNothingWithNoAnsweredCall() {
+        let (session, fake, _) = session(settings: plSettings(debugMode: true))
+        session.togglePacketCapture()
+        XCTAssertTrue(fake.packetLogCalls.isEmpty)
+        XCTAssertFalse(session.packetCapturing)
+    }
+
+    func testPressDoesNothingWhileADialIsInFlight() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.testPostEngineCallHook = { session.togglePacketCapture() }
+        try session.connect(node: "2001", network: .allstar)
+        XCTAssertTrue(fake.packetLogCalls.isEmpty, "the answered call is the one being replaced")
+        XCTAssertFalse(session.packetCapturing)
+    }
+
+    func testSecondPressStops() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        session.togglePacketCapture()
+        XCTAssertEqual(fake.packetLogCalls.count, 2)
+        XCTAssertEqual(fake.packetLogCalls.last?.enabled, false)
+        XCTAssertNil(fake.packetLogCalls.last?.directory)
+        XCTAssertFalse(session.packetCapturing)
+        XCTAssertEqual(fake.packetLogCallEndedCount, 0)
+    }
+
+    func testStartRunsOffTheMainThread() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.runRecordingWork = CallSession.backgroundRecordingWork()
+        let done = expectation(description: "started")
+        fake.onPacketLogConfigure = { done.fulfill() }
+        session.togglePacketCapture()
+        wait(for: [done], timeout: 5)
+        XCTAssertEqual(fake.packetLogOnMainThread, [false])
+    }
+
+    func testCallEndingEndsTheCapture() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        fake.snapshotToReturn = snap(.hangup)
+        session.poll()
+        XCTAssertFalse(session.packetCapturing)
+        XCTAssertEqual(fake.packetLogCallEndedCount, 1)
+        XCTAssertEqual(fake.packetLogCalls.map(\.enabled), [true], "ended as a hangup, not stopped")
+    }
+
+    func testDisconnectEndsTheCapture() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        try session.disconnect()
+        XCTAssertFalse(session.packetCapturing)
+        XCTAssertEqual(fake.packetLogCallEndedCount, 1)
+    }
+
+    func testCallEndingAfterAQueuedStartLeavesNothingRunning() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        let held = HeldWork()
+        held.hold(session)
+        session.togglePacketCapture()
+        fake.snapshotToReturn = snap(.hangup)
+        session.poll()
+        XCTAssertFalse(session.packetCapturing)
+        XCTAssertEqual(held.count, 2)
+
+        held.runNext()
+        XCTAssertEqual(fake.packetLogCalls.map(\.enabled), [true], "the start ran first")
+        XCTAssertEqual(fake.packetLogCallEndedCount, 0)
+        held.runNext()
+        XCTAssertEqual(fake.packetLogCallEndedCount, 1, "and the end ran behind it")
+        XCTAssertFalse(session.packetCapturing)
+    }
+
+    func testANewCallDoesNotResumeCapture() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        fake.snapshotToReturn = snap(.hangup)
+        session.poll()
+        fake.snapshotToReturn = snap(.answered)
+        session.poll()
+        XCTAssertFalse(session.packetCapturing)
+        XCTAssertEqual(fake.packetLogCalls.count, 1, "no new start")
+    }
+
+    func testADialReplacingACallEndsTheCapture() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        try session.connect(node: "2001", network: .allstar)
+        XCTAssertFalse(session.packetCapturing)
+        XCTAssertEqual(fake.packetLogCallEndedCount, 1)
+    }
+
+    func testTurningDebugModeOffStopsACapture() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        session.recordingSettings.debugMode = false
+        XCTAssertEqual(fake.packetLogCalls.last?.enabled, false)
+        XCTAssertFalse(session.packetCapturing)
+        XCTAssertEqual(fake.packetLogCallEndedCount, 0)
+    }
+
+    func testChangingTheFolderLeavesACaptureRunning() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        session.recordingSettings = plSettings(debugMode: true, folder: "/tmp/pl-b")
+        session.recordingSettings = plSettings(
+            debugMode: true, folder: "/tmp/pl-b", max: 250_000_000)
+        XCTAssertEqual(fake.packetLogCalls.count, 1, "no new configure")
+        XCTAssertTrue(session.packetCapturing)
+
+        session.togglePacketCapture()
+        session.togglePacketCapture()
+        XCTAssertEqual(fake.packetLogCalls.last?.directory?.path, "/tmp/pl-b")
+        XCTAssertEqual(fake.packetLogCalls.last?.maxBytes, 250_000_000)
+    }
+
+    func testAFailedStartResetsTheButtonAndSetsTheError() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        fake.packetLogConfigureError = StationError(
+            code: -23, text: "recording error", detail: "folder is read-only")
+        session.togglePacketCapture()
+        XCTAssertFalse(session.packetCapturing)
+        XCTAssertEqual(session.packetLogError, "folder is read-only")
+
+        fake.packetLogConfigureError = nil
+        session.togglePacketCapture()
+        XCTAssertTrue(session.packetCapturing)
+        XCTAssertNil(session.packetLogError, "the next press clears it")
+    }
+
+    func testAStaleFailureDoesNotUndoALaterCapture() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        let held = HeldWork()
+        held.hold(session)
+        session.togglePacketCapture()  // refused, once it runs
+        session.togglePacketCapture()
+        session.togglePacketCapture()  // a fresh start, queued behind the stop
+
+        fake.packetLogConfigureError = StationError(
+            code: -23, text: "recording error", detail: "folder is read-only")
+        held.runNext()
+        fake.packetLogConfigureError = nil
+        held.runNext()
+        held.runNext()
+
+        XCTAssertTrue(session.packetCapturing)
+        XCTAssertNil(session.packetLogError)
+    }
+
+    func testAnErrorDuringACaptureStopsIt() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        fake.packetLogStateValue = plState(error: "disk full")
+        session.poll()
+        XCTAssertEqual(session.packetLogError, "disk full")
+        XCTAssertFalse(session.packetCapturing)
+        XCTAssertEqual(fake.packetLogCalls.last?.enabled, false)
+    }
+
+    func testAnEngineThatStoppedResetsTheButton() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        fake.packetLogStateValue = plState(capturing: false)
+        session.poll()
+        XCTAssertFalse(session.packetCapturing)
+        XCTAssertNil(session.packetLogError)
+        XCTAssertEqual(fake.packetLogCalls.count, 1, "nothing left to stop")
+    }
+
+    func testAStartStillQueuedIsNotMistakenForAnEngineThatStopped() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        HeldWork().hold(session)
+        fake.packetLogStateValue = plState(capturing: false)
+        session.togglePacketCapture()
+        session.poll()
+        XCTAssertTrue(session.packetCapturing)
+        XCTAssertEqual(fake.packetLogStateReads, 0)
+    }
+
+    func testStateIsNotReadWithNoCapture() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.poll()
+        clock.addTimeInterval(1)
+        session.poll()
+        XCTAssertEqual(fake.packetLogStateReads, 0)
+    }
+
+    func testACaptureReadsTheBytesUsedEveryHalfSecond() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        fake.packetLogStateValue = plState(usedBytes: 4096)
+        session.poll()
+        XCTAssertEqual(session.packetLogUsedBytes, 4096)
+        let reads = fake.packetLogStateReads
+        session.poll()
+        XCTAssertEqual(fake.packetLogStateReads, reads, "throttled to 0.5 s")
+        clock.addTimeInterval(1)
+        session.poll()
+        XCTAssertEqual(fake.packetLogStateReads, reads + 1)
+    }
+
+    func testAStopRefreshesTheBytesUsed() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        fake.packetLogStateValue = plState(capturing: false, usedBytes: 8192)
+        session.togglePacketCapture()
+        XCTAssertEqual(session.packetLogUsedBytes, 8192)
+    }
+
+    func testRebuiltStationEndsTheCapture() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        let rebuilt = FakeStation()
+        session.reconfigure(station: rebuilt, hasCredentials: true)
+        XCTAssertFalse(session.packetCapturing)
+        XCTAssertEqual(fake.packetLogCallEndedCount, 1, "the old engine is the one told")
+        XCTAssertEqual(rebuilt.packetLogCallEndedCount, 0)
+        XCTAssertTrue(rebuilt.packetLogCalls.isEmpty, "a rebuilt station captures nothing")
+    }
+
+    func testQuitStopsACaptureAndLeavesDebugModeSaved() throws {
+        let (session, fake, store) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+
+        XCTAssertTrue(session.finishPacketLogBeforeQuit(timeout: 1))
+
+        XCTAssertEqual(fake.packetLogCalls.last?.enabled, false)
+        XCTAssertNil(fake.packetLogCalls.last?.directory)
+        XCTAssertFalse(session.packetCapturing)
+        XCTAssertTrue(session.recordingSettings.debugMode, "the switch stays on")
+        XCTAssertTrue(store.settings.debugMode, "the next launch shows the button")
+    }
+
+    func testQuitWithNoCaptureTouchesNothing() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        XCTAssertTrue(session.finishPacketLogBeforeQuit(timeout: 1))
+        XCTAssertTrue(fake.packetLogCalls.isEmpty)
+        XCTAssertEqual(fake.packetLogCallEndedCount, 0)
+        XCTAssertEqual(fake.packetLogStateReads, 0)
+    }
+
+    func testQuitStopsACaptureOffTheMainThread() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        session.runRecordingWork = CallSession.backgroundRecordingWork()
+
+        XCTAssertTrue(session.finishPacketLogBeforeQuit(timeout: 5))
+        XCTAssertEqual(fake.packetLogCalls.last?.enabled, false, "returned only after the stop")
+        XCTAssertEqual(fake.packetLogOnMainThread.last, false)
+    }
+
+    func testQuitWaitsForAStopAlreadyQueued() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        var queued: [() -> Void] = []
+        session.runRecordingWork = { queued.append($0) }
+        session.togglePacketCapture()  // the operator's stop, not yet run
+
+        let background = CallSession.backgroundRecordingWork()
+        session.runRecordingWork = background
+        background {
+            Thread.sleep(forTimeInterval: 0.1)  // a writer slow to finish
+            for work in queued { work() }
+        }
+        XCTAssertTrue(session.finishPacketLogBeforeQuit(timeout: 5))
+        XCTAssertEqual(fake.packetLogCalls.last?.enabled, false, "the queued stop finished first")
+    }
+
+    func testQuitGivesUpOnAWedgedPacketLog() throws {
+        let (session, _, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        session.runRecordingWork = { _ in }  // a stop that never answers
+
+        let began = Date()
+        XCTAssertFalse(session.finishPacketLogBeforeQuit(timeout: 0.2))
+        XCTAssertLessThan(Date().timeIntervalSince(began), 2, "a wedged stop cannot hold quit")
+    }
+
+    // MARK: - Packet log errors
+
+    /// Answered, capturing, and the engine reporting `error`, with the poll
+    /// having stopped the capture over it.
+    private func answeredWithAPacketLogError(
+        _ error: String = "disk full"
+    ) throws -> (CallSession, FakeStation, MemoryRecordingSettingsStore) {
+        let (session, fake, store) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        fake.packetLogStateValue = plState(error: error)
+        session.poll()
+        XCTAssertEqual(session.packetLogError, error)
+        XCTAssertFalse(session.packetCapturing)
+        return (session, fake, store)
+    }
+
+    func testTurningDebugModeOffClearsThePacketLogError() throws {
+        let (session, _, _) = try answeredWithAPacketLogError()
+        session.recordingSettings.debugMode = false
+        XCTAssertNil(session.packetLogError)
+    }
+
+    func testTheNextAnsweredCallClearsThePacketLogError() throws {
+        let (session, fake, _) = try answeredWithAPacketLogError()
+        fake.snapshotToReturn = snap(.hangup)
+        session.poll()
+        XCTAssertEqual(session.packetLogError, "disk full", "the call ending leaves it")
+        fake.snapshotToReturn = snap(.answered)
+        session.poll()
+        XCTAssertNil(session.packetLogError)
+    }
+
+    func testAPollOnTheSameCallLeavesThePacketLogError() throws {
+        let (session, _, _) = try answeredWithAPacketLogError()
+        session.poll()
+        XCTAssertEqual(session.packetLogError, "disk full", "still answered: not a new call")
+    }
+
+    func testAnErrorAtAStopIsPublished() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        fake.packetLogStateValue = plState(error: "write failed")
+        session.togglePacketCapture()
+        XCTAssertFalse(session.packetCapturing)
+        XCTAssertEqual(session.packetLogError, "write failed")
+    }
+
+    func testAnErrorAtACallEndSurvivesTheCallEnding() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        fake.packetLogStateValue = plState(error: "write failed")
+        fake.snapshotToReturn = snap(.hangup)
+        session.poll()
+        XCTAssertEqual(fake.packetLogCallEndedCount, 1)
+        XCTAssertEqual(session.packetLogError, "write failed")
+    }
+
+    func testAStopStillQueuedDoesNotBringBackAClearedError() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        let held = HeldWork()
+        held.hold(session)
+        fake.packetLogStateValue = plState(error: "write failed")
+        session.recordingSettings.debugMode = false
+        held.runNext()
+        XCTAssertEqual(fake.packetLogCalls.last?.enabled, false)
+        XCTAssertNil(session.packetLogError, "Debug mode went off after the stop was asked for")
+    }
+
+    func testAFailedDialLeavesTheCaptureOnTheCallThatSurvives() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        fake.connectWTError = NSError(domain: "test", code: -5)
+        XCTAssertThrowsError(try session.connect(node: "2001", network: .allstar))
+        XCTAssertTrue(session.packetCapturing)
+        XCTAssertEqual(fake.packetLogCallEndedCount, 0)
+    }
+
+    func testAFailedDialThatTookTheCallDownEndsTheCaptureAtThePoll() throws {
+        let (session, fake, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        fake.connectWTError = NSError(domain: "test", code: -5)
+        XCTAssertThrowsError(try session.connect(node: "2001", network: .allstar))
+        fake.snapshotToReturn = snap(.hangup)
+        session.poll()
+        XCTAssertFalse(session.packetCapturing)
+        XCTAssertEqual(fake.packetLogCallEndedCount, 1)
+    }
+
+    func testThePacketCaptureButtonIsOffWhileADialIsInFlight() throws {
+        let (session, _, _) = try answeredWithDebugMode()
+        XCTAssertTrue(session.packetCapturePressable)
+        var duringTheDial: Bool?
+        session.testPostEngineCallHook = { duringTheDial = session.packetCapturePressable }
+        try session.connect(node: "2001", network: .allstar)
+        XCTAssertEqual(duringTheDial, false, "the press would be ignored")
+    }
+
+    func testAStopIsStillPressableDuringADial() throws {
+        let (session, _, _) = try answeredWithDebugMode()
+        session.togglePacketCapture()
+        var duringTheDial: Bool?
+        session.testPostEngineCallHook = { duringTheDial = session.packetCapturePressable }
+        try session.connect(node: "2001", network: .allstar)
+        XCTAssertEqual(duringTheDial, true, "a press stops the capture")
+    }
+
+    func testAlwaysRecordIsUnaffected() throws {
+        var settings = plSettings(debugMode: true)
+        settings.alwaysRecord = true
+        let (_, fake, _) = try answeredAllStar2000(settings: settings)
+        XCTAssertEqual(fake.recordStartCalls.count, 1)
+        XCTAssertEqual(fake.recordStartCalls.first?.directory, settings.folder.path)
+    }
 }

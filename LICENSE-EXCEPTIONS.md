@@ -72,6 +72,12 @@ astar-server links no Codec 2. Older container images installed Debian's
 `libcodec2` runtime package and loaded it with `dlopen`; the image built from
 the static release no longer does.
 
+**astar-netrec's release build** (`cargo build --release -p astar-netrec
+--features release`, see `docs/RELEASING.md`) is built with `codec2-static` in
+the same way, and everything below applies to it too. A default `cargo build`
+of astar-netrec links no Codec 2: it looks for the system `libcodec2` at
+runtime.
+
 ### You are free to change Codec 2 and rebuild astar
 
 Stated plainly, because it is the point of everything in this section and not
@@ -478,13 +484,16 @@ uses is the operator's choice in config (Settings → Vocoders in the app,
 
 **Built into every shipped build** (Rob, 2026-11-01). It is reached through
 the `dstar-soft-ambe` Cargo feature (of `astar-codec`, re-exported by
-`astar-console`, `astar-station`, `astar-sys` and `astar-server`), and:
+`astar-console`, `astar-station`, `astar-sys`, `astar-server` and
+`astar-netrec`), and:
 
 * **the macOS app** links it statically: `bindings/swift/build-xcframework.sh`
   turns the feature on unless `ASTAR_DSTAR_SOFT_AMBE=0`, so the signed DMG
   carries it;
 * **astar-server's single static release** (`just server-release`, the
-  `release` feature) links it statically too.
+  `release` feature) links it statically too;
+* **astar-netrec's release build** (`cargo build --release -p astar-netrec
+  --features release`) links it statically as well.
 
 A plain `cargo build` of any astar crate does not: like `codec2-static`, the
 feature is named on purpose by the builds that ship, never a cargo default
@@ -501,8 +510,8 @@ the result.** Patch it, tune it, replace it, or remove it, and rebuild.
 
 ### Static linking and your right to relink
 
-Where a released astar binary links this vocoder statically — the macOS app and
-astar-server's static release — LGPL-3.0 section 4 requires that a recipient
+Where a released astar binary links this vocoder statically — the macOS app,
+astar-server's static release and astar-netrec's release build — LGPL-3.0 section 4 requires that a recipient
 can modify the library and relink it into the application. astar satisfies this
 the same way it does for Codec 2 and LAME, by publishing its **complete,
 buildable source**:
@@ -514,8 +523,10 @@ buildable source**:
   included, is `git checkout v<version>`.
 * To relink: edit `vendor/ham-digital-modes-ambe` (or point
   `ham-digital-modes-ambe` in the root `Cargo.toml` at your own copy), then
-  rebuild with `just xcframework && just dmg` for the app or
-  `just server-release` for the server. Build instructions:
+  rebuild with `just xcframework && just dmg` for the app,
+  `just server-release` for the server, or
+  `cargo build --release -p astar-netrec --features release` for the recorder.
+  Build instructions:
   <https://rcludwick.github.io/astar>.
 
 **Where the source is.** The Corresponding Source of every release that

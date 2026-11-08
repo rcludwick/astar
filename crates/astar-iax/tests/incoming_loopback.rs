@@ -196,6 +196,73 @@ fn auto_answer_new_yields_accept_answer_and_unified_call() {
     }
 }
 
+/// A snapshot taken after the far end hung up still describes the call that
+/// ran, which a packet capture's `Start` reads for its codec.
+#[test]
+fn a_peer_hangup_leaves_the_codec_in_the_snapshot() {
+    let policy = IncomingCallPolicy {
+        decision: IncomingDecisionPolicy::AutoAccept,
+        auth: IncomingAuthPolicy::Off,
+        ..IncomingCallPolicy::default()
+    };
+    let (listener, events) = IncomingCallListener::builder()
+        .bind("127.0.0.1:0".parse().unwrap())
+        .policy(policy)
+        .start()
+        .expect("listener starts");
+    let listener_addr = listener.local_addr();
+
+    let (peer, _peer_addr) = peer_socket();
+    peer.send_to(&new_datagram(valid_new_ies(), PEER_CALL), listener_addr)
+        .unwrap();
+    let mut our_call = 0;
+    let mut next_in = 0;
+    recv_until(&peer, listener_addr, PEER_CALL, |f| {
+        our_call = f.source_call;
+        next_in = f.oseqno.wrapping_add(1);
+        f.frame_type == FrameType::Control
+            && f.subclass == Subclass::Control(astar_iax_core::subclass::ControlSubclass::Answer)
+    })
+    .expect("ANSWER arrives");
+
+    let ev = events
+        .recv_timeout(Duration::from_secs(2))
+        .expect("an IncomingCallEvent arrives");
+    let IncomingCallEvent::Answered { call, .. } = ev else {
+        panic!("expected Answered");
+    };
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while call.snapshot().negotiated_format.is_none() {
+        assert!(Instant::now() < deadline, "the codec was never published");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let hangup = enc(&Frame::Full(Box::new(FullFrame {
+        source_call: PEER_CALL,
+        dest_call: our_call,
+        retransmission: false,
+        timestamp: 100,
+        oseqno: 1,
+        iseqno: next_in,
+        frame_type: FrameType::Iax,
+        subclass: Subclass::Iax(IaxCommand::Hangup),
+        ies: Ies::empty(),
+        payload: &[],
+    })));
+    peer.send_to(&hangup, listener_addr).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !matches!(call.snapshot().state, astar_iax::CallSnapshotState::Hungup) {
+        assert!(Instant::now() < deadline, "the HANGUP never ended the leg");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        call.snapshot().negotiated_format,
+        Some(VoiceFormat::G711U),
+        "the call's codec outlives the call"
+    );
+}
+
 #[test]
 fn app_decide_surfaces_incoming_then_answer_yields_unified_call() {
     let policy = IncomingCallPolicy {

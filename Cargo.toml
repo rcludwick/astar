@@ -31,6 +31,8 @@ members = [
     "crates/astar-nxdn",
     "crates/astar-discord",
     "crates/astar-nodebench",
+    "crates/astar-netarchive",
+    "crates/astar-netrec",
     "apps/gui",
 ]
 exclude = [
@@ -52,7 +54,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.1.19-beta"
+version = "0.1.20-beta"
 edition = "2024"
 # Real floor, verified against the committed Cargo.lock: apps/gui's graph pulls
 # font-types 1.89 (and iced/wgpu/image 1.88, zbus 1.87). The engine crates alone
@@ -119,6 +121,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zeroize = { version = "1", features = ["derive"] }
 boringtun = "0.7"
+jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+toml = "1.1"
+clap = { version = "4", features = ["derive"] }
 base64 = "0.23"
 
 [profile.release]

@@ -3,6 +3,7 @@
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 
 import AstarStation
+import Foundation
 
 /// The slice of the AstarStation `Station` that `CallSession` drives. Abstracted
 /// to a protocol so the session can be tested with a fake (no audio/network).
@@ -135,6 +136,21 @@ public protocol StationDriving {
     /// The recorder's state. Crosses the ABI with JSON, so the session reads
     /// it at most twice a second.
     func recordState() throws -> RecordState
+
+    // MARK: Packet log
+
+    /// Turn the packet log on or off, or point it at another folder. Mirrors
+    /// `Station.packetLogConfigure(enabled:directory:maxBytes:utcOffsetSeconds:)`
+    /// 1:1. Joins the writer thread; call it off the main thread.
+    func packetLogConfigure(
+        enabled: Bool, directory: URL?, maxBytes: Int64, utcOffsetSeconds: Int32
+    ) throws
+    /// Tell the engine the captured call ended, so the log stops. Mirrors
+    /// `Station.packetLogCallEnded()`. Joins the writer thread; call it off
+    /// the main thread.
+    func packetLogCallEnded() throws
+    /// The packet log's state. Cheap, and never waits on a change in progress.
+    func packetLogState() throws -> PacketLogState
 
     // MARK: System Fusion
 

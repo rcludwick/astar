@@ -31,7 +31,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use astar_iax_core::VoiceFormat;
-use astar_iax_core::frame::{Frame, OwnedFrame, OwnedFullFrame, Subclass, encode, parse_lenient};
+use astar_iax_core::frame::{
+    Frame, OwnedFrame, OwnedFullFrame, Subclass, encode, is_media, parse_lenient,
+};
 use astar_iax_core::ie::Ies;
 use astar_iax_core::session::CodecPolicy;
 use astar_iax_core::session::auth::{AuthMethods, Credentials, Secret};
@@ -41,6 +43,7 @@ use astar_iax_core::session::fsm::{
 };
 use astar_iax_core::session::reliability::{Reliability, ReliabilityConfig, RxOutcome};
 use astar_iax_core::subclass::{FrameType, IaxCommand};
+use astar_record::packet_tap::{CallMeta, CallPacketTap, PacketCallId, PacketNetwork, PacketSlot};
 use mio::{Events, Poll, Token, Waker};
 use rand::TryRng;
 
@@ -128,6 +131,8 @@ pub struct IncomingCallPolicy {
     pub credential_resolver: Option<CredentialResolver>,
     /// Codec negotiation policy for accepted calls (iax-31f7).
     pub codec_policy: CodecPolicy,
+    /// The packet log's slot, shared with every leg. Empty logs nothing.
+    pub packet_slot: PacketSlot,
 }
 
 impl std::fmt::Debug for IncomingCallPolicy {
@@ -156,6 +161,7 @@ impl std::fmt::Debug for IncomingCallPolicy {
                 ),
             )
             .field("codec_policy", &self.codec_policy)
+            .field("packet_slot", &format_args!("<slot>"))
             .finish()
     }
 }
@@ -176,6 +182,7 @@ impl Default for IncomingCallPolicy {
             credentials: HashMap::new(),
             credential_resolver: None,
             codec_policy: CodecPolicy::default(),
+            packet_slot: PacketSlot::default(),
         }
     }
 }
@@ -421,6 +428,7 @@ fn leg_run_loop(p: LegSpawn) {
         let actions = fsm.handle(Event::App(AppCommand::DriveInbound {
             now: Instant::now(),
         }));
+        publish_format(&format_bits, &fsm);
         if ctx.dispatch(
             &mut edge,
             actions,
@@ -507,6 +515,7 @@ fn leg_run_loop(p: LegSpawn) {
                         break;
                     }
                     let actions = fsm.handle(Event::Frame { frame, now });
+                    publish_format(&format_bits, &fsm);
                     if ctx.dispatch(
                         &mut edge,
                         actions,
@@ -854,16 +863,25 @@ fn leg_run_loop(p: LegSpawn) {
         });
         rtt_micros.store(micros, Ordering::Relaxed);
         // iax-31f7: publish the negotiated codec once per event-handling pass
-        // for Call::snapshot. `0` = not yet negotiated.
-        format_bits.store(
-            fsm.negotiated_format().map_or(0, VoiceFormat::as_u32),
-            Ordering::Relaxed,
-        );
+        // for Call::snapshot.
+        publish_format(&format_bits, &fsm);
         let _ = start;
     }
 
     state.store(STATE_HUNGUP, Ordering::Relaxed);
     let _ = done_tx.send(our_call);
+}
+
+/// Publish the leg's negotiated codec. `0` = not yet negotiated. Once set it
+/// stays, because the FSM forgets the codec at a HANGUP and a snapshot of the
+/// ended call still describes the call that ran. The handshake
+/// steps call this before sending what `fsm` just decided: the peer's voice can
+/// follow its ACCEPT with nothing else to wake the leg, and the packet tap on
+/// the demux thread reads this cell for that first packet.
+fn publish_format(format_bits: &AtomicU32, fsm: &Fsm) {
+    if let Some(format) = fsm.negotiated_format() {
+        format_bits.store(format.as_u32(), Ordering::Relaxed);
+    }
 }
 
 /// Per-leg dispatch context (groups the args `dispatch` needs, mirroring
@@ -1142,6 +1160,8 @@ struct LegHandle {
     /// Live remote-PTT-key cell (iax-feab parrot mode), mirroring `state`.
     /// Carried into `Call::new_inbound`.
     remote_keyed: Arc<AtomicBool>,
+    /// The packet log's id for this leg, whose tap lives in its [`LegEntry`].
+    packet_call: PacketCallId,
 }
 
 impl IncomingCall {
@@ -1166,6 +1186,7 @@ impl IncomingCall {
             tx_sender,
             sample_rate,
             remote_keyed,
+            packet_call,
         } = handle;
         let call = Call::new_inbound(
             cmd_tx,
@@ -1182,6 +1203,7 @@ impl IncomingCall {
             format_bits,
             sample_rate,
             remote_keyed,
+            Some(packet_call),
         );
         (call, event_rx)
     }
@@ -1437,6 +1459,21 @@ struct LegEntry {
     peer_call: CallNo,
     frame_tx: mpsc::Sender<LegDatagram>,
     waker: Arc<Waker>,
+    /// Sees what the source pins let through, before the leg's own gates.
+    packet_tap: CallPacketTap,
+    /// The leg's negotiated-codec cell, for the tap to name.
+    format_bits: Arc<AtomicU32>,
+}
+
+impl LegEntry {
+    /// Log a datagram received at `at`, under the codec the leg has agreed.
+    fn capture_at(&mut self, at: Instant, src: SocketAddr, bytes: &[u8]) {
+        let bits = self.format_bits.load(Ordering::Relaxed);
+        if let Some(format) = VoiceFormat::from_u32(bits) {
+            self.packet_tap.set_codec(format.wire_name());
+        }
+        self.packet_tap.capture_at(at, src, bytes);
+    }
 }
 
 /// The Listener's blocking demux loop. Owns the shared socket; reads datagrams,
@@ -1492,6 +1529,7 @@ fn listener_run_loop(
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(_) => return,
             };
+            let at = Instant::now();
             let bytes = buf[..n].to_vec();
             demux_one(
                 &sock,
@@ -1503,6 +1541,7 @@ fn listener_run_loop(
                 &event_tx,
                 &bytes,
                 src,
+                at,
             );
         }
     }
@@ -1539,6 +1578,7 @@ fn demux_one(
     event_tx: &mpsc::Sender<IncomingCallEvent>,
     bytes: &[u8],
     src: SocketAddr,
+    at: Instant,
 ) {
     let Some(dest_call) = peek_dest_call(bytes) else {
         // Mini frame (no dest_call in the header) or truncated. A mini voice
@@ -1553,8 +1593,9 @@ fn demux_one(
         // the old call's tail) cannot receive each other's audio.
         if let Some(entry) = peek_mini_source_call(bytes)
             .and_then(|sc| by_peer.get(&(src, sc)))
-            .and_then(|our| by_local_call.get(our))
+            .and_then(|our| by_local_call.get_mut(our))
         {
+            entry.capture_at(at, src, bytes);
             let _ = entry.frame_tx.send((bytes.to_vec(), src));
             let _ = entry.waker.wake();
         }
@@ -1564,7 +1605,7 @@ fn demux_one(
     // In-call datagram (dest_call != 0): forward to the pinned leg, or INVAL.
     if dest_call != 0 {
         if let Some(our) = CallNo::new(dest_call)
-            && let Some(entry) = by_local_call.get(&our)
+            && let Some(entry) = by_local_call.get_mut(&our)
         {
             // Source-addr pin (R-10.0-07): drop datagrams from a different src.
             if entry.peer_addr != src {
@@ -1578,6 +1619,7 @@ fn demux_one(
             // tore the new call down. Answer it as chan_iax2 answers a frame
             // for a call it does not know: INVAL, below.
             if peek_source_call(bytes) == Some(entry.peer_call.value()) {
+                entry.capture_at(at, src, bytes);
                 let _ = entry.frame_tx.send((bytes.to_vec(), src));
                 let _ = entry.waker.wake();
                 return;
@@ -1854,6 +1896,25 @@ fn spawn_leg(
         return Err(());
     };
 
+    let peer_label = offer
+        .calling_number
+        .as_deref()
+        .filter(|number| !number.is_empty())
+        .map_or_else(|| peer_addr.to_string(), str::to_string);
+    let packet_tap = CallPacketTap::new(
+        policy.packet_slot.clone(),
+        is_media,
+        CallMeta {
+            network: PacketNetwork::AllStar,
+            codec: None,
+            label: format!("AllStar inbound {peer_label}"),
+            local: sock
+                .local_addr()
+                .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0))),
+            peer: peer_addr,
+        },
+    );
+
     let handle = LegHandle {
         cmd_tx,
         waker: Arc::clone(&waker),
@@ -1862,11 +1923,12 @@ fn spawn_leg(
         ptt: crate::audio_bridge::PttGate::new(),
         rtt_micros,
         state,
-        format_bits,
+        format_bits: Arc::clone(&format_bits),
         rx_source: spk_rx,
         tx_sender: mic_tx,
         sample_rate: policy.codec_policy.max_sample_rate(),
         remote_keyed,
+        packet_call: packet_tap.id(),
     };
 
     if auto_answer {
@@ -1894,6 +1956,8 @@ fn spawn_leg(
         peer_call,
         frame_tx,
         waker,
+        packet_tap,
+        format_bits,
     })
 }
 

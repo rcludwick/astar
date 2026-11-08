@@ -121,6 +121,17 @@ public struct NullStation: StationDriving {
     public func recordStop() throws {}
     /// Idle, as a real station is before anything has recorded.
     public func recordState() throws -> RecordState { try RecordState.make() }
+    /// No engine, so nothing to log.
+    public func packetLogConfigure(
+        enabled: Bool, directory: URL?, maxBytes: Int64, utcOffsetSeconds: Int32
+    ) throws {
+        if enabled { throw NullStationError.noEngine }
+    }
+    public func packetLogCallEnded() throws {}
+    /// Off, as a real station is before anything has logged.
+    public func packetLogState() throws -> PacketLogState {
+        PacketLogState(capturing: false, openCalls: 0, usedBytes: 0, dropped: 0, error: nil)
+    }
     public func connectYSF(host: String, callsign: String, options: String?) throws {
         throw NullStationError.noEngine
     }

@@ -530,6 +530,146 @@ public final class CallSession: ObservableObject {
     @Published public var recordingSettings: RecordingSettings {
         didSet {
             if recordingSettings != oldValue { recordingStore.save(recordingSettings) }
+            // A folder or limit change waits for the next press.
+            if oldValue.debugMode, !recordingSettings.debugMode {
+                stopPacketCapture(callEnded: false)
+                clearPacketLogError()
+            }
+        }
+    }
+    /// A packet capture is running (or a start has been asked for and not
+    /// yet refused). Main thread only.
+    @Published public private(set) var packetCapturing = false
+    /// Why the capture could not start, or stopped by itself (folder
+    /// unusable, disk full, size limit). It outlasts the call it happened on,
+    /// and clears on the next start, the next answered call, or Debug mode
+    /// going off.
+    @Published public private(set) var packetLogError: String?
+    /// Bytes the packet logs take up, as the engine last reported it.
+    @Published public private(set) var packetLogUsedBytes: Int64 = 0
+    private var lastPacketLogStateRead: Date?
+    /// Counts starts and cleared errors, so a late answer from a refused
+    /// start or a stop can tell it no longer speaks for what is on screen.
+    private var packetCaptureToken = 0
+    /// Starts dispatched but not yet finished. The engine's state still
+    /// describes the moment before them, so it is not read meanwhile.
+    private var packetCaptureWorkInFlight = 0
+
+    /// Whether a press of the capture button would do anything: stop the
+    /// capture running, or start one because Debug mode is on and a call is
+    /// answered and staying. A dial in flight is about to replace that call.
+    public var packetCapturePressable: Bool {
+        packetCapturing
+            || (recordingSettings.debugMode && status == .answered && dialNetworkInFlight == nil)
+    }
+
+    /// Capture the answered call's packets, or stop the capture running.
+    /// Does nothing when `packetCapturePressable` is false. Main thread (a UI
+    /// action).
+    public func togglePacketCapture() {
+        if packetCapturing {
+            stopPacketCapture(callEnded: false)
+        } else if packetCapturePressable {
+            startPacketCapture()
+        }
+    }
+
+    /// Ask the engine to start capturing, off the main thread: this starts a
+    /// writer thread and can wait on one stopping. `packetCapturing` turns on
+    /// at once, so the button answers the click; a refusal turns it back off
+    /// with the engine's reason.
+    private func startPacketCapture() {
+        packetCapturing = true
+        clearPacketLogError()
+        lastPacketLogStateRead = nil
+        let token = packetCaptureToken
+        let settings = recordingSettings
+        let offset = Int32(clamping: TimeZone.current.secondsFromGMT())
+        let station = self.station
+        packetCaptureWorkInFlight += 1
+        runRecordingWork { [weak self] in
+            var failure: String?
+            do {
+                try station.packetLogConfigure(
+                    enabled: true, directory: settings.packetLogFolder,
+                    maxBytes: settings.packetLogMaxBytes, utcOffsetSeconds: offset)
+            } catch let error as StationError {
+                failure = error.message
+            } catch {
+                failure = String(describing: error)
+            }
+            Self.onMain {
+                guard let self else { return }
+                self.packetCaptureWorkInFlight -= 1
+                // A refusal speaks only for the latest start: a stop and a
+                // fresh start queued behind it must not be undone by it.
+                if let failure, token == self.packetCaptureToken {
+                    if self.packetCapturing { self.packetCapturing = false }
+                    self.packetLogError = failure
+                }
+            }
+        }
+    }
+
+    /// Stop the capture, if one runs, off the main thread: this joins the
+    /// writer thread. `callEnded` says why, which is what each file's end
+    /// line records. The bytes used and any error are read behind the stop,
+    /// because the poll reads nothing once the capture is over.
+    private func stopPacketCapture(callEnded: Bool) {
+        guard packetCapturing else { return }
+        packetCapturing = false
+        let token = packetCaptureToken
+        let settings = recordingSettings
+        let station = self.station
+        runRecordingWork { [weak self] in
+            if callEnded {
+                try? station.packetLogCallEnded()
+            } else {
+                try? station.packetLogConfigure(
+                    enabled: false, directory: nil, maxBytes: settings.packetLogMaxBytes,
+                    utcOffsetSeconds: 0)
+            }
+            guard let state = try? station.packetLogState() else { return }
+            let used = Int64(clamping: state.usedBytes)
+            let error = state.error
+            Self.onMain {
+                guard let self else { return }
+                if self.packetLogUsedBytes != used { self.packetLogUsedBytes = used }
+                if let error, token == self.packetCaptureToken, self.packetLogError != error {
+                    self.packetLogError = error
+                }
+            }
+        }
+    }
+
+    /// Forget the capture's error, and any answer still on its way with one.
+    private func clearPacketLogError() {
+        packetCaptureToken &+= 1
+        if packetLogError != nil { packetLogError = nil }
+    }
+
+    /// The call is over, or its station is going, so its capture ends too.
+    /// The next call starts with the button off.
+    func endPacketCaptureForCall() {
+        stopPacketCapture(callEnded: true)
+    }
+
+    /// Read the engine's packet log at most every 0.5 s, only during a
+    /// capture. A capture the engine stopped by itself ends here, with its
+    /// reason if it gave one.
+    private func pollPacketLogState() {
+        guard packetCapturing, packetCaptureWorkInFlight == 0 else { return }
+        let t = now()
+        if let last = lastPacketLogStateRead, t.timeIntervalSince(last) < 0.5 { return }
+        lastPacketLogStateRead = t
+        guard let state = try? station.packetLogState() else { return }
+        let used = Int64(clamping: state.usedBytes)
+        if packetLogUsedBytes != used { packetLogUsedBytes = used }
+        if let error = state.error {
+            if packetLogError != error { packetLogError = error }
+            stopPacketCapture(callEnded: false)
+        } else if !state.capturing {
+            packetCapturing = false
         }
     }
     private let recordingStore: RecordingSettingsStore
@@ -1183,6 +1323,8 @@ public final class CallSession: ObservableObject {
     public func reconfigure(station: StationDriving, hasCredentials: Bool) {
         let wasRunning = timer != nil
         stop()
+        // A capture lives in the engine being replaced, so tell that one.
+        endPacketCaptureForCall()
         self.station = station
         self.hasCredentials = hasCredentials
         // A rebuilt station is a new engine: give it the same trust list, so a
@@ -2675,6 +2817,9 @@ public final class CallSession: ObservableObject {
         dialed: (network: Network, node: String)?, generation: Int,
         atStart: (network: Network?, epoch: Int)
     ) {
+        // A failed dial may have left the call up. If it took the call down,
+        // the poll's answered edge ends the capture.
+        if dialed != nil { endPacketCaptureForCall() }
         resumeRecordingOnAnswer = nil
         guard let previous = atStart.network,
             recordingSnapshot.epoch == atStart.epoch
@@ -2698,10 +2843,12 @@ public final class CallSession: ObservableObject {
             // connection.
             stopRecording(chosen: false)
             endRecordingErrorForCall()
+            endPacketCaptureForCall()
         } else if previous == .dialing, current == .hangup || current == .idle {
             // A dial that never answered: nothing to resume into.
             resumeRecordingOnAnswer = nil
         } else if current == .answered {
+            if previous != .answered { clearPacketLogError() }
             // The resume is used up either way, but only for the call its
             // dial reached: a newer attempt since (or a disconnect, which
             // also bumps) leaves it stale, and the answer then gets the same
@@ -2715,6 +2862,7 @@ public final class CallSession: ObservableObject {
             }
         }
         pollRecordState()
+        pollPacketLogState()
     }
 
     /// Read the engine's recorder at most every 0.5 s while recording, and
@@ -2811,6 +2959,7 @@ public final class CallSession: ObservableObject {
         resumeRecordingOnAnswer = nil
         stopRecording(chosen: true)
         endRecordingErrorForCall()
+        endPacketCaptureForCall()
     }
 
     private func stopRecording(chosen: Bool) {
@@ -2847,6 +2996,25 @@ public final class CallSession: ObservableObject {
             try? station.recordStop()
             done.signal()
         }
+        return done.wait(timeout: .now() + timeout) == .success
+    }
+
+    /// Stop any capture as the app quits, so every open file gets its end
+    /// line: the process exits without dropping the station, and a file left
+    /// with no end line reads as a crash. Call it after the calls are hung
+    /// up, so those files end as hangups.
+    ///
+    /// The stop runs on the recording queue, behind any work already sent
+    /// there, and the caller waits at most `timeout`. Debug mode stays as it
+    /// is. With no capture there is nothing to stop, but a stop still queued
+    /// is waited for all the same.
+    ///
+    /// Returns `false` only when the wait ran out.
+    @discardableResult
+    public func finishPacketLogBeforeQuit(timeout: TimeInterval = 2) -> Bool {
+        stopPacketCapture(callEnded: false)
+        let done = DispatchSemaphore(value: 0)
+        runRecordingWork { done.signal() }
         return done.wait(timeout: .now() + timeout) == .success
     }
 

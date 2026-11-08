@@ -657,8 +657,8 @@ presence only.
 
 **Live and restart.** Every field carries a tag. `live` — bridge mode,
 mix-minus, local radio, parrot tuning, the audio devices, M17 on or off and
-this node's own M17 reflectors, and every credential except the portal
-password — takes effect when you save. The portal password is read at
+this node's own M17 reflectors, the packet log, and every credential except
+the portal password — takes effect when you save. The portal password is read at
 startup; under `source = "file"` a saved one is used from the next restart,
 and **Test the running credentials** then checks it. Under the other
 sources, save it after **Move credentials to credentials.toml**. `restart` —
@@ -737,3 +737,12 @@ thousands (`"2 GB"` is 2,000,000,000 bytes), `KiB`, `MiB` and `GiB` count in
 **Recordings**, and every one of them takes effect at the next restart.
 What a recording contains and how to download one is on
 [Recording](recording.md).
+
+## `[packet_log]` — a debug log of received packets
+
+A debugging tool. With `debug_mode = true`, the Recordings page gets a
+**Capture packets** button that saves each live call's received voice packets
+to a pcap file for Wireshark, until you press it again. Nothing is captured
+until you press it. A change takes effect when you save, with no restart, and
+a save stops a capture in progress. The keys and the admin downloads are on
+[Packet log](packet-log.md).

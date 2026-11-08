@@ -350,6 +350,16 @@ source = "file"    # "file"    → credentials.toml beside this file, mode 0600,
 # max_bytes = "2 GB"                 # at least 100 MB; KB/MB/GB or KiB/MiB/GiB
 # max_age_days = 30                  # 1–3650
 # frames = true                      # also keep M17 codec frames for unamblify
+#
+# ─── [packet_log] — OPTIONAL: debug log of received media packets ────────────
+# One pcap per call for Wireshark, plus jitter-buffer history. Holds other
+# people's voices. With debug_mode on, a capture is started from the
+# Recordings page and downloads there (/admin/recordings). See
+# docs/site/server/packet-log.md.
+# [packet_log]
+# debug_mode = true                    # default false; shows a capture button
+# dir = "/var/lib/astar/packet-logs"   # absolute path
+# max_bytes = "1 GB"                   # at least 100 MB; oldest logs go first
 
 # ─── ACTIVE announcement config (iax-c4ea on-join greeting via piper/cori) ────
 [announce]

@@ -200,15 +200,16 @@ cbindgen:
     ./scripts/check-cbindgen.sh
     ./scripts/check-cbindgen-serial.sh
 
-# The nine merge invariants CI's `guard` stage enforces: no armed hardware /
+# The ten merge invariants CI's `guard` stage enforces: no armed hardware /
 # live-network opt-in, no git dependencies (ambe-thumbdv stays vendored, with
 # its licences), no invented install channel, an AGPL SPDX header on every
 # first-party rs/swift/sh/py file, no LGPL code in a default build (Codec 2
 # stays opt-in; the software D-Star vocoder stays opt-in and D-Star only), no async runtime / voice stack in a default build (the
 # discord feature stays opt-in), no tiny_http anywhere (every HTTP server
-# runs on astar-http), and the EchoLink test fences (no EchoLink host name in
-# the engine; the loopback-only features never reach a real build). Each
-# prints one line; run them before a push.
+# runs on astar-http), the EchoLink test fences (no EchoLink host name in
+# the engine; the loopback-only features never reach a real build), no packet
+# tap on a path that carries secrets, and the net recorder staying
+# receive-only. Each prints one line; run them before a push.
 guards:
     ./ci/guard-safety-env.sh
     ./ci/guard-no-git-deps.sh
@@ -219,6 +220,8 @@ guards:
     ./ci/guard-discord-feature.sh
     ./ci/guard-no-tiny-http.sh
     ./ci/guard-echolink.sh
+    ./ci/guard-packet-log.sh
+    ./ci/guard-netrec-receive-only.sh
 
 # RFC audit verifier (tracker-free: ticket refs are format-checked, plus
 # archive membership when docs/issues-archive.jsonl is present locally).
@@ -454,7 +457,9 @@ ci: fmt-check clippy test cbindgen version-check release-test deploy-verify-test
     ./ci/guard-discord-feature.sh
     ./ci/guard-no-tiny-http.sh
     ./ci/guard-echolink.sh
-    @echo "✓ ci: fmt + clippy + test + cbindgen + version-check + release-test + deploy-verify-test + public-check + dns-check + auth-check + http-check + gsm-check + soft-ambe-check + discord-guard + tiny-http-guard + echolink-guard passed"
+    ./ci/guard-packet-log.sh
+    ./ci/guard-netrec-receive-only.sh
+    @echo "✓ ci: fmt + clippy + test + cbindgen + version-check + release-test + deploy-verify-test + public-check + dns-check + auth-check + http-check + gsm-check + soft-ambe-check + discord-guard + tiny-http-guard + echolink-guard + packet-log-guard + netrec-guard passed"
 
 # astar-server's opt-in public-tls (HTTPS, ACME, Porkbun) and stream-mp3 (LAME)
 # features, which a default-features `just clippy`/`just test` never compiles. Unlike discord it
@@ -486,6 +491,8 @@ soft-ambe-check:
     cargo test -p astar-console --features dstar,dstar-soft-ambe --lib -- software_ dstar_vocoder
     cargo test -p astar-sys --features dstar-soft-ambe --lib -- dstar_vocoder
     cargo test -p astar-server --features dstar-soft-ambe --lib -- vocoder
+    cargo clippy -p astar-netrec --all-targets --features release -- -D warnings
+    cargo test -p astar-netrec --features release
     ./ci/guard-dstar-soft-ambe.sh
     @echo "✓ soft-ambe-check: clippy + tests with --features dstar-soft-ambe passed"
 

@@ -83,6 +83,24 @@ it to a GitHub release by hand when Rob publishes one. It statically links
 LGPL code (LAME, Codec 2, the software D-Star vocoder), so the release notes point at
 `LICENSE-EXCEPTIONS.md` and the matching source tag.
 
+## The net recorder artefact
+
+`astar-netrec` is built on its own, not by `just release`:
+
+```bash
+cargo build --release -p astar-netrec --features release
+```
+
+`--features release` is the set that includes Codec 2 and the software D-Star
+vocoder (`ci/guard-codec2-licensing.sh` and `ci/guard-dstar-soft-ambe.sh`
+check that the set is pulled in and that a plain build is not). It is not
+cross-built or attached to a release by a recipe yet; like the server binary,
+attach it to a GitHub release by hand when Rob publishes one. It statically
+links LGPL code (Codec 2, the software D-Star vocoder), so the release notes
+point at `LICENSE-EXCEPTIONS.md` and the matching source tag. The systemd unit
+and launchd agent are in `docs/site/netrec/`. A recipe for a static VPS build is
+`astar-netrec-release` in `docs/BACKLOG.md`.
+
 ## `just publish <version>`
 
 Preconditions:

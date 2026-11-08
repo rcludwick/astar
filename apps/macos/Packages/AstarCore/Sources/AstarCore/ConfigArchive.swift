@@ -224,10 +224,12 @@ public struct ConfigArchive: Codable, Equatable {
     /// serials of the AMBE sticks this Mac may open — and a trust list
     /// imported from another Mac would trust whatever device happens to carry
     /// that serial here. Refused on export AND on import (`isImportable`), so
-    /// a hand-edited file cannot plant one either. Adding this exclusion does
-    /// not move `ConfigVersion`: nothing that was ever exported changes
-    /// meaning.
-    public static let machineLocalPrefixes = ["vocoder."]
+    /// a hand-edited file cannot plant one either. `recording.packetLog` is
+    /// the packet-log switch, folder and size limit: a folder path means
+    /// nothing on another Mac, and a file must not turn on logging of every
+    /// packet. Adding these exclusions does not move `ConfigVersion`: nothing
+    /// that was ever exported changes meaning.
+    public static let machineLocalPrefixes = ["vocoder.", "recording.packetLog"]
 
     /// Interface state that stays on this Mac even though it sits under
     /// `ui.`: which Settings sections are folded (`SettingsSectionID`). How

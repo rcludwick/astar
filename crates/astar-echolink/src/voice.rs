@@ -104,6 +104,13 @@ pub fn classify(bytes: &[u8]) -> Datagram {
     }
 }
 
+/// True when `bytes` is a GSM audio datagram: the only voice-port datagram
+/// worth recording.
+#[must_use]
+pub fn is_media(bytes: &[u8]) -> bool {
+    bytes.len() == AUDIO_PACKET_LEN && bytes[0] == AUDIO_MARK && bytes[1] == PAYLOAD_GSM
+}
+
 /// `oNDATA`, CR, then the text with each newline turned into CR.
 #[must_use]
 pub fn info_datagram(text: &str) -> Vec<u8> {
@@ -281,5 +288,66 @@ mod tests {
         let out = clean_text(shifted.as_bytes());
         assert_eq!(out.len(), 511);
         assert!(out[1..].chars().all(|c| c == 'é'));
+    }
+
+    fn audio_wire() -> Vec<u8> {
+        AudioPacket {
+            seq: 9,
+            frames: [[0x5a; GSM_FRAME_LEN]; FRAMES_PER_PACKET],
+        }
+        .encode()
+        .to_vec()
+    }
+
+    fn non_media_wires() -> Vec<Vec<u8>> {
+        let mut speex = audio_wire();
+        speex[1] = 0x96;
+        let mut short = vec![0xC0, 0x03];
+        short.extend_from_slice(&[0; 20]);
+        let mut other_mark = audio_wire();
+        other_mark[0] = 0x80;
+        vec![
+            other_mark,
+            crate::rtcp::sdes("N0CALL", "Rob"),
+            crate::rtcp::bye().to_vec(),
+            info_datagram("hello"),
+            chat_datagram("N0CALL", "hi"),
+            short,
+            speex,
+        ]
+    }
+
+    #[test]
+    fn is_media_accepts_voice() {
+        assert!(is_media(&audio_wire()));
+    }
+
+    #[test]
+    fn is_media_refuses_every_non_media_packet() {
+        for w in non_media_wires() {
+            assert!(!is_media(&w), "{w:02x?}");
+        }
+    }
+
+    #[test]
+    fn is_media_agrees_with_classify() {
+        let mut all = non_media_wires();
+        all.push(audio_wire());
+        for w in all {
+            assert_eq!(
+                is_media(&w),
+                matches!(classify(&w), Datagram::Audio(_)),
+                "{w:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn is_media_never_panics_on_short_input() {
+        for len in 0..=64 {
+            for fill in [0x00u8, 0xff] {
+                let _ = is_media(&vec![fill; len]);
+            }
+        }
     }
 }

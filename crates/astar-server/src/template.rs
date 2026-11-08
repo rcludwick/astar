@@ -135,4 +135,14 @@ source = "file"
 # directory = "bundled"
 # [m17.reflectors]
 # "M17-XYZ" = "m17.example.net:17000"
+
+# ─── [packet_log] — OPTIONAL: debug log of received media packets ────────────
+# One pcap per call for Wireshark, plus jitter-buffer history. Holds other
+# people's voices. With debug_mode on, a capture is started from the
+# Recordings page and downloads there (/admin/recordings). See
+# docs/site/server/packet-log.md.
+# [packet_log]
+# debug_mode = true                    # default false; shows a capture button
+# dir = "/var/lib/astar/packet-logs"   # absolute path
+# max_bytes = "1 GB"                   # at least 100 MB; oldest logs go first
 "#;

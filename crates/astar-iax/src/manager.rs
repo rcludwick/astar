@@ -31,8 +31,12 @@ use astar_audio::{
     AudioBackend, AudioRouter, Conference, ConferenceConfig, MemberId, MicId, MixCallId, OutputId,
     StreamConfig,
 };
+use astar_iax_core::frame::is_media;
 use astar_iax_core::session::CodecPolicy;
 use astar_iax_core::session::call_no::CallNo;
+use astar_record::packet_tap::{
+    CallMeta, CallPacketTap, JitterSample, PacketCallId, PacketNetwork, PacketSlot,
+};
 use astar_wireguard::{UdpTransport, WgLinkConfig, WgStack, WgStackStatus};
 use mio::{Poll, Token, Waker};
 
@@ -315,6 +319,9 @@ pub struct Manager {
     /// from. [`crate::transport::OsNetStack`] by default (byte-identical); the
     /// shared [`crate::transport::WgNetStack`] in `WireGuard` mode.
     net: Arc<dyn crate::transport::NetStack>,
+    /// The packet log's slot, shared with every call dialed from here on.
+    /// Empty until the embedder installs one.
+    packet_slot: PacketSlot,
     /// The extra plain-UDP listener address from the WG config (`None` in UDP
     /// mode or when the config leaves it unset). Read by the embedder when it
     /// starts the inbound listener.
@@ -464,6 +471,7 @@ impl Manager {
             station_policy: CodecPolicy::default(),
             parrot_pending_hangup: Vec::new(),
             net: Arc::new(crate::transport::OsNetStack),
+            packet_slot: PacketSlot::default(),
             wg_also_bind_udp: None,
             wg: None,
         }
@@ -1021,6 +1029,54 @@ impl Manager {
         Ok(())
     }
 
+    /// Set the packet log's slot for calls dialed from now on.
+    pub fn set_packet_slot(&mut self, slot: PacketSlot) {
+        self.packet_slot = slot;
+    }
+
+    /// One jitter reading per pooled call that has a tap. Every field is
+    /// `None` for a conference member.
+    #[must_use]
+    pub fn packet_log_samples(&self) -> Vec<(PacketCallId, JitterSample)> {
+        self.calls
+            .values()
+            .filter_map(|c| {
+                let id = c.call.packet_call()?;
+                // A conference member has no bus or jitter buffer to read, and
+                // its snapshot's zeros would look like a perfect network.
+                if c.member.is_some() {
+                    return Some((id, JitterSample::default()));
+                }
+                let snap = c.call.snapshot();
+                let sample = JitterSample {
+                    depth_ms: Some(snap.rx_jb_depth_ms),
+                    jitter_ms: Some(snap.rx_jitter_ms),
+                    lost: Some(snap.rx_frames_lost),
+                    late: Some(snap.rx_frames_late),
+                    ooo: Some(snap.rx_frames_ooo),
+                    underruns: Some(snap.rx_underruns),
+                };
+                Some((id, sample))
+            })
+            .collect()
+    }
+
+    /// The tap for a call to `node` at `peer`. `local` is a placeholder: the
+    /// run loop fills it in once its socket is connected.
+    fn packet_tap_for(&self, node: &str, peer: SocketAddr) -> CallPacketTap {
+        CallPacketTap::new(
+            self.packet_slot.clone(),
+            is_media,
+            CallMeta {
+                network: PacketNetwork::AllStar,
+                codec: None,
+                label: format!("AllStar {node}"),
+                local: SocketAddr::from(([0, 0, 0, 0], 0)),
+                peer,
+            },
+        )
+    }
+
     /// Dial a node into the pool, monitor-only (no mic until `route`). Opens /
     /// joins the spec's output bus, spawns the per-call runtime with a
     /// per-socket `CallNo(1)` (Q4), and registers the [`Connection`] under the
@@ -1079,6 +1135,7 @@ impl Manager {
         let poll = Poll::new()?;
         let waker = Arc::new(Waker::new(poll.registry(), Token(1))?);
         let gate = PttGate::new();
+        let packet_tap = self.packet_tap_for(&spec.node, spec.peer);
 
         let (call, events) = spawn_call_runtime(SpawnParams {
             peer: spec.peer,
@@ -1102,6 +1159,7 @@ impl Manager {
             // Transport seam (iax-b6f5/iax-927a): the Manager's selected
             // transport — plain OS UDP unless WireGuard mode is set.
             net: Arc::clone(&self.net),
+            packet_tap: Some(packet_tap),
         })?;
 
         // Manager owns the routing facts that feed the snapshot.
@@ -2962,6 +3020,7 @@ pub(crate) mod test_support {
             // Test fake: default station rate so `adopt` accepts it (iax-4348).
             8000,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            None,
         )
     }
 
@@ -3025,6 +3084,7 @@ pub(crate) mod test_support {
             // Leg rate must match the adopting station's (iax-4348).
             sample_rate,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            None,
         );
         (call, rx_injector, tx_observer)
     }
@@ -5023,6 +5083,48 @@ mod link_layer_tests {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(mgr.sync_link_keying(), 1);
         assert!(!mgr.calls[&link].call.snapshot().keyed);
+    }
+
+    #[test]
+    fn packet_log_samples_read_empty_for_a_conference_member() {
+        // A conference member hands the mix bare frames, so it has no bus and
+        // no jitter buffer. Its row says "unknown"; a zero would read as a
+        // perfect network.
+        let quiet_peer = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+        let peer = quiet_peer.local_addr().expect("addr");
+        let dial = |id| DialSpec {
+            id: CallId(id),
+            node: "1999".to_string(),
+            peer,
+            output: OutputId::new("out:s"),
+            caller_id: "mgr-test".to_string(),
+            secret: String::new(),
+            mode: CallMode::Standard,
+            dest: "1999".to_string(),
+            frame_observer: None,
+            codec_policy: CodecPolicy::default(),
+        };
+
+        let mut handset = test_manager();
+        handset.dial(dial(1)).expect("dial");
+        let samples = handset.packet_log_samples();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].1.underruns, Some(0));
+        assert_eq!(samples[0].1.depth_ms, Some(0));
+
+        let mut bridge = test_manager();
+        bridge
+            .set_bridge_config(BridgeConfig {
+                mode: BridgeMode::Bridge,
+                mix_minus: true,
+                include_local_radio: false,
+                parrot: None,
+            })
+            .unwrap();
+        bridge.dial(dial(2)).expect("dial");
+        let samples = bridge.packet_log_samples();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(samples[0].1, JitterSample::default());
     }
 
     #[test]

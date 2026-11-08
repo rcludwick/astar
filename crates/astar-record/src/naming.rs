@@ -71,35 +71,44 @@ pub fn app_base_name(start: SystemTime, utc_offset_secs: i32, label: &str) -> St
     )
 }
 
-fn exists(base: &str, layout: Layout) -> bool {
-    let any = |suffixes: &[&str]| {
-        suffixes
-            .iter()
-            .any(|s| Path::new(&format!("{base}{s}")).exists())
-    };
-    match layout {
-        Layout::Stereo | Layout::Mixed => any(&[".flac"]),
-        Layout::TwoMono => any(&[" rx.flac", " tx.flac"]),
-    }
+/// A label for a packet log: [`sanitize_label`], and `"` becomes `-` as well,
+/// because the name travels in a `Content-Disposition` header.
+#[must_use]
+pub fn packet_log_label(s: &str) -> String {
+    sanitize_label(s).replace('"', "-")
 }
 
-/// `dir/base`, or `dir/base 2`, `dir/base 3`, … until none of the layout's
-/// files exist. The result has no extension. This only looks: callers must
-/// open the files with `create_new` so a racing writer cannot be overwritten.
+/// `dir/base`, or `dir/base 2`, `dir/base 3`, … until no `suffixes` file
+/// exists. The result has no extension. This only looks: callers must open
+/// the files with `create_new` so a racing writer cannot be overwritten.
 #[must_use]
-pub fn unique_base(dir: &Path, base: &str, layout: Layout) -> PathBuf {
+pub fn unique_stem(dir: &Path, base: &str, suffixes: &[&str]) -> PathBuf {
     let stem = dir.join(base);
     let stem_s = stem.to_string_lossy().into_owned();
-    if !exists(&stem_s, layout) {
+    let taken = |cand: &str| {
+        suffixes
+            .iter()
+            .any(|s| Path::new(&format!("{cand}{s}")).exists())
+    };
+    if !taken(&stem_s) {
         return stem;
     }
     let mut n = 2u64;
     loop {
         let cand = format!("{stem_s} {n}");
-        if !exists(&cand, layout) {
+        if !taken(&cand) {
             return PathBuf::from(cand);
         }
         n += 1;
+    }
+}
+
+/// [`unique_stem`] for the files of `layout`.
+#[must_use]
+pub fn unique_base(dir: &Path, base: &str, layout: Layout) -> PathBuf {
+    match layout {
+        Layout::Stereo | Layout::Mixed => unique_stem(dir, base, &[".flac"]),
+        Layout::TwoMono => unique_stem(dir, base, &[" rx.flac", " tx.flac"]),
     }
 }
 
@@ -174,6 +183,29 @@ mod tests {
             d.join(format!("{b} 3"))
         );
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn unique_stem_looks_at_every_suffix_it_is_given() {
+        let d = std::env::temp_dir().join(format!("astar-stem-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let sfx = [".pcap", ".jitter.jsonl"];
+        assert_eq!(unique_stem(&d, "call", &sfx), d.join("call"));
+        std::fs::write(d.join("call.jitter.jsonl"), b"").unwrap();
+        assert_eq!(unique_stem(&d, "call", &sfx), d.join("call 2"));
+        std::fs::write(d.join("call 2.pcap"), b"").unwrap();
+        assert_eq!(unique_stem(&d, "call", &sfx), d.join("call 3"));
+        assert_eq!(unique_stem(&d, "call", &[".flac"]), d.join("call"));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn packet_log_label_also_removes_quotes() {
+        assert_eq!(packet_log_label("a\"b/c"), "a-b-c");
+        assert_eq!(packet_log_label("\""), "-");
+        assert_eq!(packet_log_label(""), "Recording");
+        assert_eq!(packet_log_label("EchoLink WA7ABU-R"), "EchoLink WA7ABU-R");
+        assert!(packet_log_label(&"\"".repeat(300)).len() <= MAX_LABEL_BYTES);
     }
 
     #[test]

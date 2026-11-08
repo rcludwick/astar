@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, TryLockError};
 
+use crate::packet_pool::PacketPool;
+
 /// Capacity of the received-audio tap.
 pub const HEARD_TAP_CAPACITY: usize = 64;
 /// Capacity of the sent-audio tap.
@@ -26,11 +28,13 @@ pub struct PcmChunk {
 /// has gone away, drops the item and bumps a shared counter.
 ///
 /// The receiver must be drained with `try_recv` on its own clock and never
-/// parked in `recv`/`recv_timeout`: `try_send` locks and futex-wakes a parked
-/// receiver, which the audio thread must not do. See [`tap_channel`].
+/// parked in `recv`/`recv_timeout`: `try_send` futex-wakes a parked receiver,
+/// which the audio thread must not do. See [`tap_channel`].
 pub struct Tap<T> {
     tx: SyncSender<T>,
     dropped: Arc<AtomicU64>,
+    /// The buffers a [`TapSlot::try_offer_from`] item can be built in.
+    pool: Option<Arc<PacketPool>>,
 }
 
 impl<T> Clone for Tap<T> {
@@ -38,6 +42,7 @@ impl<T> Clone for Tap<T> {
         Self {
             tx: self.tx.clone(),
             dropped: Arc::clone(&self.dropped),
+            pool: self.pool.clone(),
         }
     }
 }
@@ -46,8 +51,9 @@ impl<T> Clone for Tap<T> {
 ///
 /// Contract: the receiver must be drained with `try_recv` on the consumer's
 /// own 20 ms clock, and must never park in `recv` or `recv_timeout`. The
-/// standard channel's `try_send` takes an internal mutex and wakes a parked
-/// receiver with a futex call, and the audio thread must never pay for either.
+/// standard channel's `try_send` wakes a parked receiver with a futex call,
+/// and the audio thread must never pay for that. It can still spin briefly
+/// when another sender is mid-write, which is bounded and never parks.
 ///
 /// # Panics
 /// Panics if `capacity` is zero (a zero-capacity channel is a rendezvous
@@ -60,12 +66,28 @@ pub fn tap_channel<T>(capacity: usize) -> (Tap<T>, Receiver<T>) {
         Tap {
             tx,
             dropped: Arc::new(AtomicU64::new(0)),
+            pool: None,
         },
         rx,
     )
 }
 
 impl<T> Tap<T> {
+    /// Give the tap the pool its items' buffers come from.
+    #[must_use]
+    pub fn with_pool(self, pool: Arc<PacketPool>) -> Self {
+        Self {
+            pool: Some(pool),
+            ..self
+        }
+    }
+
+    /// The pool, if the tap has one.
+    #[must_use]
+    pub fn pool(&self) -> Option<&Arc<PacketPool>> {
+        self.pool.as_ref()
+    }
+
     /// Hand over an item without waiting. Returns false (and counts a drop)
     /// when the channel is full or the receiver is gone.
     pub fn offer(&self, item: T) -> bool {
@@ -83,6 +105,18 @@ impl<T> Tap<T> {
     pub fn dropped_counter(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.dropped)
     }
+}
+
+/// What became of an item offered to a [`TapSlot`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Offer {
+    /// The item went into the channel.
+    Sent,
+    /// No tap is installed; nothing was made.
+    NoTap,
+    /// A tap is installed but the item was lost: the lock was busy, the
+    /// channel full, the receiver gone or the item couldn't be built.
+    Dropped,
 }
 
 /// A shared, swappable "maybe a tap" cell. The audio thread only ever
@@ -107,8 +141,12 @@ impl<T> Clone for TapSlot<T> {
 
 impl<T> Default for TapSlot<T> {
     fn default() -> Self {
+        let inner = Mutex::new(None);
+        // On macOS std allocates a mutex at its first lock, and that mustn't
+        // be the audio thread's first `try_lock`.
+        drop(inner.try_lock());
         Self {
-            inner: Arc::new(Mutex::new(None)),
+            inner: Arc::new(inner),
             contended: Arc::new(AtomicU64::new(0)),
             generation: Arc::new(AtomicU64::new(0)),
         }
@@ -151,21 +189,46 @@ impl<T> TapSlot<T> {
     }
 
     /// Build and offer an item, never blocking. `make` runs only when a tap is
-    /// installed and the lock was free; otherwise nothing is made and false is
-    /// returned.
-    pub fn offer_with(&self, make: impl FnOnce() -> T) -> bool {
+    /// installed and the lock was free; otherwise nothing is made. The result
+    /// tells "no tap" from "dropped".
+    pub fn try_offer(&self, make: impl FnOnce() -> T) -> Offer {
+        self.try_offer_from(|_| Some(make()))
+    }
+
+    /// [`TapSlot::try_offer`] for an item built from the tap itself. `make`
+    /// returning `None` loses the item, and counts as a drop.
+    pub fn try_offer_from(&self, make: impl FnOnce(&Tap<T>) -> Option<T>) -> Offer {
         let guard = match self.inner.try_lock() {
             Ok(g) => g,
             Err(TryLockError::Poisoned(p)) => p.into_inner(),
             Err(TryLockError::WouldBlock) => {
                 self.contended.fetch_add(1, Ordering::Relaxed);
-                return false;
+                return Offer::Dropped;
             }
         };
-        match guard.as_ref() {
-            Some(tap) => tap.offer(make()),
-            None => false,
+        let Some(tap) = guard.as_ref() else {
+            return Offer::NoTap;
+        };
+        let Some(item) = make(tap) else {
+            tap.dropped.fetch_add(1, Ordering::Relaxed);
+            return Offer::Dropped;
+        };
+        if tap.offer(item) {
+            Offer::Sent
+        } else {
+            Offer::Dropped
         }
+    }
+
+    /// [`TapSlot::try_offer`] as a plain yes/no: true only when sent.
+    pub fn offer_with(&self, make: impl FnOnce() -> T) -> bool {
+        matches!(self.try_offer(make), Offer::Sent)
+    }
+
+    /// Hold the slot's lock, so a test can make offers contend.
+    #[cfg(test)]
+    pub(crate) fn lock_for_test(&self) -> std::sync::MutexGuard<'_, Option<Tap<T>>> {
+        self.inner.lock().unwrap()
     }
 }
 
@@ -186,12 +249,17 @@ impl StartedOn {
 
     /// Offer the `Start` that `make` builds; remembers the tap it reached.
     pub fn offer_start<T>(&mut self, slot: &TapSlot<T>, make: impl FnOnce() -> T) -> bool {
+        matches!(self.try_start(slot, make), Offer::Sent)
+    }
+
+    /// [`StartedOn::offer_start`], telling "no tap" from "dropped".
+    pub fn try_start<T>(&mut self, slot: &TapSlot<T>, make: impl FnOnce() -> T) -> Offer {
         let generation = slot.generation();
-        let ok = slot.offer_with(make);
-        if ok {
+        let offer = slot.try_offer(make);
+        if offer == Offer::Sent {
             self.0 = Some(generation);
         }
-        ok
+        offer
     }
 
     /// Offer the `Start` only when [`StartedOn::needs_start`].
@@ -211,6 +279,7 @@ impl StartedOn {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packet_pool::PacketPool;
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
@@ -262,6 +331,63 @@ mod tests {
         assert_eq!(slot.contended_counter().load(Ordering::Relaxed), 1);
         release_tx.send(()).unwrap();
         t.join().unwrap();
+    }
+
+    #[test]
+    fn try_offer_tells_no_tap_from_dropped() {
+        let slot = TapSlot::<u32>::default();
+        assert_eq!(slot.try_offer(|| panic!("no tap")), Offer::NoTap);
+        let (tap, rx) = tap_channel(1);
+        slot.set(Some(tap));
+        assert_eq!(slot.try_offer(|| 1), Offer::Sent);
+        assert_eq!(slot.try_offer(|| 2), Offer::Dropped, "channel full");
+        drop(rx);
+        assert_eq!(slot.try_offer(|| 3), Offer::Dropped, "receiver gone");
+        let held = slot.clone();
+        let _g = held.lock_for_test();
+        assert_eq!(slot.try_offer(|| panic!("held")), Offer::Dropped);
+    }
+
+    #[test]
+    fn try_offer_from_hands_make_the_tap_it_will_offer_to() {
+        let pool = PacketPool::new(1);
+        let (tap, rx) = tap_channel::<bool>(1);
+        let slot = TapSlot::default();
+        slot.set(Some(tap.with_pool(Arc::clone(&pool))));
+        let offer =
+            slot.try_offer_from(|tap| Some(tap.pool().is_some_and(|got| Arc::ptr_eq(got, &pool))));
+        assert_eq!(offer, Offer::Sent);
+        assert!(rx.try_recv().unwrap());
+    }
+
+    #[test]
+    fn make_giving_up_is_a_counted_drop() {
+        let (tap, _rx) = tap_channel::<u32>(1);
+        let dropped = tap.dropped_counter();
+        let slot = TapSlot::default();
+        slot.set(Some(tap));
+        assert_eq!(slot.try_offer_from(|_| None), Offer::Dropped);
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn try_offer_from_runs_no_make_without_a_free_tap() {
+        let slot = TapSlot::<u32>::default();
+        assert_eq!(slot.try_offer_from(|_| panic!("no tap")), Offer::NoTap);
+        let (tap, _rx) = tap_channel(1);
+        slot.set(Some(tap));
+        let held = slot.clone();
+        let _g = held.lock_for_test();
+        assert_eq!(slot.try_offer_from(|_| panic!("held")), Offer::Dropped);
+    }
+
+    #[test]
+    fn a_tap_has_no_pool_until_given_one_and_its_clones_share_it() {
+        let (tap, _rx) = tap_channel::<u32>(1);
+        assert!(tap.pool().is_none());
+        let pool = PacketPool::new(1);
+        let tap = tap.with_pool(Arc::clone(&pool));
+        assert!(Arc::ptr_eq(tap.clone().pool().unwrap(), &pool));
     }
 
     #[test]

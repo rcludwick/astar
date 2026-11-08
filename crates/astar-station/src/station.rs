@@ -2,7 +2,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use astar_audio::AudioBackend;
 use astar_console::{
@@ -12,6 +16,12 @@ use astar_console::{
 use astar_iax::{CallMode, CodecPolicy, IncomingCallPolicy, LinkEvent, LinkMode, LinkRoster};
 use astar_iax_core::session::auth::Secret;
 use astar_record::frames::FrameEvent;
+use astar_record::packet_log::{
+    DeleteRefused, PacketLogConfig, PacketLogEnd, PacketLogRow, PacketLogState, PacketLogger,
+    delete_log, list_logs,
+};
+use astar_record::packet_pool::PACKET_POOL_BUFFERS;
+use astar_record::packet_tap::{PACKET_TAP_CAPACITY, PacketEvent, packet_tap_channel};
 use astar_record::tap::{
     FRAME_TAP_CAPACITY, HEARD_TAP_CAPACITY, SENT_TAP_CAPACITY, Tap, tap_channel,
 };
@@ -246,6 +256,111 @@ impl Drop for BusyGuard<'_> {
     }
 }
 
+/// How often the sampler offers a jitter row per live call.
+const PACKET_LOG_SAMPLE_EVERY: Duration = Duration::from_secs(1);
+/// The sampler's sleep, which is also how long a stop can wait for it.
+const PACKET_LOG_SAMPLE_SLICE: Duration = Duration::from_millis(100);
+
+/// The packet log's logger and sampler. Lock order is `packet_log` →
+/// `session`, never the reverse. No lock is held across a join: `changing`
+/// keeps a second change out while the first runs unlocked.
+#[derive(Default)]
+struct PacketLogSlot {
+    /// The logger, while a capture runs.
+    running: Option<RunningPacketLog>,
+    /// The folder of the last start that worked, which
+    /// [`Station::packet_log_list`] still reads once the capture is over.
+    dir: Option<PathBuf>,
+    /// What [`Station::packet_log_state`] reports with no logger running.
+    last: PacketLogState,
+    /// A change is stopping or starting a logger with the lock released.
+    changing: bool,
+}
+
+struct RunningPacketLog {
+    logger: PacketLogger,
+    cfg: PacketLogConfig,
+    sampler: PacketLogSampler,
+}
+
+/// Ends a change: `changing` clears and waiters wake, even if it unwinds.
+struct PacketLogChange<'a>(&'a Station);
+
+impl Drop for PacketLogChange<'_> {
+    fn drop(&mut self) {
+        let station = self.0;
+        station
+            .packet_log
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .changing = false;
+        station.packet_log_settled.notify_all();
+    }
+}
+
+/// Whether two configs would run the same logger.
+fn same_packet_log(a: &PacketLogConfig, b: &PacketLogConfig) -> bool {
+    a.dir == b.dir
+        && a.max_bytes == b.max_bytes
+        && a.utc_offset_secs == b.utc_offset_secs
+        && a.version == b.version
+}
+
+/// The thread that offers a jitter row per live call once a second. It's a
+/// thread because a server with no page open may never take a snapshot. The
+/// `Weak` keeps it from holding a session its station has let go.
+struct PacketLogSampler {
+    stop: Arc<AtomicBool>,
+    thread: JoinHandle<()>,
+}
+
+impl PacketLogSampler {
+    fn spawn(session: Weak<Mutex<ConsoleSession>>, tap: Tap<PacketEvent>) -> std::io::Result<Self> {
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("astar-packet-sampler".to_owned())
+            .spawn(move || {
+                let mut due = Instant::now() + PACKET_LOG_SAMPLE_EVERY;
+                while !flag.load(Ordering::Acquire) {
+                    std::thread::sleep(PACKET_LOG_SAMPLE_SLICE);
+                    if Instant::now() >= due {
+                        if !offer_packet_log_samples(&session, &tap) {
+                            return;
+                        }
+                        due = Instant::now() + PACKET_LOG_SAMPLE_EVERY;
+                    }
+                }
+            })?;
+        Ok(Self { stop, thread })
+    }
+
+    /// The thread may be waiting for the session lock, so the caller must
+    /// not hold it.
+    fn stop(self) {
+        self.stop.store(true, Ordering::Release);
+        let _ = self.thread.join();
+    }
+}
+
+/// One round of rows, offered with the session lock released. `false` once
+/// there is no session left to sample.
+fn offer_packet_log_samples(session: &Weak<Mutex<ConsoleSession>>, tap: &Tap<PacketEvent>) -> bool {
+    let Some(session) = session.upgrade() else {
+        return false;
+    };
+    let Ok(session) = session.lock() else {
+        return false;
+    };
+    let samples = session.packet_log_samples();
+    drop(session);
+    let at = Instant::now();
+    for (call, sample) in samples {
+        tap.offer(PacketEvent::Jitter { call, at, sample });
+    }
+    true
+}
+
 /// How long an M17 monitor goes without hearing its reflector before it gives
 /// the link up. This is `SessionFsm`'s own default, and the figure
 /// [`Station::m17_connect`] uses, so the two kinds of leg fail on the same
@@ -444,6 +559,10 @@ pub struct Station {
     /// Call recording: the app recorder and the server's frame tap. See
     /// [`Station::record_start`] and [`Station::set_frame_tap`].
     recording: Mutex<RecordSlot>,
+    /// The packet log. See [`Station::packet_log_configure`].
+    packet_log: Mutex<PacketLogSlot>,
+    /// Wakes whoever waits for a change to `packet_log` to finish.
+    packet_log_settled: Condvar,
 }
 
 /// Supervision state for automatic re-registration (iax-177d). Without it a
@@ -519,6 +638,8 @@ impl Station {
             #[cfg(feature = "m17")]
             codec2_probe_cache: Mutex::new(None),
             recording: Mutex::new(RecordSlot::default()),
+            packet_log: Mutex::new(PacketLogSlot::default()),
+            packet_log_settled: Condvar::new(),
         };
         station.pin_station_policy();
         station.set_vocoder_trust(station.config.vocoder_trust.clone());
@@ -567,6 +688,8 @@ impl Station {
             #[cfg(feature = "m17")]
             codec2_probe_cache: Mutex::new(None),
             recording: Mutex::new(RecordSlot::default()),
+            packet_log: Mutex::new(PacketLogSlot::default()),
+            packet_log_settled: Condvar::new(),
         };
         station.pin_station_policy();
         station.set_vocoder_trust(station.config.vocoder_trust.clone());
@@ -1689,6 +1812,175 @@ impl Station {
             Some(r) => r.state(),
             None => slot.last.clone().unwrap_or_else(RecordState::idle),
         }
+    }
+
+    /// Start, restart or stop the packet log: with `Some`, the media calls
+    /// receive from now on goes to a pcap and a companion file in `cfg.dir`,
+    /// which open at a call's first voice packet; with `None`, it stops and
+    /// each open file ends with `stopped`.
+    ///
+    /// The same settings again change nothing, so a caller can apply its
+    /// config freely. New settings end the live calls' files, whose calls
+    /// carry on in new ones, because the old logger has to finish before the
+    /// new one starts: two loggers on a folder would each prune the other's
+    /// open files as closed ones.
+    ///
+    /// This waits for the writer, however long its disk takes, and for any
+    /// other change in progress, with no lock held. Callers keep it off UI
+    /// threads.
+    ///
+    /// # Errors
+    /// [`StationError::Record`] when the folder can't be used or the disk is
+    /// short of space. No capture runs afterwards, even if one ran before,
+    /// and [`Station::packet_log_state`] carries the message.
+    pub fn packet_log_configure(&self, cfg: Option<PacketLogConfig>) -> Result<(), StationError> {
+        self.packet_log_change(cfg, PacketLogEnd::Stopped)
+    }
+
+    /// Stops the packet log because the call ended, so each open file ends
+    /// with `hangup` whether this or the tap's own end gets there first. Does
+    /// nothing when no log runs. Waits as [`Station::packet_log_configure`]
+    /// does, so callers keep it off UI threads.
+    pub fn packet_log_call_ended(&self) {
+        // Only a start can fail, and this starts nothing.
+        let _ = self.packet_log_change(None, PacketLogEnd::Hangup);
+    }
+
+    /// Moves the log to `cfg`, ending any open files with `end`.
+    fn packet_log_change(
+        &self,
+        cfg: Option<PacketLogConfig>,
+        end: PacketLogEnd,
+    ) -> Result<(), StationError> {
+        let mut slot = self.settled_packet_log();
+        if let (Some(cfg), Some(run)) = (&cfg, &slot.running)
+            && same_packet_log(cfg, &run.cfg)
+            && run.logger.state().capturing
+        {
+            return Ok(());
+        }
+        let starting = cfg.is_some();
+        let old = slot.running.take();
+        if let Some(run) = &old {
+            slot.last = run.logger.state();
+        }
+        if starting {
+            slot.last.error = None;
+        }
+        slot.changing = true;
+        drop(slot);
+        let _settled = PacketLogChange(self);
+
+        let stopped = old.map(|run| self.stop_packet_log(run, end));
+        let started = cfg.map(|cfg| self.start_packet_log(cfg)).transpose();
+
+        let mut slot = self.packet_log.lock().unwrap();
+        if let Some(state) = stopped {
+            slot.last = state;
+        }
+        // A new start answers for itself: the last capture's error is over.
+        if starting {
+            slot.last.error = None;
+        }
+        match started {
+            Ok(running) => {
+                if let Some(run) = &running {
+                    slot.dir = Some(run.cfg.dir.clone());
+                }
+                slot.running = running;
+                Ok(())
+            }
+            Err(e) => {
+                slot.last.capturing = false;
+                slot.last.error = Some(e.to_string());
+                Err(StationError::Record(e.to_string()))
+            }
+        }
+    }
+
+    /// Takes the tap off every call, then stops the sampler and the writer.
+    /// The caller holds no lock, as the joins are unbounded. An empty slot
+    /// sends no `End`, so it's [`PacketLogger::stop_as`] that ends open files.
+    fn stop_packet_log(&self, run: RunningPacketLog, end: PacketLogEnd) -> PacketLogState {
+        self.session.lock().unwrap().set_packet_tap(None);
+        run.sampler.stop();
+        run.logger.stop_as(end)
+    }
+
+    /// The tap goes on last, once nothing else can fail, so a refused start
+    /// leaves the session untouched.
+    fn start_packet_log(&self, cfg: PacketLogConfig) -> Result<RunningPacketLog, RecordError> {
+        let (tap, rx) = packet_tap_channel(PACKET_TAP_CAPACITY, PACKET_POOL_BUFFERS);
+        let logger = PacketLogger::start(cfg.clone(), rx)?;
+        let sampler = PacketLogSampler::spawn(Arc::downgrade(&self.session), tap.clone())?;
+        self.session.lock().unwrap().set_packet_tap(Some(tap));
+        Ok(RunningPacketLog {
+            logger,
+            cfg,
+            sampler,
+        })
+    }
+
+    /// The slot, once no change is in progress. Waiting releases the lock.
+    fn settled_packet_log(&self) -> MutexGuard<'_, PacketLogSlot> {
+        let slot = self.packet_log.lock().unwrap();
+        self.packet_log_settled
+            .wait_while(slot, |s| s.changing)
+            .unwrap()
+    }
+
+    /// The live state; while stopped, the last logger's final state, or why
+    /// the last start was refused. Never waits on a change in progress.
+    #[must_use]
+    pub fn packet_log_state(&self) -> PacketLogState {
+        let slot = self.packet_log.lock().unwrap();
+        match &slot.running {
+            Some(run) => run.logger.state(),
+            None => slot.last.clone(),
+        }
+    }
+
+    /// Forgets the error [`Station::packet_log_state`] carries once no capture
+    /// runs, for a caller whose operator can no longer act on it. A capture
+    /// running or changing keeps its own.
+    pub fn packet_log_clear_error(&self) {
+        let mut slot = self.settled_packet_log();
+        if slot.running.is_none() {
+            slot.last.error = None;
+        }
+    }
+
+    /// The folder, spelled as `cfg.dir` because open files are matched by
+    /// exact path, and the files open in it. Waits out a change in progress,
+    /// when no logger can say what's open.
+    fn packet_log_folder(&self) -> Option<(PathBuf, Vec<PathBuf>)> {
+        let slot = self.settled_packet_log();
+        let open = slot.running.as_ref().map(|r| r.logger.open_paths());
+        Some((slot.dir.clone()?, open.unwrap_or_default()))
+    }
+
+    /// The logs in the last folder that was started, newest first, whether
+    /// or not a capture is still running. Empty before any start. Reads the folder
+    /// and waits out a [`Station::packet_log_configure`] in progress, so
+    /// callers keep it off UI threads.
+    #[must_use]
+    pub fn packet_log_list(&self) -> Vec<PacketLogRow> {
+        self.packet_log_folder()
+            .map(|(dir, open)| list_logs(&dir, &open))
+            .unwrap_or_default()
+    }
+
+    /// Delete the log whose pcap is called `name` from the folder
+    /// [`Station::packet_log_list`] reads. Waits as that does.
+    ///
+    /// # Errors
+    /// [`DeleteRefused::Open`] while a call is writing to it,
+    /// [`DeleteRefused::NoSuchLog`] when `name` isn't a log of ours in that
+    /// folder or none has been started, and [`DeleteRefused::Io`] when the
+    /// files can't be removed.
+    pub fn packet_log_delete(&self, name: &str) -> Result<(), DeleteRefused> {
+        let (dir, open) = self.packet_log_folder().ok_or(DeleteRefused::NoSuchLog)?;
+        delete_log(&dir, name, &open)
     }
 
     /// Install (or, with `None`, remove) the server's codec-frame tap. It
@@ -3941,6 +4233,12 @@ impl Drop for Station {
         self.deregister();
         // Stop the inbound listener (its Drop stops the actor thread).
         self.stop_inbound();
+        // Last, so every call hung up above ends its file as a hangup. This
+        // covers a station that is really dropped; a process that exits with
+        // its station alive (the app, `astar-server`) has to stop the log
+        // itself. A shared session outlives this station and must not keep
+        // its tap.
+        let _ = self.packet_log_configure(None);
     }
 }
 

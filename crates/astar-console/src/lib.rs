@@ -37,6 +37,7 @@ pub use astar_audio::{MicProfile, NotchSpec};
 #[cfg(feature = "dmr")]
 pub use astar_dmr::{DmrNetwork, Timeslot};
 pub use astar_iax::{Direction, TracedFrame};
+pub use astar_record::packet_tap::{JitterSample, PacketCallId, PacketEvent};
 #[cfg(feature = "dmr")]
 pub use dmr::{DmrConfig, DmrLink, DmrSnapshot};
 #[cfg(feature = "dstar")]

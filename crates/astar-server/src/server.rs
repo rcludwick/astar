@@ -7,10 +7,11 @@
 //! connection, one request per connection. Every request first passes the
 //! `Host` allow-list — a foreign `Host` gets the router's 403 and nothing
 //! else, the event stream included. Then `GET /events` → a close-delimited
-//! event stream ([`crate::sse::pump_events`]); the two recording downloads
-//! → a stream ([`crate::recording::http::stream_reply`]); all other requests →
-//! `handle_request_with_headers` → one whole answer. [`ControlServer::stop`]
-//! stops accepting; an open event stream ends at the controller's stop flag.
+//! event stream ([`crate::sse::pump_events`]); the recording and packet log
+//! downloads → a stream ([`crate::recording::http::stream_reply`]); all other
+//! requests → `handle_request_with_headers` → one whole answer.
+//! [`ControlServer::stop`] stops accepting; an open event stream ends at the
+//! controller's stop flag.
 
 use crate::{
     access::strip_admin_prefix,
@@ -191,7 +192,7 @@ fn dispatch(
         }
     }
 
-    // The two recording downloads, streamed: past the gate, like the event
+    // The recording and packet log downloads, streamed: past the gate, like the event
     // stream, and never through the router, which holds a whole body.
     if let Some(reply) = download(ctrl, &method, &path_no_query, &url, req.header("Range")) {
         return reply;
@@ -237,8 +238,9 @@ fn dispatch(
     ))
 }
 
-/// A recording download (`crate::recording::http::download_for`) as a
-/// stream, or its refusal; `None` for any other route.
+/// A recording or packet log download
+/// (`crate::recording::http::download_for`) as a stream, or its refusal;
+/// `None` for any other route.
 fn download(
     ctrl: &Arc<NodeController>,
     method: &str,

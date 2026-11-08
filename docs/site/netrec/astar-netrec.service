@@ -1,0 +1,36 @@
+# /etc/systemd/system/astar-netrec.service
+#
+#   sudo install -m 0755 astar-netrec /usr/local/bin/
+#   sudo useradd --system --home /var/lib/astar astar      # if it is not there yet
+#   sudo install -d -o astar -g astar /var/lib/astar/netrec
+#   sudo install -d /etc/astar
+#   sudo install -m 0644 netrec.toml /etc/astar/netrec.toml
+#   sudo install -m 0644 astar-netrec.service /etc/systemd/system/
+#   sudo systemctl enable --now astar-netrec
+#
+# The config has to be there first: ProtectSystem=strict makes /etc read-only
+# to the service, so it cannot write a template and would restart for ever.
+#
+# A D-Star net on a dongle also needs the astar user to be allowed to open
+# the stick; on most distributions that means SupplementaryGroups=dialout.
+
+[Unit]
+Description=astar-netrec, the receive-only net recorder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=astar
+ExecStart=/usr/local/bin/astar-netrec --config /etc/astar/netrec.toml run
+Restart=on-failure
+# A start that is refused (another recorder holds the lock, for example while
+# `astar-netrec now` runs) must not use up systemd's start limit.
+RestartSec=30
+ReadWritePaths=/var/lib/astar/netrec
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

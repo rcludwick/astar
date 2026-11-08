@@ -18,9 +18,10 @@ use zeroize::Zeroize;
 use astar_station::LinkMode;
 use astar_station::{
     AnswerPolicy, CallMode, CallStatus, CodecPolicy, DtmfMode, HeardEntry, InboundConfig,
-    IncomingAuthPolicy, IncomingCallPolicy, Layout, NodeConfig, OperatingMode, PortalCredentials,
-    RecordRequest, RegisterConfig, Station, StationConfig, StationError, StationEvent,
-    VocoderEnrolment, VocoderTrust, VoiceFormat, WgConfigError, WgLinkConfig,
+    IncomingAuthPolicy, IncomingCallPolicy, Layout, MIN_PACKET_LOG_BYTES, NodeConfig,
+    OperatingMode, PacketLogConfig, PortalCredentials, RecordRequest, RegisterConfig, Station,
+    StationConfig, StationError, StationEvent, VocoderEnrolment, VocoderTrust, VoiceFormat,
+    WgConfigError, WgLinkConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -3131,6 +3132,102 @@ pub unsafe extern "C" fn iax_station_record_state_json(
     .unwrap_or(IAX_ERR_PANIC)
 }
 
+/// Turn the packet log on or off, or point it somewhere else. `enabled`
+/// non-zero starts (or restarts) it in `dir` with at most `max_bytes` of logs
+/// kept there; a `max_bytes` below the floor ([`MIN_PACKET_LOG_BYTES`], 100 MB)
+/// is raised to it. `utc_offset_secs` is the operator's offset from UTC, for
+/// the dates in file names. `enabled` zero stops it and finishes the open
+/// files; `dir` may then be NULL.
+///
+/// Returns [`IAX_OK`]; [`IAX_ERR_NULL`] (NULL `st`, or NULL `dir` while
+/// enabling); [`IAX_ERR_UTF8`] (`dir` not UTF-8); [`IAX_ERR_RECORD`] (the
+/// folder cannot be used or the disk is short of space, so logging is left
+/// off; [`iax_station_last_error`] says which); or [`IAX_ERR_PANIC`].
+///
+/// NOTE: this joins the writer thread and waits for any other change in
+/// progress, so call it off any UI thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_packet_log_configure(
+    st: *mut IaxStation,
+    enabled: c_int,
+    dir: *const c_char,
+    max_bytes: u64,
+    utc_offset_secs: c_int,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let cfg = if enabled == 0 {
+            None
+        } else {
+            let dir = match unsafe { req_str(dir) } {
+                Ok(s) => s,
+                Err(c) => return c,
+            };
+            Some(PacketLogConfig {
+                dir: std::path::PathBuf::from(dir),
+                max_bytes: max_bytes.max(MIN_PACKET_LOG_BYTES),
+                utc_offset_secs,
+                version: env!("CARGO_PKG_VERSION").to_owned(),
+            })
+        };
+        result_code(station, station.inner.packet_log_configure(cfg))
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Tell the packet log the call it was capturing has ended, so each open
+/// file ends with `hangup` and the log stops. Does nothing when no log runs.
+///
+/// Returns [`IAX_OK`], [`IAX_ERR_NULL`] (NULL `st`), or [`IAX_ERR_PANIC`].
+///
+/// NOTE: this joins the writer thread and waits for any other change in
+/// progress, so call it off any UI thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_packet_log_call_ended(st: *mut IaxStation) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        station.inner.packet_log_call_ended();
+        IAX_OK
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Write the packet log's state as JSON into the caller buffer `buf` of `len`
+/// bytes (NUL-terminated, truncate-safe; returns the byte length the full
+/// JSON needs, excluding the NUL, so a `len == 0` call is a sizing query).
+///
+/// ```json
+/// {"capturing":true,"open_calls":1,"used_bytes":123,"dropped":0,"error":null}
+/// ```
+///
+/// `error` says why the log is off when it could not start or stopped by
+/// itself, else `null`. It never carries a packet's contents. Never waits on
+/// a change in progress. Returns [`IAX_ERR_NULL`] if `st` is NULL, or
+/// [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_packet_log_state_json(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let json = serde_json::to_string(&station.inner.packet_log_state())
+            .unwrap_or_else(|_| "{}".to_owned());
+        unsafe { fill_buf(&json, buf, len) }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
 /// Set extra directories to search for a runtime `libcodec2`, ahead of the
 /// hard-coded system paths (iax-f2b8 Task 4/5). `dirs` is a single
 /// NUL-terminated string of `':'`-separated filesystem paths (e.g.
@@ -5221,5 +5318,163 @@ mod characterize_opts_tests {
         ] {
             assert_eq!(parse_characterize_opts(bad), Err(IAX_ERR_IAX), "{bad}");
         }
+    }
+}
+
+#[cfg(test)]
+mod packet_log_tests {
+    //! The packet log's two entry points, against a real station that never
+    //! connects: no network, no audio device, a scratch folder under the
+    //! system temp dir.
+    use super::*;
+    use std::ptr;
+
+    fn station() -> *mut IaxStation {
+        let cfg = IaxConfig {
+            input: ptr::null(),
+            output: ptr::null(),
+            portal_user: ptr::null(),
+            portal_pass: ptr::null(),
+            portal_node: ptr::null(),
+            secret: ptr::null(),
+            codec_policy: ptr::null(),
+        };
+        let st = unsafe { iax_station_new(std::ptr::from_ref(&cfg)) };
+        assert!(!st.is_null());
+        st
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("astar-sys-pl-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn state(st: *mut IaxStation) -> serde_json::Value {
+        let needed = unsafe { iax_station_packet_log_state_json(st, ptr::null_mut(), 0) };
+        assert!(needed > 0);
+        let mut buf = vec![0 as c_char; usize::try_from(needed).unwrap() + 1];
+        let rc = unsafe { iax_station_packet_log_state_json(st, buf.as_mut_ptr(), buf.len()) };
+        assert_eq!(rc, needed);
+        let text = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().unwrap();
+        serde_json::from_str(text).expect("valid json")
+    }
+
+    #[test]
+    fn packet_log_ffi_rejects_null() {
+        let dir = c"/tmp/astar-never-made";
+        assert_eq!(
+            unsafe {
+                iax_station_packet_log_configure(ptr::null_mut(), 1, dir.as_ptr(), 1 << 30, 0)
+            },
+            IAX_ERR_NULL
+        );
+        assert_eq!(
+            unsafe { iax_station_packet_log_state_json(ptr::null_mut(), ptr::null_mut(), 0) },
+            IAX_ERR_NULL
+        );
+        let st = station();
+        // A null folder is only allowed when turning the log off.
+        assert_eq!(
+            unsafe { iax_station_packet_log_configure(st, 1, ptr::null(), 1 << 30, 0) },
+            IAX_ERR_NULL
+        );
+        assert_eq!(
+            unsafe { iax_station_packet_log_configure(st, 0, ptr::null(), 0, 0) },
+            IAX_OK
+        );
+        let bad = [0xffu8, 0xfe, 0];
+        assert_eq!(
+            unsafe { iax_station_packet_log_configure(st, 1, bad.as_ptr().cast(), 1 << 30, 0) },
+            IAX_ERR_UTF8
+        );
+        unsafe { iax_station_free(st) };
+    }
+
+    #[test]
+    fn packet_log_ffi_starts_and_reports_state() {
+        let dir = scratch("start");
+        let cdir = std::ffi::CString::new(dir.to_str().unwrap()).unwrap();
+        let st = station();
+        assert_eq!(state(st)["capturing"], false);
+        assert_eq!(
+            unsafe { iax_station_packet_log_configure(st, 1, cdir.as_ptr(), 1 << 30, 0) },
+            IAX_OK
+        );
+        let on = state(st);
+        assert_eq!(on["capturing"], true);
+        assert_eq!(on["open_calls"], 0);
+        assert_eq!(on["dropped"], 0);
+        assert!(on["error"].is_null());
+        assert_eq!(
+            unsafe { iax_station_packet_log_configure(st, 0, ptr::null(), 0, 0) },
+            IAX_OK
+        );
+        assert_eq!(state(st)["capturing"], false);
+        unsafe { iax_station_free(st) };
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn packet_log_call_ended_rejects_null() {
+        assert_eq!(
+            unsafe { iax_station_packet_log_call_ended(ptr::null_mut()) },
+            IAX_ERR_NULL
+        );
+    }
+
+    #[test]
+    fn packet_log_call_ended_stops_the_log() {
+        let dir = scratch("ended");
+        let cdir = std::ffi::CString::new(dir.to_str().unwrap()).unwrap();
+        let st = station();
+        assert_eq!(
+            unsafe { iax_station_packet_log_configure(st, 1, cdir.as_ptr(), 1 << 30, 0) },
+            IAX_OK
+        );
+        assert_eq!(state(st)["capturing"], true);
+        assert_eq!(unsafe { iax_station_packet_log_call_ended(st) }, IAX_OK);
+        assert_eq!(state(st)["capturing"], false);
+        unsafe { iax_station_free(st) };
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn packet_log_ffi_clamps_a_small_limit() {
+        let dir = scratch("clamp");
+        let cdir = std::ffi::CString::new(dir.to_str().unwrap()).unwrap();
+        let st = station();
+        // One byte would leave no room for a single log; it's raised to the
+        // floor instead of being refused.
+        assert_eq!(
+            unsafe { iax_station_packet_log_configure(st, 1, cdir.as_ptr(), 1, 0) },
+            IAX_OK
+        );
+        assert_eq!(state(st)["capturing"], true);
+        unsafe { iax_station_free(st) };
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn packet_log_state_json_is_secret_free_and_reports_needed_length() {
+        let st = station();
+        let json = state(st);
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["capturing", "dropped", "error", "open_calls", "used_bytes"]
+        );
+        let needed = unsafe { iax_station_packet_log_state_json(st, ptr::null_mut(), 0) };
+        let mut small = [0 as c_char; 4];
+        let rc = unsafe { iax_station_packet_log_state_json(st, small.as_mut_ptr(), small.len()) };
+        assert_eq!(rc, needed, "a short buffer still reports the full length");
+        assert_eq!(small[3], 0, "and is NUL-terminated");
+        unsafe { iax_station_free(st) };
     }
 }

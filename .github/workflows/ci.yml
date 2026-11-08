@@ -107,6 +107,8 @@ jobs:
           ./ci/guard-discord-feature.sh
           ./ci/guard-no-tiny-http.sh
           ./ci/guard-echolink.sh
+          ./ci/guard-packet-log.sh
+          ./ci/guard-netrec-receive-only.sh
 
   # The `just ci` equivalent. `just` is deliberately not installed on the box,
   # so the recipes are spelled out; keep the two in step by hand.
@@ -155,6 +157,8 @@ jobs:
           cargo test -p astar-console --features dstar,dstar-soft-ambe --lib -- software_ dstar_vocoder
           cargo test -p astar-sys --features dstar-soft-ambe --lib -- dstar_vocoder
           cargo test -p astar-server --features dstar-soft-ambe --lib -- vocoder
+          cargo clippy -p astar-netrec --all-targets --features release -- -D warnings
+          cargo test -p astar-netrec --features release
           ./ci/guard-dstar-soft-ambe.sh
 
       # Pinned: different cbindgen releases format headers differently, and a

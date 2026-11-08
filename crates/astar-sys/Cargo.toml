@@ -93,7 +93,7 @@ echolink = ["astar-station/echolink"]
 codec2-static = ["astar-station/codec2-static"]
 
 [dependencies]
-astar-station = { path = "../astar-station", version = "0.1.19-beta" }
+astar-station = { path = "../astar-station", version = "0.1.20-beta" }
 # Serialize the secret-free MicProfile to/from JSON for the characterize /
 # set-mic-profile FFI (iax-5fb6 / iax-2095).
 serde_json.workspace = true
@@ -105,12 +105,12 @@ zeroize.workspace = true
 # Every EchoLink socket refuses a non-loopback address in a test build. No
 # test here logs in or calls anyone, and this makes that a property of the
 # code rather than a promise.
-astar-station = { path = "../astar-station", version = "0.1.19-beta", features = [
+astar-station = { path = "../astar-station", version = "0.1.20-beta", features = [
     "echolink-loopback-only",
 ] }
 # The FFI tests build the real station; the test-backend feature keeps any
 # device-enumeration path hardware-free.
-astar-audio = { path = "../astar-audio", version = "0.1.19-beta", features = [
+astar-audio = { path = "../astar-audio", version = "0.1.20-beta", features = [
     "test-backend",
 ] }
 

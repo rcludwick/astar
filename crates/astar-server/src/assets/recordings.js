@@ -1,9 +1,11 @@
 // The node's recordings: every over the node logger wrote, newest first,
-// with play, download and delete.
+// with play, download and delete. Below them, the node's packet logs, with
+// download and delete.
 //
-// Nothing here builds markup. A talker's callsign came off the air, so every
-// value reaches the DOM through createElement and textContent only, and no
-// node is ever given a string of HTML. The server's CSP is the second lock.
+// Nothing here builds markup. A talker's callsign came off the air, and so
+// did part of a packet log's name, so every value reaches the DOM through
+// createElement and textContent only, and no node is ever given a string of
+// HTML. The server's CSP is the second lock.
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -15,6 +17,7 @@ const BUSY_TEXT = "Too many downloads at once — finish or close one and try ag
 // node would take another download, without sending any recordings.
 const TAR_PROBE = "recordings.tar?since=9999-12-31T23:59:59Z";
 const GONE_TEXT = "That recording is gone.";
+const LOG_GONE_TEXT = "That packet log is gone.";
 const PLAY_FAILED = "This recording could not be played.";
 const NETWORKS = { allstar: "AllStar", m17: "M17", node: "node" };
 const STATES = {
@@ -27,6 +30,10 @@ const STATES = {
 // The last rows rendered, by name, so a poll that changed nothing leaves
 // the table (and the focus in it) alone.
 let shown = "";
+// The same for the packet logs. Sizes are left out, because an open log
+// grows on every poll: its size cell is updated in place instead.
+let shownLogs = "";
+const logSizes = new Map();
 // The open delete confirmation, or null: { box, back }.
 let confirmOpen = null;
 let inFlight = 0;
@@ -44,6 +51,10 @@ function announce(text) {
 
 function fileUrl(name, download) {
   return "recordings/file?name=" + encodeURIComponent(name) + (download ? "&download=1" : "");
+}
+
+function packetLogUrl(name) {
+  return "packet-logs/file?name=" + encodeURIComponent(name);
 }
 
 function when(startedAt) {
@@ -198,14 +209,15 @@ function openConfirm(anchor, question, onYes) {
   yes.focus({ preventScroll: true });
 }
 
-async function remove(row) {
+/// Asks the node to delete `name`; `done` runs once it has.
+async function askDelete(url, name, done) {
   inFlight += 1;
   let res;
   try {
-    res = await fetch("recordings/delete", {
+    res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: row.name }),
+      body: JSON.stringify({ name: name }),
     });
   } catch (_e) {
     inFlight -= 1;
@@ -220,12 +232,7 @@ async function remove(row) {
     body = {};
   }
   if (res.ok) {
-    if (playing === row.name) {
-      player.removeAttribute("src");
-      player.load();
-      playing = null;
-    }
-    announce("Deleted the recording from " + when(row.started_at) + ".");
+    done();
     $("error").hidden = true;
   } else {
     const msg = (body && (body.message || body.error)) || "The node refused that (" + res.status + ").";
@@ -233,6 +240,23 @@ async function remove(row) {
     $("error").hidden = false;
   }
   refresh();
+}
+
+function remove(row) {
+  return askDelete("recordings/delete", row.name, () => {
+    if (playing === row.name) {
+      player.removeAttribute("src");
+      player.load();
+      playing = null;
+    }
+    announce("Deleted the recording from " + when(row.started_at) + ".");
+  });
+}
+
+function removePacketLog(row) {
+  return askDelete("packet-logs/delete", row.name, () => {
+    announce("Deleted the packet log from " + when(row.modified) + ".");
+  });
 }
 
 // ---- rendering --------------------------------------------------------------------
@@ -298,8 +322,137 @@ function render(body) {
   syncPlayButtons();
 }
 
+// ---- packet logs -----------------------------------------------------------------
+
+function logDownload(name, label, spoken) {
+  const a = el("a", "btn", label);
+  a.href = packetLogUrl(name);
+  a.setAttribute("download", name);
+  a.setAttribute("aria-label", spoken);
+  guardDownload(a, packetLogUrl(name), LOG_GONE_TEXT);
+  return a;
+}
+
+function renderPacketRow(row) {
+  const tr = el("tr");
+  const t = when(row.modified);
+  const time = el("td");
+  const timeEl = el("time", null, t);
+  timeEl.dateTime = row.modified;
+  time.append(timeEl);
+  const name = el("td", "mono", row.name);
+  const sz = el("td", "mono", size(row.bytes));
+  logSizes.set(row.name, sz);
+
+  const actions = el("td");
+  const acts = el("div", "row-actions");
+  const pcap = logDownload(row.name, "Download pcap", "Download the pcap from " + t);
+  const jitter = logDownload(row.companion, "Download jitter log", "Download the jitter log from " + t);
+  const del = el("button", "btn quiet-danger", "Delete");
+  del.type = "button";
+  // A call is still writing to it; the node would refuse.
+  del.disabled = row.open;
+  del.setAttribute("aria-label", "Delete the packet log from " + t);
+  del.addEventListener("click", () =>
+    openConfirm(acts, "Delete the packet log from " + t + "? This cannot be undone.", () => removePacketLog(row)),
+  );
+  acts.append(pcap, jitter, del);
+  actions.append(acts);
+  tr.append(time, name, sz, actions);
+  return tr;
+}
+
+function renderPacketLogs(body) {
+  const rows = Array.isArray(body.rows) ? body.rows : [];
+  const on = Boolean(body.state && body.state.capturing);
+  const error = body.state && body.state.error;
+  const debug = Boolean(body.debug_mode);
+  $("card-packet-logs").hidden = !debug && rows.length === 0 && !error;
+  const button = $("packet-capture");
+  button.hidden = !debug;
+  button.textContent = on ? "Stop capture" : "Capture packets";
+  button.setAttribute("aria-pressed", on ? "true" : "false");
+  $("badge-capture").hidden = !on;
+  $("packet-on").hidden = !on;
+  $("packet-error").textContent = error || "";
+  $("packet-error").hidden = !error;
+  $("packet-count").textContent = String(rows.length);
+  $("packet-empty").style.display = rows.length ? "none" : "block";
+  const key = JSON.stringify(rows.map((r) => [r.name, r.open]));
+  if (key !== shownLogs && !confirmOpen) {
+    shownLogs = key;
+    logSizes.clear();
+    $("packet-rows").replaceChildren(...rows.map(renderPacketRow));
+    return;
+  }
+  for (const row of rows) {
+    const cell = logSizes.get(row.name);
+    if (cell) cell.textContent = size(row.bytes);
+  }
+}
+
+async function refreshPacketLogs() {
+  let res;
+  try {
+    res = await fetch("packet-logs/state", { headers: { Accept: "application/json" } });
+  } catch (_e) {
+    return; // the recordings poll says the node is unreachable
+  }
+  let body = {};
+  try {
+    body = await res.json();
+  } catch (_e) {
+    body = {};
+  }
+  if (!res.ok) {
+    // Logging is off here. Any other refusal, the recordings poll reports.
+    $("card-packet-logs").hidden = true;
+    $("packet-capture").hidden = true;
+    $("badge-capture").hidden = true;
+    return;
+  }
+  renderPacketLogs(body);
+}
+
+/// Asks the node for the opposite of what the button shows.
+async function toggleCapture() {
+  const button = $("packet-capture");
+  const want = button.getAttribute("aria-pressed") !== "true";
+  button.disabled = true;
+  let res;
+  try {
+    res = await fetch("packet-logs/capture", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ capturing: want }),
+    });
+  } catch (_e) {
+    button.disabled = false;
+    $("offline").hidden = false;
+    return;
+  }
+  let body = {};
+  try {
+    body = await res.json();
+  } catch (_e) {
+    body = {};
+  }
+  button.disabled = false;
+  if (res.ok) {
+    $("error").hidden = true;
+    announce(want ? "Capture started." : "Capture stopped.");
+  } else {
+    const msg = (body && (body.message || body.error)) || "The node refused that (" + res.status + ").";
+    $("error").textContent = "Could not change the capture: " + msg;
+    $("error").hidden = false;
+  }
+  refreshPacketLogs();
+}
+$("packet-capture").addEventListener("click", toggleCapture);
+
 async function refresh() {
   if (inFlight) return;
+  refreshPacketLogs();
   let res;
   try {
     res = await fetch("recordings/state", { headers: { Accept: "application/json" } });

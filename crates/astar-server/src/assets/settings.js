@@ -32,8 +32,8 @@ const dirty = new Set();
 // Outstanding POSTs. No render and no poll while one is in flight.
 let inFlight = 0;
 
-// The eleven cards in page order. A card is shown when it has a renderer.
-const CARD_NAMES = ["identity", "listener", "audio", "announce", "discord", "linking", "m17", "vocoder", "public", "recording", "advanced"];
+// The twelve cards in page order. A card is shown when it has a renderer.
+const CARD_NAMES = ["identity", "listener", "audio", "announce", "discord", "linking", "m17", "vocoder", "public", "recording", "packet_log", "advanced"];
 
 // ---- small pure helpers ----------------------------------------------------
 
@@ -812,6 +812,7 @@ const CARD_RENDERERS = {
   vocoder: renderCardVocoder,
   public: renderCardPublic,
   recording: renderCardRecording,
+  packet_log: renderCardPacketLog,
   advanced: renderCardAdvanced,
 };
 
@@ -2111,12 +2112,41 @@ function renderCardRecording() {
   const adv = el("div");
   adv.append(
     field(card, "recording.frames", {
-      label: "Save codec frames for unamblify",
+      label: "Save codec frames",
       kind: "bool",
       advanced: true,
     }),
   );
   mount(card, adv, true);
+}
+
+// ---- packet log: [packet_log] ----------------------------------------------
+
+function renderCardPacketLog() {
+  const card = "packet_log";
+  if (dirty.has(card)) return;
+  clearMounted(card);
+
+  const main = el("div");
+  main.append(
+    field(card, "packet_log.debug_mode", {
+      label: "Debug mode",
+      kind: "bool",
+      hint: "Off by default. Adds a Capture packets button to the Recordings page. Nothing is captured until you press it, and a capture holds other people's voices. Takes effect when you save, and saving this card stops a capture in progress.",
+    }),
+    field(card, "packet_log.dir", {
+      label: "Folder",
+      kind: "text",
+      placeholder: "/var/lib/astar/packet-logs",
+    }),
+    field(card, "packet_log.max_bytes", {
+      label: "Keep at most",
+      kind: "text",
+      placeholder: "1 GB",
+      hint: "Oldest logs are deleted first. For example 1 GB.",
+    }),
+  );
+  mount(card, main, false);
 }
 
 // ---- keyboard and the unload guard ------------------------------------------

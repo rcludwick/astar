@@ -114,6 +114,7 @@ use astar_codec::ysf::{DnFrame, dn_frame_to_channel};
 use astar_nxdn::frame::{MESSAGE_TYPE_TX_REL, NetFrame, USC_SACCH_NS};
 use astar_nxdn::{FsmAction, LinkState, NxdnFsm, wire};
 use astar_record::frames::{CaptureMode, Dir, FrameEvent};
+use astar_record::packet_tap::{CallMeta, CallPacketTap, PacketCallId, PacketNetwork, PacketSlot};
 use astar_record::tap::TapSlot;
 
 use crate::heard::{HeardEntry, HeardLog};
@@ -255,6 +256,10 @@ pub struct NxdnLink {
     /// The codec-frame recording tap ([`NxdnLink::frame_tap`]). A link with
     /// no audio decodes nothing, so its slot is never offered to.
     frame_tap: TapSlot<FrameEvent>,
+    /// The packet log's slot ([`NxdnLink::packet_slot`]).
+    packet_slot: PacketSlot,
+    /// The id of this link's [`CallPacketTap`], which the thread owns.
+    packet_call: PacketCallId,
 }
 
 #[derive(Debug)]
@@ -511,11 +516,25 @@ impl NxdnLink {
             .as_ref()
             .map_or_else(TapSlot::default, |a| a.rec.slot());
 
+        let packet_slot = PacketSlot::default();
+        let packet_tap = CallPacketTap::new(
+            packet_slot.clone(),
+            astar_nxdn::wire::is_media,
+            CallMeta {
+                network: PacketNetwork::Nxdn,
+                codec: None,
+                label: format!("NXDN {} {talkgroup}", reflector_name(host)),
+                local: socket.local_addr().unwrap_or(bind),
+                peer: addr,
+            },
+        );
+        let packet_call = packet_tap.id();
+
         let thread = {
             let shared = Arc::clone(&shared);
             thread::Builder::new()
                 .name("astar-nxdn-link".into())
-                .spawn(move || run(&socket, addr, fsm, &shared, audio))
+                .spawn(move || run(&socket, addr, fsm, &shared, audio, packet_tap))
                 .map_err(|e| ConsoleError::Nxdn(format!("thread: {e}")))?
         };
 
@@ -524,6 +543,8 @@ impl NxdnLink {
             thread: Some(thread),
             backend,
             frame_tap,
+            packet_slot,
+            packet_call,
         })
     }
 
@@ -544,6 +565,20 @@ impl NxdnLink {
             tx_dbfs: -60.0,
             rx_dbfs: -60.0,
         }
+    }
+
+    /// The packet log's slot: install a tap here and the link thread offers
+    /// every media datagram it receives to it. The slot is shared: setting it
+    /// on the returned handle reaches the live link.
+    #[must_use]
+    pub fn packet_slot(&self) -> PacketSlot {
+        self.packet_slot.clone()
+    }
+
+    /// The id this link's packet events carry.
+    #[must_use]
+    pub fn packet_call(&self) -> PacketCallId {
+        self.packet_call
     }
 
     /// The codec-frame recording tap: install a [`astar_record::Tap`] here
@@ -619,6 +654,12 @@ impl Drop for NxdnLink {
     }
 }
 
+/// The host part of a `host:port` reflector address, for the packet log's
+/// label: the port is in the log's addresses already.
+fn reflector_name(host: &str) -> &str {
+    host.rsplit_once(':').map_or(host, |(name, _)| name)
+}
+
 /// The link thread's body. The socket is owned by the spawned closure for
 /// the thread's lifetime and borrowed here.
 fn run(
@@ -627,6 +668,7 @@ fn run(
     mut fsm: NxdnFsm,
     shared: &Arc<Shared>,
     mut audio: Option<Audio>,
+    mut packet_tap: CallPacketTap,
 ) {
     let publish = |fsm: &NxdnFsm| {
         shared
@@ -652,6 +694,7 @@ fn run(
     while !shared.stop.load(Ordering::Relaxed) {
         match socket.recv_from(&mut buf) {
             Ok((n, from)) if from == addr => {
+                packet_tap.capture(from, &buf[..n]);
                 let action = fsm.on_packet(&buf[..n], Instant::now());
                 if matches!(action, FsmAction::Data(_)) {
                     last_data = Some(Instant::now());

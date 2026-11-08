@@ -230,6 +230,12 @@ struct AstarApp: App {
         /// file is finished. That work also runs off the main thread, and its
         /// wait is capped at 2 s, so a logoff stuck behind a slow directory
         /// never holds the quit either.
+        ///
+        /// The packet log stops last, so a call hung up above ends its file
+        /// as a hangup. The process exits without dropping the station, so
+        /// without this every open log would be left with no end line, which
+        /// the docs say means a crash. Its wait is capped at 2 s too, which
+        /// makes 7 s the most a quit can take.
         func applicationWillTerminate(_ notification: Notification) {
             if !session.finishRecordingBeforeQuit(timeout: 3) {
                 Self.log.error(
@@ -237,6 +243,11 @@ struct AstarApp: App {
                 )
             }
             session.echolinkShutdownForQuit(timeout: 2)
+            if !session.finishPacketLogBeforeQuit(timeout: 2) {
+                Self.log.error(
+                    "Quit did not wait for the packet log to finish: the stop took longer than 2 s, so its files may lack an end line"
+                )
+            }
         }
 
         private static let log = Logger(subsystem: "astar", category: "recording")

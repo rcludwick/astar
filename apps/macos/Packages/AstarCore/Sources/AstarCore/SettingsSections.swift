@@ -31,7 +31,7 @@ public enum SettingsSectionID: String, CaseIterable, Hashable, Sendable {
     public var title: String {
         switch self {
         case .operatorIdentity: return "Operator"
-        case .account: return "Account"
+        case .account: return "AllStarLink"
         case .echolink: return "EchoLink"
         case .dmr: return "DMR"
         case .nxdn: return "NXDN"

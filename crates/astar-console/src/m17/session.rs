@@ -8,7 +8,7 @@
 //! and anything built on them) has no way to put a voice-stream packet on
 //! the wire. See [`crate::m17`] for the architecture.
 
-use std::net::UdpSocket;
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -21,6 +21,7 @@ use astar_m17::{
     encode_callsign,
 };
 use astar_record::frames::{Dir, FrameEvent};
+use astar_record::packet_tap::{CallMeta, CallPacketTap, PacketCallId, PacketNetwork, PacketSlot};
 use astar_record::tap::{StartedOn, TapSlot};
 
 use super::rx::{RxTrack, connect_udp_socket, recv_step};
@@ -40,6 +41,10 @@ pub struct M17Session {
     /// does TX stream bookkeeping) on its next poll.
     ptt_request: Arc<AtomicBool>,
     shared: Arc<SharedState>,
+    /// The packet log's slot ([`M17Session::packet_slot`]).
+    packet_slot: PacketSlot,
+    /// The id of this session's [`CallPacketTap`], which the run loop owns.
+    packet_call: PacketCallId,
 }
 
 impl M17Session {
@@ -79,6 +84,21 @@ impl M17Session {
 
         let socket = connect_udp_socket(&cfg.host, cfg.port)?;
 
+        let unknown = SocketAddr::from(([0, 0, 0, 0], 0));
+        let packet_slot = PacketSlot::default();
+        let packet_tap = CallPacketTap::new(
+            packet_slot.clone(),
+            astar_m17::frame::is_media,
+            CallMeta {
+                network: PacketNetwork::M17,
+                codec: None,
+                label: format!("M17 {} {}", cfg.host, char::from(cfg.module)),
+                local: socket.local_addr().unwrap_or(unknown),
+                peer: socket.peer_addr().unwrap_or(unknown),
+            },
+        );
+        let packet_call = packet_tap.id();
+
         let fsm = SessionFsm::with_keepalive_timeout(callsign, cfg.module, cfg.keepalive_timeout);
 
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -100,6 +120,7 @@ impl M17Session {
                     shutdown: thread_shutdown,
                     ptt_request: thread_ptt_request,
                     shared: thread_shared,
+                    packet_tap,
                 });
             })
             .map_err(|e| ConsoleError::Resolve {
@@ -112,6 +133,8 @@ impl M17Session {
             shutdown,
             ptt_request,
             shared,
+            packet_slot,
+            packet_call,
         })
     }
 
@@ -138,6 +161,20 @@ impl M17Session {
     #[must_use]
     pub fn heard(&self) -> Vec<HeardEntry> {
         self.shared.talkers.heard()
+    }
+
+    /// The packet log's slot: install a tap here and the run loop offers
+    /// every media datagram it receives to it. The slot is shared: setting it
+    /// on the returned handle reaches the live session.
+    #[must_use]
+    pub fn packet_slot(&self) -> PacketSlot {
+        self.packet_slot.clone()
+    }
+
+    /// The id this session's packet events carry.
+    #[must_use]
+    pub fn packet_call(&self) -> PacketCallId {
+        self.packet_call
     }
 
     /// The codec-frame recording tap: install a [`astar_record::Tap`] here
@@ -177,6 +214,9 @@ impl Drop for M17Session {
 /// Everything [`run_loop`] needs, bundled to keep the spawn call's arity sane
 /// (`clippy::too_many_arguments`).
 struct RunLoopParams {
+    /// The packet log's tap, owned by the loop so the call's last event goes
+    /// out when the loop ends.
+    packet_tap: CallPacketTap,
     socket: UdpSocket,
     fsm: SessionFsm,
     /// The lane's two channel ends. Its `preroll_lead` cell is carried but
@@ -263,6 +303,7 @@ fn run_loop(p: RunLoopParams) {
         shutdown,
         ptt_request,
         shared,
+        mut packet_tap,
     } = p;
 
     let now = Instant::now();
@@ -344,7 +385,15 @@ fn run_loop(p: RunLoopParams) {
         // 3. Socket poll (bounded by SOCKET_POLL_TIMEOUT). `recv_step` only
         //    reads and reports; every send happens here, on this loop's own
         //    socket.
-        let step = recv_step(|b| socket.recv(b), &mut buf, &mut fsm);
+        let step = recv_step(
+            |b| {
+                let (n, from) = socket.recv_from(b)?;
+                packet_tap.capture(from, &b[..n]);
+                Ok(n)
+            },
+            &mut buf,
+            &mut fsm,
+        );
         if let Some(reply) = step.reply {
             let _ = socket.send(&reply);
         }

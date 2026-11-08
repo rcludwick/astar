@@ -1665,6 +1665,55 @@ int iax_station_record_stop(IaxStation *st);
 int iax_station_record_state_json(IaxStation *st, char *buf, uintptr_t len);
 
 /**
+ * Turn the packet log on or off, or point it somewhere else. `enabled`
+ * non-zero starts (or restarts) it in `dir` with at most `max_bytes` of logs
+ * kept there; a `max_bytes` below the floor ([`MIN_PACKET_LOG_BYTES`], 100 MB)
+ * is raised to it. `utc_offset_secs` is the operator's offset from UTC, for
+ * the dates in file names. `enabled` zero stops it and finishes the open
+ * files; `dir` may then be NULL.
+ *
+ * Returns [`IAX_OK`]; [`IAX_ERR_NULL`] (NULL `st`, or NULL `dir` while
+ * enabling); [`IAX_ERR_UTF8`] (`dir` not UTF-8); [`IAX_ERR_RECORD`] (the
+ * folder cannot be used or the disk is short of space, so logging is left
+ * off; [`iax_station_last_error`] says which); or [`IAX_ERR_PANIC`].
+ *
+ * NOTE: this joins the writer thread and waits for any other change in
+ * progress, so call it off any UI thread.
+ */
+int iax_station_packet_log_configure(IaxStation *st,
+                                     int enabled,
+                                     const char *dir,
+                                     uint64_t max_bytes,
+                                     int utc_offset_secs);
+
+/**
+ * Tell the packet log the call it was capturing has ended, so each open
+ * file ends with `hangup` and the log stops. Does nothing when no log runs.
+ *
+ * Returns [`IAX_OK`], [`IAX_ERR_NULL`] (NULL `st`), or [`IAX_ERR_PANIC`].
+ *
+ * NOTE: this joins the writer thread and waits for any other change in
+ * progress, so call it off any UI thread.
+ */
+int iax_station_packet_log_call_ended(IaxStation *st);
+
+/**
+ * Write the packet log's state as JSON into the caller buffer `buf` of `len`
+ * bytes (NUL-terminated, truncate-safe; returns the byte length the full
+ * JSON needs, excluding the NUL, so a `len == 0` call is a sizing query).
+ *
+ * ```json
+ * {"capturing":true,"open_calls":1,"used_bytes":123,"dropped":0,"error":null}
+ * ```
+ *
+ * `error` says why the log is off when it could not start or stopped by
+ * itself, else `null`. It never carries a packet's contents. Never waits on
+ * a change in progress. Returns [`IAX_ERR_NULL`] if `st` is NULL, or
+ * [`IAX_ERR_PANIC`].
+ */
+int iax_station_packet_log_state_json(IaxStation *st, char *buf, uintptr_t len);
+
+/**
  * Set extra directories to search for a runtime `libcodec2`, ahead of the
  * hard-coded system paths (iax-f2b8 Task 4/5). `dirs` is a single
  * NUL-terminated string of `':'`-separated filesystem paths (e.g.

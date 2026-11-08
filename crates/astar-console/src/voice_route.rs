@@ -386,6 +386,7 @@ impl VoiceRoute {
     }
 
     /// This route's lane on the output bus, for its jitter-buffer counters.
+    #[cfg(feature = "echolink")]
     pub(crate) fn mix_id(&self) -> MixCallId {
         self.mix_id
     }

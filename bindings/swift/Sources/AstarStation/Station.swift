@@ -1157,6 +1157,40 @@ public struct RecordState: Decodable, Equatable, Sendable {
     }
 }
 
+/// What the packet log is doing, from ``Station/packetLogState()``. While
+/// no capture runs it is the last capture's final state, or why the last start
+/// was refused.
+public struct PacketLogState: Decodable, Equatable, Sendable {
+    /// Packets are being written to disk.
+    public let capturing: Bool
+    /// How many calls have a log file open right now.
+    public let openCalls: UInt32
+    /// Bytes the logs take up in the folder.
+    public let usedBytes: UInt64
+    /// Packets that never reached a file, for any reason.
+    public let dropped: UInt64
+    /// The first thing that went wrong (folder unusable, disk full), if any.
+    public let error: String?
+
+    public init(
+        capturing: Bool, openCalls: UInt32, usedBytes: UInt64, dropped: UInt64, error: String?
+    ) {
+        self.capturing = capturing
+        self.openCalls = openCalls
+        self.usedBytes = usedBytes
+        self.dropped = dropped
+        self.error = error
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case capturing
+        case openCalls = "open_calls"
+        case usedBytes = "used_bytes"
+        case dropped
+        case error
+    }
+}
+
 // MARK: - Error
 
 /// Thrown when an `iax_station_*` call returns a negative code.
@@ -2898,6 +2932,71 @@ public final class Station {
             let state = try? JSONDecoder().decode(RecordState.self, from: data)
         else {
             throw StationError(code: -1, text: "undecodable record state json", detail: "")
+        }
+        return state
+    }
+
+    /// Turn the packet log on or off, or point it at another folder. With
+    /// `enabled` true it logs into `directory`, keeping at most `maxBytes` of
+    /// logs there (less than 100 MB is raised to 100 MB); `utcOffsetSeconds`
+    /// puts local time in the file names. With `enabled` false it stops and
+    /// finishes the open files, and `directory` may be `nil`.
+    ///
+    /// Throws `IAX_ERR_NULL` when enabling without a directory, and
+    /// `IAX_ERR_RECORD` when the folder cannot be used or the disk is short of
+    /// space (the error's `detail` says which; no capture runs then).
+    ///
+    /// This joins the writer thread, which can take as long as the disk does,
+    /// and waits out any other change in progress. Call it off the main thread.
+    public func packetLogConfigure(
+        enabled: Bool, directory: URL?, maxBytes: Int64, utcOffsetSeconds: Int32
+    ) throws {
+        let limit = UInt64(max(maxBytes, 0))
+        if let directory {
+            try directory.path.withCString { dirPtr in
+                _ = try check(
+                    iax_station_packet_log_configure(
+                        handle, enabled ? 1 : 0, dirPtr, limit, utcOffsetSeconds))
+            }
+        } else {
+            _ = try check(
+                iax_station_packet_log_configure(
+                    handle, enabled ? 1 : 0, nil, limit, utcOffsetSeconds))
+        }
+    }
+
+    /// Tell the engine the call being captured has ended: each open file ends
+    /// with `hangup` and the log stops. A no-op when no log runs.
+    ///
+    /// This joins the writer thread, like ``packetLogConfigure(enabled:directory:maxBytes:utcOffsetSeconds:)``.
+    /// Call it off the main thread.
+    public func packetLogCallEnded() throws {
+        try check(iax_station_packet_log_call_ended(handle))
+    }
+
+    /// The packet log's state. Cheap, and never waits on a change in progress.
+    public func packetLogState() throws -> PacketLogState {
+        let needed = iax_station_packet_log_state_json(handle, nil, 0)
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
+        var buf = [CChar](repeating: 0, count: Int(needed) + 1)
+        var rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+            iax_station_packet_log_state_json(handle, ptr.baseAddress, UInt(ptr.count))
+        }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
+        // The error text can grow between the sizing call and the fill, so
+        // grow once and fill again, as ``recordState()`` does.
+        if rc > Int32(buf.count - 1) {
+            buf = [CChar](repeating: 0, count: Int(rc) + 1)
+            rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+                iax_station_packet_log_state_json(handle, ptr.baseAddress, UInt(ptr.count))
+            }
+            if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
+        }
+        let json = String(cString: buf)
+        guard let data = json.data(using: .utf8),
+            let state = try? JSONDecoder().decode(PacketLogState.self, from: data)
+        else {
+            throw StationError(code: -1, text: "undecodable packet log state json", detail: "")
         }
         return state
     }

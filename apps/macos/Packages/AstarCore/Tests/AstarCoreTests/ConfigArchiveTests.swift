@@ -301,4 +301,40 @@ final class ConfigArchiveTests: XCTestCase {
                 "\(error)".lowercased().contains("newer"), "unhelpful error: \(error)")
         }
     }
+
+    func testPacketLogKeysAreNotExported() {
+        var sources = sampleSources()
+        sources.defaults["recording.packetLogDebugMode"] = true
+        sources.defaults["recording.packetLogFolder"] = "/Users/me/Packet Logs"
+        sources.defaults["recording.packetLogMaxBytes"] = 2_000_000_000
+        let archive = ConfigArchive.make(sections: Set(ConfigSection.allCases), from: sources)
+        let keys = Set(
+            (archive.settings ?? [:]).keys.map { $0 } + (archive.interface ?? [:]).keys.map { $0 })
+        XCTAssertFalse(keys.contains { $0.hasPrefix("recording.packetLog") })
+    }
+
+    func testPacketLogKeysAreRefusedOnImport() {
+        for key in [
+            "recording.packetLog", "recording.packetLogDebugMode", "recording.packetLogFolder",
+            "recording.packetLogMaxBytes",
+        ] {
+            XCTAssertFalse(ConfigArchive.isImportable(key: key), key)
+        }
+        XCTAssertTrue(ConfigArchive.isImportable(key: "audio.inputGain"))
+
+        let suite = "astar.tests.archive.pl.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var archive = ConfigArchive.make(sections: [.settings], from: sampleSources())
+        archive.settings = (archive.settings ?? [:]).merging([
+            "recording.packetLogDebugMode": .bool(true)
+        ]) { $1 }
+        ConfigTransfer.apply(
+            archive,
+            session: CallSession(
+                station: NullStation(), userDefaults: defaults),
+            setupStore: UserDefaultsSetupStore(defaults),
+            profileStore: UserDefaultsMicProfileStore(defaults), defaults: defaults)
+        XCTAssertFalse(UserDefaultsRecordingSettingsStore(defaults).load().debugMode)
+    }
 }

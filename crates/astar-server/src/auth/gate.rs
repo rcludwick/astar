@@ -68,16 +68,18 @@ pub fn admit(svc: &AuthService, req: &Req<'_>, admin_path: &str, original: &str)
     {
         return Admission::Refuse(refused);
     }
-    // Every key from the web carries a name in the audit. The console is
-    // curl and the CLI on the node itself, and is not a web key.
+    // Every key from the web carries a name in the audit, and so does
+    // starting or stopping a packet capture, which records other people's
+    // voices. The console is curl and the CLI on the node itself, and is not
+    // a web key.
     if let Principal::User(u) = &p
         && req.method == "POST"
-        && matches!(admin_path, "/key" | "/unkey")
+        && matches!(admin_path, "/key" | "/unkey" | "/packet-logs/capture")
     {
-        let event = if admin_path == "/key" {
-            "web_key"
-        } else {
-            "web_unkey"
+        let event = match admin_path {
+            "/key" => "web_key",
+            "/unkey" => "web_unkey",
+            _ => "web_packet_capture",
         };
         svc.audit(event, Some(&u.name), "", &req.ip());
     }
@@ -210,6 +212,33 @@ mod tests {
     }
 
     #[test]
+    fn a_web_capture_names_the_admin_in_the_audit() {
+        let f = Fixture::new();
+        let admin = format!(
+            "{}={}",
+            session::SESSION_COOKIE_TLS,
+            f.svc.test_sign_in("A1DM", Role::Admin)
+        );
+        let mut r = req(Surface::Public, Some(&admin));
+        r.method = "POST";
+        let route = "/packet-logs/capture";
+        assert_eq!(
+            status(&admit(&f.svc, &r, route, "/admin/packet-logs/capture")),
+            200
+        );
+        let audit = f.svc.read(|d| {
+            d.audit
+                .iter()
+                .map(|e| (e.event.clone(), e.user.clone()))
+                .collect::<Vec<_>>()
+        });
+        assert!(
+            audit.contains(&("web_packet_capture".to_string(), Some("A1DM".to_string()))),
+            "{audit:?}"
+        );
+    }
+
+    #[test]
     fn every_step_up_route_needs_a_fresh_credential() {
         let f = Fixture::new();
         let admin = format!(
@@ -261,6 +290,10 @@ mod tests {
             ("GET", "/recordings/file"),
             ("POST", "/recordings/delete"),
             ("GET", "/recordings.tar"),
+            ("GET", "/packet-logs/state"),
+            ("GET", "/packet-logs/file"),
+            ("POST", "/packet-logs/delete"),
+            ("POST", "/packet-logs/capture"),
         ];
         for (m, p) in routes {
             let original = format!("/admin{p}");

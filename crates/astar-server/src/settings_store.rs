@@ -1026,7 +1026,7 @@ channel_id = "223456789012345678"
             "disk": disk,
             "running": disk,
             "pending": { "restart": [], "apply": [] },
-            "live": ["bridge.", "parrot.", "audio.input", "audio.output", "m17.enabled", "m17.reflectors"],
+            "live": ["bridge.", "parrot.", "audio.input", "audio.output", "m17.enabled", "m17.reflectors", "packet_log."],
             "credentials": {
                 "node": "set",
                 "portal": "unset",

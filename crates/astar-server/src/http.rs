@@ -637,10 +637,24 @@ pub fn handle_request_with_headers(
             }
             crate::recording::http::delete(ctrl, body)
         }
+        ("GET", "/packet-logs/state") => crate::recording::http::packet_log_state(ctrl),
+        ("POST", "/packet-logs/delete") => {
+            if let Err(refused) = same_origin_json(headers, "POST /packet-logs/delete") {
+                return refused;
+            }
+            crate::recording::http::packet_log_delete(ctrl, body)
+        }
+        ("POST", "/packet-logs/capture") => {
+            if let Err(refused) = same_origin_json(headers, "POST /packet-logs/capture") {
+                return refused;
+            }
+            crate::recording::http::packet_capture(ctrl, body)
+        }
         // Streamed by the server layer once the gate admits them; here only
-        // the refusals (recording off, an unknown name, a bad `since`) can
-        // be answered, since this router holds a whole body in memory.
-        ("GET", "/recordings/file" | "/recordings.tar") => {
+        // the refusals (recording or the packet log off, an unknown name, a
+        // bad `since`) can be answered, since this router holds a whole body
+        // in memory.
+        ("GET", "/recordings/file" | "/recordings.tar" | "/packet-logs/file") => {
             let query = path.split_once('?').map_or("", |(_, q)| q);
             match crate::recording::http::download_for(ctrl, method, route, query) {
                 Some(Err(refused)) => refused,
@@ -952,10 +966,16 @@ fn is_m17_path(path: &str) -> bool {
     path.starts_with("m17.")
 }
 
+/// `packet_log.*` and the removable table itself.
+fn is_packet_log_path(path: &str) -> bool {
+    path == "packet_log" || path.starts_with("packet_log.")
+}
+
 /// Apply the live tier of a written save: one `apply_bridge_config` for
 /// any bridge/parrot change, one `SetDevices` for any device change, one
-/// `apply_m17_settings` for any `[m17]` change. The three are independent,
-/// so a failure in one does not skip the others.
+/// `apply_m17_settings` for any `[m17]` change, one
+/// `set_packet_log_settings` for any `[packet_log]` change. They are
+/// independent, so a failure in one does not skip the others.
 /// `outcome.changed` also names a live path whose value already matched
 /// the disk but which the running node had not taken (the page's Apply on
 /// a hand-edited field), so that case reaches the same two doors.
@@ -1016,6 +1036,17 @@ fn apply_live_tier(ctrl: &NodeController, outcome: &SaveOutcome) -> LiveOutcome 
                 }
             }
         }
+    }
+
+    let packet_log_paths: Vec<String> = live
+        .iter()
+        .filter(|p| is_packet_log_path(p))
+        .cloned()
+        .collect();
+    if !packet_log_paths.is_empty() {
+        // Waits out any capture's writer, which costs this one connection.
+        ctrl.set_packet_log_settings(outcome.config.packet_log.as_ref());
+        applied.extend(packet_log_paths);
     }
 
     LiveOutcome {
@@ -2931,7 +2962,8 @@ mod tests {
                 "audio.input",
                 "audio.output",
                 "m17.enabled",
-                "m17.reflectors"
+                "m17.reflectors",
+                "packet_log."
             ])
         );
         assert_eq!(
@@ -4136,6 +4168,57 @@ mod tests {
         (r.status, body_json(&r))
     }
 
+    /// Nothing about `[packet_log]` waits for a restart: the running node
+    /// holds the new table when the save answers.
+    #[test]
+    fn saving_debug_mode_needs_no_restart() {
+        let (c, _dir) = settings_controller();
+        assert!(!c.packet_debug_mode());
+        let (status, v) = m17_save(
+            &c,
+            &serde_json::json!({ "packet_log.debug_mode": true }),
+            &[],
+        );
+        assert_eq!(status, 200, "{v}");
+        let applied = v["applied"].as_array().expect("the paths applied");
+        assert!(applied.contains(&"packet_log.debug_mode".into()), "{v}");
+        assert_eq!(v["on_restart"], serde_json::json!([]));
+        assert!(c.packet_debug_mode());
+    }
+
+    /// A save stops a capture, and `null` takes the whole table away.
+    #[test]
+    fn a_save_stops_a_capture_and_null_removes_the_table() {
+        let (c, dir) = settings_controller();
+        let logs = dir.path().join("logs");
+        std::fs::create_dir(&logs).unwrap();
+        let (status, v) = m17_save(
+            &c,
+            &serde_json::json!({
+                "packet_log.debug_mode": true,
+                "packet_log.dir": logs.to_str().unwrap(),
+            }),
+            &[],
+        );
+        assert_eq!(status, 200, "{v}");
+        c.packet_capture(true).expect("the folder is usable");
+        assert!(c.packet_log_status().capturing);
+
+        let (status, v) = m17_save(
+            &c,
+            &serde_json::json!({ "packet_log.max_bytes": "2 GB" }),
+            &[],
+        );
+        assert_eq!(status, 200, "{v}");
+        assert!(!c.packet_log_status().capturing);
+        assert_eq!(c.packet_log_dir().as_deref(), Some(logs.as_path()));
+
+        let (status, v) = m17_save(&c, &serde_json::json!({ "packet_log": null }), &[]);
+        assert_eq!(status, 200, "{v}");
+        assert_eq!(v["on_restart"], serde_json::json!([]));
+        assert_eq!(c.packet_log_dir(), None);
+    }
+
     /// `POST /m17` monitor. Every call in this module is refused before a
     /// socket opens.
     fn m17_dial(c: &NodeController, reflector: &str) -> (u16, serde_json::Value) {
@@ -4948,7 +5031,7 @@ mod tests {
         let js = handle_request(&c, "GET", "/settings.js", b"");
         let js = String::from_utf8(js.body).expect("the script is utf-8");
         for needle in [
-            "const CARD_NAMES = [\"identity\", \"listener\", \"audio\", \"announce\", \"discord\", \"linking\", \"m17\", \"vocoder\", \"public\", \"recording\", \"advanced\"];",
+            "const CARD_NAMES = [\"identity\", \"listener\", \"audio\", \"announce\", \"discord\", \"linking\", \"m17\", \"vocoder\", \"public\", \"recording\", \"packet_log\", \"advanced\"];",
             "  m17: renderCardM17,",
             "  m17: m17Patch,",
             "patch[\"m17.enabled\"] = false;",
@@ -5051,10 +5134,268 @@ mod tests {
             "\"recording.frames\"",
             "Off by default. Recordings include everything the conference carries, Discord too.",
             "Oldest recordings are deleted first. For example 2 GB.",
-            "Save codec frames for unamblify",
+            "\"Save codec frames\"",
         ] {
             assert!(js.contains(needle), "settings.js must contain {needle:?}");
         }
+    }
+
+    #[test]
+    fn the_settings_page_has_a_packet_log_card() {
+        let c = test_controller();
+        let page = handle_request(&c, "GET", "/settings", b"");
+        let html = String::from_utf8(page.body).expect("the page is utf-8");
+        for needle in [
+            "<section class=\"card\" id=\"card-packet_log\" hidden>",
+            "<div class=\"card-head\"><h2>Packet log</h2></div>",
+            "<div id=\"body-packet_log\"></div>",
+            "<button type=\"button\" class=\"btn\" id=\"save-packet_log\" disabled>Save</button>",
+        ] {
+            assert!(html.contains(needle), "settings.html must contain {needle}");
+        }
+        let at = |id: &str| html.find(id).expect("the card is on the page");
+        assert!(
+            at("id=\"card-recording\"") < at("id=\"card-packet_log\"")
+                && at("id=\"card-packet_log\"") < at("id=\"card-advanced\""),
+            "the Packet log card sits between Recordings and Advanced, in node.toml order"
+        );
+        let js = handle_request(&c, "GET", "/settings.js", b"");
+        let js = String::from_utf8(js.body).expect("the script is utf-8");
+        for needle in [
+            "  packet_log: renderCardPacketLog,",
+            "\"packet_log.debug_mode\"",
+            "\"packet_log.dir\"",
+            "\"packet_log.max_bytes\"",
+            "Debug mode",
+            "Off by default. Adds a Capture packets button to the Recordings page. Nothing is captured until you press it, and a capture holds other people's voices. Takes effect when you save, and saving this card stops a capture in progress.",
+            "label: \"Folder\"",
+            "label: \"Keep at most\"",
+            "Oldest logs are deleted first. For example 1 GB.",
+        ] {
+            assert!(js.contains(needle), "settings.js must contain {needle:?}");
+        }
+        assert!(!js.contains("Log received packets"));
+    }
+
+    #[test]
+    fn the_recordings_page_has_a_capture_button_beside_the_downloads() {
+        let at = |id: &str| RECORDINGS_HTML.find(id).expect("on the page");
+        assert!(
+            at("id=\"packet-capture\"") < at("id=\"download-all\"")
+                && at("id=\"badge-capture\"") < at("id=\"download-all\""),
+            "the capture controls sit before Download all, in .badges"
+        );
+        assert!(at("class=\"badges\"") < at("id=\"packet-capture\""));
+        assert!(RECORDINGS_HTML.contains("id=\"packet-capture\" aria-pressed=\"false\" hidden"));
+    }
+
+    #[test]
+    fn the_capture_button_posts_json_and_says_what_it_is_doing() {
+        for needle in [
+            "packet-logs/capture",
+            "Capture packets",
+            "Stop capture",
+            "Capturing packets",
+            "aria-pressed",
+            "announce(",
+            "Capturing every live call until you press Stop capture",
+            "Could not change the capture: ",
+        ] {
+            assert!(
+                RECORDINGS_JS.contains(needle) || RECORDINGS_HTML.contains(needle),
+                "the capture button needs {needle:?}"
+            );
+        }
+    }
+
+    /// A log's name came off the wire: the card shows it through `el` and
+    /// no line of the page's script can turn a string into markup.
+    #[test]
+    fn the_recordings_page_lists_packet_logs_as_text() {
+        let at = |id: &str| RECORDINGS_HTML.find(id).expect("on the page");
+        assert!(
+            at("id=\"card-list\"") < at("id=\"card-packet-logs\"")
+                && at("id=\"card-packet-logs\"") < at("id=\"player\""),
+            "the Packet logs card sits under Overs"
+        );
+        for needle in [
+            "<section class=\"card\" id=\"card-packet-logs\" hidden>",
+            "<h2>Packet logs</h2>",
+            ">Capturing every live call until you press Stop capture<",
+            "id=\"packet-error\"",
+        ] {
+            assert!(RECORDINGS_HTML.contains(needle), "{needle}");
+        }
+        let start = RECORDINGS_JS
+            .find("function renderPacketLogs")
+            .expect("the card's renderer");
+        let tail = &RECORDINGS_JS[start..];
+        let card = &tail[..tail.find("\n}\n").expect("its end")];
+        for needle in [
+            "$(\"packet-error\").textContent = error",
+            "!debug && rows.length === 0 && !error",
+        ] {
+            assert!(card.contains(needle), "renderPacketLogs needs {needle}");
+        }
+        let start = RECORDINGS_JS
+            .find("function renderPacketRow")
+            .expect("the renderer");
+        let tail = &RECORDINGS_JS[start..];
+        let body = &tail[..tail.find("\n}\n").expect("its end")];
+        for needle in [
+            "el(\"td\", \"mono\", row.name)",
+            "\"Download pcap\"",
+            "\"Download jitter log\"",
+            "logDownload(row.name,",
+            "logDownload(row.companion,",
+            "openConfirm(",
+        ] {
+            assert!(body.contains(needle), "renderPacketRow needs {needle}");
+        }
+        for sink in [
+            "innerHTML",
+            "outerHTML",
+            "insertAdjacentHTML",
+            "document.write",
+        ] {
+            assert!(!RECORDINGS_JS.contains(sink), "recordings.js uses {sink}");
+        }
+        assert!(
+            RECORDINGS_JS.contains("encodeURIComponent(name)"),
+            "a name goes into a URL encoded"
+        );
+    }
+
+    /// The refusal for an open log needs a live call:
+    /// `an_open_packet_log_refuses_delete_with_a_409`.
+    #[test]
+    fn packet_log_delete_needs_same_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = test_controller();
+        c.set_packet_log_settings(Some(&crate::test_support::packet_log_cfg(dir.path())));
+        c.packet_capture(true).unwrap();
+        let name = crate::test_support::seed_packet_log(dir.path(), "call", b"pcap");
+        let body = serde_json::json!({ "name": name }).to_string();
+        let post = |headers: &RequestHeaders<'_>| {
+            handle_request_with_headers(&c, "POST", "/packet-logs/delete", body.as_bytes(), headers)
+        };
+        let refused = post(&RequestHeaders {
+            origin: Some("https://evil.example"),
+            ..json_headers()
+        });
+        assert_eq!(refused.status, 403, "{refused:?}");
+        let refused = post(&RequestHeaders {
+            host: Some("evil.example"),
+            ..json_headers()
+        });
+        assert_eq!(refused.status, 403, "{refused:?}");
+        let refused = post(&RequestHeaders {
+            content_type: Some("text/plain"),
+            ..json_headers()
+        });
+        assert_eq!(refused.status, 415, "{refused:?}");
+        assert!(dir.path().join(&name).exists(), "nothing deleted");
+        let ok = post(&RequestHeaders {
+            origin: Some("http://127.0.0.1:8730"),
+            ..json_headers()
+        });
+        assert_eq!(ok.status, 200, "{ok:?}");
+        assert!(!dir.path().join(&name).exists());
+    }
+
+    fn capture_post(c: &NodeController, body: &str, headers: &RequestHeaders<'_>) -> HttpResponse {
+        handle_request_with_headers(c, "POST", "/packet-logs/capture", body.as_bytes(), headers)
+    }
+
+    #[test]
+    fn capture_needs_same_origin_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = test_controller();
+        c.set_packet_log_settings(Some(&crate::test_support::packet_log_cfg(dir.path())));
+        let body = r#"{"capturing":true}"#;
+        let refused = capture_post(
+            &c,
+            body,
+            &RequestHeaders {
+                content_type: Some("text/plain"),
+                ..json_headers()
+            },
+        );
+        assert_eq!(refused.status, 415, "{refused:?}");
+        let refused = capture_post(
+            &c,
+            body,
+            &RequestHeaders {
+                origin: Some("https://evil.example"),
+                ..json_headers()
+            },
+        );
+        assert_eq!(refused.status, 403, "{refused:?}");
+        assert!(!c.packet_log_status().capturing, "nothing started");
+    }
+
+    #[test]
+    fn capture_answers_each_refusal() {
+        let h = json_headers();
+        let c = test_controller();
+        for bad in [
+            "",
+            "{}",
+            r#"{"capturing":"yes"}"#,
+            r#"{"capturing":true,"x":1}"#,
+        ] {
+            assert_eq!(capture_post(&c, bad, &h).status, 400, "{bad}");
+        }
+        // No table: asking to start is 404, but stopping is never refused.
+        let r = capture_post(&c, r#"{"capturing":true}"#, &h);
+        assert_eq!(
+            (r.status, error_of(&r).as_str()),
+            (404, "packet log is off")
+        );
+        assert_eq!(capture_post(&c, r#"{"capturing":false}"#, &h).status, 200);
+
+        let dir = tempfile::tempdir().unwrap();
+        c.set_packet_log_settings(Some(&crate::config::PacketLogCfg {
+            debug_mode: false,
+            ..crate::test_support::packet_log_cfg(dir.path())
+        }));
+        let r = capture_post(&c, r#"{"capturing":true}"#, &h);
+        assert_eq!(
+            (r.status, error_of(&r).as_str()),
+            (409, "debug mode is off")
+        );
+
+        let not_a_folder = tempfile::NamedTempFile::new().unwrap();
+        c.set_packet_log_settings(Some(&crate::test_support::packet_log_cfg(
+            not_a_folder.path(),
+        )));
+        let r = capture_post(&c, r#"{"capturing":true}"#, &h);
+        assert_eq!(r.status, 503, "{r:?}");
+        let said = error_of(&r);
+        assert!(said.starts_with("Couldn't start the capture"), "{said}");
+        assert!(!said.contains("recording"), "{said}");
+    }
+
+    #[test]
+    fn capture_starts_and_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = test_controller();
+        c.set_packet_log_settings(Some(&crate::test_support::packet_log_cfg(dir.path())));
+        let h = json_headers();
+        let on = capture_post(&c, r#"{"capturing":true}"#, &h);
+        assert_eq!(on.status, 200, "{on:?}");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&on.body).unwrap(),
+            serde_json::json!({ "capturing": true })
+        );
+        assert!(c.packet_log_status().capturing);
+        let off = capture_post(&c, r#"{"capturing":false}"#, &h);
+        assert_eq!(off.status, 200, "{off:?}");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&off.body).unwrap(),
+            serde_json::json!({ "capturing": false })
+        );
+        assert!(!c.packet_log_status().capturing);
     }
 
     // ---- the cross-origin guard ---------------------------------------------
@@ -6162,7 +6503,8 @@ mod tests {
         // `GET /events` is the server layer's; everything else is the
         // router's, and its unknown-route 404 here means the table names a
         // route the router does not have. (The recordings routes answer
-        // their own 404, "recording is off", on a node with no logger.)
+        // their own 404, "recording is off", on a node with no logger, and
+        // the packet log routes "packet log is off".)
         for &(method, path) in crate::access::ADMIN_ROUTES {
             if path == "/events" {
                 continue;

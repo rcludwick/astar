@@ -12,7 +12,7 @@ inline. All 228 issues (164 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (174)
+## Open items (178)
 
 ### iax-vtrust — DONE 2026-10-31: A D-Star connect could key a radio on an FT-X CAT/PTT cable
 *P1 high · safety · labels: dstar, ambe, thumbdv, serial, on-air-safety*
@@ -887,6 +887,35 @@ receiving is Rob's call (on a radio link it may be wanted).
    same net.
 3. Whether RX compression is on.
 
+
+**Recordings from the 2026-11-05 net (0.1.19-beta build, `WA7ABU-R`).** Measured
+on the left (receive) channel of what the speaker was fed:
+
+- `19-29-06` (33 min): no delayed copy in any 2 s window.
+- `20-02-07` (23 min): clean for the first 5 minutes, then about 10% of speech
+  windows carry an attenuated copy, near 30 ms at first and 55 to 60 ms from
+  minute 15 (strongest r = 0.31 at 15:50). No loud 20 ms frame is an exact
+  repeat of the one before it in either file.
+
+The copy comes and goes within the net rather than covering every station, and
+the flagged short overs all have a pitch near 125 Hz, while stations at 140 to
+210 Hz are clean. A copy made inside astar would touch every talker, so this
+points at one station or link on the far side, but it is not proven: pitch is
+a crude way to tell stations apart, and several clean long overs share that
+pitch. The recording can't show the delay Rob also heard. To settle it: at a
+bad moment, note who is talking and what the call-quality line reads, and if
+possible listen to the same repeater on a radio. If the radio has the echo
+too, it comes from the far side.
+
+**The packet log has landed (work/packet-log).** Next time it goes bad: turn
+on Debug mode (macOS: Settings → Recording → Advanced) and press the capture
+button beside Record before the
+net, note the time and who is talking when the hollow sound starts, then compare
+the call's `.pcap` against the recording. If the copy is already in the packets
+(listen to them with the tshark + sox recipe, or look at the arrival times), the
+far side sent it; if the packets are clean and the recording isn't, astar made
+it. See `docs/site/reference/packet-logs.md`.
+
 ### astar-feature-matrix — DONE 2026-11-01: builds outside `just ci`'s feature set didn't compile or pass
 *P3 low · chore · labels: ci, build, cli, cx:2*
 
@@ -943,6 +972,45 @@ longer than 200 ms (the reflector replies to CONN at once, and the rest of the
 test allows 2 s), or a parallel test's `127.0.0.1:0` socket sharing the
 dual-stack reflector's port on macOS and taking the v4 datagram. Next time it
 fails, keep the run's output and check which.
+
+### astar-packet-log-end-loss — a lost `End` pins a packet log open until the logger stops
+*P3 low · bug · labels: packet-log, record, cx:2*
+
+A call's `End` event reaches the packet log writer through a single
+`try_offer`. If the lock is held or the channel is full at that moment, the
+event is gone: the writer never closes that call, so its file stays open,
+listed as open and undeletable, until the logger itself stops. The writer
+should close a call that has had no events for a while, or `Drop` should retry
+the offer.
+
+### astar-packet-log-wav — an astar-cli command that turns an EchoLink packet log into a WAV
+*P4 lowest · feature · labels: echolink, cli, packet-log, cx:2*
+
+A packet log's EchoLink audio can be heard today with `tshark`, `cut`, `xxd`
+and `sox` (the "Hearing the audio" recipe in
+`docs/site/reference/packet-logs.md`). An `astar-cli` command could do it in one
+step and leave gaps from lost packets as silence, which the recipe cannot. Rob
+wasn't sure he wants it, so nothing is built; the recipe covers it for now.
+
+### astar-packet-replay — replay a packet capture through the receive path
+*P3 low · feature · labels: packet-log, record, cx:3*
+
+Feed a capture's pcap and companion back through the jitter buffer and decoders, paced by arrival time, to reproduce what a call sounded like. The capture already keeps what this needs: exact bytes, arrival times, the network and the AllStar codec. See `docs/site/reference/packet-logs.md`.
+
+### astar-echolink-bye-flake — an EchoLink far-end BYE test fails about 1 run in 40 under load
+*P3 low · bug · labels: echolink, test, flaky, cx:1*
+
+`echolink_session::a_far_end_bye_closes_without_a_reply` fails about 1 run in
+40 under load, on main too. The likely cause is a keepalive SDES already in
+flight on the control port when the BYE arrives, but that is unproven. Next time
+it fails, keep the run's output and check what the control port had received.
+
+It failed again on 2026-11-06, in a full `cargo test` run on `work/packet-log`.
+The assertion was `crates/astar-console/tests/echolink_session.rs:705`,
+`controls_from(ours.control)` against `after_close`, with left 2 and right 1. So
+one more control packet arrived after the link read `Closed`, which fits the
+in-flight SDES idea but doesn't prove it, as the run didn't show that packet's
+contents. Twenty reruns of the same test binary straight after all passed.
 
 ### astar-acme-ca-change — switching ACME from staging to production keeps the staging certificate
 *P3 low · bug · labels: server, acme, tls, cx:1*
@@ -3413,3 +3481,11 @@ to lose a recording:
 - Tests not yet written: FLAC mid-stream encode failure, drop after
   priming, the 480–500 ms splitter boundary, DMR rotation flush and
   `pump_tx` trim, a later-lane sent tap.
+
+### astar-netrec-release — a static VPS build of the net recorder, and a watchdog for a stuck session
+*P2 medium · task · labels: netrec, release, deploy, cx:3*
+
+Needed before the first VPS deploy of `astar-netrec`. Two parts:
+
+- A `just` recipe and a check script for a static VPS build of `astar-netrec`, beside `just server-release` and the checks astar-server's release has. Today `docs/RELEASING.md` has only a plain `cargo build --release -p astar-netrec --features release`, which is not cross-built and is attached to a release by hand.
+- A watchdog for a frozen D-Star loop or a poisoned pump. Either one can leave a session running with its link reading as up while no audio arrives, and nothing notices until the window ends.

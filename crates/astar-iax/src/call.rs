@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use astar_iax_core::VoiceFormat;
 use astar_iax_core::session::fsm::{AppCommand, FailReason};
+use astar_record::packet_tap::PacketCallId;
 
 use crate::error::IaxError;
 use crate::runtime::RuntimeCommand;
@@ -248,6 +249,10 @@ pub struct Call {
     /// [`Call::remote_keyed_handle`] so a parrot member's PTT gate reflects
     /// the peer's remote key state (not just local VOX).
     remote_keyed: Arc<AtomicBool>,
+    /// The packet log's id for this call. `None` when no tap watches it (the
+    /// non-pooled raw-dial path).
+    #[allow(clippy::struct_field_names)]
+    packet_call: Option<PacketCallId>,
 }
 
 impl Call {
@@ -283,6 +288,7 @@ impl Call {
             adopt_tx_sender: None,
             adopt_sample_rate: None,
             remote_keyed,
+            packet_call: None,
         }
     }
 
@@ -304,6 +310,7 @@ impl Call {
         tx_reanchors: Arc<AtomicU64>,
         format_bits: Arc<AtomicU32>,
         remote_keyed: Arc<AtomicBool>,
+        packet_call: Option<PacketCallId>,
     ) -> Self {
         Self {
             cmd_tx,
@@ -326,6 +333,7 @@ impl Call {
             adopt_tx_sender: None,
             adopt_sample_rate: None,
             remote_keyed,
+            packet_call,
         }
     }
 
@@ -356,6 +364,7 @@ impl Call {
         format_bits: Arc<AtomicU32>,
         sample_rate: u32,
         remote_keyed: Arc<AtomicBool>,
+        packet_call: Option<PacketCallId>,
     ) -> Self {
         Self {
             cmd_tx,
@@ -381,6 +390,7 @@ impl Call {
             adopt_tx_sender: Some(tx_sender),
             adopt_sample_rate: Some(sample_rate),
             remote_keyed,
+            packet_call,
         }
     }
 
@@ -389,6 +399,12 @@ impl Call {
     #[must_use]
     pub fn call_id(&self) -> CallId {
         self.id
+    }
+
+    /// The packet log's id for this call, or `None` when no tap watches it.
+    #[must_use]
+    pub fn packet_call(&self) -> Option<PacketCallId> {
+        self.packet_call
     }
 
     /// Adopt path (iax-8baf integration point): the inbound RX `Receiver` the

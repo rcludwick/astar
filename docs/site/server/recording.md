@@ -210,6 +210,9 @@ unamblify reads the `dstar`, `ysf-dmr` and `codec2-3200` folders. The
 `nxdn` and `dmr72` folders that the macOS app can write are kept, but
 unamblify skips them.
 
+For a debugging log of the raw packets rather than the audio, see
+[Packet log](packet-log.md).
+
 These are off-air recordings, so there is no clean original of what was
 said to pair them with. They are for listening tests and for re-decoding,
 not for training pairs.

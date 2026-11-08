@@ -114,6 +114,7 @@ use astar_codec::ysf::{
     DnError, DnFrame, FRAMES_PER_PAYLOAD, dn_frame_to_channel, pack_dn, unpack_dn,
 };
 use astar_record::frames::{CaptureMode, Dir, FrameEvent};
+use astar_record::packet_tap::{CallMeta, CallPacketTap, PacketCallId, PacketNetwork, PacketSlot};
 use astar_record::tap::TapSlot;
 use astar_ysf::{
     Callsign, DataPacket, DataType, Fich, Frame, FrameInfo, FsmAction, LinkState, YsfFsm, dch, wire,
@@ -250,6 +251,10 @@ pub struct YsfLink {
     /// The codec-frame recording tap ([`YsfLink::frame_tap`]). A link with
     /// no audio decodes nothing, so its slot is never offered to.
     frame_tap: TapSlot<FrameEvent>,
+    /// The packet log's slot ([`YsfLink::packet_slot`]).
+    packet_slot: PacketSlot,
+    /// The id of this link's [`CallPacketTap`], which the thread owns.
+    packet_call: PacketCallId,
 }
 
 #[derive(Debug)]
@@ -563,11 +568,25 @@ impl YsfLink {
             .as_ref()
             .map_or_else(TapSlot::default, |a| a.rec.slot());
 
+        let packet_slot = PacketSlot::default();
+        let packet_tap = CallPacketTap::new(
+            packet_slot.clone(),
+            astar_ysf::wire::is_media,
+            CallMeta {
+                network: PacketNetwork::Ysf,
+                codec: None,
+                label: format!("Fusion {}", reflector_name(host)),
+                local: socket.local_addr().unwrap_or(bind),
+                peer: addr,
+            },
+        );
+        let packet_call = packet_tap.id();
+
         let thread = {
             let shared = Arc::clone(&shared);
             thread::Builder::new()
                 .name("astar-ysf-link".into())
-                .spawn(move || run(&socket, addr, fsm, &shared, audio))
+                .spawn(move || run(&socket, addr, fsm, &shared, audio, packet_tap))
                 .map_err(|e| ConsoleError::Ysf(format!("thread: {e}")))?
         };
 
@@ -576,6 +595,8 @@ impl YsfLink {
             thread: Some(thread),
             backend,
             frame_tap,
+            packet_slot,
+            packet_call,
         })
     }
 
@@ -604,6 +625,20 @@ impl YsfLink {
     #[must_use]
     pub fn heard(&self) -> Vec<HeardEntry> {
         self.shared.heard.snapshot()
+    }
+
+    /// The packet log's slot: install a tap here and the link thread offers
+    /// every media datagram it receives to it. The slot is shared: setting it
+    /// on the returned handle reaches the live link.
+    #[must_use]
+    pub fn packet_slot(&self) -> PacketSlot {
+        self.packet_slot.clone()
+    }
+
+    /// The id this link's packet events carry.
+    #[must_use]
+    pub fn packet_call(&self) -> PacketCallId {
+        self.packet_call
     }
 
     /// The codec-frame recording tap: install a [`astar_record::Tap`] here
@@ -667,6 +702,12 @@ impl Drop for YsfLink {
     }
 }
 
+/// The host part of a `host:port` reflector address, for the packet log's
+/// label: the port is in the log's addresses already.
+fn reflector_name(host: &str) -> &str {
+    host.rsplit_once(':').map_or(host, |(name, _)| name)
+}
+
 /// The link thread's body. The socket is owned by the spawned closure for
 /// the thread's lifetime and borrowed here.
 fn run(
@@ -675,6 +716,7 @@ fn run(
     mut fsm: YsfFsm,
     shared: &Arc<Shared>,
     mut audio: Option<Audio>,
+    mut packet_tap: CallPacketTap,
 ) {
     let publish = |fsm: &YsfFsm| {
         shared
@@ -696,6 +738,7 @@ fn run(
     while !shared.stop.load(Ordering::Relaxed) {
         match socket.recv_from(&mut buf) {
             Ok((n, from)) if from == addr => {
+                packet_tap.capture(from, &buf[..n]);
                 let action = fsm.on_packet(&buf[..n], Instant::now());
                 if !handle(&action, socket, addr, shared, audio.as_mut()) {
                     break;

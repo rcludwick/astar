@@ -20,6 +20,8 @@
     </div>
     <div class="badges">
       <span class="badge off" id="badge-state"><i class="dot"></i><span id="badge-text">loading</span></span>
+      <span class="badge warn" id="badge-capture" hidden><i class="dot"></i>Capturing packets</span>
+      <button type="button" class="btn" id="packet-capture" aria-pressed="false" hidden>Capture packets</button>
       <a class="btn" id="download-all" href="recordings.tar" download hidden>Download all</a>
       <div id="auth-chip"></div>
     </div>
@@ -37,6 +39,16 @@
       <tbody id="rows"></tbody>
     </table>
     <p class="empty" id="empty">nothing recorded yet</p>
+  </section>
+  <section class="card" id="card-packet-logs" hidden>
+    <div class="card-head"><h2>Packet logs</h2><span class="count" id="packet-count">0</span></div>
+    <p class="subtitle" id="packet-on" hidden>Capturing every live call until you press Stop capture</p>
+    <p class="banner err" id="packet-error" hidden></p>
+    <table>
+      <thead><tr><th>date</th><th>log</th><th>size</th><th><span class="sr-only">actions</span></th></tr></thead>
+      <tbody id="packet-rows"></tbody>
+    </table>
+    <p class="empty" id="packet-empty">no packet logs yet</p>
   </section>
   <audio id="player" preload="none"></audio>
 </main>

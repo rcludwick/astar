@@ -27,8 +27,10 @@ cd "$ROOT"
 # Crates a downstream consumer builds with defaults. astar-station and
 # astar-console are the two that route M17, astar-sys is what the Swift
 # binding compiles, and astar-server is the node binary the container ships:
-# it loads the distribution's libcodec2 at run time and links none.
-DEFAULT_CLEAN=(astar-codec astar-console astar-station astar-sys astar-server)
+# it loads the distribution's libcodec2 at run time and links none. astar-netrec
+# is the same: a default build of the recorder links none, and its `release`
+# names codec2-static.
+DEFAULT_CLEAN=(astar-codec astar-console astar-station astar-sys astar-server astar-netrec)
 
 # Every check walks normal edges only (`-e normal`): astar-console,
 # astar-station and astar-server force codec2-static on for their own TEST
@@ -72,6 +74,11 @@ fi
 # dev-dependency would otherwise satisfy this check with the feature emptied.
 if ! cargo tree -p astar-server -e normal --prefix none --features codec2-static 2>/dev/null | grep -qE '^codec2 v'; then
   echo "FAIL: astar-server --features codec2-static does NOT pull in codec2." >&2
+  fail=1
+fi
+
+if ! cargo tree -p astar-netrec -e normal --prefix none --features release 2>/dev/null | grep -qE '^codec2 v'; then
+  echo "FAIL: astar-netrec --features release does NOT pull in codec2." >&2
   fail=1
 fi
 

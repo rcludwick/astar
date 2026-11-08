@@ -51,6 +51,7 @@ use crate::{M17MonitorEdge, M17MonitorStatus};
 #[cfg(feature = "m17")]
 use astar_m17::LinkState;
 use astar_record::frames::FrameEvent;
+use astar_record::packet_tap::{JitterSample, PacketCallId, PacketEvent, PacketSlot};
 use astar_record::tap::{PcmChunk, Tap};
 
 /// Outcome of an outbound node registration attempt. Secret-free: the
@@ -539,6 +540,14 @@ pub struct ConsoleSession {
     /// and an engine built later gets heard/sent on its router. See
     /// [`Self::set_record_taps`].
     record_taps: RecordTaps,
+    /// The one slot every `AllStar` call offers to, dialled or inbound. It
+    /// lives as long as the session because the listener keeps the policy it
+    /// started with, so the log is switched with `set` and never by swapping
+    /// the slot.
+    iax_packet_slot: PacketSlot,
+    /// The packet log's tap, held here so a link connected later picks it up.
+    /// See [`Self::set_packet_tap`].
+    packet_tap: Option<Tap<PacketEvent>>,
 }
 
 /// The read-only recording taps a [`ConsoleSession`] installs: `heard` and
@@ -621,6 +630,8 @@ impl ConsoleSession {
             vocoder_trust: astar_codec::vocoder_trust::VocoderTrust::default(),
             dstar_vocoder: astar_codec::vocoder_choice::DstarVocoder::Dongle,
             record_taps: RecordTaps::default(),
+            iax_packet_slot: PacketSlot::default(),
+            packet_tap: None,
         }
     }
 
@@ -723,6 +734,184 @@ impl ConsoleSession {
         #[cfg(feature = "dmr")]
         if let Some(d) = self.dmr.as_ref() {
             d.frame_tap().set(self.record_taps.frames.clone());
+        }
+    }
+
+    /// Install or remove the packet log's tap, on every call live now and,
+    /// because it is stored here, on every one connected later. It runs
+    /// independently of the recording taps.
+    ///
+    /// Each live call opens a new log file on the next packet, so a caller
+    /// should only use this when the tap really changes.
+    pub fn set_packet_tap(&mut self, tap: Option<Tap<PacketEvent>>) {
+        self.packet_tap = tap;
+        for slot in self.packet_slots() {
+            slot.set(self.packet_tap.clone());
+        }
+    }
+
+    /// Put the stored packet tap on any slot that doesn't have it yet. Runs
+    /// after a link connects. A slot already in step is left alone, because
+    /// [`astar_record::tap::TapSlot::set`] restarts every call on that slot,
+    /// and `AllStar` calls and the node's `EchoLink` stations share theirs.
+    /// [`Self::set_packet_tap`] writes every slot, so a slot holding a tap
+    /// always holds the stored one.
+    #[allow(dead_code)] // called only when a network feature is compiled in.
+    fn apply_packet_tap(&self) {
+        for slot in self.packet_slots() {
+            if slot.is_set() != self.packet_tap.is_some() {
+                slot.set(self.packet_tap.clone());
+            }
+        }
+    }
+
+    /// The slot every live call offers to, one per link.
+    fn packet_slots(&self) -> Vec<PacketSlot> {
+        #[allow(unused_mut)] // pushed to only when a network feature is compiled in.
+        let mut out = vec![self.iax_packet_slot.clone()];
+        #[cfg(feature = "dstar")]
+        out.extend(self.dstar.as_ref().map(DstarSession::packet_slot));
+        #[cfg(feature = "m17")]
+        out.extend(self.m17.as_ref().map(M17Session::packet_slot));
+        #[cfg(feature = "m17")]
+        out.extend(self.m17_monitor.as_ref().map(|l| l.monitor.packet_slot()));
+        #[cfg(feature = "ysf")]
+        out.extend(self.ysf.as_ref().map(YsfLink::packet_slot));
+        #[cfg(feature = "nxdn")]
+        out.extend(self.nxdn.as_ref().map(NxdnLink::packet_slot));
+        #[cfg(feature = "dmr")]
+        out.extend(self.dmr.as_ref().map(DmrLink::packet_slot));
+        #[cfg(feature = "echolink")]
+        out.extend(self.echolink.as_ref().map(EchoLinkSession::packet_slot));
+        #[cfg(feature = "echolink")]
+        out.extend(
+            self.echolink_node
+                .as_ref()
+                .map(EchoLinkNodeLeg::packet_slot),
+        );
+        out
+    }
+
+    /// One row per live call for the packet log, read from the cells
+    /// [`Self::snapshot`] reads. A field with nothing behind it is `None`
+    /// rather than a zero that would read as a perfect network: only `AllStar`
+    /// and `EchoLink` client calls have a jitter buffer, and only a call on a
+    /// voice route or an `AllStar` bus has `underruns`.
+    #[must_use]
+    pub fn packet_log_samples(&self) -> Vec<(PacketCallId, JitterSample)> {
+        #[allow(unused_mut)] // pushed to only when a network feature is compiled in.
+        let mut out = self
+            .manager
+            .as_ref()
+            .map(Manager::packet_log_samples)
+            .unwrap_or_default();
+        #[cfg(any(
+            feature = "dstar",
+            feature = "m17",
+            feature = "ysf",
+            feature = "nxdn",
+            feature = "dmr"
+        ))]
+        let digital = JitterSample {
+            underruns: self.voice_route_underruns(),
+            ..JitterSample::default()
+        };
+        #[cfg(feature = "dstar")]
+        out.extend(
+            self.dstar
+                .as_ref()
+                .map(|d| (d.packet_call(), digital.clone())),
+        );
+        #[cfg(feature = "m17")]
+        out.extend(
+            self.m17
+                .as_ref()
+                .map(|m| (m.packet_call(), digital.clone())),
+        );
+        #[cfg(feature = "m17")]
+        out.extend(
+            self.m17_monitor
+                .as_ref()
+                .map(|l| (l.monitor.packet_call(), JitterSample::default())),
+        );
+        #[cfg(feature = "ysf")]
+        out.extend(
+            self.ysf
+                .as_ref()
+                .map(|y| (y.packet_call(), digital.clone())),
+        );
+        #[cfg(feature = "nxdn")]
+        out.extend(
+            self.nxdn
+                .as_ref()
+                .map(|n| (n.packet_call(), digital.clone())),
+        );
+        #[cfg(feature = "dmr")]
+        out.extend(
+            self.dmr
+                .as_ref()
+                .map(|d| (d.packet_call(), digital.clone())),
+        );
+        #[cfg(feature = "echolink")]
+        out.extend(
+            self.echolink
+                .as_ref()
+                .map(|e| (e.packet_call(), self.voice_route_jitter())),
+        );
+        #[cfg(feature = "echolink")]
+        if let Some(leg) = self.echolink_node.as_ref() {
+            out.extend(
+                leg.packet_calls()
+                    .into_iter()
+                    .map(|call| (call, JitterSample::default())),
+            );
+        }
+        out
+    }
+
+    /// The voice route's bus underrun count, or `None` with no route.
+    #[cfg(any(
+        feature = "dstar",
+        feature = "m17",
+        feature = "ysf",
+        feature = "nxdn",
+        feature = "dmr",
+        feature = "echolink"
+    ))]
+    fn voice_route_underruns(&self) -> Option<u64> {
+        let route = self.voice_route.as_ref()?;
+        let cell = self
+            .manager
+            .as_ref()?
+            .router()
+            .bus_underruns_cell(route.out())?;
+        Some(cell.load(Ordering::Relaxed))
+    }
+
+    /// The jitter buffer on the voice route's call lane, as an `EchoLink`
+    /// client call uses it.
+    #[cfg(feature = "echolink")]
+    fn voice_route_jitter(&self) -> JitterSample {
+        let underruns = self.voice_route_underruns();
+        let cells = self.voice_route.as_ref().and_then(|route| {
+            self.manager
+                .as_ref()?
+                .router()
+                .bus_jitter_cells(route.out(), route.mix_id())
+        });
+        let Some(cells) = cells else {
+            return JitterSample {
+                underruns,
+                ..JitterSample::default()
+            };
+        };
+        JitterSample {
+            depth_ms: Some(cells.depth_ms.load(Ordering::Relaxed)),
+            jitter_ms: Some(cells.jitter_ms.load(Ordering::Relaxed)),
+            lost: Some(cells.frames_lost.load(Ordering::Relaxed)),
+            late: Some(cells.frames_late.load(Ordering::Relaxed)),
+            ooo: Some(cells.frames_ooo.load(Ordering::Relaxed)),
+            underruns,
         }
     }
 
@@ -1483,6 +1672,9 @@ impl ConsoleSession {
         // session decides (answer / busy-reject / Manual park).
         let mut policy = policy;
         policy.decision = astar_iax::IncomingDecisionPolicy::AppDecide;
+        // The listener keeps this policy for life, so the slot has to be in
+        // it now: this is the only way the packet log reaches inbound calls.
+        policy.packet_slot = self.iax_packet_slot.clone();
 
         let (listener, events) = IncomingCallListener::builder()
             .bind(bind)
@@ -2271,6 +2463,7 @@ impl ConsoleSession {
             Ok(session) => {
                 session.frame_tap().set(self.record_taps.frames.clone());
                 self.m17 = Some(session);
+                self.apply_packet_tap();
                 Ok(())
             }
             Err(e) => {
@@ -2462,6 +2655,7 @@ impl ConsoleSession {
         ) {
             Ok(session) => {
                 self.echolink = Some(session);
+                self.apply_packet_tap();
                 Ok(())
             }
             Err(e) => {
@@ -2649,6 +2843,10 @@ impl ConsoleSession {
                 })?;
             self.echolink_node = Some(leg);
         }
+        // Before the station joins, so its first packet is logged. The leg
+        // may be new, and a new leg has a slot of its own.
+        self.apply_packet_tap();
+        let mgr = self.manager.as_mut().expect("checked above");
         let Some(handle) = mgr.add_peer_member() else {
             return Err(ConsoleError::EchoLink(MONITOR_NO_CONFERENCE.into()));
         };
@@ -2733,6 +2931,15 @@ impl ConsoleSession {
         self.echolink_node
             .as_ref()
             .and_then(EchoLinkNodeLeg::local_addrs)
+    }
+
+    /// The node's leg, once a station has been dialled. For tests, which
+    /// reach its packet slot and calls here.
+    #[cfg(feature = "echolink")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn echolink_node_leg(&self) -> Option<&EchoLinkNodeLeg> {
+        self.echolink_node.as_ref()
     }
 
     /// `true` while the node's leg has any station on it, reaped or not
@@ -2852,6 +3059,7 @@ impl ConsoleSession {
                     member,
                     last: "linking",
                 });
+                self.apply_packet_tap();
                 Ok(())
             }
             Err(e) => {
@@ -3058,6 +3266,7 @@ impl ConsoleSession {
         }
         session.frame_tap().set(self.record_taps.frames.clone());
         self.dstar = Some(session);
+        self.apply_packet_tap();
         Ok(())
     }
 
@@ -3235,6 +3444,7 @@ impl ConsoleSession {
         }
         link.frame_tap().set(self.record_taps.frames.clone());
         self.ysf = Some(link);
+        self.apply_packet_tap();
         Ok(())
     }
 
@@ -3400,6 +3610,7 @@ impl ConsoleSession {
         }
         link.frame_tap().set(self.record_taps.frames.clone());
         self.nxdn = Some(link);
+        self.apply_packet_tap();
         Ok(())
     }
 
@@ -3571,6 +3782,7 @@ impl ConsoleSession {
         }
         link.frame_tap().set(self.record_taps.frames.clone());
         self.dmr = Some(link);
+        self.apply_packet_tap();
         Ok(())
     }
 
@@ -4220,6 +4432,10 @@ impl ConsoleSession {
                 .as_ref()
                 .expect("just set")
                 .set_rx_jitter(self.rx_jitter.get());
+            self.manager
+                .as_mut()
+                .expect("just set")
+                .set_packet_slot(self.iax_packet_slot.clone());
             // Recording taps set before this engine existed (or before it was
             // rebuilt) go onto its router.
             if self.record_taps.heard.is_some() || self.record_taps.sent.is_some() {
@@ -7516,16 +7732,19 @@ mod tests {
         /// Loopback binds on ephemeral ports, and the fake's node mapped to
         /// the fake's own two ports.
         fn network(station: &FakeStation) -> EchoLinkNetwork {
-            let addr = station.addr();
+            network_of(&[(NODE, station)])
+        }
+
+        /// [`network`] for several fakes, each under its own node number.
+        fn network_of(stations: &[(u32, &FakeStation)]) -> EchoLinkNetwork {
+            let map: Vec<(u32, PeerAddr)> = stations.iter().map(|(n, s)| (*n, s.addr())).collect();
             EchoLinkNetwork {
                 audio_bind: "127.0.0.1:0".parse().unwrap(),
                 control_bind: "127.0.0.1:0".parse().unwrap(),
                 peer_addr: Arc::new(move |e: &StationEntry| {
-                    if e.node == NODE {
-                        addr
-                    } else {
-                        PeerAddr::fixed(e.ip)
-                    }
+                    map.iter()
+                        .find(|(n, _)| *n == e.node)
+                        .map_or_else(|| PeerAddr::fixed(e.ip), |(_, a)| *a)
                 }),
                 match_by_ip: false,
                 timings: Timings {
@@ -8217,6 +8436,110 @@ mod tests {
             assert!(!r.dir.lines().iter().any(|l| l[..] == logoff[..]));
             r.s.echolink_logout().expect("a login").logout();
         }
+
+        // ---- packet log ------------------------------------------------
+
+        fn row(s: &ConsoleSession, call: PacketCallId) -> JitterSample {
+            let samples = s.packet_log_samples();
+            samples
+                .iter()
+                .find(|(id, _)| *id == call)
+                .map(|(_, sample)| sample.clone())
+                .expect("a row for the live call")
+        }
+
+        #[test]
+        fn set_packet_tap_reaches_an_echolink_call_adopted_later() {
+            let mut r = logged_in();
+            let (tap, _events) = astar_record::tap::tap_channel(4);
+            r.s.set_packet_tap(Some(tap));
+            connect(&mut r.s).expect("call starts");
+
+            let slot = r.s.echolink.as_ref().expect("live").packet_slot();
+            assert!(slot.is_set(), "the call must pick up the tap");
+            r.s.set_packet_tap(None);
+            assert!(!slot.is_set(), "clearing the tap clears the live call's");
+            r.s.echolink_disconnect();
+        }
+
+        /// The call's jitter buffer and its bus's underrun count, read from
+        /// the cells a `snapshot()` reads. The stash backend never pulls, so
+        /// nothing overwrites the values planted here.
+        #[test]
+        fn samples_fill_the_jitter_fields_on_an_echolink_call() {
+            let mut r = logged_in();
+            r.s.echolink_connect(Box::new(StashBackend::default()), "9999", None, None)
+                .expect("call starts");
+            let call = r.s.echolink.as_ref().expect("live").packet_call();
+
+            let route = r.s.voice_route.as_ref().expect("route");
+            let router = r.s.manager.as_ref().expect("engine").router();
+            let cells = router
+                .bus_jitter_cells(route.out(), route.mix_id())
+                .expect("the call's lane");
+            cells.depth_ms.store(60, Ordering::Relaxed);
+            cells.jitter_ms.store(14, Ordering::Relaxed);
+            cells.frames_lost.store(3, Ordering::Relaxed);
+            cells.frames_late.store(2, Ordering::Relaxed);
+            cells.frames_ooo.store(1, Ordering::Relaxed);
+            router
+                .bus_underruns_cell(route.out())
+                .expect("the call's bus")
+                .store(9, Ordering::Relaxed);
+
+            assert_eq!(
+                row(&r.s, call),
+                JitterSample {
+                    depth_ms: Some(60),
+                    jitter_ms: Some(14),
+                    lost: Some(3),
+                    late: Some(2),
+                    ooo: Some(1),
+                    underruns: Some(9),
+                }
+            );
+            r.s.echolink_disconnect();
+            assert!(r.s.packet_log_samples().is_empty(), "the row goes with it");
+        }
+
+        /// A node member hands the conference bare frames, so it has no jitter
+        /// buffer and no bus: every member gets a row, and all of it is unknown.
+        #[test]
+        fn samples_list_every_node_member() {
+            const NODE_B: u32 = 9998;
+            const CALL_B: &str = "W1ABC";
+            let a = FakeStation::start(ECHO_CALL);
+            let b = FakeStation::start(CALL_B);
+            let dir = FakeDirectory::start(FakeLogin::Ok, vec![a.entry(NODE), b.entry(NODE_B)]);
+            let mut s = ConsoleSession::new();
+            s.set_bridge_config(BridgeConfig {
+                mode: astar_iax::BridgeMode::Bridge,
+                ..BridgeConfig::default()
+            })
+            .expect("bridge mode stored");
+            let _ = s.ensure_engine(null_backend);
+            s.set_echolink_network(network_of(&[(NODE, &a), (NODE_B, &b)]));
+            s.echolink_login(login(&dir, "Denver"), password())
+                .expect("login starts");
+            assert!(
+                wait_for(|| s
+                    .echolink_state()
+                    .is_some_and(|st| st.login.state == LoginState::LoggedIn)
+                    && s.echolink_stations().len() == 2),
+                "never logged in: {:?}",
+                s.echolink_state()
+            );
+
+            s.echolink_node_connect(ECHO_CALL).expect("dial A");
+            s.echolink_node_connect(CALL_B).expect("dial B");
+
+            let calls = s.echolink_node_leg().expect("leg").packet_calls();
+            assert_eq!(calls.len(), 2);
+            assert_eq!(s.packet_log_samples().len(), 2, "one row per member");
+            for call in calls {
+                assert_eq!(row(&s, call), JitterSample::default());
+            }
+        }
     }
 
     // ---- recording taps ------------------------------------------------
@@ -8470,5 +8793,337 @@ mod tests {
         backend.push(160);
         assert_eq!(drained(&heard), 0, "heard cleared");
         assert_eq!(drained(&sent), 0, "sent cleared");
+    }
+
+    // ---- packet log ----------------------------------------------------
+
+    /// The row `packet_log_samples` holds for `call`.
+    fn sample_for(s: &ConsoleSession, call: PacketCallId) -> JitterSample {
+        let samples = s.packet_log_samples();
+        samples
+            .iter()
+            .find(|(id, _)| *id == call)
+            .map(|(_, sample)| sample.clone())
+            .expect("a row for the live call")
+    }
+
+    /// Set the live voice route's underrun count, so a row can be told from a
+    /// cell's starting zero.
+    #[cfg(all(
+        feature = "dstar",
+        feature = "m17",
+        feature = "ysf",
+        feature = "nxdn",
+        feature = "dmr"
+    ))]
+    fn store_route_underruns(s: &ConsoleSession, n: u64) {
+        let route = s.voice_route.as_ref().expect("route");
+        s.manager
+            .as_ref()
+            .expect("engine")
+            .router()
+            .bus_underruns_cell(route.out())
+            .expect("the route's bus is open")
+            .store(n, Ordering::Relaxed);
+    }
+
+    /// The console holds the packet tap, not the link: one set before a link
+    /// exists reaches it on adoption, clearing it clears the live link's, and
+    /// the slot every `AllStar` call shares follows along.
+    #[cfg(all(feature = "dstar", feature = "ysf", feature = "nxdn", feature = "dmr"))]
+    #[test]
+    fn set_packet_tap_reaches_links_adopted_later() {
+        fn check(s: &mut ConsoleSession, slot: &PacketSlot) {
+            assert!(slot.is_set(), "the link must pick up the tap");
+            s.set_packet_tap(None);
+            assert!(!slot.is_set(), "clearing the tap clears the live link's");
+            let (tap, _events) = astar_record::tap::tap_channel(4);
+            s.set_packet_tap(Some(tap));
+            assert!(slot.is_set(), "and setting it again reaches it");
+        }
+        let (tap, _events) = astar_record::tap::tap_channel(4);
+        let mut s = ConsoleSession::new();
+        s.set_packet_tap(Some(tap));
+
+        let slot = s.iax_packet_slot.clone();
+        check(&mut s, &slot);
+
+        let (_target, addr) = sink_socket();
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        s.dstar_adopt(dstar_session(addr, audio)).expect("adopt");
+        let slot = s.dstar.as_ref().expect("live").packet_slot();
+        check(&mut s, &slot);
+        s.dstar_disconnect();
+
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        let (reflector, link) = loopback_ysf(audio);
+        s.ysf_adopt(link).expect("adopt ysf");
+        let slot = s.ysf.as_ref().expect("live").packet_slot();
+        check(&mut s, &slot);
+        s.ysf_disconnect();
+        reflector.shutdown();
+
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        let (reflector, link) = loopback_nxdn(audio);
+        s.nxdn_adopt(link).expect("adopt nxdn");
+        let slot = s.nxdn.as_ref().expect("live").packet_slot();
+        check(&mut s, &slot);
+        s.nxdn_disconnect();
+        reflector.shutdown();
+
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        let (master, link) = loopback_dmr(audio);
+        s.dmr_adopt(link).expect("adopt dmr");
+        let slot = s.dmr.as_ref().expect("live").packet_slot();
+        check(&mut s, &slot);
+        s.dmr_disconnect();
+        master.shutdown();
+    }
+
+    /// The same for M17: a tap set before either the client or the
+    /// receive-only monitor exists reaches each once it is up.
+    #[cfg(feature = "m17")]
+    #[test]
+    fn set_packet_tap_reaches_the_m17_session_and_monitor() {
+        let (_target, addr) = sink_socket();
+        let (tap, _events) = astar_record::tap::tap_channel(4);
+
+        let mut s = ConsoleSession::new();
+        s.set_bridge_config(BridgeConfig {
+            mode: astar_iax::BridgeMode::Bridge,
+            ..BridgeConfig::default()
+        })
+        .expect("bridge mode stored");
+        s.set_packet_tap(Some(tap));
+        s.m17_connect(Box::new(NullBackend::new()), m17_cfg(addr), None, None)
+            .expect("m17 connect");
+        s.m17_monitor_connect(m17_monitor_cfg(addr))
+            .expect("monitor up");
+        let session_slot = s.m17.as_ref().expect("live").packet_slot();
+        let monitor_slot = s.m17_monitor.as_ref().expect("leg").monitor.packet_slot();
+        assert!(session_slot.is_set(), "the M17 client picks up the tap");
+        assert!(monitor_slot.is_set(), "the M17 monitor picks up the tap");
+
+        s.set_packet_tap(None);
+        assert!(!session_slot.is_set(), "clearing reaches the M17 client");
+        assert!(!monitor_slot.is_set(), "clearing reaches the M17 monitor");
+        s.m17_monitor_take().expect("leg").disconnect();
+        s.m17_disconnect();
+    }
+
+    /// `TapSlot::set` makes every call on that slot offer its `Start` again,
+    /// and the writer answers that with a new file. A link connecting must
+    /// therefore leave a slot alone when it already holds the tap. Changing
+    /// the tap is the one thing that does touch it.
+    #[test]
+    fn applying_the_tap_leaves_a_slot_that_has_it_alone() {
+        let (tap, _events) = astar_record::tap::tap_channel(4);
+        let mut s = ConsoleSession::new();
+        s.set_packet_tap(Some(tap));
+        let slot = s.iax_packet_slot.clone();
+        let generation = slot.generation();
+
+        s.apply_packet_tap();
+        assert_eq!(slot.generation(), generation, "nothing to do, nothing done");
+
+        let (tap, _events) = astar_record::tap::tap_channel(4);
+        s.set_packet_tap(Some(tap));
+        assert_ne!(slot.generation(), generation, "a new tap is installed");
+    }
+
+    /// The slot goes onto every engine the session builds. Only a call can
+    /// show that, because the `Manager` keeps the slot to itself: the dial
+    /// rebuilds the 8 kHz engine at 16 kHz, then the fake node's voice must
+    /// still land on the tap.
+    #[test]
+    fn a_rebuilt_engine_keeps_its_packet_tap() {
+        use astar_iax_core::frame::{Frame, MiniFrame, encode};
+
+        let (tap, events) = astar_record::packet_tap::packet_tap_channel(16, 16);
+        let mut s = ConsoleSession::new();
+        s.set_packet_tap(Some(tap));
+        let _ = s.ensure_engine(null_backend);
+        assert_eq!(s.pipeline_sample_rate(), 8_000);
+
+        let (node, peer) = sink_socket();
+        node.set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("timeout");
+        s.connect(null_backend(), peer, slin16_config())
+            .expect("dial starts");
+        assert_eq!(s.pipeline_sample_rate(), 16_000, "the engine was rebuilt");
+
+        let mut buf = [0_u8; 1500];
+        let (_, caller) = node.recv_from(&mut buf).expect("the dial's NEW");
+        let mut voice = Vec::new();
+        encode(
+            &Frame::Mini(MiniFrame {
+                source_call: 21,
+                timestamp: 20,
+                payload: &[0x11; 160],
+            }),
+            &mut voice,
+        )
+        .expect("mini frame encodes");
+        node.send_to(&voice, caller).expect("send voice");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut logged = false;
+        while !logged && std::time::Instant::now() < deadline {
+            logged = events
+                .try_iter()
+                .any(|e| matches!(e, PacketEvent::Packet { .. }));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            logged,
+            "the rebuilt engine's call offers to the session's slot"
+        );
+        let _ = s.disconnect();
+    }
+
+    /// A recording and the packet log run independently: switching the log
+    /// never disturbs heard, sent or the frame tap.
+    #[test]
+    fn set_packet_tap_leaves_the_record_taps_alone() {
+        let backend = StashBackend::default();
+        let (heard_tap, heard) = astar_record::tap::tap_channel(16);
+        let (sent_tap, sent) = astar_record::tap::tap_channel(16);
+        let (frames, _frames) = astar_record::tap::tap_channel(4);
+        let (tap, _events) = astar_record::tap::tap_channel(4);
+
+        let mut s = ConsoleSession::new();
+        s.set_record_taps(RecordTaps {
+            heard: Some(heard_tap),
+            sent: Some(sent_tap),
+            frames: Some(frames),
+        });
+        let b = backend.clone();
+        let audio = s
+            .open_voice_route(None, None, move || Box::new(b))
+            .expect("route");
+        {
+            let router = s.manager.as_mut().expect("engine").router_mut();
+            assert!(s.voice_route.as_mut().expect("route").key(router, true));
+        }
+
+        s.set_packet_tap(Some(tap));
+        s.set_packet_tap(None);
+
+        audio
+            .rx_frames
+            .send(astar_audio::RxFrame::from(vec![1_000_i16; 160]))
+            .unwrap();
+        backend.pull(160);
+        backend.push(160);
+        assert_eq!(drained(&heard), 1, "heard is still installed");
+        assert_eq!(drained(&sent), 1, "sent is still installed");
+        assert!(
+            s.record_taps().frames.is_some(),
+            "frames is still installed"
+        );
+    }
+
+    /// And the reverse: starting or stopping a recording leaves the log's
+    /// slot exactly as it was, so a live call's log file carries on.
+    #[test]
+    fn set_record_taps_leaves_the_packet_tap_alone() {
+        let (tap, _events) = astar_record::tap::tap_channel(4);
+        let (frames, _frames) = astar_record::tap::tap_channel(4);
+
+        let mut s = ConsoleSession::new();
+        s.set_packet_tap(Some(tap));
+        let slot = s.iax_packet_slot.clone();
+        let generation = slot.generation();
+
+        s.set_record_taps(RecordTaps {
+            frames: Some(frames),
+            ..RecordTaps::default()
+        });
+        s.set_frame_tap(None);
+        s.set_record_taps(RecordTaps::default());
+
+        assert!(slot.is_set(), "the log is still installed");
+        assert_eq!(slot.generation(), generation, "and was never touched");
+    }
+
+    /// Only `AllStar` and `EchoLink` calls have a jitter buffer. On every other
+    /// link those fields are unknown, not zero, and `underruns` comes from the
+    /// voice route's bus. Reading must not need `&mut self` or a snapshot.
+    #[cfg(all(
+        feature = "dstar",
+        feature = "m17",
+        feature = "ysf",
+        feature = "nxdn",
+        feature = "dmr"
+    ))]
+    #[test]
+    fn samples_on_a_digital_link_have_null_jitter_fields() {
+        fn check(s: &ConsoleSession, call: PacketCallId) {
+            store_route_underruns(s, 7);
+            let want = JitterSample {
+                underruns: Some(7),
+                ..JitterSample::default()
+            };
+            assert_eq!(sample_for(s, call), want);
+            assert_eq!(s.packet_log_samples().len(), 1, "one row, one link");
+        }
+        let mut s = ConsoleSession::new();
+        assert!(s.packet_log_samples().is_empty(), "no calls, no rows");
+
+        let (_target, addr) = sink_socket();
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        s.dstar_adopt(dstar_session(addr, audio)).expect("adopt");
+        check(&s, s.dstar.as_ref().expect("live").packet_call());
+        s.dstar_disconnect();
+        assert!(
+            s.packet_log_samples().is_empty(),
+            "the row goes with the link"
+        );
+
+        s.m17_connect(Box::new(NullBackend::new()), m17_cfg(addr), None, None)
+            .expect("m17 connect");
+        check(&s, s.m17.as_ref().expect("live").packet_call());
+        s.m17_disconnect();
+
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        let (reflector, link) = loopback_ysf(audio);
+        s.ysf_adopt(link).expect("adopt ysf");
+        check(&s, s.ysf.as_ref().expect("live").packet_call());
+        s.ysf_disconnect();
+        reflector.shutdown();
+
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        let (reflector, link) = loopback_nxdn(audio);
+        s.nxdn_adopt(link).expect("adopt nxdn");
+        check(&s, s.nxdn.as_ref().expect("live").packet_call());
+        s.nxdn_disconnect();
+        reflector.shutdown();
+
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        let (master, link) = loopback_dmr(audio);
+        s.dmr_adopt(link).expect("adopt dmr");
+        check(&s, s.dmr.as_ref().expect("live").packet_call());
+        s.dmr_disconnect();
+        master.shutdown();
+    }
+
+    /// The receive-only monitor feeds the conference, so it has no bus of its
+    /// own: its whole row is unknown.
+    #[cfg(feature = "m17")]
+    #[test]
+    fn samples_on_the_m17_monitor_are_all_null() {
+        let (_target, addr) = sink_socket();
+        let mut s = ConsoleSession::new();
+        s.set_bridge_config(BridgeConfig {
+            mode: astar_iax::BridgeMode::Bridge,
+            ..BridgeConfig::default()
+        })
+        .expect("bridge mode stored");
+        let _ = s.ensure_engine(null_backend);
+        s.m17_monitor_connect(m17_monitor_cfg(addr))
+            .expect("monitor up");
+        let call = s.m17_monitor.as_ref().expect("leg").monitor.packet_call();
+        assert_eq!(sample_for(&s, call), JitterSample::default());
+        s.m17_monitor_take().expect("leg").disconnect();
     }
 }
