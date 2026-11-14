@@ -261,7 +261,8 @@
             .padding(8)
             .background(
                 Color.secondary.opacity(0.06),
-                in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+            )
             .contextMenu {
                 Button("Remove", role: .destructive, action: remove)
             }
@@ -412,7 +413,8 @@
             Task { @MainActor in
                 outcome = await vocoders.enrol(candidate)
                 if let outcome {
-                    AccessibilityAnnouncer.post(VocoderOutcomeSummary(outcome).title, priority: .high)
+                    AccessibilityAnnouncer.post(
+                        VocoderOutcomeSummary(outcome).title, priority: .high)
                 }
             }
         }

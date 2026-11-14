@@ -174,6 +174,16 @@ NOTARY_PROFILE="${ASTAR_NOTARY_PROFILE:-astar-notary}"
 NOTARIZED=0
 APP_STAPLED=0
 
+# stapler writes the stapled copy in a temp folder on the volume it thinks
+# the file lives on, then renames it over the original. Given a path through
+# a symlink (`just link-builds` makes build/ one, onto another drive) it picks
+# the boot volume, the rename fails with EXDEV ("Cross-device link"), and it
+# reports "the written data did not validate", Error 73. The real path keeps
+# the temp file on the same drive.
+real_path() {
+  echo "$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")"
+}
+
 can_notarize() {
   [ "$SIGNED" = 1 ] && [ "${ASTAR_SKIP_NOTARIZE:-0}" != 1 ] &&
     xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1
@@ -186,7 +196,7 @@ if can_notarize; then
   # symlinks and extended attributes, and notarytool rejects a mangled bundle.
   ditto -c -k --keepParent "$APP" "$APP_ZIP"
   if xcrun notarytool submit "$APP_ZIP" --keychain-profile "$NOTARY_PROFILE" --wait; then
-    xcrun stapler staple "$APP"
+    xcrun stapler staple "$(real_path "$APP")"
     APP_STAPLED=1
   else
     echo "!! app notarization failed — continuing; the DMG pass below will report the damage." >&2
@@ -250,7 +260,7 @@ fi
 if can_notarize; then
   echo ">> notarizing the DMG (profile: $NOTARY_PROFILE) — Apple's scan usually takes a few minutes…"
   if xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait; then
-    xcrun stapler staple "$DMG_PATH"
+    xcrun stapler staple "$(real_path "$DMG_PATH")"
     NOTARIZED=1
   else
     echo "!! notarization failed — the DMG is signed but NOT notarized." >&2

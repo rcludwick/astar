@@ -17,11 +17,11 @@ use zeroize::Zeroize;
 
 use astar_station::LinkMode;
 use astar_station::{
-    AnswerPolicy, CallMode, CallStatus, CodecPolicy, DtmfMode, HeardEntry, InboundConfig,
-    IncomingAuthPolicy, IncomingCallPolicy, Layout, MIN_PACKET_LOG_BYTES, NodeConfig,
-    OperatingMode, PacketLogConfig, PortalCredentials, RecordRequest, RegisterConfig, Station,
-    StationConfig, StationError, StationEvent, VocoderEnrolment, VocoderTrust, VoiceFormat,
-    WgConfigError, WgLinkConfig,
+    AnswerPolicy, CallMode, CallStatus, CodecPolicy, DtmfMode, ForcedReason, HeardEntry,
+    InboundConfig, IncomingAuthPolicy, IncomingCallPolicy, Layout, MIN_PACKET_LOG_BYTES,
+    NodeConfig, OperatingMode, PacketLogConfig, PortalCredentials, PttSnapshot, PttSource,
+    RecordRequest, RegisterConfig, Station, StationConfig, StationError, StationEvent,
+    VocoderEnrolment, VocoderTrust, VoiceFormat, WgConfigError, WgLinkConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -55,9 +55,34 @@ pub struct IaxStation {
     /// `Asl3Error` can never reach here. Every other variant's message is
     /// documented secret-free at its definition.
     last_error: Mutex<String>,
+    /// The output device the most recent snapshot reported stopped, empty
+    /// when none — read back by [`iax_station_speaker_stopped`]. Kept here
+    /// rather than in the fixed-size [`IaxState`], which carries only the
+    /// flag, exactly as `last_incoming` is. A device name, secret-free.
+    speaker_stopped: Mutex<String>,
+    /// The input device the most recent snapshot reported stopped, empty
+    /// when none — read back by [`iax_station_mic_stopped`].
+    mic_stopped: Mutex<String>,
 }
 
 impl IaxStation {
+    /// Remember which devices `s` reports stopped, so the string getters
+    /// answer for the same snapshot the caller's flags came from.
+    fn remember_stopped(&self, s: &astar_station::ConsoleState) {
+        for (slot, name) in [
+            (&self.speaker_stopped, &s.speaker_stopped),
+            (&self.mic_stopped, &s.mic_stopped),
+        ] {
+            if let Ok(mut slot) = slot.lock() {
+                let name = name.as_deref().unwrap_or("");
+                if *slot != name {
+                    slot.clear();
+                    slot.push_str(name);
+                }
+            }
+        }
+    }
+
     /// Record `e`'s detail and return its code. The single funnel through
     /// which a `StationError` becomes an FFI result.
     fn fail(&self, e: &StationError) -> c_int {
@@ -420,6 +445,48 @@ pub struct IaxState {
     /// failed is `false`; [`iax_station_echolink_state`] says which.
     /// Feature-independent, like [`Self::echolink_active`].
     pub echolink_logged_in: bool,
+    /// `true` when the speaker's stream stopped and could not be rebuilt —
+    /// the call is deaf. The engine rebuilds a stream whose device changes
+    /// under it (a Bluetooth headset switching to hands-free) by itself; this
+    /// is set only once that has failed. Read the device's name with
+    /// [`iax_station_speaker_stopped`] and say so.
+    pub speaker_stopped: bool,
+    /// `true` when the mic's stream stopped and could not be rebuilt. Read
+    /// the device's name with [`iax_station_mic_stopped`].
+    pub mic_stopped: bool,
+    /// Mask of the PTT sources holding the key right now, bit
+    /// `1 << IAX_PTT_*`. The radio is on air while any held source is
+    /// unlatched, so a UI that wants to know who is keying reads this
+    /// instead of guessing from its own button state. `0` while nothing
+    /// holds.
+    pub ptt_sources: u32,
+    /// Mask of the sources latched by a forced stop, a stop-all, a hang-up
+    /// or a refused press (same bits as [`Self::ptt_sources`]). The Legacy
+    /// bit latches only on the transmit time-out and on a stop-all. A latched
+    /// source keys again only after it releases, so a UI can say "let go and
+    /// press again" instead of showing a refusal it cannot explain.
+    pub ptt_latched: u32,
+    /// Sequence number of the last forced stop (transmit time-out or
+    /// Bluetooth lease expiry); `0` before the first. A UI announces a forced
+    /// stop once per change of this value, not once per poll.
+    pub ptt_forced_seq: u32,
+    /// Mask of the sources the last forced stop released (same bits as
+    /// [`Self::ptt_sources`]).
+    pub ptt_forced_sources: u32,
+    /// Why the last forced stop happened: [`IAX_PTT_FORCED_LEASE_EXPIRED`] or
+    /// [`IAX_PTT_FORCED_TX_TIMEOUT`], and [`IAX_PTT_FORCED_NONE`] before the
+    /// first.
+    pub ptt_forced_reason: u32,
+    /// The transmit time-out in force, in milliseconds: `120000` on a new
+    /// station, and `60000..=600000` after any accepted
+    /// [`iax_station_set_tx_timeout_ms`]. Never `0`, because the time-out
+    /// cannot be turned off.
+    pub ptt_tx_timeout_ms: u32,
+    /// The loudness VOX judges, in dBFS `-60.0..=0.0`: the mean power of the
+    /// same input as [`Self::input_db`] over the last 50 ms. A single click
+    /// barely moves it, so drive VOX and its calibration meter from this
+    /// field; `input_db` stays the peak for level meters.
+    pub vox_db: c_float,
 }
 
 /// The kind of a drained lifecycle event (see [`iax_station_next_event`]).
@@ -546,6 +613,24 @@ pub const IAX_ERR_RECORD: c_int = -23;
 /// it never carries the password.
 pub const IAX_ERR_ECHOLINK: c_int = -24;
 
+/// A lease renew on a PTT source that holds no lease: never pressed with one,
+/// released, or latched by a forced stop (lease expiry, transmit time-out,
+/// stop-all, call end). Renew never presses; a client seeing this must drop
+/// its own key-down and wait for a fresh press.
+pub const IAX_ERR_NOT_LEASED: c_int = -25;
+
+/// An argument outside its documented range: an unknown PTT source, a lease
+/// TTL of 0 or above 5000 ms, a lease on a source other than Bluetooth, a
+/// Bluetooth press without a lease (Bluetooth keys only with one, so the
+/// engine bounds every Bluetooth hold), or a
+/// transmit time-out below 60 000 ms (including 0) or above 600 000 ms. The
+/// value already in force is kept, so no caller can disable the time-out.
+pub const IAX_ERR_INVALID: c_int = -26;
+
+/// A press on a PTT source that a forced stop latched. Release that source
+/// first, then press again.
+pub const IAX_ERR_PTT_LATCHED: c_int = -27;
+
 /// Number of log-spaced dBFS bins [`iax_station_mic_spectrum`] writes when
 /// monitoring (iax-e73e). Size the `out` array to (at least) this; a larger
 /// buffer is fine (the extra entries are left untouched). A literal here so
@@ -557,6 +642,42 @@ const _: () = assert!(
     IAX_SPECTRUM_BINS == astar_station::SPECTRUM_BINS,
     "IAX_SPECTRUM_BINS must match astar_audio::SPECTRUM_BINS"
 );
+
+/// [`iax_station_ptt_source`] id for the on-screen button and Space. They
+/// are one source because they are the same hand on the same Mac.
+pub const IAX_PTT_MANUAL: u32 = 0;
+/// VOX: the voice-operated gate a client drives from
+/// [`IaxState::vox_db`].
+pub const IAX_PTT_VOX: u32 = 1;
+/// A USB radio interface's PTT line (raw USB or tty).
+pub const IAX_PTT_SERIAL: u32 = 2;
+/// A Bluetooth LE PTT button. The only source that may hold a lease
+/// ([`iax_station_ptt_lease_press`]), because it is the only one whose
+/// release can be lost in the air.
+pub const IAX_PTT_BLUETOOTH: u32 = 3;
+/// [`iax_station_set_ptt`]'s callers: `astar-server`, the CLI, Python and
+/// the Iced client.
+pub const IAX_PTT_LEGACY: u32 = 4;
+/// [`IaxState::ptt_forced_reason`] before the first forced stop.
+pub const IAX_PTT_FORCED_NONE: u32 = 0;
+/// The Bluetooth lease ran out without a renew: the button's link went
+/// quiet while it held the key, so the engine unkeyed it.
+pub const IAX_PTT_FORCED_LEASE_EXPIRED: u32 = 1;
+/// The transmit time-out fired: the radio was on air continuously for the
+/// whole time-out, so every source was stopped and latched.
+pub const IAX_PTT_FORCED_TX_TIMEOUT: u32 = 2;
+
+// The C ids are the engine's own discriminants: literals above (so cbindgen
+// emits `#define`s) and compile-time checks here (so the two can never
+// drift). One `const _` per check, in the same shape as the
+// `IAX_SPECTRUM_BINS` assertion, which cbindgen already skips.
+const _: () = assert!(IAX_PTT_MANUAL == PttSource::Manual as u32);
+const _: () = assert!(IAX_PTT_VOX == PttSource::Vox as u32);
+const _: () = assert!(IAX_PTT_SERIAL == PttSource::Serial as u32);
+const _: () = assert!(IAX_PTT_BLUETOOTH == PttSource::Bluetooth as u32);
+const _: () = assert!(IAX_PTT_LEGACY == PttSource::Legacy as u32);
+const _: () = assert!(IAX_PTT_FORCED_LEASE_EXPIRED == ForcedReason::LeaseExpired as u32);
+const _: () = assert!(IAX_PTT_FORCED_TX_TIMEOUT == ForcedReason::TxTimeout as u32);
 
 // ---------------------------------------------------------------------------
 // Internal helpers (not exported to C)
@@ -604,13 +725,26 @@ fn err_code(e: &StationError) -> c_int {
         StationError::Nxdn(_) => IAX_ERR_NXDN,
         StationError::Dmr(_) => IAX_ERR_DMR,
         StationError::Record(_) => IAX_ERR_RECORD,
+        StationError::NotLeased => IAX_ERR_NOT_LEASED,
+        StationError::InvalidArgument(_) => IAX_ERR_INVALID,
+        StationError::PttLatched => IAX_ERR_PTT_LATCHED,
     }
 }
 
+/// Build the C snapshot from the console's state and the PTT arbiter's.
+/// The two come from separate locks (arbiter, then session, never the
+/// reverse), so the caller reads the console first and the arbiter second:
+/// a latch the console snapshot caused (`observe_call`) is then already
+/// visible here.
+///
 /// `echolink_available` is passed in rather than read from `s`: see
 /// [`echolink_gate`] for why it must be this library's feature AND the
 /// station's.
-fn fill_state(s: &astar_station::ConsoleState, echolink_available: bool) -> IaxState {
+fn fill_state(
+    s: &astar_station::ConsoleState,
+    echolink_available: bool,
+    ptt: &PttSnapshot,
+) -> IaxState {
     let status = match &s.status {
         CallStatus::Idle => IaxStatus::Idle,
         CallStatus::Dialing => IaxStatus::Dialing,
@@ -663,6 +797,24 @@ fn fill_state(s: &astar_station::ConsoleState, echolink_available: bool) -> IaxS
         echolink_available,
         echolink_active: s.echolink_active,
         echolink_logged_in: s.echolink_logged_in,
+        speaker_stopped: s.speaker_stopped.is_some(),
+        mic_stopped: s.mic_stopped.is_some(),
+        ptt_sources: ptt.sources,
+        ptt_latched: ptt.latched,
+        ptt_forced_seq: ptt.forced.seq,
+        ptt_forced_sources: ptt.forced.sources,
+        ptt_forced_reason: forced_reason_to_ffi(ptt.forced.reason),
+        ptt_tx_timeout_ms: u32::try_from(ptt.tx_timeout.as_millis()).unwrap_or(u32::MAX),
+        vox_db: s.vox_level_db,
+    }
+}
+
+/// Map the arbiter's forced-stop reason to its `IAX_PTT_FORCED_*` id.
+fn forced_reason_to_ffi(reason: Option<ForcedReason>) -> u32 {
+    match reason {
+        None => IAX_PTT_FORCED_NONE,
+        Some(ForcedReason::LeaseExpired) => IAX_PTT_FORCED_LEASE_EXPIRED,
+        Some(ForcedReason::TxTimeout) => IAX_PTT_FORCED_TX_TIMEOUT,
     }
 }
 
@@ -758,6 +910,8 @@ pub unsafe extern "C" fn iax_station_new(cfg: *const IaxConfig) -> *mut IaxStati
             last_incoming: Mutex::new(String::new()),
             last_link_node: Mutex::new(String::new()),
             last_error: Mutex::new(String::new()),
+            speaker_stopped: Mutex::new(String::new()),
+            mic_stopped: Mutex::new(String::new()),
         }))
     }))
     .unwrap_or(std::ptr::null_mut())
@@ -1317,11 +1471,73 @@ pub unsafe extern "C" fn iax_station_incoming_from(
     .unwrap_or(IAX_ERR_PANIC)
 }
 
+/// Write the name of the output device whose stream stopped, as of the most
+/// recent [`iax_station_snapshot`], into `buf` of `len` bytes (NUL-terminated,
+/// truncate-safe). Empty (returns `0`) while `IaxState::speaker_stopped` is
+/// `false`. Returns the byte length the full name needs (excluding the NUL),
+/// or a negative `IAX_ERR_*`; pass `len == 0` to query the size. A device
+/// name — secret-free.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_speaker_stopped(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let name = station
+            .speaker_stopped
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default();
+        unsafe { fill_buf(&name, buf, len) }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Write the name of the input device whose stream stopped, as of the most
+/// recent [`iax_station_snapshot`]. Same contract as
+/// [`iax_station_speaker_stopped`], for `IaxState::mic_stopped`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_mic_stopped(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let name = station
+            .mic_stopped
+            .lock()
+            .map(|s| s.clone())
+            .unwrap_or_default();
+        unsafe { fill_buf(&name, buf, len) }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
 // ---------------------------------------------------------------------------
 // PTT + gains
 // ---------------------------------------------------------------------------
 
-/// Set local transmit (PTT). Returns [`IAX_ERR_NOT_CONNECTED`] while idle.
+/// Set local transmit (PTT) as the `Legacy` source ([`IAX_PTT_LEGACY`]).
+///
+/// `true` presses Legacy. `false` stops every source, as
+/// [`iax_station_ptt_stop_all`] does, and re-arms Legacy, because `false` is
+/// the only release a Legacy caller has. Returns [`IAX_ERR_NOT_CONNECTED`]
+/// while idle (for `false` too: it always reaches the console), and
+/// [`IAX_ERR_PTT_LATCHED`] for a `true` only after the transmit time-out
+/// or an [`iax_station_ptt_stop_all`] stopped a held Legacy key, until a
+/// `false` re-arms it. A `true` the console refuses latches nothing, and a
+/// Legacy key still held when the call hangs up is released with no latch,
+/// so the next call's `true` keys. A key held past the transmit time-out
+/// (two minutes unless [`iax_station_set_tx_timeout_ms`] changed it) unkeys.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iax_station_set_ptt(st: *mut IaxStation, on: bool) -> c_int {
     if st.is_null() {
@@ -1330,6 +1546,118 @@ pub unsafe extern "C" fn iax_station_set_ptt(st: *mut IaxStation, on: bool) -> c
     let station = unsafe { &*st };
     catch_unwind(AssertUnwindSafe(|| {
         result_code(station, station.inner.set_ptt(on))
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Decode a C source id. An id this library does not define is refused,
+/// never mapped onto a default: a newer binding's id must not key as
+/// `Manual`.
+fn ptt_source_from_ffi(src: u32) -> Result<PttSource, StationError> {
+    PttSource::from_raw(src).ok_or(StationError::InvalidArgument("unknown ptt source"))
+}
+
+/// Press (`on`) or release one PTT source (`IAX_PTT_*`). The radio is on air
+/// while any unlatched source holds, so releasing one source never unkeys
+/// another's over.
+///
+/// Release is never refused and returns [`IAX_OK`] even while idle. A press
+/// returns [`IAX_ERR_PTT_LATCHED`] while the source is latched (release it
+/// first), or the console's own refusal ([`IAX_ERR_NOT_CONNECTED`],
+/// [`IAX_ERR_AUDIO`], [`IAX_ERR_NXDN`], [`IAX_ERR_DMR`]), after which the
+/// source is latched until it releases ([`IAX_PTT_LEGACY`] excepted: a
+/// refused Legacy press latches nothing). A press of [`IAX_PTT_BLUETOOTH`] is
+/// [`IAX_ERR_INVALID`] and changes nothing: Bluetooth keys only through
+/// [`iax_station_ptt_lease_press`], so the engine bounds every Bluetooth
+/// hold. Its release is accepted. An unknown `src` is [`IAX_ERR_INVALID`];
+/// NULL `st` is [`IAX_ERR_NULL`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_ptt_source(st: *mut IaxStation, src: u32, on: bool) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let r = ptt_source_from_ffi(src).and_then(|s| station.inner.ptt_source(s, on));
+        result_code(station, r)
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Stop transmitting, whoever holds the key: release every source and latch
+/// every one that was held, [`IAX_PTT_LEGACY`] included, so nothing re-keys
+/// until it is let go and pressed again. Always forwards an unkey to the
+/// console. Returns
+/// [`IAX_OK`] (idle included), [`IAX_ERR_NULL`] or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_ptt_stop_all(st: *mut IaxStation) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        station.inner.ptt_stop_all();
+        IAX_OK
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Press [`IAX_PTT_BLUETOOTH`] with a lease of `ttl_ms` (1..=5000). The
+/// engine unkeys the source by itself when the lease runs out without an
+/// [`iax_station_ptt_lease_renew`], so a button whose release is lost in the
+/// air still ends unkeyed. Any other `src`, `ttl_ms == 0` or `ttl_ms > 5000`
+/// is [`IAX_ERR_INVALID`] and changes nothing. Otherwise the result is as
+/// [`iax_station_ptt_source`]'s press.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_ptt_lease_press(
+    st: *mut IaxStation,
+    src: u32,
+    ttl_ms: u32,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let ttl = Duration::from_millis(u64::from(ttl_ms));
+        let r = ptt_source_from_ffi(src).and_then(|s| station.inner.ptt_lease_press(s, ttl));
+        result_code(station, r)
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Extend the lease of a source that holds one. Returns [`IAX_OK`], or
+/// [`IAX_ERR_NOT_LEASED`] when `src` holds no lease (never pressed, already
+/// released, stopped or expired): renew never presses, so a renew racing a
+/// forced stop cannot re-key. An unknown `src` is [`IAX_ERR_INVALID`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_ptt_lease_renew(st: *mut IaxStation, src: u32) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let r = ptt_source_from_ffi(src).and_then(|s| station.inner.ptt_lease_renew(s));
+        result_code(station, r)
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Set the transmit time-out: the longest the radio may stay on air
+/// continuously, whichever sources hold it. `ms` must be 60000..=600000
+/// (1 to 10 minutes). Anything else, `0` included, is [`IAX_ERR_INVALID`]
+/// and the value in force stays, so no binding can turn the time-out off.
+/// A new station runs on 120000. Read it back from
+/// [`IaxState::ptt_tx_timeout_ms`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_set_tx_timeout_ms(st: *mut IaxStation, ms: u32) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let timeout = Duration::from_millis(u64::from(ms));
+        result_code(station, station.inner.set_tx_timeout(timeout))
     }))
     .unwrap_or(IAX_ERR_PANIC)
 }
@@ -2028,6 +2356,8 @@ pub unsafe extern "C" fn iax_station_set_mic_profile(
 // ---------------------------------------------------------------------------
 
 /// Fill the caller-allocated `out` with the latest call state. Cheap; poll it.
+/// The `ptt_*` fields are read after the console fields, so a latch caused by
+/// the call ending is already reported in the same snapshot.
 /// Returns [`IAX_OK`], [`IAX_ERR_NULL`] (NULL `st`/`out`), or [`IAX_ERR_PANIC`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iax_station_snapshot(st: *mut IaxStation, out: *mut IaxState) -> c_int {
@@ -2037,10 +2367,13 @@ pub unsafe extern "C" fn iax_station_snapshot(st: *mut IaxStation, out: *mut Iax
     let station = unsafe { &*st };
     catch_unwind(AssertUnwindSafe(|| {
         let snap = station.inner.snapshot();
+        station.remember_stopped(&snap);
+        let ptt = station.inner.ptt_snapshot();
         unsafe {
             *out = fill_state(
                 &snap,
                 cfg!(feature = "echolink") && station.inner.echolink_available(),
+                &ptt,
             );
         }
         IAX_OK
@@ -2250,6 +2583,9 @@ pub unsafe extern "C" fn iax_error_text(code: c_int) -> *const c_char {
         IAX_ERR_DMR => b"dmr error\0",
         IAX_ERR_RECORD => b"recording error\0",
         IAX_ERR_ECHOLINK => b"echolink error\0",
+        IAX_ERR_NOT_LEASED => b"ptt source holds no lease\0",
+        IAX_ERR_INVALID => b"invalid argument\0",
+        IAX_ERR_PTT_LATCHED => b"ptt source is latched: release it first\0",
         IAX_ERR_IAX => b"iax error\0",
         IAX_ERR_SERIAL => b"serial error\0",
         IAX_ERR_UTF8 => b"argument was not valid utf-8\0",
@@ -2267,24 +2603,375 @@ pub unsafe extern "C" fn iax_error_text(code: c_int) -> *const c_char {
 }
 
 #[cfg(test)]
+mod ptt_error_code_tests {
+    //! The three PTT error variants cross the ABI as their own codes, with
+    //! their own static text. `err_code` matches `StationError` exhaustively,
+    //! so a variant without an arm does not compile; these tests pin WHICH
+    //! code and WHICH words.
+    use super::{
+        IAX_ERR_INVALID, IAX_ERR_NOT_LEASED, IAX_ERR_PTT_LATCHED, err_code, iax_error_text,
+    };
+    use astar_station::StationError;
+    use std::ffi::{CStr, c_int};
+
+    fn text(code: c_int) -> &'static str {
+        // SAFETY: `iax_error_text` returns a pointer to a 'static,
+        // NUL-terminated byte literal for every input.
+        unsafe { CStr::from_ptr(iax_error_text(code)) }
+            .to_str()
+            .expect("error text is ASCII")
+    }
+
+    #[test]
+    fn ptt_errors_map_to_their_own_codes() {
+        assert_eq!(IAX_ERR_NOT_LEASED, -25);
+        assert_eq!(IAX_ERR_INVALID, -26);
+        assert_eq!(IAX_ERR_PTT_LATCHED, -27);
+        assert_eq!(err_code(&StationError::NotLeased), IAX_ERR_NOT_LEASED);
+        assert_eq!(
+            err_code(&StationError::InvalidArgument(
+                "lease ttl must be 1..=5000 ms"
+            )),
+            IAX_ERR_INVALID
+        );
+        assert_eq!(err_code(&StationError::PttLatched), IAX_ERR_PTT_LATCHED);
+    }
+
+    #[test]
+    fn ptt_error_codes_have_their_own_text() {
+        assert_eq!(text(IAX_ERR_NOT_LEASED), "ptt source holds no lease");
+        assert_eq!(text(IAX_ERR_INVALID), "invalid argument");
+        assert_eq!(
+            text(IAX_ERR_PTT_LATCHED),
+            "ptt source is latched: release it first"
+        );
+    }
+}
+
+#[cfg(test)]
 mod fill_state_tests {
     //! Offline coverage of the snapshot mapping (iax-3e53): the negotiated
-    //! codec crosses the ABI as its IAX2 format bit, `0` = none.
-    use super::fill_state;
-    use astar_station::{ConsoleState, VoiceFormat};
+    //! codec crosses the ABI as its IAX2 format bit, `0` = none. The PTT
+    //! arbiter's snapshot crosses field for field, with distinct values in
+    //! every field so a transposition fails.
+    use std::time::Duration;
+
+    use super::{
+        IAX_PTT_FORCED_LEASE_EXPIRED, IAX_PTT_FORCED_NONE, IAX_PTT_FORCED_TX_TIMEOUT, fill_state,
+    };
+    use astar_station::{
+        ConsoleState, ForcedReason, ForcedRecord, PttArbiter, PttSnapshot, VoiceFormat,
+    };
+
+    fn idle_ptt() -> PttSnapshot {
+        PttArbiter::new().snapshot()
+    }
+
+    #[test]
+    fn a_stopped_speaker_or_mic_raises_its_own_flag() {
+        let mut s = ConsoleState::default();
+        let st = fill_state(&s, false, &idle_ptt());
+        assert!(!st.speaker_stopped);
+        assert!(!st.mic_stopped);
+        s.speaker_stopped = Some("B02PTT-6522".into());
+        let st = fill_state(&s, false, &idle_ptt());
+        assert!(st.speaker_stopped);
+        assert!(!st.mic_stopped);
+        s.speaker_stopped = None;
+        s.mic_stopped = Some("B02PTT-6522".into());
+        let st = fill_state(&s, false, &idle_ptt());
+        assert!(!st.speaker_stopped);
+        assert!(st.mic_stopped);
+    }
 
     #[test]
     fn negotiated_format_maps_to_the_iax2_format_bit() {
         let mut s = ConsoleState::default();
-        assert_eq!(fill_state(&s, false).negotiated_format, 0, "idle → 0");
+        let ptt = idle_ptt();
+        assert_eq!(fill_state(&s, false, &ptt).negotiated_format, 0, "idle → 0");
         s.negotiated_format = Some(VoiceFormat::G711U);
-        assert_eq!(fill_state(&s, false).negotiated_format, 4, "µ-law → bit 2");
+        assert_eq!(
+            fill_state(&s, false, &ptt).negotiated_format,
+            4,
+            "µ-law → bit 2"
+        );
         s.negotiated_format = Some(VoiceFormat::Slin16);
         assert_eq!(
-            fill_state(&s, false).negotiated_format,
+            fill_state(&s, false, &ptt).negotiated_format,
             32768,
             "slin16 → bit 15"
         );
+    }
+
+    #[test]
+    fn ptt_snapshot_maps_field_for_field() {
+        let ptt = PttSnapshot {
+            sources: 0b0_1010,
+            latched: 0b0_0100,
+            forced: ForcedRecord {
+                seq: 3,
+                sources: 0b0_1000,
+                reason: Some(ForcedReason::LeaseExpired),
+            },
+            tx_timeout: Duration::from_secs(300),
+        };
+        let st = fill_state(&ConsoleState::default(), false, &ptt);
+        assert_eq!(st.ptt_sources, 0b0_1010);
+        assert_eq!(st.ptt_latched, 0b0_0100);
+        assert_eq!(st.ptt_forced_seq, 3);
+        assert_eq!(st.ptt_forced_sources, 0b0_1000);
+        assert_eq!(st.ptt_forced_reason, IAX_PTT_FORCED_LEASE_EXPIRED);
+        assert_eq!(st.ptt_tx_timeout_ms, 300_000);
+    }
+
+    #[test]
+    fn ptt_forced_reason_maps_every_variant() {
+        let mut ptt = idle_ptt();
+        let s = ConsoleState::default();
+        ptt.forced.reason = None;
+        assert_eq!(
+            fill_state(&s, false, &ptt).ptt_forced_reason,
+            IAX_PTT_FORCED_NONE
+        );
+        ptt.forced.reason = Some(ForcedReason::LeaseExpired);
+        assert_eq!(
+            fill_state(&s, false, &ptt).ptt_forced_reason,
+            IAX_PTT_FORCED_LEASE_EXPIRED
+        );
+        ptt.forced.reason = Some(ForcedReason::TxTimeout);
+        assert_eq!(
+            fill_state(&s, false, &ptt).ptt_forced_reason,
+            IAX_PTT_FORCED_TX_TIMEOUT
+        );
+    }
+
+    #[test]
+    fn idle_arbiter_maps_to_zero_masks_and_the_two_minute_default() {
+        let st = fill_state(&ConsoleState::default(), false, &idle_ptt());
+        assert_eq!(st.ptt_sources, 0);
+        assert_eq!(st.ptt_latched, 0);
+        assert_eq!(st.ptt_forced_seq, 0);
+        assert_eq!(st.ptt_forced_sources, 0);
+        assert_eq!(st.ptt_forced_reason, IAX_PTT_FORCED_NONE);
+        assert_eq!(st.ptt_tx_timeout_ms, 120_000);
+    }
+}
+
+#[cfg(all(test, feature = "m17"))]
+mod ptt_ffi_loopback_tests {
+    //! The accepted path through the PTT entry points, on a station linked
+    //! over M17 to a fake reflector on `127.0.0.1`. The idle-station tests in
+    //! `tests/ffi.rs` only ever see refusals, so this is the one place a held
+    //! source, a successful renew and the universal stop are checked across
+    //! the ABI. Hermetic: `NullBackend` opens no device and every datagram
+    //! goes to loopback.
+    use std::mem::MaybeUninit;
+    use std::net::{SocketAddr, UdpSocket};
+    use std::sync::Mutex;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use super::{
+        IAX_ERR_NOT_CONNECTED, IAX_ERR_NOT_LEASED, IAX_ERR_PTT_LATCHED, IAX_OK, IAX_PTT_BLUETOOTH,
+        IAX_PTT_LEGACY, IAX_PTT_MANUAL, IaxState, IaxStation, iax_station_free,
+        iax_station_ptt_lease_press, iax_station_ptt_lease_renew, iax_station_ptt_source,
+        iax_station_ptt_stop_all, iax_station_set_ptt, iax_station_snapshot,
+    };
+    use astar_station::{CallStatus, Station, StationConfig};
+
+    /// CONN (11 bytes) → ACKN, then silence; lives 8 s, far longer than the
+    /// test. The same fake reflector as astar-station's PTT station tests.
+    fn spawn_reflector() -> SocketAddr {
+        let sock = UdpSocket::bind("127.0.0.1:0").expect("bind fake reflector");
+        sock.set_read_timeout(Some(Duration::from_millis(100)))
+            .expect("set read timeout");
+        let addr = sock.local_addr().expect("local addr");
+        thread::spawn(move || {
+            let mut buf = [0u8; 4_096];
+            let mut acked = false;
+            let deadline = Instant::now() + Duration::from_secs(8);
+            while Instant::now() < deadline {
+                let Ok((n, src)) = sock.recv_from(&mut buf) else {
+                    continue;
+                };
+                if !acked && n == 11 && &buf[0..4] == b"CONN" {
+                    acked = true;
+                    let _ = sock.send_to(b"ACKN", src);
+                }
+            }
+        });
+        addr
+    }
+
+    /// A heap `IaxStation` around a `NullBackend` station, as
+    /// `iax_station_new` would build it, so `iax_station_free` owns it.
+    fn null_backend_station() -> *mut IaxStation {
+        Box::into_raw(Box::new(IaxStation {
+            inner: Station::with_backend_factory(
+                StationConfig::default(),
+                Box::new(|| Box::new(astar_audio::NullBackend::new())),
+            ),
+            last_incoming: Mutex::new(String::new()),
+            last_link_node: Mutex::new(String::new()),
+            last_error: Mutex::new(String::new()),
+            speaker_stopped: Mutex::new(String::new()),
+            mic_stopped: Mutex::new(String::new()),
+        }))
+    }
+
+    fn state_of(st: *mut IaxStation) -> IaxState {
+        let mut out = MaybeUninit::<IaxState>::uninit();
+        assert_eq!(
+            unsafe { iax_station_snapshot(st, out.as_mut_ptr()) },
+            IAX_OK
+        );
+        // SAFETY: `iax_station_snapshot` returned `IAX_OK`, so it wrote a
+        // whole `IaxState` through `out`.
+        unsafe { out.assume_init() }
+    }
+
+    /// Link `st` over M17 to a fresh fake reflector on loopback and wait
+    /// (at most 2 s) for the answer. Each call spawns its own reflector,
+    /// because a reflector acknowledges only one CONN.
+    fn link(st: *mut IaxStation) {
+        let station = unsafe { &*st };
+        let addr = spawn_reflector();
+        assert!(
+            station.inner.m17_available(),
+            "Codec 2 must be available for the loopback link (the codec2-static dev-dependency)"
+        );
+        station
+            .inner
+            .m17_connect(&addr.ip().to_string(), addr.port(), 'A', "N0CALL")
+            .expect("m17 connect to the loopback reflector");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while station.inner.snapshot().status != CallStatus::Answered && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            station.inner.snapshot().status,
+            CallStatus::Answered,
+            "must link before keying"
+        );
+    }
+
+    #[test]
+    fn stop_all_releases_and_latches_every_held_source_across_the_abi() {
+        let st = null_backend_station();
+        let station = unsafe { &*st };
+        link(st);
+
+        let both = (1 << IAX_PTT_MANUAL) | (1 << IAX_PTT_BLUETOOTH);
+        assert_eq!(
+            unsafe { iax_station_ptt_source(st, IAX_PTT_MANUAL, true) },
+            IAX_OK
+        );
+        assert_eq!(
+            unsafe { iax_station_ptt_lease_press(st, IAX_PTT_BLUETOOTH, 1500) },
+            IAX_OK
+        );
+        assert_eq!(
+            unsafe { iax_station_ptt_lease_renew(st, IAX_PTT_BLUETOOTH) },
+            IAX_OK,
+            "a held lease renews"
+        );
+        let held = state_of(st);
+        assert_eq!(held.ptt_sources, both, "both accepted presses hold");
+        assert_eq!(held.ptt_latched, 0);
+
+        assert_eq!(unsafe { iax_station_ptt_stop_all(st) }, IAX_OK);
+        let stopped = state_of(st);
+        assert_eq!(stopped.ptt_sources, 0, "stop_all must release every source");
+        assert_eq!(
+            stopped.ptt_latched, both,
+            "stop_all latches every source that held"
+        );
+        assert_eq!(stopped.ptt_forced_seq, 0, "stop_all is not a forced stop");
+        assert_eq!(
+            unsafe { iax_station_ptt_lease_renew(st, IAX_PTT_BLUETOOTH) },
+            IAX_ERR_NOT_LEASED,
+            "the stop ended the lease, so renew cannot re-key"
+        );
+
+        station.inner.m17_disconnect();
+        unsafe { iax_station_free(st) };
+    }
+
+    /// Rob, 2026-10-09: Legacy (`set_ptt`, astar-server `/key`) latches only
+    /// on the transmit time-out and on a stop-all. A hang-up releases a held
+    /// Legacy key with no latch (Manual, held alongside it, does latch), so
+    /// the next call's `set_ptt(true)` keys; a stop-all latches Legacy until
+    /// `set_ptt(false)`.
+    #[test]
+    fn legacy_is_released_by_hang_up_but_latched_by_stop_all_across_the_abi() {
+        let st = null_backend_station();
+        let station = unsafe { &*st };
+        let legacy = 1 << IAX_PTT_LEGACY;
+        let manual = 1 << IAX_PTT_MANUAL;
+
+        link(st);
+        assert_eq!(unsafe { iax_station_set_ptt(st, true) }, IAX_OK);
+        assert_eq!(
+            unsafe { iax_station_ptt_source(st, IAX_PTT_MANUAL, true) },
+            IAX_OK
+        );
+        assert_eq!(state_of(st).ptt_sources, legacy | manual);
+
+        station.inner.m17_disconnect();
+        let hung_up = state_of(st);
+        assert_eq!(hung_up.ptt_sources, 0, "the hang-up releases every source");
+        assert_eq!(
+            hung_up.ptt_latched, manual,
+            "the hang-up latches Manual but releases Legacy with no latch"
+        );
+        assert_eq!(
+            unsafe { iax_station_set_ptt(st, true) },
+            IAX_ERR_NOT_CONNECTED,
+            "between calls set_ptt(true) is the console's refusal, never PTT_LATCHED"
+        );
+        assert_eq!(
+            state_of(st).ptt_latched,
+            manual,
+            "and that refusal latches nothing"
+        );
+
+        link(st);
+        assert_eq!(
+            unsafe { iax_station_set_ptt(st, true) },
+            IAX_OK,
+            "the next call's set_ptt(true) keys with no set_ptt(false) in between"
+        );
+        assert_eq!(state_of(st).ptt_sources, legacy);
+
+        assert_eq!(unsafe { iax_station_ptt_stop_all(st) }, IAX_OK);
+        let stopped = state_of(st);
+        assert_eq!(stopped.ptt_sources, 0, "stop_all must release Legacy");
+        assert_eq!(
+            stopped.ptt_latched,
+            legacy | manual,
+            "stop_all latches the held Legacy key; Manual's latch is untouched"
+        );
+        assert_eq!(
+            unsafe { iax_station_set_ptt(st, true) },
+            IAX_ERR_PTT_LATCHED,
+            "after a stop-all, Legacy needs set_ptt(false) before keying again"
+        );
+        assert_eq!(unsafe { iax_station_set_ptt(st, false) }, IAX_OK);
+        assert_eq!(
+            state_of(st).ptt_latched,
+            manual,
+            "set_ptt(false) re-arms Legacy only"
+        );
+        assert_eq!(
+            unsafe { iax_station_set_ptt(st, true) },
+            IAX_OK,
+            "re-armed Legacy keys"
+        );
+        assert_eq!(unsafe { iax_station_set_ptt(st, false) }, IAX_OK);
+        assert_eq!(state_of(st).ptt_sources, 0);
+
+        station.inner.m17_disconnect();
+        unsafe { iax_station_free(st) };
     }
 }
 
@@ -3735,7 +4422,8 @@ pub unsafe extern "C" fn iax_station_dstar_disconnect(st: *mut IaxStation) -> c_
 ///
 /// ```json
 /// {"link":"linked","talker":"AJ7HR","slow_text":"hi","backend":"thumbdv",
-///  "tx_capable":true,"ptt":false,"tx_db":-60.0,"rx_db":-31.2,"input_db":-45.0}
+///  "tx_capable":true,"ptt":false,"tx_db":-60.0,"rx_db":-31.2,"input_db":-45.0,
+///  "vox_db":-52.0}
 /// ```
 ///
 /// `link` is one of `idle`/`linking`/`linked`/`unlinking`/`failed`; `backend`
@@ -3749,8 +4437,8 @@ pub unsafe extern "C" fn iax_station_dstar_disconnect(st: *mut IaxStation) -> c_
 /// compiled in. Returns [`IAX_ERR_NULL`] if `st` is NULL, or
 /// [`IAX_ERR_PANIC`].
 ///
-/// The three level fields duplicate [`IaxSnapshot`]'s `tx_db`/`rx_db`/
-/// `input_db`, which mirror the active session whatever its network — read
+/// The four level fields duplicate [`IaxSnapshot`]'s `tx_db`/`rx_db`/
+/// `input_db`/`vox_db`, which mirror the active session whatever its network — read
 /// them from the snapshot on a metering tick and call this only when the UI
 /// needs the D-Star-specific fields.
 #[unsafe(no_mangle)]
@@ -3795,6 +4483,7 @@ fn dstar_state_json(station: &IaxStation) -> String {
             "tx_db": s.tx_dbfs,
             "rx_db": s.rx_dbfs,
             "input_db": s.input_dbfs,
+            "vox_db": s.vox_dbfs,
         })
         .to_string()
     }
@@ -5476,5 +6165,88 @@ mod packet_log_tests {
         assert_eq!(rc, needed, "a short buffer still reports the full length");
         assert_eq!(small[3], 0, "and is NUL-terminated");
         unsafe { iax_station_free(st) };
+    }
+}
+
+#[cfg(test)]
+mod stopped_device_tests {
+    //! The names behind `speaker_stopped` / `mic_stopped`: remembered from
+    //! each snapshot, read back through the two string getters.
+    use super::*;
+    use std::ptr;
+
+    fn station() -> *mut IaxStation {
+        let cfg = IaxConfig {
+            input: ptr::null(),
+            output: ptr::null(),
+            portal_user: ptr::null(),
+            portal_pass: ptr::null(),
+            portal_node: ptr::null(),
+            secret: ptr::null(),
+            codec_policy: ptr::null(),
+        };
+        let st = unsafe { iax_station_new(std::ptr::from_ref(&cfg)) };
+        assert!(!st.is_null());
+        st
+    }
+
+    /// Read one getter into a `String`, sizing the buffer first.
+    fn read(
+        st: *mut IaxStation,
+        getter: unsafe extern "C" fn(*mut IaxStation, *mut c_char, usize) -> c_int,
+    ) -> String {
+        let needed = unsafe { getter(st, ptr::null_mut(), 0) };
+        assert!(needed >= 0, "getter failed: {needed}");
+        let mut buf = vec![0 as c_char; usize::try_from(needed).expect("non-negative") + 1];
+        let rc = unsafe { getter(st, buf.as_mut_ptr(), buf.len()) };
+        assert_eq!(rc, needed);
+        unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
+            .to_str()
+            .expect("utf-8")
+            .to_string()
+    }
+
+    #[test]
+    fn a_healthy_station_names_nothing() {
+        let st = station();
+        let mut out = std::mem::MaybeUninit::<IaxState>::uninit();
+        assert_eq!(
+            unsafe { iax_station_snapshot(st, out.as_mut_ptr()) },
+            IAX_OK
+        );
+        assert_eq!(read(st, iax_station_speaker_stopped), "");
+        assert_eq!(read(st, iax_station_mic_stopped), "");
+        unsafe { iax_station_free(st) };
+    }
+
+    #[test]
+    fn the_getters_name_what_the_last_snapshot_saw() {
+        let st = station();
+        let station = unsafe { &*st };
+        station.remember_stopped(&astar_station::ConsoleState {
+            speaker_stopped: Some("B02PTT-6522".into()),
+            mic_stopped: Some("USB Audio Device".into()),
+            ..astar_station::ConsoleState::default()
+        });
+        assert_eq!(read(st, iax_station_speaker_stopped), "B02PTT-6522");
+        assert_eq!(read(st, iax_station_mic_stopped), "USB Audio Device");
+        // Recovery clears them on the next snapshot.
+        station.remember_stopped(&astar_station::ConsoleState::default());
+        assert_eq!(read(st, iax_station_speaker_stopped), "");
+        assert_eq!(read(st, iax_station_mic_stopped), "");
+        unsafe { iax_station_free(st) };
+    }
+
+    #[test]
+    fn the_getters_refuse_a_null_station() {
+        let mut buf = [0 as c_char; 8];
+        assert_eq!(
+            unsafe { iax_station_speaker_stopped(ptr::null_mut(), buf.as_mut_ptr(), buf.len()) },
+            IAX_ERR_NULL
+        );
+        assert_eq!(
+            unsafe { iax_station_mic_stopped(ptr::null_mut(), buf.as_mut_ptr(), buf.len()) },
+            IAX_ERR_NULL
+        );
     }
 }

@@ -97,8 +97,9 @@ impl FramePipeline {
         };
 
         let mut stereo = Vec::with_capacity(DISCORD_FRAME_PAIRS * 2);
-        for i in 0..DISCORD_FRAME_PAIRS {
-            let s = if i < got { self.scratch_out[i] } else { 0.0 };
+        let samples = self.scratch_out.iter().copied().take(got);
+        let padded = samples.chain(std::iter::repeat(0.0));
+        for s in padded.take(DISCORD_FRAME_PAIRS) {
             #[allow(clippy::cast_possible_truncation)]
             let v = (s * 32768.0).clamp(-32768.0, 32767.0) as i16;
             stereo.push(v);

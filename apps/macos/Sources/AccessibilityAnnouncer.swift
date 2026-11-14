@@ -5,6 +5,7 @@
 #if os(macOS)
     import AppKit
     import AstarCore
+    import AstarStation
     import Combine
 
     /// Posts VoiceOver announcements for astar's async call-session events
@@ -26,8 +27,9 @@
         /// (`session.$keyedSince != nil`), so this never burns CPU at rest.
         private var talkTimerTimer: Timer?
 
-        init(session: CallSession) {
+        init(session: CallSession, bluetooth: BluetoothPTTController) {
             observe(session)
+            observe(bluetooth: bluetooth)
         }
 
         deinit {
@@ -75,6 +77,15 @@
                 }
                 .store(in: &cancellables)
 
+            // Engine forced stops (transmit time-out, lease expiry). The
+            // planner swallows the replayed value and speaks once per seq.
+            session.$lastForcedStop
+                .receive(on: RunLoop.main)
+                .sink { [weak self] newValue in
+                    self?.post(self?.planner.forcedStopChanged(to: newValue) ?? [])
+                }
+                .store(in: &cancellables)
+
             // Talk timer: the 1 s tick runs ONLY while keyed. `keyedSince`
             // flips nil<->non-nil on every key/unkey edge (CallSession.poll()),
             // so this publisher is exactly the "start/stop the timer" signal.
@@ -94,6 +105,35 @@
                         guard let self, let session else { return }
                         self.tickTalkTimer(session: session)
                     }
+                }
+                .store(in: &cancellables)
+        }
+
+        /// Bluetooth PTT announcements: forced releases (adapter off, sleep, a
+        /// value the button should never send, a link lost while keyed) and a
+        /// link that drops while nothing was on air. The planner decides which
+        /// channel owns a drop, so one loss is announced once.
+        private func observe(bluetooth: BluetoothPTTController) {
+            bluetooth.$lastForcedStop
+                .receive(on: RunLoop.main)
+                .sink { [weak self, weak bluetooth] newValue in
+                    guard let self else { return }
+                    self.post(
+                        self.planner.bluetoothForcedReleaseChanged(
+                            to: newValue, shortName: bluetooth?.device?.namePrefix))
+                }
+                .store(in: &cancellables)
+
+            bluetooth.$status
+                .receive(on: RunLoop.main)
+                .sink { [weak self, weak bluetooth] status in
+                    guard let self, let bluetooth else { return }
+                    // `@Published` emits before the property is stored, but
+                    // `receive(on:)` delivers on a later run-loop turn, so the
+                    // controller's `lastForcedStop` is already current here.
+                    self.post(
+                        self.planner.bluetoothStatusChanged(
+                            to: status, lastForcedStop: bluetooth.lastForcedStop, now: Date()))
                 }
                 .store(in: &cancellables)
         }

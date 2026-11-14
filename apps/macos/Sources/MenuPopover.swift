@@ -15,6 +15,9 @@
     struct MenuPopover: View {
         @EnvironmentObject private var session: CallSession
         @EnvironmentObject private var serial: SerialController
+        /// The Bluetooth PTT button. Read here for the poll exemption; the PTT
+        /// chip, the forced-stop banner and the PTT settings read it too.
+        @EnvironmentObject private var bluetooth: BluetoothPTTController
         /// The cached reflector directory (astar-refl-ui), for the search
         /// pane and the module picker. The *dial* path does not go through
         /// this — it holds the directory's frozen `index` value instead, so
@@ -25,7 +28,11 @@
         @EnvironmentObject private var navigation: AppNavigation
         @State private var node = ""
         @State private var errorText: String?
-        @State private var keyed = false  // PTT currently held
+        /// This view's own press (pointer or Space), kept only to pair each
+        /// press with its release. What the button SHOWS is `session.ptt`, the
+        /// radio's state, because the Bluetooth button, serial, VOX or a remote
+        /// caller can hold the key too.
+        @State private var keyed = false
         @State private var keyMonitor: Any?  // spacebar hold-to-talk event monitor
         @State private var showFavoriteEditor = false  // inline "save favorite" popover
         /// Last module used per reflector, offered pre-selected in the picker.
@@ -210,6 +217,15 @@
             .onChange(of: serial.isActive) { _ in
                 applyPollState(for: navigation.pane)
             }
+            // The same goes for a linked Bluetooth PTT button, and for being on
+            // air from any source (the red tint and the talk timer must not
+            // freeze while Settings is open). See `PollPolicy`.
+            .onChange(of: bluetooth.isLinked) { _ in
+                applyPollState(for: navigation.pane)
+            }
+            .onChange(of: session.ptt) { _ in
+                applyPollState(for: navigation.pane)
+            }
             .onChange(of: session.status) { newStatus in
                 if newStatus != .answered && keyed { setKeyed(false) }  // unkey when the call ends
                 // Call over → compose state and history die with it; the
@@ -258,6 +274,14 @@
                                 meters
                                 levelsAndSpectrum
                                 callControls
+                                // Directly under the button it explains: a
+                                // forced stop leaves the sources it cut off
+                                // latched, and this says why the next press
+                                // waits for a release.
+                                ForcedStopBanner()
+                                if bluetooth.spec != nil {
+                                    BluetoothPTTChip()
+                                }
                                 if let recordingError = session.recordingError {
                                     // One line, under the controls it is about:
                                     // a recording that could not start or
@@ -297,7 +321,16 @@
                                     .mainCard()
                             }
                         } else {
-                            connectControls.mainCard()
+                            VStack(alignment: .leading, spacing: 0) {
+                                connectControls
+                                // Before the call: is the button linked and in
+                                // range? Only when this config's PTT hardware is
+                                // the Bluetooth button.
+                                if bluetooth.spec != nil {
+                                    BluetoothPTTChip()
+                                }
+                            }
+                            .mainCard()
                         }
 
                         if let errorText {
@@ -336,7 +369,8 @@
                                         }
                                         .help(
                                             "D-Star runs its voice on this Mac instead of a "
-                                                + "vocoder stick. Change it back in Settings → Vocoders.")
+                                                + "vocoder stick. Change it back in Settings → Vocoders."
+                                        )
                                     }
                                 }
                                 .controlSize(.small)
@@ -346,6 +380,18 @@
 
                         if !isInCall, vocoders.suggestsAdding, !vocoderHintDismissed {
                             vocoderHint
+                        }
+
+                        // astar-hfpout — a speaker or mic whose stream
+                        // stopped and could not be rebuilt. Same slot and
+                        // colour as the dial failures above: the call is up
+                        // but deaf (or mute), and this says which device.
+                        if let warning = session.audioDeviceWarning {
+                            Label(warning, systemImage: "speaker.slash")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                                .padding(.horizontal, 6)
+                                .accessibilityLabel(warning)
                         }
 
                         // astar-9d41 — two devices reporting one name. Sits
@@ -421,15 +467,25 @@
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
                 Divider()
-                // A List (not a ScrollView) so Saved configs get native drag-to-
-                // reorder via .onMove. Account is its own section on top.
-                // ScrollViewReader wraps it so Saved configs' + can scroll a
+                // A List (not a ScrollView) so Audio configs get native drag-to-
+                // reorder via .onMove; they sit at the top.
+                // ScrollViewReader wraps it so Audio configs' + can scroll a
                 // freshly created card into view.
                 ScrollViewReader { proxy in
                     List {
-                        // Who you are comes before what you own: the callsign and
-                        // radio ID identify the operator, everything below is
-                        // equipment (astar-c9d2).
+                        // The audio setup comes first: the audio configs
+                        // are what gets changed most often, and the mic
+                        // profiles they reference sit directly under them.
+                        SetupsView(scroll: proxy)
+                        MicProfilesView()
+                        // App-wide, so it follows the audio configs
+                        // rather than living inside one: every config
+                        // transmits under the same time-out, whatever is
+                        // keying.
+                        TransmitTimeoutSettingsView()
+                        // Who you are comes before the rest of what you own:
+                        // the callsign and radio ID identify the operator
+                        // (astar-c9d2).
                         StationIdentityView()
                         SettingsSection(.account) {
                             CredentialsView()
@@ -450,9 +506,7 @@
                         // Next to the network credentials it unlocks: D-Star,
                         // Fusion, NXDN and DMR all need a trusted stick.
                         VocoderSettingsView()
-                        SetupsView(scroll: proxy)
                         FavoritesSettingsView(directoryRevision: $directoryRevision)
-                        MicProfilesView()
                         ReflectorSettingsView()
                         SpectrumSettingsView()
                         RecordingSettingsView()
@@ -499,17 +553,18 @@
         /// Settings is.
         private var reflectorsPane: some View {
             ReflectorSearchPane(
-                preferredNetwork: selectedNetwork.reflectorNetwork,
+                preferredNetwork: DirectorySearchNetwork.preferred(for: selectedNetwork),
                 onBack: { navigation.goBack() },
                 onSelect: { text, network in
                     // Switch the picker to the chosen reflector's own network
                     // before filling the field — the pane can browse past the
                     // network the dial is set to, and text resolved against the
                     // wrong one silently finds nothing. Same move the favorites
-                    // menu already makes. Unavailable networks cannot appear here:
+                    // menu already makes, and an EchoLink station switches to
+                    // EchoLink. Unavailable networks cannot appear here:
                     // `Network.resolve` refuses them, so this cannot select a
                     // segment that is not offered.
-                    if let appNetwork = Network.matching(network),
+                    if let appNetwork = network.appNetwork,
                         availableNetworks.contains(appNetwork)
                     {
                         networkRaw = appNetwork.rawValue
@@ -1315,15 +1370,23 @@
             }
         }
 
+        /// While EchoLink is logged in the reflector search lists its
+        /// stations too, so the button says so.
+        private var reflectorSearchLabel: String {
+            session.echolinkLogin == .loggedIn
+                ? "Search the reflector directory and EchoLink"
+                : "Search the reflector directory"
+        }
+
         /// Magnifying glass beside the dial field: opens the reflector search
         /// pane (astar-refl-ui, astar-5a41), or on EchoLink the station
         /// browser.
         ///
         /// Shown only for a network that HAS something to browse. AllStar
-        /// nodes are not reflectors and never appear in this data, so offering
-        /// to search it there would be an empty promise — the same reasoning
-        /// that keeps the network picker itself hidden until a second network
-        /// exists.
+        /// has its node directory (the same pane, opened on the AllStar
+        /// filter), so the glass shows there too; a network with nothing to
+        /// search would be an empty promise, the same reasoning that keeps the
+        /// network picker itself hidden until a second network exists.
         @ViewBuilder
         private var searchButton: some View {
             if selectedNetwork == .echolink {
@@ -1335,6 +1398,15 @@
                 .buttonStyle(.borderless)
                 .help("Browse the EchoLink station list")
                 .accessibilityLabel("Browse the EchoLink station list")
+            } else if selectedNetwork == .allstar {
+                Button {
+                    navigation.pane = .reflectors
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                }
+                .buttonStyle(.borderless)
+                .help("Search the AllStar node directory")
+                .accessibilityLabel("Search the AllStar node directory")
             } else if selectedNetwork.reflectorNetwork != nil {
                 Button {
                     navigation.pane = .reflectors
@@ -1343,9 +1415,9 @@
                 }
                 .buttonStyle(.borderless)
                 .disabled(needsCredentials)
-                .help("Search the reflector directory")
+                .help(reflectorSearchLabel)
                 // Icon-only: `.help` is a hover tooltip, not the a11y label.
-                .accessibilityLabel("Search the reflector directory")
+                .accessibilityLabel(reflectorSearchLabel)
             }
         }
 
@@ -1560,7 +1632,7 @@
             }
             .disabled(!available)
             .accessibilityLabel(
-                "\(name.isEmpty ? target : name), \(entry.network.displayName)"
+                "\(name.isEmpty || name == target ? target : "\(name), \(target)"), \(entry.network.displayName)"
                     + (available ? "" : ", not available"))
         }
 
@@ -1883,11 +1955,24 @@
 
         /// Hold-to-talk: press (or hold Spacebar) to key the mic, release to unkey.
         /// Only live once the call is answered.
+        ///
+        /// Everything it shows comes from `PTTButtonPresentation` with
+        /// `onAir: session.ptt`, so it says ON AIR whenever any source holds the
+        /// key. The text stays exactly as it was. This is the universal stop:
+        /// while another source holds the key (`session.manualPressStops`),
+        /// CallSession's Manual press runs `pttStopAll()` instead of keying,
+        /// and every source that was holding must re-arm. The local press shows
+        /// as a slightly darker idle fill, so a click registers instantly
+        /// without claiming ON AIR before the engine says so.
         private var pttButton: some View {
-            Text(keyed ? "ON AIR" : "Hold to Talk  (Space)")
+            let onAir = PTTButtonPresentation.showsOnAirStyle(
+                onAir: session.ptt, localPress: keyed)
+            return Text(PTTButtonPresentation.title(onAir: session.ptt, localPress: keyed))
                 .frame(maxWidth: .infinity)
-                .callControlChrome(fill: keyed ? Color.red : Color.secondary.opacity(0.18))
-                .foregroundStyle(keyed ? .white : .primary)
+                .callControlChrome(
+                    fill: onAir ? Color.red : Color.secondary.opacity(keyed ? 0.3 : 0.18)
+                )
+                .foregroundStyle(onAir ? .white : .primary)
                 .gesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { _ in setKeyed(true) }
@@ -1895,22 +1980,49 @@
                 )
                 .disabled(session.status != .answered)
                 .opacity(session.status == .answered ? 1 : 0.4)
-                .animation(.easeOut(duration: 0.08), value: keyed)
+                .animation(.easeOut(duration: 0.08), value: session.ptt)
                 // astar-a9c3 F1: a DragGesture's onChanged/onEnded is unreachable
                 // through the accessibility system, and press-and-hold isn't
                 // performable through VoiceOver anyway — so this is exposed as one
                 // real button element with a LATCHING toggle action instead (press
-                // once to key, again to unkey). Both the default action (plain
-                // VO+Space) and the named one perform the same toggle; `.disabled`
-                // above already keeps `setKeyed` from firing while not answered, and
-                // `setKeyed` itself still guards `session.status == .answered`
-                // before keying, so this can't bypass that safety.
+                // once to key, again to unkey; a stop that never keys while
+                // another source holds). Both the default action (plain VO+Space) and the
+                // named one perform the same toggle; `.disabled` above already
+                // keeps `setKeyed` from firing while not answered, and `setKeyed`
+                // itself still guards `session.status == .answered` before
+                // keying, so this can't bypass that safety.
                 .accessibilityElement()
                 .accessibilityAddTraits(.isButton)
                 .accessibilityLabel("Push to talk")
-                .accessibilityValue(keyed ? "on air" : "not transmitting")
-                .accessibilityAction { setKeyed(!keyed) }
-                .accessibilityAction(named: "Toggle transmit") { setKeyed(!keyed) }
+                .accessibilityValue(
+                    PTTButtonPresentation.accessibilityValue(
+                        onAir: session.ptt, localPress: keyed)
+                )
+                .accessibilityHint(
+                    PTTButtonPresentation.accessibilityHint(
+                        manualPressStops: session.manualPressStops)
+                )
+                .accessibilityAction { toggleFromAccessibility() }
+                .accessibilityAction(named: "Toggle transmit") { toggleFromAccessibility() }
+        }
+
+        /// VoiceOver's latching stand-in for press-and-hold. The steps are
+        /// `PTTButtonPresentation.accessibilityToggleSteps`. While another
+        /// source holds the key, one activation releases a latched press (if
+        /// any) and then runs `stopAllTransmit()`, which only ever unkeys. The
+        /// stop is never built from a press: `manualPressStops` is up to one
+        /// poll old, and a press made just after the other source let go would
+        /// key Manual for an instant from a control whose hint said "Stop".
+        private func toggleFromAccessibility() {
+            let steps = PTTButtonPresentation.accessibilityToggleSteps(
+                keyed: keyed, manualPressStops: session.manualPressStops)
+            for step in steps {
+                switch step {
+                case .press: setKeyed(true)
+                case .release: setKeyed(false)
+                case .stopAll: session.stopAllTransmit()
+                }
+            }
         }
 
         /// Replaces the hold-to-talk button while VOX is active: the radio keys from
@@ -1971,20 +2083,41 @@
             try? session.setPTT(on)
         }
 
-        /// Drive the 20 Hz poll for the current pane. In Settings we normally pause it
-        /// (no meters; avoids device pickers re-rendering every tick). The exception is
-        /// a live serial PTT source: the Settings PTT self-test reads
-        /// `serial.keyDetected`, which only advances from the poll loop's
-        /// `pttSourceTick` — so polling must stay on there or the indicator never flips
-        /// (astar-d00a).
+        /// The universal stop while VOX is on (Space; design S6).
+        /// It goes straight to `stopAllTransmit()`, which only ever unkeys:
+        /// with VOX on there is no Manual press to pair, so `setKeyed` is not
+        /// involved.
+        private func stopAllFromVoxControl() {
+            session.stopAllTransmit()
+        }
+
+        /// Drive the 20 Hz poll for the current pane. Off the call card we
+        /// normally pause it: there are no meters, and the churn re-renders
+        /// whatever list is there (device pickers in Settings, 1,400 reflector
+        /// rows) on every tick.
+        ///
+        /// The poll stays on for:
+        /// - a live serial source, whose self-test only advances from `pttSourceTick` (astar-d00a);
+        /// - a linked Bluetooth PTT button;
+        /// - being on air from any source.
+        ///
+        /// `PollPolicy` holds the rule. The button's lease renewals do not
+        /// depend on any of this: they run on the controller's own ticker.
+        ///
+        /// It starts or stops only on a real change. This is re-evaluated on
+        /// every PTT edge, and `start()` restarts the loop, so an unconditional
+        /// `start()` would poll twice per edge and shift the timer's phase. It
+        /// asks the session rather than caching the last decision, because
+        /// `onDisappear` and `reconfigure` start the loop behind this
+        /// function's back.
         private func applyPollState(for pane: AppPane) {
-            // Any pane but the call card: no meters on screen, and the 20 Hz
-            // churn re-renders whatever list is there (device pickers in
-            // Settings, 1,400 reflector rows here) on every tick.
-            if pane != .call && !serial.isActive {
+            let keepPolling = PollPolicy.keepsPolling(
+                onCallPane: pane == .call, serialActive: serial.isActive,
+                bluetoothLinked: bluetooth.isLinked, onAir: session.ptt)
+            if keepPolling {
+                if !session.isPolling { session.start() }
+            } else if session.isPolling {
                 session.stop()
-            } else {
-                session.start()
             }
         }
 
@@ -2005,17 +2138,29 @@
             guard keyMonitor == nil else { return }
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { event in
                 guard event.keyCode == 49 else { return event }  // 49 = Space
-                if !keyed {
-                    let firstResponder =
-                        event.window?.firstResponder ?? NSApp.keyWindow?.firstResponder
-                    if SpaceKeyGuard.spaceIsTyping(firstResponder: firstResponder) { return event }
-                }
-                guard session.status == .answered, !session.voxEnabled, session.canTransmit
-                else { return event }
-                if event.type == .keyDown {
-                    if !event.isARepeat { setKeyed(true) }
-                } else {
-                    setKeyed(false)
+                // Every rule and its order live in the tested
+                // PTTButtonPresentation.spaceAction: a keyUp while keyed always
+                // releases (even after VOX was turned on mid-hold, or a field
+                // took focus, or transmit was disabled), a space typed into a
+                // field passes through (astar-e814), with VOX on Space is the
+                // universal stop while something holds, else hold-to-talk.
+                let firstResponder =
+                    event.window?.firstResponder ?? NSApp.keyWindow?.firstResponder
+                let action = PTTButtonPresentation.spaceAction(
+                    isKeyUp: event.type == .keyUp,
+                    isRepeat: event.type == .keyDown && event.isARepeat,
+                    keyed: keyed,
+                    typing: SpaceKeyGuard.spaceIsTyping(firstResponder: firstResponder),
+                    answered: session.status == .answered,
+                    voxEnabled: session.voxEnabled,
+                    canTransmit: session.canTransmit,
+                    manualPressStops: session.manualPressStops)
+                switch action {
+                case .passThrough: return event
+                case .consume: break
+                case .press: setKeyed(true)
+                case .release: setKeyed(false)
+                case .stopAll: stopAllFromVoxControl()
                 }
                 return nil  // consume Space (no beep / scroll)
             }
@@ -2607,6 +2752,9 @@
         MenuPopover()
             .environmentObject(previewSession)
             .environmentObject(SerialController())
+            // Never attached, so the factory never runs and no Bluetooth
+            // central exists in a preview.
+            .environmentObject(BluetoothPTTController(centralFactory: { CoreBluetoothCentral() }))
             .environmentObject(SetupController())
             .environmentObject(
                 MicAnalyzerController(session: previewSession, navigation: previewNavigation)

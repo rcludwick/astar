@@ -73,7 +73,7 @@ pub use dtmf::DtmfDetector;
 pub use dynamics::{Compressor, CompressorParams, NoiseGate, NoiseGateParams};
 pub use error::AudioError;
 pub use filter::{Biquad, HumFilter};
-pub use meter::{peak, peak_to_dbfs};
+pub use meter::{VOX_WINDOW_MS, VoxLevel, peak, peak_to_dbfs, power_to_dbfs};
 pub use mixer::{
     IAX_JITTER_CONFIG, MixCallId, Mixer, MixerClock, RxClock, RxFrame, RxJitterCells,
     RxJitterConfig, RxJitterSettings,
@@ -87,7 +87,7 @@ pub use resample::{AntiAliasResampler, Resampler1, resample_offline};
 pub use rnnoise::{
     DenoiseChain, DenoiseMode, DenoiseStatus, RNNOISE_FRAME, RNNOISE_RATE, RnnoiseStage,
 };
-pub use router::{AudioRouter, CallAudio, MicId, OutputId};
+pub use router::{AudioRouter, CallAudio, MicId, OutputId, StoppedDevice};
 pub use signal_report::{Grade, SignalReport, analyze_signal, render_report, signal_report_text};
 pub use spectrum::{SPECTRUM_BINS, SpectrumAnalyzer};
 #[cfg(feature = "device-audio")]

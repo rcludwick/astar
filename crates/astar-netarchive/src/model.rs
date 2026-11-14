@@ -47,6 +47,9 @@ pub struct SessionMeta {
     pub dropped_frames: u64,
     pub overs: u32,
     pub astar_version: String,
+    /// The recorder's `my_callsigns`, for the page's "my side" filter.
+    #[serde(default)]
+    pub my_callsigns: Vec<String>,
 }
 
 /// One `log.jsonl` line.
@@ -78,4 +81,20 @@ pub enum LogKind {
     Error {
         message: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_session_json_without_my_callsigns_reads_as_empty() {
+        let old = r#"{"net":"n","network":"m17","target":"h:1 C","window_start":"a",
+            "window_end":"b","visibility":"private","my_side":false,"sample_rate":8000,
+            "started_at":"a","ended_at":null,"ended":null,"rejoins":0,
+            "dropped_frames":0,"overs":0,"astar_version":"0"}"#;
+        let m: SessionMeta = serde_json::from_str(old).unwrap();
+        assert_eq!(m.my_callsigns, Vec::<String>::new());
+        assert_eq!(m.format, 1);
+    }
 }

@@ -1,0 +1,22 @@
+{
+  "name": "bt_off_mid_press",
+  "device": "inrico-b02ptt",
+  "steps": [
+    { "at_ms": 0,    "event": {"kind": "enable", "confirmed": true},
+      "expect": {"intent": "none", "status": "searching", "cmds": []} },
+    { "at_ms": 1,    "event": {"kind": "adapter", "state": "on"},
+      "expect": {"intent": "none", "status": "searching", "cmds": []} },
+    { "at_ms": 10,   "event": {"kind": "connected", "epoch": 1},
+      "expect": {"intent": "none", "status": "connecting", "cmds": []} },
+    { "at_ms": 20,   "event": {"kind": "gatt_accepted", "epoch": 1},
+      "expect": {"intent": "none", "status": "connecting", "cmds": []} },
+    { "at_ms": 30,   "event": {"kind": "subscribed", "epoch": 1},
+      "expect": {"intent": "none", "status": "ready", "cmds": []} },
+    { "at_ms": 2000, "event": {"kind": "notify", "epoch": 1, "bytes": [1]},
+      "expect": {"intent": "press", "status": "ready", "cmds": [], "pressed": true, "raw_pressed": true} },
+    { "at_ms": 2100, "event": {"kind": "adapter", "state": "off"},
+      "expect": {"intent": "release", "reason": "adapter_off", "status": "bluetooth_off", "cmds": [], "pressed": false} },
+    { "at_ms": 2200, "event": {"kind": "adapter", "state": "on"},
+      "expect": {"intent": "none", "status": "reconnecting", "cmds": [], "pressed": false} }
+  ]
+}

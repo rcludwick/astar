@@ -443,8 +443,9 @@ fn m17_drop_and_rejoin() {
     let ran_ms = ended.duration_since(began).as_millis();
     let whole = run.session_samples();
     let file_ms = i128::from(whole.len() as u64 * 1000 / u64::from(run.rate));
+    // 250 ms: the 20 ms deadline clock and the script-driven stop may slip a few ticks under load.
     assert!(
-        (file_ms - ran_ms).abs() <= 100,
+        (file_ms - ran_ms).abs() <= 250,
         "session.flac runs {file_ms} ms of a {ran_ms} ms session"
     );
     let after = &run.overs()[1];

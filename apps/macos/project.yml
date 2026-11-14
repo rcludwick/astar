@@ -39,7 +39,7 @@ settings:
     # together; `just ci` fails if they disagree.
     # (App Store submission would demand a purely numeric n.n.n here; nothing
     # is submitted or notarised today — build-from-source only.)
-    MARKETING_VERSION: "0.1.20-beta"
+    MARKETING_VERSION: "0.1.21-beta"
     CURRENT_PROJECT_VERSION: "1"
     SWIFT_VERSION: "5.0"
     GENERATE_INFOPLIST_FILE: "YES"
@@ -71,7 +71,8 @@ targets:
       # load-bearing: reflectors.json becomes
       # astar.app/Contents/Resources/reflectors.json, which is the bundled
       # directory snapshot ReflectorDirectory reads on a first launch with no
-      # network. Refresh it with `just reflectors` at release time.
+      # network. allstar.json is the same for the AllStar node directory.
+      # Refresh both with `just reflectors` at release time.
       - path: Resources
         buildPhase: resources
     settings:
@@ -95,6 +96,12 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"   # iPhone + iPad (iOS)
         # Audio app: the IAX engine captures the mic on a call.
         INFOPLIST_KEY_NSMicrophoneUsageDescription: "astar uses the microphone to transmit on AllStar nodes."
+        # The Bluetooth LE PTT button (Inrico B02PTT). macOS shows this the first
+        # time astar creates its Bluetooth central. That happens only once a
+        # config's PTT hardware is the button (CoreBluetoothCentral.powerUp), so
+        # nobody who does not use the feature ever sees it. The text is the
+        # promise the code keeps: astar only listens to the button.
+        INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription: "astar reads the push-to-talk button on your Bluetooth speaker-mic. It never sends commands to the device."
 
 # Shared schemes (tracked in git) so `xcodebuild -scheme` and Xcode both find them.
 schemes:

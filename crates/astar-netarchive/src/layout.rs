@@ -5,6 +5,8 @@
 
 use astar_record::naming::{key_component, sanitize_label};
 
+use crate::callsign::base_call;
+
 /// The folder for a net: sanitised, lowercased, spaces become `-`.
 #[must_use]
 pub fn net_dir_name(net_name: &str) -> String {
@@ -17,10 +19,11 @@ pub fn session_dir_name(local_start: &jiff::Zoned) -> String {
     local_start.strftime("%Y-%m-%d %H%M").to_string()
 }
 
-/// `001 19-00-12 NC0NTL.flac`; no talker reads `unknown`.
+/// `001 19-00-12 NC0NTL.flac`; the talker is named by its base callsign, and
+/// no talker reads `unknown`.
 #[must_use]
 pub fn over_file_name(seq: u32, local_start: &jiff::Zoned, talker: Option<&str>) -> String {
-    let who = key_component(talker.unwrap_or(""));
+    let who = key_component(&talker.and_then(base_call).unwrap_or_default());
     format!("{seq:03} {} {who}.flac", local_start.strftime("%H-%M-%S"))
 }
 
@@ -40,6 +43,14 @@ mod tests {
             "007 19-00-12 NC0NTL.flac"
         );
         assert_eq!(over_file_name(7, &t, None), "007 19-00-12 unknown.flac");
+        assert_eq!(
+            over_file_name(7, &t, Some("KX0AAA  D")),
+            "007 19-00-12 KX0AAA.flac"
+        );
+        assert_eq!(
+            over_file_name(7, &t, Some("-1")),
+            "007 19-00-12 unknown.flac"
+        );
     }
 
     #[test]

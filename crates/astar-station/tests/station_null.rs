@@ -330,7 +330,17 @@ fn snapshot_reports_the_monitor_input_level_with_no_call() {
         "snapshot must mirror the monitor lane ({lane}), got {}",
         s.snapshot().input_level_db
     );
+    let vox = s.monitor_vox_dbfs().expect("monitoring");
+    assert!(
+        (s.snapshot().vox_level_db - vox).abs() < 1e-6,
+        "snapshot must mirror the monitor lane's VOX level ({vox}), got {}",
+        s.snapshot().vox_level_db
+    );
     s.monitor_stop();
+    assert!(
+        s.monitor_vox_dbfs().is_none(),
+        "the VOX level goes with the lane"
+    );
 }
 
 // --- iax-e73e: live voice-band mic spectrum tap ---

@@ -662,11 +662,42 @@ pub fn handle_request_with_headers(
             }
         }
 
+        // ---- the net recordings' delete --------------------------------------
+        // The one write under `/nets`. Whoever reaches this arm has passed
+        // the gate as an admin (or is this port's open policy without
+        // sign-in), so the pages are told `Admin`; they still refuse an open
+        // session and anything the archive does not list.
+        ("POST", "/nets/delete") => {
+            if let Err(refused) = same_origin_json(headers, "POST /nets/delete") {
+                return refused;
+            }
+            match ctrl.nets() {
+                Some(pages) => {
+                    nets_delete_reply(&pages.delete(body, astar_netarchive::Access::Admin))
+                }
+                None => HttpResponse::error_json(404, "net recordings are off"),
+            }
+        }
+
         // ---- lifecycle ------------------------------------------------------
         ("POST", "/shutdown") => execute_and_render(ctrl, NodeCommand::Shutdown),
 
         // ---- fallback -------------------------------------------------------
         _ => HttpResponse::error_json(404, "not found"),
+    }
+}
+
+// ---- the net recordings ------------------------------------------------------
+
+/// `astar_netarchive::Pages::delete`'s answer as this router's: always a
+/// JSON body, never kept by a cache. The security headers are the server
+/// layer's, as for every other route here.
+fn nets_delete_reply(r: &astar_http::Response) -> HttpResponse {
+    HttpResponse {
+        status: r.status,
+        content_type: "application/json",
+        body: r.body.clone(),
+        headers: vec![("Cache-Control", "no-store".to_string())],
     }
 }
 
@@ -1888,73 +1919,6 @@ mod tests {
         assert!(css.content_type.contains("css"));
     }
 
-    /// `css` with every `/* ... */` comment replaced by one space, so that
-    /// prose ("a wall of red", the button comment) is never mistaken for a
-    /// declaration. An unterminated comment swallows the rest of the text.
-    fn strip_comments(css: &str) -> String {
-        let mut out = String::with_capacity(css.len());
-        let mut rest = css;
-        while let Some((before, after)) = rest.split_once("/*") {
-            out.push_str(before);
-            out.push(' ');
-            rest = after.split_once("*/").map_or("", |(_, tail)| tail);
-        }
-        out.push_str(rest);
-        out
-    }
-
-    /// Colour literals in a CSS fragment, comments excluded: hex colours
-    /// (`#fff`, `#1e3a8a`), numeric `rgb(`/`rgba(`/`hsl(`/`hsla(` calls in
-    /// any case, and the bare names a contributor reaches for by reflex
-    /// (`white`, `black`, `red`, ...). `transparent` and `currentColor` are
-    /// scheme-neutral and allowed. A `#` followed by an identifier that
-    /// merely starts with hex digits (`#badge`, `#dead-end`) is a selector,
-    /// not a colour: the digit run does not end at a word boundary. A name
-    /// inside a longer identifier (`--green-rgb`, `.red-x`, `border`) is not
-    /// a colour either: a name must start a word that no `.`, `#`, `-`, `_`
-    /// or alphanumeric precedes. `rgba(var(--green-rgb), ...)` is not a
-    /// literal because a token, not a number, follows the paren. Only ASCII
-    /// bytes are used as slice starts, so a multi-byte character cannot
-    /// split a char.
-    fn colour_literals(css: &str) -> Vec<String> {
-        const NAMED: [&str; 9] = [
-            "white", "black", "red", "green", "blue", "gray", "grey", "orange", "yellow",
-        ];
-        let css = strip_comments(css);
-        let bytes = css.as_bytes();
-        let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'-' || c == b'_';
-        let mut out = Vec::new();
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'#' {
-                let run = bytes[i + 1..]
-                    .iter()
-                    .take_while(|c| c.is_ascii_hexdigit())
-                    .count();
-                let next = bytes.get(i + 1 + run).copied().unwrap_or(b' ');
-                if matches!(run, 3 | 4 | 6 | 8) && !is_word(next) {
-                    out.push(css[i..=i + run].to_string());
-                }
-                continue;
-            }
-            let prev = if i == 0 { b' ' } else { bytes[i - 1] };
-            if !b.is_ascii_alphabetic() || is_word(prev) || prev == b'.' || prev == b'#' {
-                continue;
-            }
-            let tail = &css[i..];
-            let len = tail.bytes().take_while(|&c| is_word(c)).count();
-            let word = tail[..len].to_ascii_lowercase();
-            let numeric_call = tail[len..]
-                .strip_prefix('(')
-                .is_some_and(|args| args.trim_start().starts_with(|c: char| c.is_ascii_digit()));
-            if matches!(word.as_str(), "rgb" | "rgba" | "hsl" | "hsla") && numeric_call {
-                out.push(tail.chars().take(24).collect());
-            } else if NAMED.contains(&word.as_str()) {
-                out.push(tail[..len].to_string());
-            }
-        }
-        out
-    }
-
     /// The stylesheet's contract with the system appearance setting: both
     /// schemes are opted into, every token has a dark and a light value, and
     /// nothing below the token marker names a colour (a hex literal, a
@@ -2012,7 +1976,7 @@ mod tests {
             );
         }
         assert_eq!(
-            colour_literals(rest),
+            astar_http::testing::colour_literals(rest),
             Vec::<String>::new(),
             "every colour lives in the token blocks; these literals are below the marker"
         );
@@ -2080,6 +2044,80 @@ mod tests {
                 "reduced motion must switch off `{selector}`"
             );
         }
+    }
+
+    /// `--name: value` for every custom property in the first block after
+    /// `marker` (`:root {` for dark, the light media query for light).
+    fn css_tokens(css: &str, marker: &str) -> std::collections::BTreeMap<String, String> {
+        let at = css.find(marker).unwrap_or_else(|| panic!("no {marker}"));
+        let rest = &css[at..];
+        let open = rest.find(":root {").expect("a :root block") + ":root {".len();
+        let block = &rest[open..open + rest[open..].find('}').expect("closed")];
+        block
+            .split(';')
+            .filter_map(|d| d.trim().split_once(':'))
+            .filter(|(k, _)| k.trim().starts_with("--"))
+            .map(|(k, v)| {
+                (
+                    k.trim().to_string(),
+                    v.split_whitespace().collect::<Vec<_>>().join(" "),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nets_css_tokens_match_style_css() {
+        let nets = astar_netarchive::web::NETS_CSS;
+        for marker in [":root {", "prefers-color-scheme: light"] {
+            let ours = css_tokens(STYLE_CSS, marker);
+            let theirs = css_tokens(nets, marker);
+            let shared: Vec<&String> = ours.keys().filter(|k| theirs.contains_key(*k)).collect();
+            assert!(shared.len() >= 15, "{marker}: only {shared:?} shared");
+            for k in shared {
+                assert_eq!(ours[k], theirs[k], "{marker} {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn status_says_whether_nets_are_on() {
+        let ctrl = test_controller();
+        assert!(
+            status_json(&ctrl).get("nets").is_none(),
+            "absent without [netrec]: the JSON is what it always was"
+        );
+        let (_dir, _f) = crate::test_support::mount_nets_fixture(&ctrl, false);
+        assert_eq!(status_json(&ctrl)["nets"], true);
+    }
+
+    #[test]
+    fn the_index_page_links_to_nets_when_they_are_on() {
+        assert!(
+            INDEX_HTML.contains("id=\"nets-link\""),
+            "the link is in the page"
+        );
+        // Relative, like every admin link: `../nets/` is `/nets/` from both
+        // `/` (the control port) and `/admin/` (either bind).
+        assert!(
+            INDEX_HTML.contains("href=\"../nets/\""),
+            "and goes to /nets/"
+        );
+        assert!(
+            APP_JS.contains("snap.nets"),
+            "app.js shows it from the status"
+        );
+    }
+
+    #[test]
+    fn nets_delete_is_404_when_nets_are_off_and_needs_json() {
+        let ctrl = test_controller();
+        let r = handle_request_with_headers(&ctrl, "POST", "/nets/delete", b"{}", &json_headers());
+        assert_eq!(r.status, 404);
+        assert_eq!(json_of(&r)["error"], "net recordings are off");
+        // The same-origin JSON rule comes first, as on every delete route.
+        let r = handle_request(&ctrl, "POST", "/nets/delete", b"{}");
+        assert_eq!(r.status, 415, "no Content-Type");
     }
 
     #[test]

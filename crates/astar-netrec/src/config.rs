@@ -83,7 +83,7 @@ pub struct VocoderCfg {
     pub trusted_serials: Vec<String>,
 }
 
-/// `[web]`. Stage 2 serves the pages; stage 1 only reads the keys.
+/// `[web]`: the recordings pages, served on loopback only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebCfg {
     /// Serve the pages on the loopback address.
@@ -146,6 +146,8 @@ pub struct NetCfg {
     pub visibility: Visibility,
     /// Default the page to "my side".
     pub my_side: bool,
+    /// `[recorder] my_callsigns`, copied here so a session can record them.
+    pub my_callsigns: Vec<String>,
     /// Render video, on unless switched off (read now, used in a later stage).
     pub video: bool,
     /// Stream live to `YouTube` (later stage).
@@ -351,7 +353,7 @@ fn one_char(net: &str, what: &str, s: &str) -> Result<char, ConfigError> {
     }
 }
 
-fn convert_net(r: RawNet) -> Result<NetCfg, ConfigError> {
+fn convert_net(r: RawNet, my_callsigns: &[String]) -> Result<NetCfg, ConfigError> {
     let name = r.name.clone();
     let module = one_char(&name, "module", &r.module)?;
     let host = |r: &RawNet| {
@@ -403,6 +405,7 @@ fn convert_net(r: RawNet) -> Result<NetCfg, ConfigError> {
         tz,
         visibility: r.visibility,
         my_side: r.my_side,
+        my_callsigns: my_callsigns.to_vec(),
         video: r.video,
         youtube_live: r.youtube_live,
         youtube_upload: r.youtube_upload,
@@ -439,7 +442,7 @@ pub fn from_toml_str(s: &str) -> Result<Config, ConfigError> {
     let nets = raw
         .nets
         .into_iter()
-        .map(convert_net)
+        .map(|n| convert_net(n, &recorder.my_callsigns))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Config {
         recorder,
@@ -474,7 +477,8 @@ pre_roll = "5m"
 post_roll = "10m"
 
 [web]
-# Serving the pages arrives in a later stage; these keys are read now.
+# Serve the recordings pages at http://<bind>/nets/. The address must be
+# loopback (127.0.0.1 or ::1); the pages show private sessions and can delete.
 local = false
 bind = "127.0.0.1:8050"
 
@@ -543,6 +547,12 @@ pub fn load_or_bootstrap(path: &Path) -> Result<Config, ConfigError> {
 /// vocoder, or `max_age_days` outside 1 to 3650.
 pub fn validate(cfg: &Config, now: jiff::Timestamp) -> Result<Vec<String>, ConfigError> {
     let warnings = validate_recorder(&cfg.recorder)?;
+    if cfg.web.local && !cfg.web.bind.ip().is_loopback() {
+        return Err(invalid(format!(
+            "[web] bind must be a loopback address (127.0.0.1 or ::1): {}",
+            cfg.web.bind
+        )));
+    }
     validate_folders(&cfg.nets)?;
     for n in &cfg.nets {
         validate_net(cfg, n)?;
@@ -796,6 +806,29 @@ youtube_upload = false
         assert_eq!(c.vocoder.dstar, DstarVocoder::Dongle);
         assert_eq!(c.vocoder.trusted_serials, Vec::<String>::new());
         validate(&c, jiff::Timestamp::now()).unwrap();
+    }
+
+    #[test]
+    fn config_refuses_a_non_loopback_bind() {
+        for bad in ["0.0.0.0:8050", "192.168.1.5:8050"] {
+            let s = SPEC.replace("127.0.0.1:8050", bad);
+            let c = from_toml_str(&s).unwrap();
+            let e = validate(&c, jiff::Timestamp::now())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                e.contains("[web] bind must be a loopback address (127.0.0.1 or ::1)"),
+                "{e}"
+            );
+            assert!(e.contains(bad), "{e}");
+        }
+        // Off, the address is never bound, so it is not judged.
+        let s = SPEC
+            .replace("127.0.0.1:8050", "0.0.0.0:8050")
+            .replace("local = true", "local = false");
+        validate(&from_toml_str(&s).unwrap(), jiff::Timestamp::now()).unwrap();
+        let s = SPEC.replace("127.0.0.1:8050", "[::1]:8050");
+        validate(&from_toml_str(&s).unwrap(), jiff::Timestamp::now()).unwrap();
     }
 
     #[test]

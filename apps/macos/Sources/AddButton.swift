@@ -5,7 +5,7 @@
 #if os(macOS)
     import SwiftUI
 
-    /// The "+" that starts something new — a Section header (Saved configs, Mic
+    /// The "+" that starts something new — a Section header (Audio configs, Mic
     /// Profiles), a config's own mic-profile row, Quick settings' mic-profile
     /// row, and the analyzer pane's own header. It is one affordance living in
     /// four different contexts, and none of those contexts pinned a font: left

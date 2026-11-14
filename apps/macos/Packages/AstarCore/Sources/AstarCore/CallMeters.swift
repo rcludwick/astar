@@ -24,9 +24,12 @@ public final class CallMeters: ObservableObject {
     /// ~250 ms peak-held TX/RX levels for the VU meters (astar-f78a).
     @Published public private(set) var txDBHeld: Float = -60
     @Published public private(set) var rxDBHeld: Float = -60
-    /// Continuous mic input level (dBFS), metered even while unkeyed — drives
-    /// the VOX calibration meter (the gate itself keys from the raw snapshot).
+    /// Continuous mic input PEAK (dBFS), metered even while unkeyed.
     @Published public private(set) var inputDB: Float = -60
+    /// The loudness VOX judges (dBFS, mean power over 50 ms) — drives the VOX
+    /// calibration meter, so the bar crosses the threshold mark exactly when
+    /// VOX would. The gate itself reads the raw snapshot.
+    @Published public private(set) var voxDB: Float = -60
     /// Round-trip time to the peer, when the call has measured one.
     @Published public private(set) var rttMS: Int?
     /// The receive path's health, behind the call-quality line (iax-rxjb).
@@ -49,18 +52,21 @@ public final class CallMeters: ObservableObject {
 
     /// Advance from one poll tick, publishing only fields that visibly moved.
     func update(
-        txDB: Float, rxDB: Float, inputDB: Float, txDBHeld: Float, rxDBHeld: Float, rttMS: Int?
+        txDB: Float, rxDB: Float, inputDB: Float, voxDB: Float = -60,
+        txDBHeld: Float, rxDBHeld: Float, rttMS: Int?
     ) {
         rawTxDB = txDB
         rawRxDB = rxDB
         let tx = Self.quantize(txDB)
         let rx = Self.quantize(rxDB)
         let input = Self.quantize(inputDB)
+        let vox = Self.quantize(voxDB)
         let txHeld = Self.quantize(txDBHeld)
         let rxHeld = Self.quantize(rxDBHeld)
         if self.txDB != tx { self.txDB = tx }
         if self.rxDB != rx { self.rxDB = rx }
         if self.inputDB != input { self.inputDB = input }
+        if self.voxDB != vox { self.voxDB = vox }
         if self.txDBHeld != txHeld { self.txDBHeld = txHeld }
         if self.rxDBHeld != rxHeld { self.rxDBHeld = rxHeld }
         if self.rttMS != rttMS { self.rttMS = rttMS }

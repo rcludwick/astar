@@ -86,6 +86,31 @@ install the driver above.
     transfer surfaces as a *serial device error* and the device is disabled —
     it can never freeze the interface.
 
+## Bluetooth PTT buttons
+
+astar on macOS can take push-to-talk from the button on a Bluetooth
+speaker-mic. One device is supported:
+
+| Device | Advertises as | Button | Mic and speaker |
+|---|---|---|---|
+| **Inrico B02PTT** | `B02PTT-` and a unit number | Bluetooth LE, no pairing | Classic Bluetooth (HFP), paired in System Settings |
+
+Setting it up, the status chip and what happens when the link drops are on
+[Bluetooth PTT button](bluetooth-ptt.md).
+
+* **One PTT device per config.** A config uses none, a USB radio interface, or
+  the Bluetooth button. Choosing the button closes that config's serial
+  interface, so the two never key together.
+* **Two independent links.** The button works without the audio paired, and
+  the audio works without the button.
+* **Only devices astar knows.** There is no way to type in a Bluetooth service
+  or characteristic. A mistyped one on some other gadget must never become a
+  transmit button — the same reasoning as the dongle scan below. Adding a
+  device takes a listen-only capture of what its button sends, a row in the
+  engine's device table, and tests built from that capture.
+* **No battery reading.** The B02PTT's battery level cannot be read without
+  pairing the button link; astar shows signal strength instead.
+
 ## Digital voice
 
 **System Fusion, NXDN and DMR need a hardware vocoder dongle. D-Star uses one
@@ -175,6 +200,18 @@ Input and output devices are chosen in Quick settings or in the full device
 settings; the UCI150 and similar interfaces show up as ordinary USB audio
 devices. astar also carries microphone characterization and per-profile gain,
 so a headset and a radio interface can each keep their own levels.
+
+### "Speaker stopped" and "Microphone stopped"
+
+Some devices change format while a call is up. A Bluetooth headset plays at
+44.1 kHz stereo until its mic opens, then switches to hands-free at 16 kHz
+mono, and switches back when the mic closes. astar notices and reopens the
+speaker or mic on the new format by itself, so the call carries on. If it
+cannot reopen it within about a second (usually because the device was
+unplugged or turned off), the main window says so under the dial card, for
+example **Speaker stopped: B02PTT-6522**. The call stays up but you will not
+hear it (or, for the mic, not be heard). Reconnect the device, then hang up
+and call again; the next call opens it afresh.
 
 ## Next steps
 

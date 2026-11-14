@@ -7,21 +7,22 @@ import Foundation
 
 /// One collapsible section of the Settings pane, top to bottom.
 ///
-/// Settings grew to thirteen sections, which is several screens of scrolling
+/// Settings grew to fourteen sections, which is several screens of scrolling
 /// before you find the one you came for. Each section now folds behind a
 /// disclosure triangle, and this enum is the list of them: the title and SF
 /// Symbol its header shows, whether it starts open, and the preferences key
 /// that remembers whether you left it open.
 public enum SettingsSectionID: String, CaseIterable, Hashable, Sendable {
+    case savedConfigs
+    case micProfiles
+    case transmit
     case operatorIdentity = "operator"
     case account
     case echolink
     case dmr
     case nxdn
     case vocoders
-    case savedConfigs
     case favorites
-    case micProfiles
     case reflectorDirectory
     case spectrum
     case recording
@@ -36,9 +37,10 @@ public enum SettingsSectionID: String, CaseIterable, Hashable, Sendable {
         case .dmr: return "DMR"
         case .nxdn: return "NXDN"
         case .vocoders: return "Vocoders"
-        case .savedConfigs: return "Saved configs"
+        case .savedConfigs: return "Audio configs"
         case .favorites: return "Favorites"
         case .micProfiles: return "Mic Profiles"
+        case .transmit: return TransmitTimeoutPresentation.sectionTitle
         case .reflectorDirectory: return "Reflector directory"
         case .spectrum: return "Spectrum"
         case .recording: return "Recording"
@@ -58,6 +60,7 @@ public enum SettingsSectionID: String, CaseIterable, Hashable, Sendable {
         case .savedConfigs: return "square.stack.3d.up"
         case .favorites: return "star"
         case .micProfiles: return "mic"
+        case .transmit: return "timer"
         case .reflectorDirectory: return "list.bullet.rectangle"
         case .spectrum: return "waveform"
         case .recording: return "record.circle"
@@ -102,7 +105,7 @@ public enum SettingsAnchor: Hashable, Sendable {
 
 /// Which Settings sections are open, remembered across launches.
 ///
-/// One object for all thirteen rather than an `@AppStorage` per section,
+/// One object for all fourteen rather than an `@AppStorage` per section,
 /// because Expand All, ⌥-click and anchor jumps all act on every section at
 /// once, and the header's "Expand All / Collapse All" label has to know
 /// whether anything is still folded. Each section still has its own

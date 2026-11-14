@@ -106,3 +106,71 @@ impl Stub {
             .clone()
     }
 }
+
+/// `css` with every `/* ... */` comment replaced by one space, so that
+/// prose ("a wall of red", the button comment) is never mistaken for a
+/// declaration. An unterminated comment swallows the rest of the text.
+fn strip_comments(css: &str) -> String {
+    let mut out = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some((before, after)) = rest.split_once("/*") {
+        out.push_str(before);
+        out.push(' ');
+        rest = after.split_once("*/").map_or("", |(_, tail)| tail);
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Colour literals in a CSS fragment, comments excluded: hex colours
+/// (`#fff`, `#1e3a8a`), numeric `rgb(`/`rgba(`/`hsl(`/`hsla(` calls in
+/// any case, and the bare names a contributor reaches for by reflex
+/// (`white`, `black`, `red`, ...). `transparent` and `currentColor` are
+/// scheme-neutral and allowed. A `#` followed by an identifier that
+/// merely starts with hex digits (`#badge`, `#dead-end`) is a selector,
+/// not a colour: the digit run does not end at a word boundary. A name
+/// inside a longer identifier (`--green-rgb`, `.red-x`, `border`) is not
+/// a colour either: a name must start a word that no `.`, `#`, `-`, `_`
+/// or alphanumeric precedes. `rgba(var(--green-rgb), ...)` is not a
+/// literal because a token, not a number, follows the paren. Only ASCII
+/// bytes are used as slice starts, so a multi-byte character cannot
+/// split a char.
+#[must_use]
+pub fn colour_literals(css: &str) -> Vec<String> {
+    const NAMED: [&str; 9] = [
+        "white", "black", "red", "green", "blue", "gray", "grey", "orange", "yellow",
+    ];
+    let css = strip_comments(css);
+    let bytes = css.as_bytes();
+    let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'-' || c == b'_';
+    let mut out = Vec::new();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'#' {
+            let run = bytes[i + 1..]
+                .iter()
+                .take_while(|c| c.is_ascii_hexdigit())
+                .count();
+            let next = bytes.get(i + 1 + run).copied().unwrap_or(b' ');
+            if matches!(run, 3 | 4 | 6 | 8) && !is_word(next) {
+                out.push(css[i..=i + run].to_string());
+            }
+            continue;
+        }
+        let prev = if i == 0 { b' ' } else { bytes[i - 1] };
+        if !b.is_ascii_alphabetic() || is_word(prev) || prev == b'.' || prev == b'#' {
+            continue;
+        }
+        let tail = &css[i..];
+        let len = tail.bytes().take_while(|&c| is_word(c)).count();
+        let word = tail[..len].to_ascii_lowercase();
+        let numeric_call = tail[len..]
+            .strip_prefix('(')
+            .is_some_and(|args| args.trim_start().starts_with(|c: char| c.is_ascii_digit()));
+        if matches!(word.as_str(), "rgb" | "rgba" | "hsl" | "hsla") && numeric_call {
+            out.push(tail.chars().take(24).collect());
+        } else if NAMED.contains(&word.as_str()) {
+            out.push(tail[..len].to_string());
+        }
+    }
+    out
+}

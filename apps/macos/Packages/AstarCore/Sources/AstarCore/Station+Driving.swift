@@ -5,14 +5,13 @@
 import AstarStation
 import Foundation
 
-/// Make the real `Station` satisfy `StationDriving` by mapping its `Snapshot`
-/// into the testable `CallSnapshot`. (connectWT/setPTT/disconnect already match
-/// the protocol, so they need no adapter.) This is the seam to the binding —
-/// the testable logic lives in `CallSession`.
-extension Station: StationDriving {
-    public func readSnapshot() throws -> CallSnapshot {
-        let s = try snapshot()
-        return CallSnapshot(
+extension CallSnapshot {
+    /// The binding's `Snapshot` as the testable `CallSnapshot`. It is pulled
+    /// out of `readSnapshot()` so a test can hand it PTT masks, a forced stop
+    /// and a time-out that a fresh, idle station never reports, and so pin
+    /// that every field is copied from its own source.
+    init(_ s: Snapshot) {
+        self.init(
             status: s.status, ptt: s.ptt, remotePTT: s.remotePTT,
             txDB: s.txDB, rxDB: s.rxDB, inputDB: s.inputDB, rttMS: s.rttMS,
             negotiatedFormat: s.negotiatedFormat,
@@ -32,8 +31,24 @@ extension Station: StationDriving {
             nxdnAvailable: s.nxdnAvailable, nxdnActive: s.nxdnActive,
             dmrAvailable: s.dmrAvailable, dmrActive: s.dmrActive,
             echolinkAvailable: s.echolinkAvailable, echolinkActive: s.echolinkActive,
-            echolinkLoggedIn: s.echolinkLoggedIn
+            echolinkLoggedIn: s.echolinkLoggedIn,
+            speakerStopped: s.speakerStopped, micStopped: s.micStopped,
+            pttSources: s.pttSources, pttLatched: s.pttLatched,
+            pttForcedSeq: s.pttForcedSeq, pttForcedSources: s.pttForcedSources,
+            pttForcedReason: s.pttForcedReason, pttTxTimeoutMS: s.pttTxTimeoutMS,
+            voxDB: s.voxDB
         )
+    }
+}
+
+/// Make the real `Station` satisfy `StationDriving` by mapping its `Snapshot`
+/// into the testable `CallSnapshot`. (connectWT/setPTT/disconnect and the five
+/// PTT source calls already match the protocol, so they need no adapter.)
+/// This is the seam to the binding —
+/// the testable logic lives in `CallSession`.
+extension Station: StationDriving {
+    public func readSnapshot() throws -> CallSnapshot {
+        CallSnapshot(try snapshot())
     }
 
     public func readEvent() throws -> Event? {
@@ -88,6 +103,12 @@ public struct NullStation: StationDriving {
     public func connectWT(destNode: String, address: String) throws {}
     public func connect(dest: String, calling: String, secret: String?) throws {}
     public func setPTT(_ on: Bool) throws {}
+    /// No engine, so nothing can key. Every PTT call is a no-op, as `setPTT` is.
+    public func pttSource(_ source: StationPTTSource, on: Bool) throws {}
+    public func pttStopAll() throws {}
+    public func pttLeasePress(_ source: StationPTTSource, ttl: Duration) throws {}
+    public func pttLeaseRenew(_ source: StationPTTSource) throws {}
+    public func setTxTimeout(_ timeout: Duration) throws {}
     public func sendDTMF(_ digit: Character) throws {}
     public func sendDTMF(sequence: String) throws {}
     public func cancelDTMF() throws {}

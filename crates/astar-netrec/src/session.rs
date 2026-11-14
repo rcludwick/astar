@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 
 use astar_netarchive::{
     Ended, LogKind, LogRow, META_FORMAT, MIN_FREE_BYTES, OverRec, SessionMeta, append_row,
-    net_dir_name, over_file_name, session_dir_name, write_checkins, write_log_csv, write_meta,
+    compute_peaks, net_dir_name, over_file_name, session_dir_name, write_checkins, write_log_csv,
+    write_meta, write_peaks,
 };
 use astar_record::{FlacWriter, OverEvent, OverSplitter, SplitterConfig};
 
@@ -194,6 +195,7 @@ impl SessionRecorder {
             dropped_frames: 0,
             overs: 0,
             astar_version: env!("CARGO_PKG_VERSION").to_owned(),
+            my_callsigns: net.my_callsigns.clone(),
         };
         write_meta(&dir, &meta)?;
         let frame_samples = (rate / 50) as usize;
@@ -483,6 +485,8 @@ impl SessionRecorder {
         keep(write_log_csv(&self.dir, &self.overs).map_err(Into::into));
         keep(write_checkins(&self.dir, &self.overs, &self.meta.network).map_err(Into::into));
 
+        keep(write_peaks(&self.dir, &compute_peaks(&self.dir, &self.overs)).map_err(Into::into));
+
         let mut meta = self.meta.clone();
         meta.ended_at = Some(now.timestamp().to_string());
         meta.ended = Some(ended);
@@ -582,6 +586,7 @@ mod tests {
             tz: jiff::tz::TimeZone::get("America/Denver").unwrap(),
             visibility: Visibility::Private,
             my_side: false,
+            my_callsigns: Vec::new(),
             video: false,
             youtube_live: false,
             youtube_upload: false,
@@ -800,6 +805,29 @@ mod tests {
     }
 
     #[test]
+    fn raw_talker_stays_in_the_log_while_the_file_names_the_base_call() {
+        let root = temp("basecall");
+        let mut rig = Rig::new(&root);
+        rig.run(50, true, Some("KX0AAA  D"));
+        let dir = rig.dir();
+        rig.close();
+        let files = over_files(&dir);
+        assert!(files[0].ends_with(" KX0AAA.flac"), "{files:?}");
+        assert_eq!(over_rows(&dir)[0].1.as_deref(), Some("KX0AAA  D"));
+    }
+
+    #[test]
+    fn open_writes_my_callsigns() {
+        let root = temp("mycalls");
+        let mut cfg = net();
+        cfg.my_callsigns = vec!["N0CALL".into()];
+        let rec = SessionRecorder::open(&root, &cfg, &window(), RATE, t0()).unwrap();
+        let dir = rec.dir().to_owned();
+        let meta = astar_netarchive::read_meta(&dir).unwrap();
+        assert_eq!(meta.my_callsigns, vec!["N0CALL".to_owned()]);
+    }
+
+    #[test]
     fn offset_ms_points_into_session() {
         let root = temp("offset");
         let mut rig = Rig::new(&root);
@@ -992,6 +1020,19 @@ mod tests {
         assert_eq!(meta.overs, 1);
         let f = over_files(&dir).remove(0);
         assert!(decode(&dir.join("overs").join(f)).1 >= 25 * FRAME);
+    }
+
+    #[test]
+    fn close_writes_peaks_for_every_over() {
+        let root = temp("peaks");
+        let mut rig = Rig::new(&root);
+        rig.run(25, true, Some("NC0NTL"));
+        let dir = rig.dir();
+        rig.close();
+        let p = astar_netarchive::read_peaks(&dir).unwrap().unwrap();
+        let files = over_files(&dir);
+        assert_eq!(p.overs.keys().cloned().collect::<Vec<_>>(), files);
+        assert!(p.overs.values().all(|v| v.len() == 48));
     }
 
     /// `n` voiced ticks and then enough silence to end the over, returning

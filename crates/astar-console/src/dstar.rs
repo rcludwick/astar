@@ -411,6 +411,9 @@ pub struct DstarSnapshotState {
     /// meter a UI shows while the operator sets their gain. Console-owned —
     /// see [`Self::tx_dbfs`].
     pub input_dbfs: f32,
+    /// The loudness VOX judges (dBFS, mean power over 50 ms) of the same
+    /// input. Console-owned — see [`Self::tx_dbfs`].
+    pub vox_dbfs: f32,
 }
 
 /// Atomics/cells shared between the control-side [`DstarSession`] and its
@@ -550,6 +553,7 @@ impl SharedState {
             tx_dbfs: -60.0,
             rx_dbfs: -60.0,
             input_dbfs: -60.0,
+            vox_dbfs: -60.0,
         }
     }
 }

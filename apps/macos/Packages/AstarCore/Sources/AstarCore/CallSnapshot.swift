@@ -121,6 +121,31 @@ public struct CallSnapshot: Equatable {
     /// one that failed, reads `false`; `StationDriving.echolinkState()` says
     /// which.
     public var echolinkLoggedIn: Bool
+    /// The output device whose stream stopped and could not be rebuilt, or
+    /// `nil` while the speaker plays (astar-hfpout). Defaults `nil` so
+    /// pre-existing fixtures (and `NullStation`) need no change.
+    public var speakerStopped: String?
+    /// The input device whose stream stopped and could not be rebuilt, or
+    /// `nil` while the mic captures.
+    public var micStopped: String?
+    /// The sources holding the key. `ptt` is their OR, so a UI that wants to
+    /// know whether a press should stop instead of key reads this.
+    public var pttSources: StationPTTSourceSet
+    /// Sources a forced stop latched. Each re-arms only once it is released.
+    public var pttLatched: StationPTTSourceSet
+    /// It goes up by one on every forced stop and is 0 before the first, so
+    /// each stop is announced once.
+    public var pttForcedSeq: UInt32
+    /// Who was holding when the latest forced stop fired.
+    public var pttForcedSources: StationPTTSourceSet
+    /// Why the latest forced stop fired, or `nil` if none has.
+    public var pttForcedReason: StationPTTForcedReason?
+    /// The transmit time-out in force, in ms (never 0).
+    public var pttTxTimeoutMS: UInt32
+    /// The loudness VOX judges (dBFS): the mean power of the same input as
+    /// `inputDB` over the last 50 ms. `VoxGate` keys from this, never from the
+    /// peak, so one click cannot key the transmitter.
+    public var voxDB: Float
 
     public init(
         status: IaxStatus, ptt: Bool, remotePTT: Bool,
@@ -141,7 +166,12 @@ public struct CallSnapshot: Equatable {
         nxdnAvailable: Bool = false, nxdnActive: Bool = false,
         dmrAvailable: Bool = false, dmrActive: Bool = false,
         echolinkAvailable: Bool = false, echolinkActive: Bool = false,
-        echolinkLoggedIn: Bool = false
+        echolinkLoggedIn: Bool = false,
+        speakerStopped: String? = nil, micStopped: String? = nil,
+        pttSources: StationPTTSourceSet = [], pttLatched: StationPTTSourceSet = [],
+        pttForcedSeq: UInt32 = 0, pttForcedSources: StationPTTSourceSet = [],
+        pttForcedReason: StationPTTForcedReason? = nil, pttTxTimeoutMS: UInt32 = 120_000,
+        voxDB: Float = -60
     ) {
         self.status = status
         self.ptt = ptt
@@ -177,6 +207,15 @@ public struct CallSnapshot: Equatable {
         self.echolinkAvailable = echolinkAvailable
         self.echolinkActive = echolinkActive
         self.echolinkLoggedIn = echolinkLoggedIn
+        self.speakerStopped = speakerStopped
+        self.micStopped = micStopped
+        self.pttSources = pttSources
+        self.pttLatched = pttLatched
+        self.pttForcedSeq = pttForcedSeq
+        self.pttForcedSources = pttForcedSources
+        self.pttForcedReason = pttForcedReason
+        self.pttTxTimeoutMS = pttTxTimeoutMS
+        self.voxDB = voxDB
     }
 
     /// The receive-path health the call-quality line reads, lifted out of the

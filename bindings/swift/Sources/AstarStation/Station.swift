@@ -165,9 +165,9 @@ public struct Snapshot: Sendable, Equatable {
     public let txDB: Float
     /// RX (decoded node audio) level in dBFS, `-60.0...0.0`.
     public let rxDB: Float
-    /// Continuous mic INPUT level in dBFS, `-60.0...0.0`, metered even while
-    /// unkeyed (post-gain, pre-noise-reduction). Drive VOX from this, not
-    /// `txDB`, so you can key from silence (iax-5c30).
+    /// Continuous mic INPUT peak in dBFS, `-60.0...0.0`, metered even while
+    /// unkeyed (post-gain, pre-noise-reduction) — for level meters. VOX keys
+    /// from ``voxDB`` instead, which a single click cannot push up.
     public let inputDB: Float
     /// Smoothed round-trip estimate in milliseconds, or `nil` if unknown.
     public let rttMS: Int?
@@ -330,6 +330,36 @@ public struct Snapshot: Sendable, Equatable {
     /// running, or one that failed, reads `false`; ``Station/echolinkState()``
     /// says which.
     public let echolinkLoggedIn: Bool
+    /// The name of the output device whose stream stopped and could not be
+    /// rebuilt, or `nil` while the speaker is playing. The engine rebuilds a
+    /// stream whose device changes under it (a Bluetooth headset switching
+    /// to hands-free) by itself; this is set only once that has failed, so a
+    /// UI can say "Speaker stopped" instead of leaving the call silently deaf.
+    public var speakerStopped: String? = nil
+    /// The name of the input device whose stream stopped and could not be
+    /// rebuilt, or `nil` while the mic is capturing.
+    public var micStopped: String? = nil
+    /// Which sources hold the key right now. The radio is keyed while this is
+    /// non-empty (`ptt` is the OR's result).
+    public var pttSources: StationPTTSourceSet = []
+    /// The sources a forced stop latched. Each must be released before it can
+    /// key again (release-to-re-arm).
+    public var pttLatched: StationPTTSourceSet = []
+    /// It goes up by one on every forced stop and is `0` until the first one,
+    /// so a UI announces each stop exactly once.
+    public var pttForcedSeq: UInt32 = 0
+    /// The sources that were holding when the latest forced stop fired.
+    public var pttForcedSources: StationPTTSourceSet = []
+    /// Why the latest forced stop fired, or `nil` if none has.
+    public var pttForcedReason: StationPTTForcedReason? = nil
+    /// The transmit time-out in force, in ms. It can never be 0: the engine
+    /// starts at 120 000 and refuses anything outside 60 000...600 000.
+    public var pttTxTimeoutMS: UInt32 = 120_000
+    /// The loudness VOX judges, in dBFS `-60.0...0.0`: the mean power of the
+    /// same input as ``inputDB`` over the last 50 ms. Drive VOX and its
+    /// calibration meter from this. A 5 ms click reads 10 dB under its own
+    /// peak and is forgotten 50 ms later.
+    public var voxDB: Float = -60
 }
 
 /// The YSF-shaped state of a live link, from ``Station/ysfState()``.
@@ -999,6 +1029,9 @@ public struct DStarState: Equatable, Sendable {
     /// capture device is open. Stays at -60 until the first key-down —
     /// D-Star opens the microphone lazily.
     public let inputDB: Float
+    /// The loudness VOX judges (dBFS, mean power over 50 ms) of the same
+    /// input. -60 from an engine too old to send it.
+    public let voxDB: Float
 
     /// Decode from the C-ABI's JSON. Returns `nil` for the `{}` no-session
     /// document.
@@ -1024,6 +1057,7 @@ public struct DStarState: Equatable, Sendable {
         txDB = (obj["tx_db"] as? Double).map(Float.init) ?? -60.0
         rxDB = (obj["rx_db"] as? Double).map(Float.init) ?? -60.0
         inputDB = (obj["input_db"] as? Double).map(Float.init) ?? -60.0
+        voxDB = (obj["vox_db"] as? Double).map(Float.init) ?? -60.0
     }
 }
 
@@ -1651,6 +1685,59 @@ public final class Station {
     /// Set local transmit (PTT). Throws `IAX_ERR_NOT_CONNECTED` while idle.
     public func setPTT(_ on: Bool) throws {
         try check(iax_station_set_ptt(handle, on))
+    }
+
+    // MARK: PTT sources, lease, transmit time-out
+
+    /// Press (`on`) or release one PTT source. The engine keys while ANY
+    /// source holds, so releasing one never cuts off another.
+    ///
+    /// A release is never refused, even while idle. A press throws
+    /// `pttLatchedCode` (-27) on a latched source, or the console's own
+    /// refusal (`-3` with no call, the NXDN/DMR receive-only codes). After
+    /// such a refusal the engine has rolled the press back and latched the
+    /// source, except `.legacy`, which a refusal never latches (only the
+    /// transmit time-out or `pttStopAll` latches it). A press of `.bluetooth`
+    /// throws `invalidArgumentCode` (-26) and changes nothing: Bluetooth keys
+    /// only through `pttLeasePress`, so the engine bounds every Bluetooth hold.
+    public func pttSource(_ source: StationPTTSource, on: Bool) throws {
+        try check(iax_station_ptt_source(handle, source.abiValue, on))
+    }
+
+    /// Release every source, latch every one that was holding, and unkey. This
+    /// is the universal stop: the on-screen button while another source keys,
+    /// TX disabled, and quit. It does not throw while idle.
+    public func pttStopAll() throws {
+        try check(iax_station_ptt_stop_all(handle))
+    }
+
+    /// Press `source` (Bluetooth only) under a lease the engine expires by
+    /// itself after `ttl` unless `pttLeaseRenew` extends it. A wedged app or
+    /// a dead link therefore ends unkeyed. `ttl` is converted to whole
+    /// milliseconds, saturating. Anything outside 1...5000 ms, or any source
+    /// but `.bluetooth`, throws `invalidArgumentCode` (-26).
+    @available(macOS 13.0, iOS 16.0, *)
+    public func pttLeasePress(_ source: StationPTTSource, ttl: Duration) throws {
+        try check(
+            iax_station_ptt_lease_press(
+                handle, source.abiValue, Station.saturatingMilliseconds(ttl)))
+    }
+
+    /// Extend a held lease by its TTL. It never presses: on a source that
+    /// holds no lease (expired, stopped, never pressed) it throws
+    /// `notLeasedCode` (-25), and the caller must treat the button as lost.
+    public func pttLeaseRenew(_ source: StationPTTSource) throws {
+        try check(iax_station_ptt_lease_renew(handle, source.abiValue))
+    }
+
+    /// Set the one transmit time-out, which covers every source. It is
+    /// converted to whole milliseconds, saturating, so a huge value can never
+    /// wrap round into range. Anything outside 60...600 s, including 0,
+    /// throws `invalidArgumentCode` (-26) and leaves the old value in force:
+    /// the time-out can never be turned off.
+    @available(macOS 13.0, iOS 16.0, *)
+    public func setTxTimeout(_ timeout: Duration) throws {
+        try check(iax_station_set_tx_timeout_ms(handle, Station.saturatingMilliseconds(timeout)))
     }
 
     /// Send a single DTMF digit to the active call's peer — the dialer keypad
@@ -3032,7 +3119,21 @@ public final class Station {
     public func snapshot() throws -> Snapshot {
         var out = IaxState()
         try check(iax_station_snapshot(handle, &out))
-        return Snapshot(
+        var snap = Station.makeSnapshot(out)
+        // The names cross separately (the C struct carries only the flags),
+        // and only when a flag is set, so a healthy poll pays nothing.
+        if out.speaker_stopped { snap.speakerStopped = stoppedName(iax_station_speaker_stopped) }
+        if out.mic_stopped { snap.micStopped = stoppedName(iax_station_mic_stopped) }
+        return snap
+    }
+
+    /// The `IaxState` the engine filled, as a `Snapshot`. It is pulled out of
+    /// `snapshot()` so a test can hand it PTT masks, a forced stop and a
+    /// time-out that a fresh, idle station never reports, and so pin that
+    /// every field is read from its own C field. The stopped-device names are
+    /// read by `snapshot()` itself: they need the live handle.
+    static func makeSnapshot(_ out: IaxState) -> Snapshot {
+        Snapshot(
             status: IaxStatus(rawValue: Int32(out.status.rawValue)) ?? .idle,
             ptt: out.ptt,
             remotePTT: out.remote_ptt,
@@ -3071,8 +3172,31 @@ public final class Station {
             dmrActive: out.dmr_active,
             echolinkAvailable: out.echolink_available,
             echolinkActive: out.echolink_active,
-            echolinkLoggedIn: out.echolink_logged_in
+            echolinkLoggedIn: out.echolink_logged_in,
+            pttSources: StationPTTSourceSet(rawValue: out.ptt_sources),
+            pttLatched: StationPTTSourceSet(rawValue: out.ptt_latched),
+            pttForcedSeq: out.ptt_forced_seq,
+            pttForcedSources: StationPTTSourceSet(rawValue: out.ptt_forced_sources),
+            // 0 (none) and any unknown reason both land as nil.
+            pttForcedReason: StationPTTForcedReason(rawValue: out.ptt_forced_reason),
+            pttTxTimeoutMS: out.ptt_tx_timeout_ms,
+            voxDB: out.vox_db
         )
+    }
+
+    /// Read one stopped-device name, as of the snapshot just taken. `nil`
+    /// when the engine has none to give; never a reason to fail the poll.
+    private func stoppedName(
+        _ fn: (OpaquePointer?, UnsafeMutablePointer<CChar>?, UInt) -> Int32
+    ) -> String? {
+        let needed = fn(handle, nil, 0)
+        guard needed > 0 else { return nil }
+        var buf = [CChar](repeating: 0, count: Int(needed) + 1)
+        let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+            fn(handle, ptr.baseAddress, UInt(ptr.count))
+        }
+        guard rc >= 0 else { return nil }
+        return String(cString: buf)
     }
 
     /// Drain one queued lifecycle event, or `nil` if none is queued.
@@ -3124,6 +3248,21 @@ public final class Station {
     }
 
     // MARK: - Internals
+
+    /// `duration` in whole milliseconds, truncating sub-millisecond parts and
+    /// SATURATING at `0...UInt32.max`. It saturates rather than wraps because
+    /// the engine range-checks the result: 2^32 ms + 120 000 ms wrapped would
+    /// arrive as a valid 2 min time-out, or a 1.5 s lease.
+    @available(macOS 13.0, iOS 16.0, *)
+    static func saturatingMilliseconds(_ duration: Duration) -> UInt32 {
+        let (seconds, attoseconds) = duration.components
+        let (fromSeconds, overflow) = seconds.multipliedReportingOverflow(by: 1_000)
+        guard !overflow else { return seconds < 0 ? 0 : .max }
+        let (total, sumOverflow) = fromSeconds.addingReportingOverflow(
+            attoseconds / 1_000_000_000_000_000)
+        guard !sumOverflow else { return fromSeconds < 0 ? 0 : .max }
+        return UInt32(clamping: total)
+    }
 
     /// Throw a `StationError` if `code` is negative; otherwise pass it through.
     @discardableResult

@@ -59,6 +59,10 @@ pub struct ConsoleState {
     /// unkeyed (post-gain, pre-noise-reduction) so a consumer's VOX can key from
     /// silence (iax-5c30).
     pub input_level_db: f32,
+    /// The loudness VOX judges, in dBFS `-60.0..=0.0`: the mean power of the
+    /// same input as `input_level_db` over the last 50 ms. A single click
+    /// barely moves it, which is why VOX keys from this and not the peak.
+    pub vox_level_db: f32,
     /// Local transmit state (`true` = keyed; render the PTT light red).
     pub ptt: bool,
     /// Remote-keyed state from `RemotePtt` events (for a future RX indicator).
@@ -107,6 +111,16 @@ pub struct ConsoleState {
     /// Ceiling of the RX jitter buffer's adaptive depth, ms — the effective,
     /// clamped value (iax-rxjb).
     pub rx_jb_max_ms: u32,
+    /// The name of the output device whose stream stopped and could not be
+    /// rebuilt, or `None` while the speaker is playing. Set only after the
+    /// engine's own rebuild has given up (a Bluetooth headset switching
+    /// profile is rebuilt silently), so a UI can say "Speaker stopped"
+    /// instead of leaving a call silently deaf. A device name,
+    /// credential-free.
+    pub speaker_stopped: Option<String>,
+    /// The name of the input device whose stream stopped and could not be
+    /// rebuilt, or `None` while the mic is capturing. See `speaker_stopped`.
+    pub mic_stopped: Option<String>,
     /// Which mic noise-reduction chain is live, and at what device rate
     /// (`docs/design/noise-suppression.md`). Read-only, and reported rather
     /// than inferred: the 48 kHz guard is otherwise invisible, and a mic
@@ -244,6 +258,7 @@ impl Default for ConsoleState {
             tx_level_db: -60.0,
             rx_level_db: -60.0,
             input_level_db: -60.0,
+            vox_level_db: -60.0,
             denoise_status: astar_audio::DenoiseStatus::default(),
             ptt: false,
             remote_ptt: false,
@@ -259,6 +274,8 @@ impl Default for ConsoleState {
             rx_jb_enabled: astar_audio::RxJitterConfig::default().enabled,
             rx_jb_min_ms: astar_audio::RxJitterConfig::default().min_ms,
             rx_jb_max_ms: astar_audio::RxJitterConfig::default().max_ms,
+            speaker_stopped: None,
+            mic_stopped: None,
             negotiated_format: None,
             calls: Vec::new(),
             answered_seq: 0,
@@ -310,6 +327,9 @@ mod tests {
         assert!(s.rx_jb_enabled);
         assert_eq!(s.rx_jb_min_ms, 40);
         assert_eq!(s.rx_jb_max_ms, 200);
+        // Nothing has stopped on a fresh state.
+        assert_eq!(s.speaker_stopped, None);
+        assert_eq!(s.mic_stopped, None);
         // No call → no negotiated codec (iax-3e53).
         assert_eq!(s.negotiated_format, None);
         // iax-f2b8 Task 4: byte-identical default (no M17 session ever built).

@@ -64,15 +64,43 @@ public struct AudioSettings: Equatable {
     /// receiving — so speaker bleed (e.g. the parrot's playback) can't feed back.
     /// Enable for headphones, where simultaneous TX+RX is fine.
     public var fullDuplex: Bool
-    /// VOX trigger level (dBFS): the mic level at/above which voice-activated PTT
-    /// keys. Default −40. Lower (toward −60) = more sensitive.
+    /// VOX trigger level (dBFS): the mic loudness at/above which voice-activated
+    /// PTT keys. Loudness here is the mean power over the last 50 ms (the
+    /// snapshot's `voxDB`), not the peak — see `VoxThreshold`. Default −50.
+    /// Lower (toward −60) = more sensitive. Stored as
+    /// `audio.voxThresholdRMSDBFS`.
     public var voxThresholdDBFS: Float
     /// VOX hang time (ms): how long PTT stays keyed after the mic drops below the
     /// threshold, so brief speech pauses don't drop the transmit. Default 500.
     public var voxHangtimeMS: Int
+    /// Transmit time-out, whole seconds: the longest the radio may stay on air
+    /// continuously, whatever is keying it (on-screen button, Space, serial,
+    /// Bluetooth, VOX). One app-wide value, not per config. It exists so a
+    /// stuck source can never hold a transmitter open; that is why it has no
+    /// Off and is always a whole number of minutes in `txTimeoutRange`. Not
+    /// VOX's Hang Timeout, which only decides when VOX has stopped talking.
+    public var txTimeoutSeconds: Int
     /// Selected mic-profile id (the live choice). `nil` = the built-in Default
     /// profile (unfiltered). Mirrors the active config's `Setup.micProfileID`.
     public var micProfileID: String?
+
+    /// Two minutes, Rob's choice, and the engine's own start-up value, so the
+    /// gap before the first push is already covered.
+    public static let defaultTxTimeoutSeconds = 120
+    /// One to ten minutes. The floor is above zero on purpose: no stored,
+    /// imported or typed value can turn the time-out off.
+    public static let txTimeoutRange: ClosedRange<Int> = 60...600
+
+    /// Nearest whole minute (half away from zero), clamped to 60...600. Never 0,
+    /// never "off". A non-finite value is not a choice anyone made, so it reads
+    /// as the default rather than either bound.
+    public static func normalizedTxTimeoutSeconds(_ raw: Double) -> Int {
+        guard raw.isFinite else { return defaultTxTimeoutSeconds }
+        let minutes = (raw / 60).rounded(.toNearestOrAwayFromZero)
+        let lower = Double(txTimeoutRange.lowerBound)
+        let upper = Double(txTimeoutRange.upperBound)
+        return Int(min(max(minutes * 60, lower), upper))
+    }
 
     /// The `StationConfig.codecPolicy` string: always `"prefer_slin16"`.
     /// Wideband (slin16, 16 kHz) is always on (astar-e542) — there is no
@@ -94,8 +122,9 @@ public struct AudioSettings: Equatable {
         rxCompression: Bool = false, rxCompressionLevel: Float = 0.90,
         rxJitterBuffer: Bool = true, rxJitterMinMS: Int = 40, rxJitterMaxMS: Int = 200,
         voxEnabled: Bool = false, txDisabled: Bool = false,
-        fullDuplex: Bool = false, voxThresholdDBFS: Float = -40,
-        voxHangtimeMS: Int = 500, micProfileID: String? = nil
+        fullDuplex: Bool = false, voxThresholdDBFS: Float = VoxThreshold.defaultDBFS,
+        voxHangtimeMS: Int = 500, micProfileID: String? = nil,
+        txTimeoutSeconds: Int = 120
     ) {
         self.input = input
         self.output = output
@@ -117,6 +146,7 @@ public struct AudioSettings: Equatable {
         self.voxThresholdDBFS = voxThresholdDBFS
         self.voxHangtimeMS = voxHangtimeMS
         self.micProfileID = micProfileID
+        self.txTimeoutSeconds = txTimeoutSeconds
     }
 }
 
@@ -146,12 +176,24 @@ public final class UserDefaultsAudioSettingsStore: AudioSettingsStore {
         static let voxEnabled = "audio.voxEnabled"
         static let txDisabled = "audio.txDisabled"
         static let fullDuplex = "audio.fullDuplex"
-        static let voxThreshold = "audio.voxThresholdDBFS"
+        /// The VOX threshold, measured against the 50 ms mean power.
+        static let voxThreshold = VoxThreshold.key
+        /// The pre-0.1.21 threshold, measured against the peak. Read once and
+        /// translated (`VoxThreshold.fromPeak`), never written.
+        static let legacyVoxThreshold = VoxThreshold.legacyPeakKey
         static let voxHangtime = "audio.voxHangtimeMS"
         static let micProfileID = "audio.micProfileID"
+        /// Under `audio.` so it travels in the exported settings section, like
+        /// the VOX hang time. Additive: no `ConfigVersion` bump.
+        static let txTimeoutSeconds = "audio.txTimeoutSeconds"
         // "audio.wideband" is a dead key (astar-e542): the wideband toggle is
         // gone, wideband is always on. A stale key in old saves is ignored.
     }
+
+    /// The transmit time-out's key, for `ConfigTransfer`: an imported value has
+    /// to be pushed to the session and the station, so the importer must be
+    /// able to tell it arrived. Internal, not public.
+    static let txTimeoutSecondsKey = Key.txTimeoutSeconds
 
     private let defaults: UserDefaults
 
@@ -190,12 +232,39 @@ public final class UserDefaultsAudioSettingsStore: AudioSettingsStore {
             voxEnabled: defaults.bool(forKey: Key.voxEnabled),
             txDisabled: defaults.bool(forKey: Key.txDisabled),
             fullDuplex: defaults.bool(forKey: Key.fullDuplex),
-            voxThresholdDBFS: defaults.object(forKey: Key.voxThreshold) != nil
-                ? defaults.float(forKey: Key.voxThreshold) : -40,
+            voxThresholdDBFS: loadVoxThreshold(),
             voxHangtimeMS: defaults.object(forKey: Key.voxHangtime) != nil
                 ? defaults.integer(forKey: Key.voxHangtime) : 500,
-            micProfileID: defaults.string(forKey: Key.micProfileID)
+            micProfileID: defaults.string(forKey: Key.micProfileID),
+            txTimeoutSeconds: Self.loadTxTimeoutSeconds(
+                defaults.object(forKey: Key.txTimeoutSeconds))
         )
+    }
+
+    /// The VOX threshold: the new key as is; else an old peak-calibrated value
+    /// translated once — written straight back under the new key, so the
+    /// translation happens exactly one time and a later save or import of the
+    /// old key cannot re-run it — else the default.
+    private func loadVoxThreshold() -> Float {
+        if let stored = defaults.object(forKey: Key.voxThreshold) as? NSNumber {
+            return VoxThreshold.clamped(stored.floatValue)
+        }
+        if let legacy = defaults.object(forKey: Key.legacyVoxThreshold) as? NSNumber {
+            let translated = VoxThreshold.fromPeak(legacy.floatValue)
+            defaults.set(translated, forKey: Key.voxThreshold)
+            return translated
+        }
+        return VoxThreshold.defaultDBFS
+    }
+
+    /// Absent → the default. A number of any kind → normalised, so a stored 0
+    /// or a negative from a hand-edited or imported file becomes 60, never Off.
+    /// Anything else (a string, data) is not a time-out → the default.
+    private static func loadTxTimeoutSeconds(_ stored: Any?) -> Int {
+        guard let number = stored as? NSNumber else {
+            return AudioSettings.defaultTxTimeoutSeconds
+        }
+        return AudioSettings.normalizedTxTimeoutSeconds(number.doubleValue)
     }
 
     public func save(_ settings: AudioSettings) {
@@ -219,5 +288,8 @@ public final class UserDefaultsAudioSettingsStore: AudioSettingsStore {
         defaults.set(settings.voxThresholdDBFS, forKey: Key.voxThreshold)
         defaults.set(settings.voxHangtimeMS, forKey: Key.voxHangtime)
         defaults.set(settings.micProfileID, forKey: Key.micProfileID)
+        defaults.set(
+            AudioSettings.normalizedTxTimeoutSeconds(Double(settings.txTimeoutSeconds)),
+            forKey: Key.txTimeoutSeconds)
     }
 }

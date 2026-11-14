@@ -2,24 +2,31 @@
 icon: lucide/archive
 ---
 
-# Saved configs, backup and transfer
+# Audio configs, backup and transfer
 
 astar keeps its whole setup on the Mac it runs on — no account, no sync, no
 server. This page covers what that setup consists of, how to move it to another
 Mac, and how to share part of it with someone else.
 
-## Saved configs
+## Audio configs
 
-A **saved config** is one rig you switch to in a single click: a hardware
-profile, the input and output devices, the mic and speaker gains, compression,
+A **saved config** is one rig you switch to in a single click: its PTT
+hardware, the input and output devices, the mic and speaker gains, compression,
 noise reduction, VOX, full duplex, and — for a serial interface like the
 UCI150 — the whole serial/PTT wiring.
+
+**A config has one PTT device**: None (the on-screen button and Space only), a
+USB radio interface (AllScan UCI150 or Custom serial), or an Inrico B02PTT
+Bluetooth button. Choose it in Quick settings → Station → **PTT**, which saves
+to the config straight away, or in the config's card in Settings. The
+on-screen button, Space and VOX work alongside whichever you pick. See
+[Bluetooth PTT button](bluetooth-ptt.md#one-ptt-device-per-config).
 
 The point is that you flip between rigs instead of re-picking devices by hand.
 A desk setup with a USB radio interface and a portable headset setup are two
 configs, and switching restores both halves at once.
 
-Settings → **Saved configs**. **System Default** always sits at the top: it is
+Settings → **Audio configs**. **System Default** always sits at the top: it is
 a real config, not a hidden fallback, so there is always a known-good plain-audio
 state one click away. ★ marks the config applied at launch.
 
@@ -60,14 +67,20 @@ Settings → **Backup** → **Export…**. Choose what to include:
 
 | Section | What travels |
 |---|---|
-| **Saved configs** | Your rigs and the mic profiles they reference |
+| **Audio configs** | Your rigs and the mic profiles they reference |
 | **Node directory** | Favorites and recents, from every network |
-| **Audio and serial settings** | Devices, gains, VOX, compression, serial PTT |
+| **Audio and serial settings** | Devices, gains, VOX, compression, serial and Bluetooth PTT |
 | **Callsign** | Your M17 callsign |
 | **Window and panel state** | Which panels are open, Dock icon, selected network |
 
 The result is a plain-text JSON file with an `.astarconfig` extension. It is
 meant to be opened and read — you can check what is in one before trusting it.
+
+Audio and serial settings include the app-wide transmit time-out. A config
+that uses a Bluetooth PTT button carries the button's model and, if you picked
+one, its advertised name (for example B02PTT-6522), but never this Mac's
+confirmation of it: on another Mac it arrives unconfirmed and asks to be set
+up there.
 
 !!! warning "Callsign is what makes a file personal"
 
@@ -96,7 +109,7 @@ and leave their microphone, gains and serial wiring alone.
 
 | Section | How a match is decided |
 |---|---|
-| Saved configs, mic profiles | By id — a config edited elsewhere updates in place and keeps its position |
+| Audio configs, mic profiles | By id — a config edited elsewhere updates in place and keeps its position |
 | Node directory | By **network and target** — the same node is never stored twice, your label and ★ are kept |
 
 Afterwards astar reports what actually changed, e.g. *"2 configs added, 15 nodes

@@ -23,7 +23,8 @@ final class DStarVocoderChoiceTests: XCTestCase {
     }
 
     private func model(
-        _ defaults: UserDefaults, compiled: Bool, pushed: @escaping (DStarVocoder) -> Void = { _ in }
+        _ defaults: UserDefaults, compiled: Bool,
+        pushed: @escaping (DStarVocoder) -> Void = { _ in }
     ) -> VocoderSettings {
         VocoderSettings(
             store: InMemoryVocoderTrustStore(), enroller: FakeVocoderEnroller(),
@@ -48,7 +49,9 @@ final class DStarVocoderChoiceTests: XCTestCase {
     func testTheChoiceIsMachineLocal() {
         XCTAssertTrue(DStarVocoderPreference.key.hasPrefix("vocoder."))
         XCTAssertTrue(
-            ConfigArchive.machineLocalPrefixes.contains { DStarVocoderPreference.key.hasPrefix($0) },
+            ConfigArchive.machineLocalPrefixes.contains {
+                DStarVocoderPreference.key.hasPrefix($0)
+            },
             "an exported config must never carry the vocoder choice")
     }
 
@@ -149,7 +152,8 @@ final class DStarVocoderChoiceTests: XCTestCase {
         let dstar = VocoderSetupPrompt.noTrustedVocoderMessage(for: .dstar, softwareCompiled: true)
         XCTAssertTrue(VocoderSetupPrompt.offersSettings(for: dstar), "still opens Settings")
         XCTAssertTrue(VocoderSetupPrompt.offersSoftwareSwitch(for: dstar))
-        let without = VocoderSetupPrompt.noTrustedVocoderMessage(for: .dstar, softwareCompiled: false)
+        let without = VocoderSetupPrompt.noTrustedVocoderMessage(
+            for: .dstar, softwareCompiled: false)
         XCTAssertFalse(VocoderSetupPrompt.offersSoftwareSwitch(for: without))
         XCTAssertTrue(VocoderSetupPrompt.offersSettings(for: without))
     }

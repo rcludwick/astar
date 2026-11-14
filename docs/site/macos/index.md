@@ -38,22 +38,24 @@ The popover is the whole client. In broad strokes:
   [favorites and recents](favorites.md) from every network.
 * **Connect / Disconnect**, with call state and round-trip time.
 * **Push to talk** — press-and-hold in the UI, a hardware operator key on a USB
-  radio interface, or VOX. Also a *TX disabled — listening only* mode when you
-  want to monitor without any chance of keying.
+  radio interface, the button on an Inrico B02PTT Bluetooth speaker-mic, or
+  VOX. They combine, and a transmit time-out (2 minutes unless you change it)
+  ends any over that runs too long. Also a *TX disabled — listening only* mode
+  when you want to monitor without any chance of keying.
 * **Dialpad** for DTMF commands to the far end.
-* **Quick settings** — input and output device, gains, VOX threshold and hang
-  time, codec, talk timer.
+* **Quick settings** — the config's PTT hardware, input and output device,
+  gains, VOX threshold and hang time, codec, talk timer.
 * **Level meters and spectrum** for what you are sending and receiving.
 
-Settings adds the rest: your AllStarLink and EchoLink accounts, saved configs ("setups"),
-microphone profiles and characterization, serial PTT wiring, and device
-selection.
+Settings adds the rest: your AllStarLink and EchoLink accounts, audio configs
+("setups"), microphone profiles and characterization, serial PTT wiring, the
+Bluetooth PTT button, the transmit time-out, and device selection.
 
 ## Finding your way around Settings
 
 Open Settings with the sliders button in the popover footer, or with ⌘,
-from the menu bar. It is one long list of sections: Operator, AllStarLink, EchoLink, DMR, NXDN,
-Vocoders, Saved configs, Favorites, Mic Profiles, Reflector directory,
+from the menu bar. It is one long list of sections: Audio configs, Mic Profiles,
+Operator, AllStarLink, EchoLink, DMR, NXDN, Vocoders, Favorites, Reflector directory,
 Spectrum, Recording and Backup.
 
 That is a lot to scroll through, so each section folds away. Every section
@@ -71,7 +73,7 @@ A few things make this quicker:
 * **Option-click a triangle** to open or fold every section in one go, the
   way Finder's list view works. The section you clicked decides the
   direction: Option-clicking a folded one opens them all.
-* **The "+" stays in the header.** Vocoders, Saved configs and Mic Profiles
+* **The "+" stays in the header.** Vocoders, Audio configs and Mic Profiles
   keep their "+" visible even while folded. Pressing it opens the section
   for you, so a new saved config appears in view, ready to be named.
 * **Links into Settings open the right section.** Buttons elsewhere in
@@ -109,6 +111,10 @@ astar targets the generic class of USB radio interfaces — serial PTT plus USB
 audio. The AllScan UCI150 is the reference device, not a special case. The
 [Hardware](hardware.md) page covers the macOS driver situation and how the PTT
 lines are wired.
+
+The push-to-talk button on an **Inrico B02PTT** Bluetooth speaker-mic can key
+astar too; a config uses either it or a USB radio interface. See
+[Bluetooth PTT button](bluetooth-ptt.md).
 
 ## What these docs cover
 

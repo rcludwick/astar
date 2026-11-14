@@ -94,6 +94,8 @@ fn free_null_is_noop() {
 // --- Task 3.3: snapshot fill + error codes ---
 
 #[test]
+// One poisoned literal per `IaxState` field, so the length is the struct's.
+#[allow(clippy::too_many_lines)]
 fn snapshot_fills_idle_state() {
     let cfg = null_config();
     let st = unsafe { iax_station_new(std::ptr::from_ref(&cfg)) };
@@ -137,6 +139,15 @@ fn snapshot_fills_idle_state() {
         echolink_available: false,
         echolink_active: true,
         echolink_logged_in: true,
+        speaker_stopped: true,
+        mic_stopped: true,
+        ptt_sources: 0x1F,
+        ptt_latched: 0x1F,
+        ptt_forced_seq: 77,
+        ptt_forced_sources: 0x1F,
+        ptt_forced_reason: 9,
+        ptt_tx_timeout_ms: 1,
+        vox_db: 0.0,
     };
     let rc = unsafe { iax_station_snapshot(st, std::ptr::from_mut(&mut state)) };
     assert_eq!(rc, IAX_OK);
@@ -161,9 +172,19 @@ fn snapshot_fills_idle_state() {
     // iax-d4f7: and for DMR. `dmr_available` is skipped for the same reason
     // again — one dongle, one probe, one answer.
     assert!(!state.dmr_active);
+    // Bluetooth PTT: a new station holds nothing, has latched nothing, has
+    // never been forced off, and runs on the two-minute transmit time-out.
+    // Every value is pre-poisoned above, so each assertion proves a write.
+    assert_eq!(state.ptt_sources, 0);
+    assert_eq!(state.ptt_latched, 0);
+    assert_eq!(state.ptt_forced_seq, 0);
+    assert_eq!(state.ptt_forced_sources, 0);
+    assert_eq!(state.ptt_forced_reason, IAX_PTT_FORCED_NONE);
+    assert_eq!(state.ptt_tx_timeout_ms, 120_000);
     assert_eq!(state.rtt_ms, -1);
     // iax-5c30: idle (no active call) reports the silence floor.
     assert!((state.input_db + 60.0).abs() < 1e-3);
+    assert!((state.vox_db + 60.0).abs() < 1e-3);
     // A fresh station defaults to WT mode.
     assert!(matches!(state.mode, IaxMode::Wt));
     // iax-9e55: idle (no active call) zeroes the TX health counters, proving
@@ -258,6 +279,15 @@ fn null_guards_return_err_null() {
         echolink_available: false,
         echolink_active: false,
         echolink_logged_in: false,
+        speaker_stopped: false,
+        mic_stopped: false,
+        ptt_sources: 0,
+        ptt_latched: 0,
+        ptt_forced_seq: 0,
+        ptt_forced_sources: 0,
+        ptt_forced_reason: IAX_PTT_FORCED_NONE,
+        ptt_tx_timeout_ms: 120_000,
+        vox_db: 0.0,
     };
     assert_eq!(
         unsafe { iax_station_snapshot(ptr::null_mut(), std::ptr::from_mut(&mut state)) },
@@ -416,6 +446,15 @@ fn mint_token_without_portal_is_portal_err() {
         echolink_available: false,
         echolink_active: false,
         echolink_logged_in: false,
+        speaker_stopped: false,
+        mic_stopped: false,
+        ptt_sources: 0,
+        ptt_latched: 0,
+        ptt_forced_seq: 0,
+        ptt_forced_sources: 0,
+        ptt_forced_reason: IAX_PTT_FORCED_NONE,
+        ptt_tx_timeout_ms: 120_000,
+        vox_db: 0.0,
     };
     assert_eq!(
         unsafe { iax_station_snapshot(st, std::ptr::from_mut(&mut state)) },
@@ -2200,6 +2239,15 @@ fn echolink_flags_are_false_on_a_fresh_station() {
         echolink_available: !cfg!(feature = "echolink"),
         echolink_active: true,
         echolink_logged_in: true,
+        speaker_stopped: true,
+        mic_stopped: true,
+        ptt_sources: 0,
+        ptt_latched: 0,
+        ptt_forced_seq: 0,
+        ptt_forced_sources: 0,
+        ptt_forced_reason: IAX_PTT_FORCED_NONE,
+        ptt_tx_timeout_ms: 120_000,
+        vox_db: 0.0,
     };
     assert_eq!(
         unsafe { iax_station_snapshot(st, std::ptr::from_mut(&mut state)) },
@@ -2515,4 +2563,439 @@ fn record_state_json_fill_buf_reports_needed_size() {
         IAX_ERR_NULL
     );
     unsafe { iax_station_free(st) };
+}
+
+/// A new station reports no stopped speaker or mic. Every byte is poisoned
+/// to `0x01` first (so both bools read `true`), so each assertion proves the
+/// snapshot wrote the flag.
+#[test]
+fn a_new_station_reports_nothing_stopped() {
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(std::ptr::from_ref(&cfg)) };
+    assert!(!st.is_null());
+    let mut out = std::mem::MaybeUninit::<IaxState>::uninit();
+    // SAFETY: writes `size_of::<IaxState>()` bytes into storage of that size.
+    unsafe { out.as_mut_ptr().write_bytes(0x01, 1) };
+    assert_eq!(
+        unsafe { iax_station_snapshot(st, out.as_mut_ptr()) },
+        IAX_OK
+    );
+    // SAFETY: the snapshot returned `IAX_OK`, so it wrote a whole `IaxState`.
+    let state = unsafe { out.assume_init() };
+    assert!(!state.speaker_stopped);
+    assert!(!state.mic_stopped);
+    unsafe { iax_station_free(st) };
+}
+
+/// The two stopped-device flags are appended after `echolink_logged_in` and
+/// nothing else moved. A binding that mirrors `IaxState` by hand (the Python
+/// one does) must add them in this order, before the six PTT fields that
+/// follow them.
+#[test]
+fn the_stopped_flags_are_the_last_two_fields() {
+    use std::mem::offset_of;
+    assert_eq!(
+        offset_of!(IaxState, speaker_stopped),
+        offset_of!(IaxState, echolink_logged_in) + 1
+    );
+    assert_eq!(
+        offset_of!(IaxState, mic_stopped),
+        offset_of!(IaxState, speaker_stopped) + 1
+    );
+}
+
+// --- Bluetooth PTT: station PTT sources, the lease, the transmit time-out ---
+//
+// On-air safety: every station below is idle (built from `null_config()` and
+// never connected), so a press is refused by the console with
+// IAX_ERR_NOT_CONNECTED before anything could key. Nothing here dials, binds
+// a port, or opens a device.
+
+fn new_station() -> *mut IaxStation {
+    let cfg = null_config();
+    let st = unsafe { iax_station_new(ptr::from_ref(&cfg)) };
+    assert!(!st.is_null(), "station construction must succeed");
+    st
+}
+
+fn snapshot_of(st: *mut IaxStation) -> IaxState {
+    let mut state = unsafe { std::mem::zeroed::<IaxState>() };
+    assert_eq!(unsafe { iax_station_snapshot(st, &raw mut state) }, IAX_OK);
+    state
+}
+
+fn last_error_of(st: *mut IaxStation) -> String {
+    let mut buf = [cc(0); 256];
+    let rc = unsafe { iax_station_last_error(st, buf.as_mut_ptr(), buf.len()) };
+    assert!(rc >= 0, "iax_station_last_error returned {rc}");
+    unsafe { CStr::from_ptr(buf.as_ptr()) }
+        .to_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn ptt_error_codes_and_texts_are_pinned() {
+    assert_eq!(
+        [IAX_ERR_NOT_LEASED, IAX_ERR_INVALID, IAX_ERR_PTT_LATCHED],
+        [-25, -26, -27]
+    );
+    for (code, want) in [
+        (IAX_ERR_NOT_LEASED, "ptt source holds no lease"),
+        (IAX_ERR_INVALID, "invalid argument"),
+        (
+            IAX_ERR_PTT_LATCHED,
+            "ptt source is latched: release it first",
+        ),
+    ] {
+        let text = unsafe { CStr::from_ptr(iax_error_text(code)) }
+            .to_str()
+            .unwrap();
+        assert_eq!(text, want, "code {code}");
+    }
+    assert_eq!(
+        [
+            IAX_PTT_MANUAL,
+            IAX_PTT_VOX,
+            IAX_PTT_SERIAL,
+            IAX_PTT_BLUETOOTH,
+            IAX_PTT_LEGACY
+        ],
+        [0, 1, 2, 3, 4]
+    );
+    assert_eq!(
+        [
+            IAX_PTT_FORCED_NONE,
+            IAX_PTT_FORCED_LEASE_EXPIRED,
+            IAX_PTT_FORCED_TX_TIMEOUT
+        ],
+        [0, 1, 2]
+    );
+}
+
+#[test]
+fn ptt_entry_points_refuse_a_null_station() {
+    let null = ptr::null_mut();
+    assert_eq!(
+        unsafe { iax_station_ptt_source(null, IAX_PTT_MANUAL, true) },
+        IAX_ERR_NULL
+    );
+    assert_eq!(unsafe { iax_station_ptt_stop_all(null) }, IAX_ERR_NULL);
+    assert_eq!(
+        unsafe { iax_station_ptt_lease_press(null, IAX_PTT_BLUETOOTH, 1500) },
+        IAX_ERR_NULL
+    );
+    assert_eq!(
+        unsafe { iax_station_ptt_lease_renew(null, IAX_PTT_BLUETOOTH) },
+        IAX_ERR_NULL
+    );
+    assert_eq!(
+        unsafe { iax_station_set_tx_timeout_ms(null, 120_000) },
+        IAX_ERR_NULL
+    );
+}
+
+/// The time-out can never be turned off or set outside 1 to 10 minutes from
+/// C, and a refusal keeps whatever value was in force, not the default. A
+/// zero-length lease is refused too: it would be a press that unkeys itself
+/// on the next watchdog tick, which no caller means.
+#[test]
+fn ffi_rejects_zero_ttl_and_out_of_range_tx_timeout() {
+    let st = new_station();
+    assert_eq!(snapshot_of(st).ptt_tx_timeout_ms, 120_000);
+
+    for ms in [0, 1, 59_999, 600_001, u32::MAX] {
+        assert_eq!(
+            unsafe { iax_station_set_tx_timeout_ms(st, ms) },
+            IAX_ERR_INVALID,
+            "{ms} ms must be refused"
+        );
+        assert_eq!(
+            snapshot_of(st).ptt_tx_timeout_ms,
+            120_000,
+            "a refused {ms} ms must keep the old value"
+        );
+    }
+
+    assert_eq!(unsafe { iax_station_set_tx_timeout_ms(st, 60_000) }, IAX_OK);
+    assert_eq!(snapshot_of(st).ptt_tx_timeout_ms, 60_000);
+    for ms in [0, 59_999, 600_001] {
+        assert_eq!(
+            unsafe { iax_station_set_tx_timeout_ms(st, ms) },
+            IAX_ERR_INVALID,
+            "{ms} ms must be refused"
+        );
+        assert_eq!(
+            snapshot_of(st).ptt_tx_timeout_ms,
+            60_000,
+            "a refused {ms} ms must keep the value in force, not the default"
+        );
+    }
+    assert_eq!(
+        unsafe { iax_station_set_tx_timeout_ms(st, 600_000) },
+        IAX_OK
+    );
+    assert_eq!(snapshot_of(st).ptt_tx_timeout_ms, 600_000);
+    assert_eq!(
+        unsafe { iax_station_set_tx_timeout_ms(st, 0) },
+        IAX_ERR_INVALID
+    );
+    assert_eq!(snapshot_of(st).ptt_tx_timeout_ms, 600_000);
+
+    assert_eq!(
+        unsafe { iax_station_ptt_lease_press(st, IAX_PTT_BLUETOOTH, 0) },
+        IAX_ERR_INVALID,
+        "a 0 ms lease is refused"
+    );
+    let s = snapshot_of(st);
+    assert_eq!(s.ptt_sources, 0, "a refused TTL must not hold");
+    assert_eq!(s.ptt_latched, 0, "a refused TTL must not latch");
+    unsafe { iax_station_free(st) };
+}
+
+#[test]
+fn ptt_lease_press_bounds_and_bluetooth_only() {
+    let st = new_station();
+    assert_eq!(
+        unsafe { iax_station_ptt_lease_press(st, IAX_PTT_BLUETOOTH, 5001) },
+        IAX_ERR_INVALID,
+        "a lease longer than 5 s is refused"
+    );
+    for src in [IAX_PTT_MANUAL, IAX_PTT_VOX, IAX_PTT_SERIAL, IAX_PTT_LEGACY] {
+        assert_eq!(
+            unsafe { iax_station_ptt_lease_press(st, src, 1500) },
+            IAX_ERR_INVALID,
+            "source {src} cannot hold a lease"
+        );
+    }
+    assert_eq!(
+        snapshot_of(st).ptt_latched,
+        0,
+        "argument refusals latch nothing"
+    );
+
+    // Both TTL boundaries are accepted as arguments and reach the console,
+    // which refuses because the station is idle: the press is rolled back
+    // and the source latched until it releases.
+    for ttl in [1, 5000] {
+        assert_eq!(
+            unsafe { iax_station_ptt_lease_press(st, IAX_PTT_BLUETOOTH, ttl) },
+            IAX_ERR_NOT_CONNECTED,
+            "ttl {ttl} ms is in range"
+        );
+        let s = snapshot_of(st);
+        assert_eq!(s.ptt_sources, 0);
+        assert_eq!(s.ptt_latched, 1 << IAX_PTT_BLUETOOTH);
+        assert_eq!(
+            unsafe { iax_station_ptt_source(st, IAX_PTT_BLUETOOTH, false) },
+            IAX_OK
+        );
+        assert_eq!(snapshot_of(st).ptt_latched, 0, "release re-arms");
+    }
+    unsafe { iax_station_free(st) };
+}
+
+#[test]
+fn renew_on_an_unleased_source_is_not_leased() {
+    let st = new_station();
+    assert_eq!(
+        unsafe { iax_station_ptt_lease_renew(st, IAX_PTT_BLUETOOTH) },
+        IAX_ERR_NOT_LEASED
+    );
+    assert_eq!(last_error_of(st), "ptt source holds no lease");
+    assert_eq!(
+        unsafe { iax_station_ptt_lease_renew(st, IAX_PTT_MANUAL) },
+        IAX_ERR_NOT_LEASED
+    );
+
+    // A refused lease press leaves no lease behind, and renew never presses.
+    assert_eq!(
+        unsafe { iax_station_ptt_lease_press(st, IAX_PTT_BLUETOOTH, 1500) },
+        IAX_ERR_NOT_CONNECTED
+    );
+    assert_eq!(
+        unsafe { iax_station_ptt_lease_renew(st, IAX_PTT_BLUETOOTH) },
+        IAX_ERR_NOT_LEASED
+    );
+    assert_eq!(snapshot_of(st).ptt_sources, 0, "renew must never press");
+    unsafe { iax_station_free(st) };
+}
+
+#[test]
+fn stop_all_while_idle_is_ok() {
+    let st = new_station();
+    assert_eq!(unsafe { iax_station_ptt_stop_all(st) }, IAX_OK);
+    let s = snapshot_of(st);
+    assert_eq!(s.ptt_sources, 0);
+    assert_eq!(s.ptt_latched, 0, "nothing was held, so nothing is latched");
+    assert_eq!(s.ptt_forced_seq, 0, "stop_all is not a forced stop");
+    unsafe { iax_station_free(st) };
+}
+
+#[test]
+fn release_is_never_refused_even_idle() {
+    let st = new_station();
+    for src in [
+        IAX_PTT_MANUAL,
+        IAX_PTT_VOX,
+        IAX_PTT_SERIAL,
+        IAX_PTT_BLUETOOTH,
+        IAX_PTT_LEGACY,
+    ] {
+        assert_eq!(
+            unsafe { iax_station_ptt_source(st, src, false) },
+            IAX_OK,
+            "release of source {src}"
+        );
+    }
+    unsafe { iax_station_free(st) };
+}
+
+/// A source id this library does not define is refused, never mapped onto a
+/// default: a newer binding's id must not key as `Manual`.
+#[test]
+fn unknown_ptt_source_is_invalid_and_touches_nothing() {
+    let st = new_station();
+    for src in [5, 31, u32::MAX] {
+        for on in [true, false] {
+            assert_eq!(
+                unsafe { iax_station_ptt_source(st, src, on) },
+                IAX_ERR_INVALID,
+                "ptt_source({src}, {on})"
+            );
+        }
+        assert_eq!(
+            unsafe { iax_station_ptt_lease_press(st, src, 1500) },
+            IAX_ERR_INVALID,
+            "lease_press({src})"
+        );
+        assert_eq!(
+            unsafe { iax_station_ptt_lease_renew(st, src) },
+            IAX_ERR_INVALID,
+            "lease_renew({src})"
+        );
+    }
+    assert_eq!(last_error_of(st), "invalid argument: unknown ptt source");
+    let s = snapshot_of(st);
+    assert_eq!(s.ptt_sources, 0);
+    assert_eq!(s.ptt_latched, 0);
+    unsafe { iax_station_free(st) };
+}
+
+#[test]
+fn ptt_source_refused_press_latches_until_release() {
+    let st = new_station();
+    assert_eq!(
+        unsafe { iax_station_ptt_source(st, IAX_PTT_MANUAL, true) },
+        IAX_ERR_NOT_CONNECTED
+    );
+    let s = snapshot_of(st);
+    assert!(!s.ptt);
+    assert_eq!(s.ptt_sources, 0, "a refused press is rolled back");
+    assert_eq!(s.ptt_latched, 1 << IAX_PTT_MANUAL);
+    assert_eq!(
+        unsafe { iax_station_ptt_source(st, IAX_PTT_MANUAL, true) },
+        IAX_ERR_PTT_LATCHED,
+        "held through a refusal: let go before keying again"
+    );
+    assert_eq!(
+        unsafe { iax_station_ptt_source(st, IAX_PTT_MANUAL, false) },
+        IAX_OK
+    );
+    assert_eq!(snapshot_of(st).ptt_latched, 0);
+    assert_eq!(
+        unsafe { iax_station_ptt_source(st, IAX_PTT_MANUAL, true) },
+        IAX_ERR_NOT_CONNECTED,
+        "a fresh press after release is judged afresh"
+    );
+    unsafe { iax_station_free(st) };
+}
+
+/// `iax_station_set_ptt` is the `Legacy` source, and a Legacy press the
+/// console refuses latches nothing (Rob, 2026-10-09): a `/key` sent before a
+/// call is up must not make the next `/key` answer "latched". The same holds
+/// for `iax_station_ptt_source(IAX_PTT_LEGACY, true)`.
+#[test]
+fn legacy_press_refused_while_idle_latches_nothing() {
+    let st = new_station();
+    for attempt in 1..=2 {
+        assert_eq!(
+            unsafe { iax_station_set_ptt(st, true) },
+            IAX_ERR_NOT_CONNECTED,
+            "set_ptt(true) attempt {attempt} is the console's refusal, not PTT_LATCHED"
+        );
+        let s = snapshot_of(st);
+        assert_eq!(s.ptt_sources, 0, "a refused Legacy press is rolled back");
+        assert_eq!(s.ptt_latched, 0, "a refused Legacy press latches nothing");
+    }
+    for attempt in 1..=2 {
+        assert_eq!(
+            unsafe { iax_station_ptt_source(st, IAX_PTT_LEGACY, true) },
+            IAX_ERR_NOT_CONNECTED,
+            "ptt_source(LEGACY) attempt {attempt}"
+        );
+        assert_eq!(snapshot_of(st).ptt_latched, 0);
+    }
+    assert_eq!(
+        unsafe { iax_station_set_ptt(st, false) },
+        IAX_ERR_NOT_CONNECTED,
+        "set_ptt(false) still reaches the console, which is idle"
+    );
+    assert_eq!(snapshot_of(st).ptt_latched, 0);
+    unsafe { iax_station_free(st) };
+}
+
+/// Bluetooth keys only through a lease: a plain press is refused before the
+/// arbiter is touched, so nothing holds and nothing latches, and the engine
+/// bounds every Bluetooth hold. Its release is still accepted.
+#[test]
+fn bluetooth_press_without_lease_is_invalid() {
+    let st = new_station();
+    assert_eq!(
+        unsafe { iax_station_ptt_source(st, IAX_PTT_BLUETOOTH, true) },
+        IAX_ERR_INVALID
+    );
+    assert_eq!(
+        last_error_of(st),
+        "invalid argument: bluetooth presses need a lease"
+    );
+    let s = snapshot_of(st);
+    assert_eq!(s.ptt_sources, 0, "a refused Bluetooth press holds nothing");
+    assert_eq!(s.ptt_latched, 0, "and latches nothing");
+    assert_eq!(
+        unsafe { iax_station_ptt_source(st, IAX_PTT_BLUETOOTH, false) },
+        IAX_OK,
+        "a Bluetooth release is never refused"
+    );
+    unsafe { iax_station_free(st) };
+}
+
+/// The six PTT fields are appended after `mic_stopped`, the last field main
+/// had, and nothing else moved. At 0ef2114 `IaxState` was 136 bytes on `arm64`
+/// and `x86_64` (the bool run ending at `dmr_active` finishes at 134);
+/// `EchoLink`'s three flags and the two stopped-device flags then took 134..139.
+/// The six `u32`s start at the next 4-byte boundary, 140, and end at 164,
+/// padded to 168 for the 8-byte alignment the `u64` counters impose.
+/// `dtmf_total`, `dmr_active` and `mic_stopped` are pinned, so a field
+/// inserted mid-struct fails at its own line. The VOX loudness `f32`
+/// appended after them lands in that padding (164..168), so the size holds.
+#[test]
+fn iax_state_size_grows_by_exactly_the_six_ptt_fields() {
+    use std::mem::{offset_of, size_of};
+    const SIZE_BEFORE_PTT_FIELDS: usize = 140;
+    assert_eq!(iax_state_size(), size_of::<IaxState>());
+    assert_eq!(iax_state_size(), SIZE_BEFORE_PTT_FIELDS + 24 + 4);
+    assert_eq!(offset_of!(IaxState, dtmf_total), 120);
+    assert_eq!(offset_of!(IaxState, dmr_active), 133);
+    assert_eq!(offset_of!(IaxState, mic_stopped), 138);
+    let first = offset_of!(IaxState, ptt_sources);
+    assert_eq!(first, SIZE_BEFORE_PTT_FIELDS);
+    assert_eq!(offset_of!(IaxState, ptt_latched), first + 4);
+    assert_eq!(offset_of!(IaxState, ptt_forced_seq), first + 8);
+    assert_eq!(offset_of!(IaxState, ptt_forced_sources), first + 12);
+    assert_eq!(offset_of!(IaxState, ptt_forced_reason), first + 16);
+    assert_eq!(offset_of!(IaxState, ptt_tx_timeout_ms), first + 20);
+    // `vox_db` came after them and fits in that tail padding: it sits at 164
+    // and the size stays 168.
+    assert_eq!(offset_of!(IaxState, vox_db), first + 24);
 }

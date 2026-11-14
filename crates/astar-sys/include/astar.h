@@ -11,6 +11,152 @@
 #include <stdlib.h>
 
 /**
+ * [`IaxBleEvent::kind`]: the client enabled the button. `confirmed` says
+ * whether this Mac already holds a confirm press for the peer.
+ */
+#define IAX_BLE_EV_ENABLE 1
+
+/**
+ * [`IaxBleEvent::kind`]: the client disabled the button. Releases a held key.
+ */
+#define IAX_BLE_EV_DISABLE 2
+
+/**
+ * [`IaxBleEvent::kind`]: the confirm press was recorded during setup.
+ */
+#define IAX_BLE_EV_CONFIRMED 3
+
+/**
+ * [`IaxBleEvent::kind`]: the Bluetooth adapter reported a new state in `adapter`.
+ */
+#define IAX_BLE_EV_ADAPTER 4
+
+/**
+ * [`IaxBleEvent::kind`]: a connect attempt numbered `epoch` succeeded.
+ */
+#define IAX_BLE_EV_CONNECTED 5
+
+/**
+ * [`IaxBleEvent::kind`]: the peer on `epoch` exposes the button characteristic with NOTIFY.
+ */
+#define IAX_BLE_EV_GATT_ACCEPTED 6
+
+/**
+ * [`IaxBleEvent::kind`]: the peer on `epoch` is a lookalike without the button service.
+ */
+#define IAX_BLE_EV_GATT_REJECTED 7
+
+/**
+ * [`IaxBleEvent::kind`]: notifications are on for `epoch`. Starts the settle window.
+ */
+#define IAX_BLE_EV_SUBSCRIBED 8
+
+/**
+ * [`IaxBleEvent::kind`]: notifications stopped on `epoch`. Releases a held key.
+ */
+#define IAX_BLE_EV_UNSUBSCRIBED 9
+
+/**
+ * [`IaxBleEvent::kind`]: a notify on `epoch`, its bytes at `payload` / `payload_len`.
+ */
+#define IAX_BLE_EV_NOTIFY 10
+
+/**
+ * [`IaxBleEvent::kind`]: an RSSI read on `epoch` answered with `rssi` dBm.
+ */
+#define IAX_BLE_EV_PROBE_OK 11
+
+/**
+ * [`IaxBleEvent::kind`]: an RSSI read on `epoch` failed. Two in a row while keyed release.
+ */
+#define IAX_BLE_EV_PROBE_FAILED 12
+
+/**
+ * [`IaxBleEvent::kind`]: the link on `epoch` dropped. Releases a held key.
+ */
+#define IAX_BLE_EV_DISCONNECTED 13
+
+/**
+ * [`IaxBleEvent::kind`]: the Mac is going to sleep. Releases a held key.
+ */
+#define IAX_BLE_EV_SLEEP 14
+
+/**
+ * [`IaxBleEvent::kind`]: the Mac woke. Never keys by itself.
+ */
+#define IAX_BLE_EV_WAKE 15
+
+/**
+ * [`IaxBleEvent::kind`]: the engine refused a lease renew. Latches a button that was down.
+ */
+#define IAX_BLE_EV_LEASE_LOST 16
+
+/**
+ * [`IaxBleEvent::kind`]: the client's 250 ms timer. Drives probes and renewals.
+ */
+#define IAX_BLE_EV_TICK 17
+
+/**
+ * [`IaxBleEvent::adapter`]: powered on and authorised.
+ */
+#define IAX_BLE_ADAPTER_ON 0
+
+/**
+ * [`IaxBleEvent::adapter`]: powered off.
+ */
+#define IAX_BLE_ADAPTER_OFF 1
+
+/**
+ * [`IaxBleEvent::adapter`]: the user has not granted Bluetooth access.
+ */
+#define IAX_BLE_ADAPTER_UNAUTHORIZED 2
+
+/**
+ * [`IaxBleEvent::adapter`]: the system is resetting the adapter.
+ */
+#define IAX_BLE_ADAPTER_RESETTING 3
+
+/**
+ * [`IaxBleEvent::adapter`]: this Mac has no LE adapter.
+ */
+#define IAX_BLE_ADAPTER_UNSUPPORTED 4
+
+/**
+ * [`IaxBleOutput::intent`]: nothing to tell the station this step.
+ */
+#define IAX_BLE_INTENT_NONE 0
+
+/**
+ * [`IaxBleOutput::intent`]: lease-press the Bluetooth source now.
+ */
+#define IAX_BLE_INTENT_PRESS 1
+
+/**
+ * [`IaxBleOutput::intent`]: release the Bluetooth source now; see `release_reason`.
+ */
+#define IAX_BLE_INTENT_RELEASE 2
+
+/**
+ * [`IaxBleDevice::kind`]: a speaker-mic, so the client offers its audio helper.
+ */
+#define IAX_BLE_KIND_SPEAKER_MIC 0
+
+/**
+ * [`IaxBleDevice::kind`]: a button with no audio of its own.
+ */
+#define IAX_BLE_KIND_BUTTON_ONLY 1
+
+/**
+ * [`IaxBleDevice::liveness`]: the link is not probed while keyed.
+ */
+#define IAX_BLE_LIVENESS_NONE 0
+
+/**
+ * [`IaxBleDevice::liveness`]: the link is probed by RSSI reads while keyed.
+ */
+#define IAX_BLE_LIVENESS_RSSI 1
+
+/**
  * Success.
  */
 #define IAX_OK 0
@@ -163,6 +309,30 @@
 #define IAX_ERR_ECHOLINK -24
 
 /**
+ * A lease renew on a PTT source that holds no lease: never pressed with one,
+ * released, or latched by a forced stop (lease expiry, transmit time-out,
+ * stop-all, call end). Renew never presses; a client seeing this must drop
+ * its own key-down and wait for a fresh press.
+ */
+#define IAX_ERR_NOT_LEASED -25
+
+/**
+ * An argument outside its documented range: an unknown PTT source, a lease
+ * TTL of 0 or above 5000 ms, a lease on a source other than Bluetooth, a
+ * Bluetooth press without a lease (Bluetooth keys only with one, so the
+ * engine bounds every Bluetooth hold), or a
+ * transmit time-out below 60 000 ms (including 0) or above 600 000 ms. The
+ * value already in force is kept, so no caller can disable the time-out.
+ */
+#define IAX_ERR_INVALID -26
+
+/**
+ * A press on a PTT source that a forced stop latched. Release that source
+ * first, then press again.
+ */
+#define IAX_ERR_PTT_LATCHED -27
+
+/**
  * Number of log-spaced dBFS bins [`iax_station_mic_spectrum`] writes when
  * monitoring (iax-e73e). Size the `out` array to (at least) this; a larger
  * buffer is fine (the extra entries are left untouched). A literal here so
@@ -170,6 +340,53 @@
  * to the engine's [`astar_station::SPECTRUM_BINS`].
  */
 #define IAX_SPECTRUM_BINS 256
+
+/**
+ * [`iax_station_ptt_source`] id for the on-screen button and Space. They
+ * are one source because they are the same hand on the same Mac.
+ */
+#define IAX_PTT_MANUAL 0
+
+/**
+ * VOX: the voice-operated gate a client drives from
+ * [`IaxState::vox_db`].
+ */
+#define IAX_PTT_VOX 1
+
+/**
+ * A USB radio interface's PTT line (raw USB or tty).
+ */
+#define IAX_PTT_SERIAL 2
+
+/**
+ * A Bluetooth LE PTT button. The only source that may hold a lease
+ * ([`iax_station_ptt_lease_press`]), because it is the only one whose
+ * release can be lost in the air.
+ */
+#define IAX_PTT_BLUETOOTH 3
+
+/**
+ * [`iax_station_set_ptt`]'s callers: `astar-server`, the CLI, Python and
+ * the Iced client.
+ */
+#define IAX_PTT_LEGACY 4
+
+/**
+ * [`IaxState::ptt_forced_reason`] before the first forced stop.
+ */
+#define IAX_PTT_FORCED_NONE 0
+
+/**
+ * The Bluetooth lease ran out without a renew: the button's link went
+ * quiet while it held the key, so the engine unkeyed it.
+ */
+#define IAX_PTT_FORCED_LEASE_EXPIRED 1
+
+/**
+ * The transmit time-out fired: the radio was on air continuously for the
+ * whole time-out, so every source was stopped and latched.
+ */
+#define IAX_PTT_FORCED_TX_TIMEOUT 2
 
 /**
  * Top-level operating mode. Mirrors `astar_station::OperatingMode`.
@@ -413,11 +630,192 @@ typedef enum {
 } IaxVocoderEnrol;
 
 /**
+ * Opaque Bluetooth PTT button machine. Heap-allocated by [`iax_bleptt_new`],
+ * freed by [`iax_bleptt_free`]. Single-threaded: drive it from one thread.
+ * It holds no secret and no I/O; it is the pure `ButtonMachine` and nothing
+ * else.
+ */
+typedef struct IaxBleMachine IaxBleMachine;
+
+/**
  * Opaque station handle. Heap-allocated by [`iax_station_new`], freed by
  * [`iax_station_free`]. The only cross-boundary heap object; treat it as a
  * pointer you must not dereference, copy-and-free twice, or use after free.
  */
 typedef struct IaxStation IaxStation;
+
+/**
+ * One row of the supported-button table, filled by [`iax_bleptt_device_at`].
+ *
+ * Strings are fixed, NUL-terminated UTF-8 arrays so the client allocates and
+ * frees nothing, and so Swift reads the UUIDs from here instead of
+ * hard-coding them: the Rust table is the only place a UUID is written.
+ */
+typedef struct {
+  /**
+   * Stable config key (`inrico-b02ptt`). Never shown to the user.
+   */
+  char id[32];
+  /**
+   * Name for the UI (`Inrico B02PTT`).
+   */
+  char display_name[64];
+  /**
+   * Advertised-name prefix, matched case-sensitively; the per-unit suffix is ignored.
+   */
+  char name_prefix[32];
+  /**
+   * GATT service holding the button: uppercase, hyphenated, 36 characters.
+   */
+  char service[37];
+  /**
+   * The button characteristic (must carry NOTIFY), same form as `service`.
+   */
+  char characteristic[37];
+  /**
+   * `IAX_BLE_KIND_*`.
+   */
+  uint32_t kind;
+  /**
+   * `IAX_BLE_LIVENESS_*`.
+   */
+  uint32_t liveness;
+  /**
+   * Provenance of the row (the listen-only spike that verified it). Kept for
+   * maintainers; clients must not display it.
+   */
+  char verified[128];
+} IaxBleDevice;
+
+/**
+ * [`MachineConfig::DEFAULT`] in whole milliseconds, filled by
+ * [`iax_bleptt_default_config`]. Read-only for the client: it exists so the
+ * lease TTL and renew period the client uses come from the same numbers the
+ * machine was tested with.
+ */
+typedef struct {
+  /**
+   * Notifies inside this window after a subscribe latch instead of keying.
+   */
+  uint32_t settle_ms;
+  /**
+   * RSSI probe period while the button holds the key.
+   */
+  uint32_t probe_keyed_ms;
+  /**
+   * Consecutive missed probes that mean the link is dead.
+   */
+  uint32_t probe_misses_dead;
+  /**
+   * RSSI probe period while idle (signal display only; misses never release).
+   */
+  uint32_t probe_idle_ms;
+  /**
+   * Lease TTL the client passes to `iax_station_ptt_lease_press`.
+   */
+  uint32_t lease_ttl_ms;
+  /**
+   * How often the client renews the lease while pressed.
+   */
+  uint32_t renew_ms;
+  /**
+   * RSSI at or above this is "strong".
+   */
+  int16_t band_strong_dbm;
+  /**
+   * RSSI at or above this (and below strong) is "fair"; below is "weak".
+   */
+  int16_t band_fair_dbm;
+} IaxBleConfig;
+
+/**
+ * One transport observation, passed to [`iax_bleptt_event`]. Only the fields
+ * its `kind` names are read: `epoch` for link events, `adapter` for
+ * [`IAX_BLE_EV_ADAPTER`], `confirmed` for [`IAX_BLE_EV_ENABLE`], `rssi` for
+ * [`IAX_BLE_EV_PROBE_OK`], and `payload` / `payload_len` for
+ * [`IAX_BLE_EV_NOTIFY`].
+ */
+typedef struct {
+  /**
+   * `IAX_BLE_EV_*`. Anything else is refused with [`IAX_ERR_INVALID`].
+   */
+  uint32_t kind;
+  /**
+   * Connect-attempt number allocated by the client, strictly increasing; 0 is never used.
+   */
+  uint32_t epoch;
+  /**
+   * `IAX_BLE_ADAPTER_*`. Anything else is refused with [`IAX_ERR_INVALID`].
+   */
+  uint32_t adapter;
+  /**
+   * Whether this Mac already holds a confirm press for the peer.
+   */
+  bool confirmed;
+  /**
+   * RSSI in dBm from a successful probe.
+   */
+  int16_t rssi;
+  /**
+   * Notify bytes, borrowed for the call only. May be NULL only when `payload_len` is 0.
+   */
+  const uint8_t *payload;
+  /**
+   * The notify's true length. Up to 8 bytes are copied; anything longer
+   * keeps its length and decodes Malformed, so a long payload can never be
+   * truncated into a valid press.
+   */
+  uintptr_t payload_len;
+} IaxBleEvent;
+
+/**
+ * What the machine decided this step, filled by [`iax_bleptt_event`] and
+ * [`iax_bleptt_status`].
+ */
+typedef struct {
+  /**
+   * `IAX_BLE_INTENT_*`: what to tell the station now. Always NONE from [`iax_bleptt_status`].
+   */
+  uint32_t intent;
+  /**
+   * `ReleaseReason` (1 button, 2 malformed, 3 link lost, 4 adapter off,
+   * 5 disabled, 6 sleep) when `intent` is RELEASE, else 0.
+   */
+  uint32_t release_reason;
+  /**
+   * Read the peer's RSSI now and report it as [`IAX_BLE_EV_PROBE_OK`] or
+   * [`IAX_BLE_EV_PROBE_FAILED`].
+   */
+  bool cmd_probe;
+  /**
+   * Cancel the peer connection now.
+   */
+  bool cmd_drop_link;
+  /**
+   * `LinkStatus` (0 disabled … 10 reconnecting), the only source of the UI's status line.
+   */
+  uint32_t status;
+  /**
+   * 0 when no RSSI has been read, else `SignalBand` (1 strong, 2 fair, 3 weak).
+   */
+  uint32_t signal;
+  /**
+   * Whether `last_rssi` holds a reading.
+   */
+  bool has_rssi;
+  /**
+   * Last RSSI in dBm; 0 when `has_rssi` is false.
+   */
+  int16_t last_rssi;
+  /**
+   * The last live notify was a press, whatever the gates said. For the self-test only.
+   */
+  bool raw_pressed;
+  /**
+   * The machine holds the key; the client renews the lease while this is true.
+   */
+  bool pressed;
+} IaxBleOutput;
 
 /**
  * Station configuration passed to [`iax_station_new`]. All fields are
@@ -781,6 +1179,66 @@ typedef struct {
    * Feature-independent, like [`Self::echolink_active`].
    */
   bool echolink_logged_in;
+  /**
+   * `true` when the speaker's stream stopped and could not be rebuilt —
+   * the call is deaf. The engine rebuilds a stream whose device changes
+   * under it (a Bluetooth headset switching to hands-free) by itself; this
+   * is set only once that has failed. Read the device's name with
+   * [`iax_station_speaker_stopped`] and say so.
+   */
+  bool speaker_stopped;
+  /**
+   * `true` when the mic's stream stopped and could not be rebuilt. Read
+   * the device's name with [`iax_station_mic_stopped`].
+   */
+  bool mic_stopped;
+  /**
+   * Mask of the PTT sources holding the key right now, bit
+   * `1 << IAX_PTT_*`. The radio is on air while any held source is
+   * unlatched, so a UI that wants to know who is keying reads this
+   * instead of guessing from its own button state. `0` while nothing
+   * holds.
+   */
+  uint32_t ptt_sources;
+  /**
+   * Mask of the sources latched by a forced stop, a stop-all, a hang-up
+   * or a refused press (same bits as [`Self::ptt_sources`]). The Legacy
+   * bit latches only on the transmit time-out and on a stop-all. A latched
+   * source keys again only after it releases, so a UI can say "let go and
+   * press again" instead of showing a refusal it cannot explain.
+   */
+  uint32_t ptt_latched;
+  /**
+   * Sequence number of the last forced stop (transmit time-out or
+   * Bluetooth lease expiry); `0` before the first. A UI announces a forced
+   * stop once per change of this value, not once per poll.
+   */
+  uint32_t ptt_forced_seq;
+  /**
+   * Mask of the sources the last forced stop released (same bits as
+   * [`Self::ptt_sources`]).
+   */
+  uint32_t ptt_forced_sources;
+  /**
+   * Why the last forced stop happened: [`IAX_PTT_FORCED_LEASE_EXPIRED`] or
+   * [`IAX_PTT_FORCED_TX_TIMEOUT`], and [`IAX_PTT_FORCED_NONE`] before the
+   * first.
+   */
+  uint32_t ptt_forced_reason;
+  /**
+   * The transmit time-out in force, in milliseconds: `120000` on a new
+   * station, and `60000..=600000` after any accepted
+   * [`iax_station_set_tx_timeout_ms`]. Never `0`, because the time-out
+   * cannot be turned off.
+   */
+  uint32_t ptt_tx_timeout_ms;
+  /**
+   * The loudness VOX judges, in dBFS `-60.0..=0.0`: the mean power of the
+   * same input as [`Self::input_db`] over the last 50 ms. A single click
+   * barely moves it, so drive VOX and its calibration meter from this
+   * field; `input_db` stays the peak for level meters.
+   */
+  float vox_db;
 } IaxState;
 
 /**
@@ -877,6 +1335,85 @@ typedef struct {
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
+
+/**
+ * Number of rows in the supported-button table. Rows are indexed
+ * `0..count`; the index is what [`iax_bleptt_new`] and
+ * [`iax_bleptt_accepts_gatt`] take.
+ */
+uintptr_t iax_bleptt_device_count(void);
+
+/**
+ * Fill `out` with row `index`. Returns [`IAX_ERR_INVALID`] for an index past
+ * the end (leaving `out` untouched), [`IAX_ERR_NULL`] for a NULL `out`, or
+ * [`IAX_ERR_PANIC`].
+ */
+int iax_bleptt_device_at(uintptr_t index, IaxBleDevice *out);
+
+/**
+ * The row whose advertised-name prefix `name` carries, matched
+ * case-sensitively, or `-1`. NULL, non-UTF-8 and a caught panic are also
+ * `-1`. Non-UTF-8 is refused rather than converted lossily, because a lossy
+ * `"B02PTT-\u{FFFD}"` would match a name no B02PTT advertises.
+ */
+int iax_bleptt_match_name(const char *name);
+
+/**
+ * True only when `service` is row `index`'s button service and
+ * `characteristic` is its button characteristic with the NOTIFY bit in
+ * `properties`. UUIDs are accepted in either case. The client calls this once
+ * per discovered characteristic and accepts the peer if any call is true.
+ * A bad index, NULL, non-UTF-8, a malformed UUID or a caught panic is `false`,
+ * so a lookalike device can never be accepted by accident.
+ */
+bool iax_bleptt_accepts_gatt(uintptr_t index,
+                             const char *service,
+                             const char *characteristic,
+                             uint8_t properties);
+
+/**
+ * Fill `out` with [`MachineConfig::DEFAULT`], the configuration every
+ * [`iax_bleptt_new`] machine runs. Returns [`IAX_ERR_NULL`] for a NULL `out`.
+ */
+int iax_bleptt_default_config(IaxBleConfig *out);
+
+/**
+ * Create a machine for row `device_index`, running
+ * [`MachineConfig::DEFAULT`]. It starts Disabled and unpressed. Returns NULL
+ * for an index past the end or a caught panic. Release it with
+ * [`iax_bleptt_free`].
+ */
+IaxBleMachine *iax_bleptt_new(uintptr_t device_index);
+
+/**
+ * Feed one event at `now_ms` (a monotonic offset from any origin the client
+ * keeps fixed for the machine's life) and write the decision to `out`.
+ *
+ * Returns [`IAX_ERR_INVALID`] for an unknown `kind` or `adapter`, or a NULL
+ * `payload` with a non-zero `payload_len`. The machine and `out` are then
+ * untouched. Returns [`IAX_ERR_NULL`] for a NULL `h`, `event` or `out`, and
+ * [`IAX_ERR_PANIC`] for a caught panic. The client treats a panic as a
+ * release, because it can no longer trust the machine's state.
+ */
+int iax_bleptt_event(IaxBleMachine *h,
+                     const IaxBleEvent *event,
+                     uint64_t now_ms,
+                     IaxBleOutput *out);
+
+/**
+ * Write the machine's current state to `out` with `intent` NONE and no
+ * commands, for a UI that needs the status without feeding an event.
+ * Returns [`IAX_ERR_NULL`] for a NULL `h` or `out`.
+ */
+int iax_bleptt_status(IaxBleMachine *h, IaxBleOutput *out);
+
+/**
+ * Free a machine from [`iax_bleptt_new`]. NULL is a no-op. Freeing does not
+ * release anything at the station. The client releases the Bluetooth source
+ * before it frees the machine, and the engine's 1.5 s lease covers a client
+ * that does not.
+ */
+void iax_bleptt_free(IaxBleMachine *h);
 
 /**
  * Create a station. Returns a non-NULL `IaxStation*` on success, or NULL if
@@ -1072,9 +1609,92 @@ int iax_station_reject(IaxStation *st);
 int iax_station_incoming_from(IaxStation *st, char *buf, uintptr_t len);
 
 /**
- * Set local transmit (PTT). Returns [`IAX_ERR_NOT_CONNECTED`] while idle.
+ * Write the name of the output device whose stream stopped, as of the most
+ * recent [`iax_station_snapshot`], into `buf` of `len` bytes (NUL-terminated,
+ * truncate-safe). Empty (returns `0`) while `IaxState::speaker_stopped` is
+ * `false`. Returns the byte length the full name needs (excluding the NUL),
+ * or a negative `IAX_ERR_*`; pass `len == 0` to query the size. A device
+ * name — secret-free.
+ */
+int iax_station_speaker_stopped(IaxStation *st, char *buf, uintptr_t len);
+
+/**
+ * Write the name of the input device whose stream stopped, as of the most
+ * recent [`iax_station_snapshot`]. Same contract as
+ * [`iax_station_speaker_stopped`], for `IaxState::mic_stopped`.
+ */
+int iax_station_mic_stopped(IaxStation *st, char *buf, uintptr_t len);
+
+/**
+ * Set local transmit (PTT) as the `Legacy` source ([`IAX_PTT_LEGACY`]).
+ *
+ * `true` presses Legacy. `false` stops every source, as
+ * [`iax_station_ptt_stop_all`] does, and re-arms Legacy, because `false` is
+ * the only release a Legacy caller has. Returns [`IAX_ERR_NOT_CONNECTED`]
+ * while idle (for `false` too: it always reaches the console), and
+ * [`IAX_ERR_PTT_LATCHED`] for a `true` only after the transmit time-out
+ * or an [`iax_station_ptt_stop_all`] stopped a held Legacy key, until a
+ * `false` re-arms it. A `true` the console refuses latches nothing, and a
+ * Legacy key still held when the call hangs up is released with no latch,
+ * so the next call's `true` keys. A key held past the transmit time-out
+ * (two minutes unless [`iax_station_set_tx_timeout_ms`] changed it) unkeys.
  */
 int iax_station_set_ptt(IaxStation *st, bool on);
+
+/**
+ * Press (`on`) or release one PTT source (`IAX_PTT_*`). The radio is on air
+ * while any unlatched source holds, so releasing one source never unkeys
+ * another's over.
+ *
+ * Release is never refused and returns [`IAX_OK`] even while idle. A press
+ * returns [`IAX_ERR_PTT_LATCHED`] while the source is latched (release it
+ * first), or the console's own refusal ([`IAX_ERR_NOT_CONNECTED`],
+ * [`IAX_ERR_AUDIO`], [`IAX_ERR_NXDN`], [`IAX_ERR_DMR`]), after which the
+ * source is latched until it releases ([`IAX_PTT_LEGACY`] excepted: a
+ * refused Legacy press latches nothing). A press of [`IAX_PTT_BLUETOOTH`] is
+ * [`IAX_ERR_INVALID`] and changes nothing: Bluetooth keys only through
+ * [`iax_station_ptt_lease_press`], so the engine bounds every Bluetooth
+ * hold. Its release is accepted. An unknown `src` is [`IAX_ERR_INVALID`];
+ * NULL `st` is [`IAX_ERR_NULL`].
+ */
+int iax_station_ptt_source(IaxStation *st, uint32_t src, bool on);
+
+/**
+ * Stop transmitting, whoever holds the key: release every source and latch
+ * every one that was held, [`IAX_PTT_LEGACY`] included, so nothing re-keys
+ * until it is let go and pressed again. Always forwards an unkey to the
+ * console. Returns
+ * [`IAX_OK`] (idle included), [`IAX_ERR_NULL`] or [`IAX_ERR_PANIC`].
+ */
+int iax_station_ptt_stop_all(IaxStation *st);
+
+/**
+ * Press [`IAX_PTT_BLUETOOTH`] with a lease of `ttl_ms` (1..=5000). The
+ * engine unkeys the source by itself when the lease runs out without an
+ * [`iax_station_ptt_lease_renew`], so a button whose release is lost in the
+ * air still ends unkeyed. Any other `src`, `ttl_ms == 0` or `ttl_ms > 5000`
+ * is [`IAX_ERR_INVALID`] and changes nothing. Otherwise the result is as
+ * [`iax_station_ptt_source`]'s press.
+ */
+int iax_station_ptt_lease_press(IaxStation *st, uint32_t src, uint32_t ttl_ms);
+
+/**
+ * Extend the lease of a source that holds one. Returns [`IAX_OK`], or
+ * [`IAX_ERR_NOT_LEASED`] when `src` holds no lease (never pressed, already
+ * released, stopped or expired): renew never presses, so a renew racing a
+ * forced stop cannot re-key. An unknown `src` is [`IAX_ERR_INVALID`].
+ */
+int iax_station_ptt_lease_renew(IaxStation *st, uint32_t src);
+
+/**
+ * Set the transmit time-out: the longest the radio may stay on air
+ * continuously, whichever sources hold it. `ms` must be 60000..=600000
+ * (1 to 10 minutes). Anything else, `0` included, is [`IAX_ERR_INVALID`]
+ * and the value in force stays, so no binding can turn the time-out off.
+ * A new station runs on 120000. Read it back from
+ * [`IaxState::ptt_tx_timeout_ms`].
+ */
+int iax_station_set_tx_timeout_ms(IaxStation *st, uint32_t ms);
 
 /**
  * Send a single DTMF digit to the active call's peer (iax-0e9b). How the
@@ -1379,6 +1999,8 @@ int iax_station_set_mic_profile(IaxStation *st, const char *json);
 
 /**
  * Fill the caller-allocated `out` with the latest call state. Cheap; poll it.
+ * The `ptt_*` fields are read after the console fields, so a latch caused by
+ * the call ending is already reported in the same snapshot.
  * Returns [`IAX_OK`], [`IAX_ERR_NULL`] (NULL `st`/`out`), or [`IAX_ERR_PANIC`].
  */
 int iax_station_snapshot(IaxStation *st, IaxState *out);
@@ -1875,7 +2497,8 @@ int iax_station_dstar_disconnect(IaxStation *st);
  *
  * ```json
  * {"link":"linked","talker":"AJ7HR","slow_text":"hi","backend":"thumbdv",
- *  "tx_capable":true,"ptt":false,"tx_db":-60.0,"rx_db":-31.2,"input_db":-45.0}
+ *  "tx_capable":true,"ptt":false,"tx_db":-60.0,"rx_db":-31.2,"input_db":-45.0,
+ *  "vox_db":-52.0}
  * ```
  *
  * `link` is one of `idle`/`linking`/`linked`/`unlinking`/`failed`; `backend`
@@ -1889,8 +2512,8 @@ int iax_station_dstar_disconnect(IaxStation *st);
  * compiled in. Returns [`IAX_ERR_NULL`] if `st` is NULL, or
  * [`IAX_ERR_PANIC`].
  *
- * The three level fields duplicate [`IaxSnapshot`]'s `tx_db`/`rx_db`/
- * `input_db`, which mirror the active session whatever its network — read
+ * The four level fields duplicate [`IaxSnapshot`]'s `tx_db`/`rx_db`/
+ * `input_db`/`vox_db`, which mirror the active session whatever its network — read
  * them from the snapshot on a metering tick and call this only when the UI
  * needs the D-Star-specific fields.
  */

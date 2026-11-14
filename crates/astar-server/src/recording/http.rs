@@ -42,7 +42,7 @@
 //! finite and admin-only, so a session revoked mid-download lets that one
 //! download finish; the next request is refused.
 
-use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -315,52 +315,6 @@ fn percent_decode(s: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// One `Range` header against a file of `total` bytes, as the inclusive
-/// span to send. `None`: ignore the header and send the whole file (not a
-/// `bytes` range, malformed, `a > b`, or more than one range).
-/// `Some(Err(()))`: unsatisfiable, answered `416`.
-fn parse_range(header: &str, total: u64) -> Option<Result<(u64, u64), ()>> {
-    // The unit is case-insensitive (RFC 9110 §14.1).
-    let h = header.trim();
-    let spec = h
-        .get(..5)
-        .filter(|u| u.eq_ignore_ascii_case("bytes"))
-        .map(|_| &h[5..])?
-        .trim_start()
-        .strip_prefix('=')?
-        .trim();
-    if spec.contains(',') {
-        return None;
-    }
-    let (a, b) = spec.split_once('-')?;
-    let (a, b) = (a.trim(), b.trim());
-    let digits = |s: &str| !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit());
-    // A number too long for u64 is still a number: it saturates.
-    let num = |s: &str| s.parse::<u64>().unwrap_or(u64::MAX);
-    if a.is_empty() {
-        if !digits(b) {
-            return None;
-        }
-        let n = num(b);
-        if n == 0 || total == 0 {
-            return Some(Err(()));
-        }
-        return Some(Ok((total.saturating_sub(n), total - 1)));
-    }
-    if !digits(a) || !(b.is_empty() || digits(b)) {
-        return None;
-    }
-    let first = num(a);
-    let last = if b.is_empty() { u64::MAX } else { num(b) };
-    if last < first {
-        return None;
-    }
-    if first >= total {
-        return Some(Err(()));
-    }
-    Some(Ok((first, last.min(total - 1))))
-}
-
 /// A download as the server sends it, inside a per-client stream slot
 /// (like the audio streams, it does not count against the event streams).
 /// `range` is the request's `Range` header, read only for a file.
@@ -437,13 +391,7 @@ fn attachment_name(name: &str) -> String {
         .collect()
 }
 
-fn run_file(
-    mut conn: astar_http::Conn,
-    path: &Path,
-    name: &str,
-    how: &FileReply,
-    range: Option<&str>,
-) {
+fn run_file(conn: astar_http::Conn, path: &Path, name: &str, how: &FileReply, range: Option<&str>) {
     // Opened only now, and never through a symlink: the file or the folder
     // it sits in may have changed since the name was looked up. A recording
     // sits in a day folder, checked here; a packet log sits in the folder
@@ -457,7 +405,7 @@ fn run_file(
     } else {
         None
     };
-    let Some((mut file, size)) = opened else {
+    let Some((file, size)) = opened else {
         respond(conn, &how.gone);
         return;
     };
@@ -465,67 +413,13 @@ fn run_file(
     let mut headers = vec![
         ("Content-Type", how.content_type),
         ("Cache-Control", "no-store"),
-        ("Accept-Ranges", "bytes"),
     ];
     if how.attach {
         headers.push(("Content-Disposition", disposition.as_str()));
     }
     // The span comes from the size of the open handle, and the seek is on
     // that same handle: nothing is re-opened by path.
-    let (status, start, len, content_range) = match range.and_then(|h| parse_range(h, size)) {
-        None => (200, 0, size, None),
-        Some(Ok((first, last))) => (
-            206,
-            first,
-            last - first + 1,
-            Some(format!("bytes {first}-{last}/{size}")),
-        ),
-        Some(Err(())) => {
-            conn.respond(
-                &Response::json(416, r#"{"error":"range not satisfiable"}"#)
-                    .header("Content-Range", format!("bytes */{size}"))
-                    .header("Accept-Ranges", "bytes")
-                    .header("Cache-Control", "no-store"),
-            );
-            return;
-        }
-    };
-    if let Some(cr) = &content_range {
-        headers.push(("Content-Range", cr.as_str()));
-    }
-    if start > 0
-        && let Err(e) = file.seek(SeekFrom::Start(start))
-    {
-        tracing::warn!("download: cannot seek {name:?}: {e}");
-        respond(conn, &HttpResponse::error_json(500, "cannot read the file"));
-        return;
-    }
-    if conn.write_head_sized(status, &headers, len).is_err() || conn.head_only() {
-        return;
-    }
-    if let Err(e) = copy_exact(file, &mut conn, len) {
-        // Returning closes the connection short of Content-Length.
-        tracing::warn!("download: {name:?} cut short: {e}");
-    }
-}
-
-/// Copies exactly `size` bytes; a source that runs dry first is an error.
-fn copy_exact<R: Read, W: Write>(mut from: R, to: &mut W, size: u64) -> io::Result<()> {
-    let mut left = size;
-    let mut buf = vec![0u8; TAR_CHUNK];
-    while left > 0 {
-        let cap = usize::try_from(left).unwrap_or(usize::MAX).min(buf.len());
-        let n = from.read(&mut buf[..cap])?;
-        if n == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "the file shrank while it was being sent",
-            ));
-        }
-        to.write_all(&buf[..n])?;
-        left -= n as u64;
-    }
-    to.flush()
+    astar_http::files::send_file(conn, file, size, &headers, range, name);
 }
 
 fn run_tar(mut conn: astar_http::Conn, ctrl: &NodeController, since: Option<SystemTime>) {
@@ -577,6 +471,7 @@ mod tests {
     use crate::secrets::SecretProvider;
     use crate::test_support::{packet_log_cfg, seed_packet_log};
     use std::collections::BTreeMap;
+    use std::io::Read;
     use std::net::TcpStream;
     use std::time::Duration;
 
@@ -1199,30 +1094,6 @@ mod tests {
             "{head}"
         );
         assert!((body.len() as u64) < want, "{}", body.len());
-    }
-
-    #[test]
-    fn ranges_parse_as_one_satisfiable_span_or_nothing() {
-        assert_eq!(parse_range("bytes=0-1", 10), Some(Ok((0, 1))));
-        assert_eq!(parse_range("bytes=-3", 10), Some(Ok((7, 9))));
-        assert_eq!(parse_range("bytes=4-", 10), Some(Ok((4, 9))));
-        assert_eq!(parse_range("bytes=4-99", 10), Some(Ok((4, 9))));
-        assert_eq!(parse_range(" bytes = 2 - 3 ", 10), Some(Ok((2, 3))));
-        assert_eq!(parse_range("Bytes=0-1", 10), Some(Ok((0, 1))));
-        assert_eq!(parse_range("BYTES=-2", 10), Some(Ok((8, 9))));
-        assert_eq!(parse_range("bytes=10-", 10), Some(Err(())));
-        assert_eq!(parse_range("bytes=-0", 10), Some(Err(())));
-        assert_eq!(parse_range("bytes=0-", 0), Some(Err(())));
-        for ignored in [
-            "bytes=0-1,2-3",
-            "bytes=3-2",
-            "bytes=-",
-            "bytes=",
-            "bytes=+1-2",
-            "lines=0-1",
-        ] {
-            assert_eq!(parse_range(ignored, 10), None, "{ignored}");
-        }
     }
 
     #[test]

@@ -65,6 +65,8 @@
                             .foregroundStyle(.tertiary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                    Divider().padding(.vertical, 4)
+                    AllStarSettingsBlock()
                 }
                 .font(.callout)
                 .listRowSeparator(.hidden)
@@ -127,6 +129,95 @@
                     // The message is already published on the directory, where
                     // it outlives this view; saying it twice in two styles
                     // would read as two problems.
+                    outcome = nil
+                }
+            }
+        }
+    }
+
+    /// The "AllStar nodes" block under the reflector one: how many nodes are
+    /// loaded, how fresh, a Sync Now button, the last failure and the
+    /// attribution the feed carries. Same shape as the reflector block above,
+    /// reading `AllStarDirectory` instead.
+    private struct AllStarSettingsBlock: View {
+        @EnvironmentObject private var allstar: AllStarDirectory
+
+        @State private var outcome: String?
+        @State private var syncing = false
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 6) {
+                let count = allstar.index.count
+                if count == 0 {
+                    Text("No AllStar nodes loaded")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("\(count.formatted()) AllStar nodes")
+                        .accessibilityLabel("AllStar directory contents")
+                        .accessibilityValue("\(count.formatted()) nodes")
+                }
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(
+                            ReflectorDirectoryStatus.freshness(
+                                lastFetched: allstar.lastFetched,
+                                isBundled: allstar.origin == .bundled,
+                                now: Date())
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        Text(
+                            ReflectorDirectoryStatus.automaticLine(
+                                nextDue: allstar.nextAutomaticSync, now: Date())
+                        )
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    }
+                    Spacer(minLength: 8)
+                    Button {
+                        sync()
+                    } label: {
+                        if syncing {
+                            ProgressView().controlSize(.small).frame(width: 40)
+                        } else {
+                            Text("Sync Now")
+                        }
+                    }
+                    .controlSize(.small)
+                    .disabled(syncing)
+                    .accessibilityLabel("Sync AllStar nodes now")
+                    .accessibilityValue(syncing ? "syncing" : "")
+                }
+                if let outcome {
+                    Text(outcome)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                if let error = allstar.lastSyncError {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if !allstar.feed.attribution.isEmpty {
+                    Text(allstar.feed.attribution)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+
+        private func sync() {
+            syncing = true
+            outcome = nil
+            Task { @MainActor in
+                defer { syncing = false }
+                do {
+                    outcome = try await allstar.sync(trigger: .manual).message()
+                } catch {
+                    // Already published on the directory as `lastSyncError`.
                     outcome = nil
                 }
             }

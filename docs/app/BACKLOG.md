@@ -12,7 +12,138 @@ inline. All 129 issues (107 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (43)
+## Open items (49)
+
+### astar-b02hw — Rob's hardware checks for the B02PTT button, before the release that ships it
+*P1 high · task · labels: macos, ptt, bluetooth, hardware, test, cx:3*
+
+The Bluetooth PTT work is built and unit-tested, but nothing has yet
+watched a real Inrico B02PTT or opened Bluetooth: running the app, the
+Bluetooth permission prompt and pressing the button are Rob's alone. Until
+these pass, the settle window (300 ms), the RSSI bands (−65 / −80 dBm), the
+2.5 s link-loss and 1.5 s hung-app figures are the design's numbers, not
+measured ones; if any moves, `MachineConfig::DEFAULT`, its pinned tests and
+`docs/site/macos/bluetooth-ptt.md` move with it.
+
+**Listen-only** (`IAX_BLE_TESTS=1 swift Tools/b02ptt-watch.swift`, button on
+and nearby; it links nothing from astar and never builds a `Station`):
+
+1. Does the button send its current state on subscribe, and how late? (A held
+   state reported after the 300 ms settle window would key without a fresh
+   press: the accepted residual risk of the conditional latch.)
+2. `readRSSI` round trip, and how often a healthy link misses a 500 ms reply.
+3. Does LE advertising stop while HFP is connected, and does
+   `retrieveConnectedPeripherals` still find the unit?
+4. Press-to-notify timing.
+5. RSSI "across the room" and "next room" (sets the bands).
+
+**Keying, only into the local M17 parrot** (`just m17-parrot 17000`, astar's
+M17 at `127.0.0.1:17000` module A, never a live node, radio side into a dummy
+load or unpowered):
+
+1. Choose the B02PTT in Quick settings, confirm, press, hold, release.
+2. Pull the battery mid-press and time the unkey.
+3. Walk out of range mid-press.
+4. Turn Bluetooth off mid-press.
+5. Close the lid mid-press.
+6. Space tap during a B02PTT over stops it.
+7. VOX on, B02PTT pressed, then talk and stop: the over must not drop.
+8. Transmit time-out at 1 min: a held B02PTT stops at 1 min with the banner;
+   Space then B02PTT then release Space still stops 1 min after Space keyed;
+   continuous VOX stops at 1 min and keys again only after a pause longer
+   than the Hang Timeout.
+9. Switch between a UCI150 config and a B02PTT config: only one PTT device
+   works at a time.
+10. The HFP mic opens without a gap when keyed.
+11. Sleep the Mac (or Bluetooth off and on) with the button up: "reconnecting…"
+    then connected, and the first press keys. Repeat holding the button
+    through the drop: "release to arm", and only a release then a fresh press
+    keys.
+12. **HFP reconnect while held.** With **Use B02PTT-xxxx for mic and
+    speaker** on, hold the button while the headset's HFP link drops and comes
+    back (walk out of range and back, or toggle the headset in Bluetooth
+    settings). The over must end unkeyed, the audio route must recover
+    without a restart, and nothing may key until a release and a fresh press.
+13. **An over with the astar window closed.** Close the window (menu-bar
+    only) and key with the B02PTT: it keys and unkeys as with the window
+    open, the poll keeps running while a unit is linked, and a forced stop
+    (pull the battery, or let a 1 min time-out fire) still ends unkeyed. With
+    no banner in view, note how you learn the over ended (`astar-txnotify`).
+
+Also from the build: serial unplug while keyed; the permission prompt's
+timing and text; config import and deletion with a button set up; quit while
+keyed; Bluetooth off at launch; relaunch with no ★ default; light and dark,
+VoiceOver and Reduce Motion on the picker, setup flow, chip, banner and
+time-out slider; setup from each entry point and the audio helper.
+
+### astar-blescan — Bluetooth PTT: bound the background scan, and say when a config's button is unknown
+*P3 low · bug · labels: macos, ptt, bluetooth, ui, cx:2*
+
+Two quiet behaviours in `BluetoothPTTController` (AstarCore), both failing
+safe (nothing keys), both worth fixing once Rob's hardware checks
+(`astar-b02hw`) have tuned the search window.
+
+1. **The background scan never ends.** Outside setup, `seek()` starts an
+   unfiltered scan whenever `retrievePeripherals` returns nothing, and
+   `finishSearch` stops a scan only during setup or once a unit is linked.
+   So when a confirmed button is off or away and CoreBluetooth has forgotten
+   its identifier, the scan runs for as long as the config is active. The
+   cost is power, not safety. Bound it (a duty cycle, or a scan only on
+   wake, Bluetooth on and an explicit Search), and show the chip as
+   "not found" rather than searching forever.
+2. **An unknown device attaches silently.** If the config's PTT names a
+   device this build's table does not list (for example a config imported
+   from a newer astar), or `BLEButtonMachine` fails to construct, `attach`
+   publishes the spec and returns with no machine, `needsSetup` false and
+   status `.disabled`. The chip is hidden and Set up does nothing, so the
+   user sees no status and has no way forward. Publish a "this button isn't
+   supported by this version of astar" status, with the chip and the PTT
+   row saying so, and log it.
+
+The astar-uiclone clients owe the same behaviour.
+
+### astar-hdrstrip — a compact node and TX/RX strip in the header once the meters scroll away
+*P2 medium · feature · labels: macos, ui, meters, cx:3*
+
+Asked 2026-10-10 (Rob); design agreed. When the main window is scrolled far enough that the TX/RX meters leave the view, a small strip fades in on the right of the header, beside "astar / AllStarLink client". The trigger is the meters scrolling out of view (Rob's choice), not any scroll at all, so the strip never duplicates meters already on screen. It fades out when the meters come back or the call ends. It is an inset in the header, not a separate window.
+
+- **Content:** the connected node, as `connectedTargetLabel(for:)` gives it (the reflector and module on M17), plus a thin red TX bar and a thin green RX bar, each with a small TX/RX label and no percentages. At the 310 pt minimum width the node shortens to its number; the bars stay.
+- **Performance:** a leaf view that observes `CallMeters` directly, like `VUMetersPane`, so the ~20 Hz ticks re-render only the strip (astar-3e04).
+- **Scroll detection:** the deployment target is macOS 13, so not `onScrollGeometryChange` (macOS 15). Report the meters' frame through a preference key in the ScrollView's named coordinate space. The strip shows when the meters' maxY is at or above the viewport's top edge and a call is up.
+- **Accessibility:** light and dark mode, and Reduce Motion drops the fade. VoiceOver reads it as one element, "Call summary: node 12345, TX 40 percent, RX 62 percent", and skips it while it is hidden.
+- **Tests:** the show/hide rule and the node label are pure AstarCore functions with exact-value tests (in a call with meters hidden → shown; meters visible, or no call → hidden; the compact label at narrow width). Check light and dark screenshots. Update the main-window docs page and the `docs/FEATURES.md` row, with Windows/Linux "paused".
+
+### astar-livedev — switching config mid-call saves the new devices but leaves the call on the old ones
+*P1 high · bug · labels: macos, audio, configs, cx:5*
+
+Found 2026-10-10 testing the B02PTT. astar launched on the starred default (UCI150) and was connected to the M17 parrot. Then the B02PTT config was selected. The menu showed the B02PTT as mic and speaker and saved both. But `Station::set_devices` only records what the *next* connect will open (`station.rs:535`), so the live call kept capturing and playing through the UCI150's sound card. Nothing on screen said so. Every test over went through the wrong mic, and the playback came out of the wrong speaker. It looked like a bad Bluetooth mic until CoreAudio's running-device list showed "USB Audio Device" running and the B02PTT idle.
+
+Fix: picking a config, or a mic or speaker in Quick settings, during a call moves the live call to the new devices. The engine re-opens the mic lane and the output bus on the new devices without dropping the call (rebind the lane the way `set_gate`'s callers rebind a destination). Any PTT hold or transmit time-out survives the switch. If a live rebind fails, the call stays on the old devices and the menu says so in plain words, such as "Still using USB Audio Device until you reconnect." It must never show devices the call is not using.
+
+Tests: a fake backend that records opens. A config switch mid-call opens the new input and output once and closes the old ones, and the snapshot reports the devices actually open. A failed open keeps the old devices and surfaces the message. The FEATURES row for configs and the configs docs page say what happens mid-call.
+
+### astar-txeq — a per-config TX equaliser, with a B02PTT preset for its missing mids
+*P1 high · feature · labels: audio, macos, engine, bluetooth, cx:5*
+
+Measured 2026-10-10 on the Inrico B02PTT's mic, the same voice through two mics, each band relative to 300–500 Hz. The B02PTT has a strong hump at 300–500 Hz, then falls 9 dB at 500–800 Hz and 19 dB at 800–1250 Hz. That is 4–6 dB further down than the UCI150's hand mic through the middle of the voice, while 2–3 kHz sits about 8 dB brighter. Rob heard the same: mids down by at least 10 dB, a boxy, hollow voice. The measurement is roughly ±3 dB (different sentences; the UCI150 recording went through Codec 2), but the drop is clearly real.
+
+astar's mic chain has no EQ stage: input gain, then the noise gate or RNNoise, the compressor and TX trim (`MicLane::dsp_quantize`, `crates/astar-audio/src/router.rs`). A mic profile only notches out hum.
+
+- **Engine:** an EQ stage in the mic lane after input gain and before noise reduction, so the denoiser and compressor see the corrected voice. A few biquads (low shelf, two or three peaking bands, high shelf) at the pipeline rate. Parameters are set live from the control side the way the compressor's level is: an atomic generation and a rebuild on the audio thread with no allocation. Off means byte-identical output. It goes through the C ABI (`just cbindgen`), the Swift binding and the Python binding parity.
+- **Config:** an additive `Setup` field (no `ConfigVersion` bump) holding the bands; it travels in `.astarconfig` exports. Absent means off.
+- **B02PTT preset:** applied when a config picks the B02PTT for its mic ("Use B02PTT-6522 for mic and speaker"). Starting point: about −5 dB peaking at 400 Hz (Q ≈ 1.2) and +8 dB peaking at 1 kHz (Q ≈ 0.9), tuned by ear on the M17 parrot, with the result recorded in the preset. The preset also sets the processing Rob chose by ear on 2026-10-10 (B02PTT on the M17 parrot, with the speaker working): noise reduction on, compression on at level 0.4, input gain 1.0 (unity; the raw mic delivers voice around −25 dBFS RMS, peaks near −9) and TX trim about 0.26. At that trim the voice reached the parrot at −31 to −43 dBFS RMS with peaks −11 to −16, a little low; check it against the TX meter and raise it toward 0.5 if other stations hear it quietly. Today those values live in the global M17 overrides (`m17.audio.*`), which apply to every config. The preset belongs to the config, so the B02PTT's processing must not leak into the UCI150's M17 calls.
+- **UI:** under the mic's advanced settings, progressive disclosure: an on/off switch, the preset name, and a small band editor with a live response curve, in light and dark mode, with VoiceOver values for each band. The TX spectrum already in the window shows the effect.
+- **Tests:** exact-value biquad tests (the gain at the centre frequency within 0.1 dB, unity far from the band), off is byte-identical, a parameter change takes effect without a glitch, and a mutation check on the bypass. Docs page and `docs/FEATURES.md` row, with Windows/Linux "paused".
+
+### astar-txnotify — macOS notification when transmit is force-stopped
+*P3 low · feature · labels: macos, ptt, ui, cx:2*
+
+A forced stop (transmit time-out, Bluetooth button link lost, lease expiry, Bluetooth off, sleep) shows an orange banner in the astar window for 8 s and a VoiceOver announcement. With the window hidden — menu-bar only, or another app in front — nothing tells the operator why the over ended. Post a user notification with the same text when the astar window is not key, and ask for notification permission the first time a forced stop happens, never at launch. Take the text from `BluetoothPTTPresentation` so the banner and the notification cannot disagree. Left out of the first Bluetooth PTT release on purpose (decided 2026-10-08, Rob). The astar-uiclone clients owe the same.
+
+### astar-voxstop — Should the VOX indicator become an on-screen stop?
+*P3 low · feature · labels: macos, ptt, ui, accessibility, cx:1*
+
+With VOX on, the call card shows the VOX indicator in place of the PTT button, and the indicator has no click, no VoiceOver action and no hint. So while the Bluetooth button or VOX holds the key, the only stops are Space (with the astar window in front) and turning on TX disabled — listening only. The Bluetooth PTT work kept the indicator unchanged on purpose (its design froze it). Question for Rob: should it become a click and VoiceOver stop while another source holds the key (a stop only, never a key), as the PTT button is with VOX off? If yes, the stop goes through `CallSession.stopAllTransmit()`, and the "With VOX on" sentences in `docs/site/macos/bluetooth-ptt.md`, `docs/site/about/safety.md` and `docs/site/macos/first-run.md` change with it. The astar-uiclone clients owe the same answer.
 
 ### astar-dmr-keychain-wipe — a failed Keychain read followed by a save wipes every DMR password
 *P2 · bug · labels: app, keychain, dmr, cx:2*
@@ -539,11 +670,6 @@ VERIFY: TDD (applyAudioSettings pushes it; legacy settings decode false; Setup o
 **Blocked by:** astar-de0a (closed)
 
 **Design:** Full hardware PTT parity via the serialport crate: port picker, RTS/DTR line selection with invert, COS sensing. Serial gets a small trait seam, PTT keying plus COS, with a fake for demos and a serialport-backed real impl so logic is testable without hardware. Linux uses in-kernel ch341; Windows needs the vendor CH34x driver documented. Last in phase 1 because it needs hardware in hand. Design: docs/superpowers/specs/2026-07-01-gui-rs-parity-roadmap-design.md
-
-### astar-d263 — VOX pre-roll: expose + wire set_vox_preroll_ms (consumer of iax-2733)
-*P2 medium · feature · labels: audio, cx:2, vox*
-
-Consumer of astar-lib iax-2733 (VOX pre-roll / look-back buffer). BLOCKED until iax-2733 lands (adds C-ABI iax_station_set_vox_preroll_ms + Swift Station.setVoxPrerollMs(_:), clamp 0..250ms, engine DEFAULT 0 = OFF). Because the engine default is off, astar must opt in or there is no behavior change. Work: (1) ensure the Swift shim setVoxPrerollMs is vendored (update-astarstation.sh / rebuild xcframework to pick up the regenerated header); (2) on the dialing-page VOX options, expose a pre-roll control (slider/stepper 0..250ms, sensible default ~250 when VOX is enabled) OR just set a fixed 250ms when VOX turns on if we don't want UI; (3) call station.setVoxPrerollMs(ms) on VOX enable + on change; (4) verify the first syllable is no longer clipped once VOX keys (pairs with astar-e9ff which wires VOX off inputDB from iax-5c30). Note open engine question Q1 in iax-2733: if the NoiseReducer gate suppresses the quiet onset, the prepended pre-roll may be near-silent — validate with real audio.
 
 ### astar-dbcb — Expose always-on node controls (iax-a1fb): accept-calls + register toggles + multi-call list
 *P2 medium · feature · labels: cx:2, node, ui*

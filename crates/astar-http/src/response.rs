@@ -21,6 +21,7 @@ pub const fn reason(code: u16) -> &'static str {
         301 => "Moved Permanently",
         303 => "See Other",
         304 => "Not Modified",
+        308 => "Permanent Redirect",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",

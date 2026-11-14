@@ -113,11 +113,9 @@ public final class ReflectorDirectory: ObservableObject {
     }
 
     private let storage: ReflectorDirectoryStoring
-    private let fetcher: ReflectorFeedFetching
-    private let configuration: Configuration
-    private let now: () -> Date
-
-    private var metadata: ReflectorSyncMetadata
+    /// The clock, the validators and the network — shared policy with the
+    /// AllStar directory (see `FeedSync`).
+    private let feedSync: FeedSync
 
     /// Lowercased search haystacks, one per entry, built once per load. 3,000
     /// rows × six fields is not worth re-lowercasing on every keystroke.
@@ -130,10 +128,10 @@ public final class ReflectorDirectory: ObservableObject {
         now: @escaping () -> Date = Date.init
     ) {
         self.storage = storage
-        self.fetcher = fetcher
-        self.configuration = configuration
-        self.now = now
-        self.metadata = storage.syncMetadata()
+        self.feedSync = FeedSync(
+            storage: storage, fetcher: fetcher, feedURL: configuration.feedURL,
+            userAgent: configuration.userAgent,
+            manualSyncInterval: configuration.manualSyncInterval, now: now)
         self.feed = .empty
         self.origin = .none
         self.index = .empty
@@ -239,7 +237,7 @@ public final class ReflectorDirectory: ObservableObject {
     // MARK: - Sync
 
     /// When astar last got a definitive answer — a 200 or a 304.
-    public var lastFetched: Date? { metadata.lastFetched }
+    public var lastFetched: Date? { feedSync.metadata.lastFetched }
 
     /// When the next automatic sync becomes permissible: `lastFetched` plus
     /// the feed's own `client_refresh_days`. `nil` means never fetched, so a
@@ -249,9 +247,7 @@ public final class ReflectorDirectory: ObservableObject {
     /// loaded feed on every call, never captured into a constant, so a change
     /// upstream takes effect the sync after it lands.
     public var nextAutomaticSync: Date? {
-        metadata.lastFetched.map {
-            $0.addingTimeInterval(TimeInterval(feed.clientRefreshDays) * 86_400)
-        }
+        feedSync.nextAutomaticSync(refreshDays: feed.clientRefreshDays)
     }
 
     /// Fetch the feed if policy allows, and adopt it if it changed.
@@ -261,49 +257,17 @@ public final class ReflectorDirectory: ObservableObject {
     /// a modal.
     @discardableResult
     public func sync(trigger: SyncTrigger = .manual) async throws -> SyncOutcome {
-        let start = now()
-
-        if trigger == .automatic, let due = nextAutomaticSync, start < due {
-            return .skipped(.notDue(nextDue: due))
-        }
-        if let attempt = metadata.lastAttempt {
-            let retry = attempt.addingTimeInterval(configuration.manualSyncInterval)
-            if start < retry { return .skipped(.debounced(retryAfter: retry)) }
-        }
-
-        // Stamped before the request, so an endpoint that hangs or fails is
-        // debounced exactly like one that succeeds.
-        metadata.lastAttempt = start
-        try? storage.writeSyncMetadata(metadata)
-
         do {
-            let response = try await fetcher.fetch(
-                ReflectorFeedRequest(
-                    url: configuration.feedURL,
-                    etag: metadata.etag,
-                    lastModified: metadata.lastModified,
-                    userAgent: configuration.userAgent))
-
-            switch response {
-            case .notModified:
-                metadata.lastFetched = now()
-                try? storage.writeSyncMetadata(metadata)
-                lastSyncError = nil
-                return .notModified
-
-            case .payload(let data, let etag, let lastModified):
-                // Parse before writing. A 200 carrying an error page must not
-                // overwrite a directory that works.
-                let parsed = try ReflectorFeed.decode(data)
-                try storage.writeCachedFeed(data)
-                metadata.lastFetched = now()
-                metadata.etag = etag
-                metadata.lastModified = lastModified
-                try? storage.writeSyncMetadata(metadata)
-                lastSyncError = nil
-                adopt(parsed, origin: .cache)
-                return .updated(count: parsed.entries.count, generated: parsed.generated)
-            }
+            let outcome = try await feedSync.run(
+                trigger: trigger, refreshDays: feed.clientRefreshDays,
+                decode: ReflectorFeed.decode,
+                adopt: { parsed in
+                    self.adopt(parsed, origin: .cache)
+                    return .updated(count: parsed.entries.count, generated: parsed.generated)
+                })
+            if case .skipped = outcome { return outcome }
+            lastSyncError = nil
+            return outcome
         } catch {
             // Recorded and rethrown, not swallowed: a caller that awaited this
             // still gets its error, and the fire-and-forget launch sync — which

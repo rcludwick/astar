@@ -97,7 +97,9 @@
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help(advancedExpanded ? "Hide the advanced settings" : "Show codec frames and Debug mode")
+            .help(
+                advancedExpanded ? "Hide the advanced settings" : "Show codec frames and Debug mode"
+            )
             .accessibilityLabel("Advanced")
             .accessibilityValue(advancedExpanded ? "expanded" : "collapsed")
             .accessibilityHint(
@@ -124,8 +126,17 @@
                     folderLine(
                         session.recordingSettings.packetLogFolder,
                         label: "Packet logs folder",
-                        choose: { chooseFolder(\.packetLogFolder, message: "Choose where astar saves its packet logs.", error: $packetLogFolderError) },
-                        show: { showInFinder(session.recordingSettings.packetLogFolder, error: $packetLogFolderError) })
+                        choose: {
+                            chooseFolder(
+                                \.packetLogFolder,
+                                message: "Choose where astar saves its packet logs.",
+                                error: $packetLogFolderError)
+                        },
+                        show: {
+                            showInFinder(
+                                session.recordingSettings.packetLogFolder,
+                                error: $packetLogFolderError)
+                        })
                     if let packetLogFolderError {
                         Text(packetLogFolderError)
                             .font(.caption)

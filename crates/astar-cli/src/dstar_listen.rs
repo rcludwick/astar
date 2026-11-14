@@ -628,6 +628,7 @@ mod tests {
             tx_dbfs: -60.0,
             rx_dbfs: -60.0,
             input_dbfs: -60.0,
+            vox_dbfs: -60.0,
         }
     }
 

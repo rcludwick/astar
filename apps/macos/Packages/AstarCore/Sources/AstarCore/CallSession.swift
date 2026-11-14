@@ -6,6 +6,32 @@ import AstarStation
 import Combine
 import Foundation
 
+/// One stop the engine forced on the transmitter. Every source that was
+/// holding is latched by it and must release before it can key again; the UI
+/// uses this to say why the radio went quiet.
+public struct PTTForcedStop: Equatable, Sendable {
+    /// The engine's forced-stop sequence number; it only ever increases on a station.
+    public let seq: UInt32
+    /// The sources that were holding when it fired.
+    public let sources: StationPTTSourceSet
+    public let reason: StationPTTForcedReason
+    /// The time-out in force when it fired, for "Transmit stopped after n minutes".
+    public let txTimeoutSeconds: Int
+    /// When the session first saw it.
+    public let at: Date
+
+    public init(
+        seq: UInt32, sources: StationPTTSourceSet, reason: StationPTTForcedReason,
+        txTimeoutSeconds: Int, at: Date
+    ) {
+        self.seq = seq
+        self.sources = sources
+        self.reason = reason
+        self.txTimeoutSeconds = txTimeoutSeconds
+        self.at = at
+    }
+}
+
 /// Observable view-model wrapping a `Station` behind a poll loop. SwiftUI
 /// observes the published state; `poll()` advances it from one snapshot.
 ///
@@ -13,6 +39,17 @@ import Foundation
 public final class CallSession: ObservableObject {
     @Published public private(set) var status: IaxStatus = .idle
     @Published public private(set) var ptt = false
+    /// Which PTT sources the engine's arbiter says are holding the key right
+    /// now, from the snapshot. `ptt` above is their OR; this says *who*, so a
+    /// press of the on-screen button can act as stop while another source holds.
+    @Published public private(set) var pttSources: StationPTTSourceSet = []
+    /// The most recent stop the engine forced (transmit time-out or Bluetooth
+    /// lease expiry), published once per engine sequence number so a banner
+    /// or VoiceOver announcement fires once per event, not once per poll.
+    @Published public private(set) var lastForcedStop: PTTForcedStop?
+    /// The one app-wide transmit time-out, whole seconds in 60...600. Mirrors
+    /// what was last pushed to the station; there is no Off.
+    @Published public private(set) var txTimeoutSeconds: Int = AudioSettings.defaultTxTimeoutSeconds
     @Published public private(set) var remotePTT = false
     /// Whether the far end is currently talking. Derived from the rx audio level
     /// (gated, with hangover) OR'd with `remotePTT` — most AllStar nodes never
@@ -425,6 +462,12 @@ public final class CallSession: ObservableObject {
     /// `.answered`. Cleared on the next dial attempt and on a successful answer;
     /// never set for a user-initiated `disconnect()`.
     @Published public private(set) var lastDialFailure: String?
+    /// A speaker or mic whose stream stopped for good, in plain words —
+    /// "Speaker stopped: B02PTT-6522" — or `nil` while both are working
+    /// (astar-hfpout). The engine rebuilds a stream whose device changes under
+    /// it by itself; this is set only once that has failed, so a call is
+    /// never silently deaf.
+    @Published public private(set) var audioDeviceWarning: String?
 
     /// The USB serials of the vocoder sticks this Mac trusts (Settings →
     /// Vocoders), as last handed to the station. Read from
@@ -480,9 +523,10 @@ public final class CallSession: ObservableObject {
     /// Voice-activated PTT: when on, `poll()` keys/unkeys from the mic level
     /// (see `VoxGate`). Persisted via the audio store.
     @Published public private(set) var voxEnabled = false
-    /// VOX trigger level (dBFS): mic level at/above which VOX keys. Mirrors the
-    /// `VoxGate` threshold; adjustable from the quick-settings slider. Persisted.
-    @Published public private(set) var voxThresholdDBFS: Float = -40
+    /// VOX trigger level (dBFS): mic loudness (the snapshot's 50 ms mean power,
+    /// `voxDB`) at/above which VOX keys. Mirrors the `VoxGate` threshold;
+    /// adjustable from the quick-settings slider. Persisted (`VoxThreshold`).
+    @Published public private(set) var voxThresholdDBFS: Float = VoxThreshold.defaultDBFS
     /// VOX hang time (ms): how long PTT stays keyed after the mic drops below the
     /// threshold, bridging brief speech pauses. Mirrors the `VoxGate` hangover;
     /// adjustable from the quick-settings slider. Persisted.
@@ -1064,9 +1108,9 @@ public final class CallSession: ObservableObject {
     /// driver (e.g. the macOS-only serial UCI150 interface) key the call without
     /// `AstarCore` importing that driver — keeping the core multiplatform and
     /// IOKit-free. Called inside `poll()` after the snapshot is read, with the
-    /// snapshot's `remotePTT` + `rxDB`. Return a non-nil `Bool` to drive
-    /// `setPTT` (true = key, false = unkey); return `nil` for "no change this
-    /// tick" so the call's PTT is left untouched. Errors from the underlying
+    /// snapshot's `remotePTT` + `rxDB`. Return a non-nil `Bool` to press or
+    /// release the `.serial` PTT source (true = key, false = unkey); return `nil`
+    /// for "no change this tick" so the call's PTT is left untouched. Errors from the underlying
     /// driver are the driver's concern — it should return `nil` (and tear itself
     /// down) on failure.
     public var pttSourceTick: ((_ remoteKeyed: Bool, _ rxDb: Float) -> Bool?)?
@@ -1077,9 +1121,10 @@ public final class CallSession: ObservableObject {
     /// Node directory: a successful connect auto-records the dialed node as a
     /// recent (see `poll()`). Injected so tests can use an in-memory store.
     private let directoryStore: NodeDirectoryStore
-    /// Resolves a node number to a display name. Seeded with the directory as its
-    /// only source; a future online lookup (astar-6c65) appends a second source.
+    /// Resolves a node number to a display name. Seeded with the saved
+    /// directory first, then the AllStar directory from hamcall-db.
     private let nameResolver: NameResolver
+    private let allstarBox = AllStarIndexBox()
     /// Per-mic characterization profiles, keyed by device name. Injected so
     /// tests can use an in-memory store.
     private let micProfileStore: MicProfileStore
@@ -1102,18 +1147,41 @@ public final class CallSession: ObservableObject {
     /// edge into `.answered` (re-asserting the spectrum decay onto the freshly
     /// created TX/RX analyzers).
     private var lastPolledStatus: IaxStatus = .idle
-    /// VOX gate state; advanced from `poll()`'s `txDB` while `voxEnabled`.
+    /// VOX gate state; advanced from `poll()`'s `voxDB` while `voxEnabled`.
     /// `internal` (not `private`) so tests can assert the threshold/hangtime
     /// setters reach the gate's config.
-    var voxGate = VoxGate()
+    var voxGate = VoxGate(config: CallSession.defaultVoxConfig)
+    /// How long the VOX loudness must stay over the threshold before VOX keys:
+    /// 120 ms. With the engine's 50 ms loudness window, a click or codec
+    /// glitch shorter than about 70 ms can never key the radio, however loud
+    /// it is; speech sustains far longer than that. The VOX pre-roll
+    /// (`setVoxPreroll`) replays the audio captured during this wait, so the
+    /// first syllable is not clipped.
+    static let voxAttackMS = 120
+    /// VOX pre-roll while VOX is on, ms: the engine's maximum. It covers the
+    /// whole wait before VOX keys — up to ~50 ms for the loudness window to
+    /// rise, the 120 ms attack, and up to one 50 ms poll — so the syllable
+    /// that keyed VOX goes out whole. The engine's pre-roll belongs to the
+    /// mic lane, not to a source, so while VOX is on EVERY key-up sends the
+    /// look-back: Space, the on-screen button, serial and the Bluetooth
+    /// button included. Accepted (review 2026-11-11). 0 while VOX is off,
+    /// so those sources go back to sending only what follows the press.
+    static let voxPrerollMS: UInt32 = 250
+    /// The gate's tuning before any setting is applied.
+    static let defaultVoxConfig = VoxConfig(
+        thresholdDBFS: VoxThreshold.defaultDBFS, hangoverMS: 500, attackMS: voxAttackMS)
     /// Detects "receiving" from the rx audio level with a hangover so it doesn't
     /// flicker on speech gaps. Same tuning the menu-bar star used previously.
     private var rxActivityGate = VoxGate(config: VoxConfig(thresholdDBFS: -50, hangoverMS: 400))
     /// ~250 ms sliding-max smoothers behind `txDBHeld`/`rxDBHeld`.
     private var txPeak = PeakHold(window: 0.25)
     private var rxPeak = PeakHold(window: 0.25)
-    /// Last PTT level VOX drove, so we only call `setPTT` on a change (edge).
+    /// Last level VOX drove its `.vox` source to, so it is only told on a change (edge).
     private var voxKeyed = false
+    /// The last forced-stop sequence number `poll()` published, so a forced
+    /// stop is announced once. Reset when the station is rebuilt, because a
+    /// new engine counts from zero again.
+    private var lastForcedSeq: UInt32 = 0
 
     /// The user's intended RX (output/speaker) gain multiplier — the value to
     /// restore when half-duplex RX suppression releases. Tracks `setOutputGain`
@@ -1148,9 +1216,11 @@ public final class CallSession: ObservableObject {
         self.echolinkPasswords = echolinkPasswords
         self.audioStore = audioStore
         self.directoryStore = directoryStore
-        // Directory first; the online AllStarLink-DB source (astar-6c65) appends
-        // after it so a user's saved label always wins over a remote callsign.
-        self.nameResolver = NameResolver(sources: [DirectoryNameSource(directoryStore)])
+        // Directory first, then the AllStar directory (hamcall-db), so a user's
+        // saved label always wins over a callsign from the downloaded list.
+        self.nameResolver = NameResolver(sources: [
+            DirectoryNameSource(directoryStore), AllStarNameSource(allstarBox),
+        ])
         self.micProfileStore = micProfileStore
         self.micProfileID = audioStore.load().micProfileID
         self.micProfiles = micProfileStore.all()
@@ -1236,6 +1306,14 @@ public final class CallSession: ObservableObject {
     /// `@Published` so the resolved-target line under the dial field refreshes
     /// when a sync replaces the feed, not only when the operator next types.
     @Published public var reflectorIndex: ReflectorIndex = .empty
+
+    /// The AllStar node directory, used to name node numbers (callsign and
+    /// location) after the saved directory has had its say. `.empty` until the
+    /// app hands it the loaded directory. Published so views showing a number
+    /// re-render when a sync lands.
+    @Published public var allstarIndex: AllStarIndex = .empty {
+        didSet { allstarBox.index = allstarIndex }
+    }
 
     /// Talkgroup lists per DMR system slug, when there are any.
     ///
@@ -1327,6 +1405,11 @@ public final class CallSession: ObservableObject {
         endPacketCaptureForCall()
         self.station = station
         self.hasCredentials = hasCredentials
+        // A rebuilt engine starts at its own 120 s default and counts forced
+        // stops from zero: give it the user's time-out and forget the old seq.
+        lastForcedSeq = 0
+        try? station.setTxTimeout(.seconds(txTimeoutSeconds))
+        try? station.setVoxPrerollMs(voxEnabled ? Self.voxPrerollMS : 0)
         // A rebuilt station is a new engine: give it the same trust list, so a
         // credential save can never quietly forget the operator's sticks.
         try? station.setVocoderTrust(vocoderSerials)
@@ -1344,6 +1427,12 @@ public final class CallSession: ObservableObject {
         }
     }
 
+    /// Whether the poll loop is running. The main window asks before it calls
+    /// `start()`, because `start()` restarts the loop: one extra poll and a new
+    /// timer phase each time. Re-evaluating on every PTT edge would otherwise
+    /// poll twice per edge.
+    public var isPolling: Bool { timer != nil }
+
     /// Stop the poll loop.
     public func stop() {
         timer?.invalidate()
@@ -1360,6 +1449,18 @@ public final class CallSession: ObservableObject {
             // forever. Only a real edge may touch a published property.
             if status != snap.status { status = snap.status }
             if ptt != snap.ptt { ptt = snap.ptt }
+            if pttSources != snap.pttSources { pttSources = snap.pttSources }
+            // A forced stop is announced once per engine sequence number; the
+            // seq stays put between events, so equality is the dedupe.
+            if snap.pttForcedSeq != 0, snap.pttForcedSeq != lastForcedSeq {
+                lastForcedSeq = snap.pttForcedSeq
+                if let reason = snap.pttForcedReason {
+                    lastForcedStop = PTTForcedStop(
+                        seq: snap.pttForcedSeq, sources: snap.pttForcedSources,
+                        reason: reason, txTimeoutSeconds: Int(snap.pttTxTimeoutMS / 1000),
+                        at: Date())
+                }
+            }
             // Talk-timer key tracking: stamp the start of a continuous transmit
             // on the rising edge and clear it on the falling edge, so the timer
             // measures *this* hold and resets every unkey (mirrors the repeater
@@ -1380,6 +1481,9 @@ public final class CallSession: ObservableObject {
             if denoiseChain != snap.denoiseChain { denoiseChain = snap.denoiseChain }
             if dtmfPlayed != snap.dtmfPlayed { dtmfPlayed = snap.dtmfPlayed }
             if dtmfTotal != snap.dtmfTotal { dtmfTotal = snap.dtmfTotal }
+            let warning = Self.audioDeviceWarning(
+                speakerStopped: snap.speakerStopped, micStopped: snap.micStopped)
+            if audioDeviceWarning != warning { audioDeviceWarning = warning }
             if m17Available != snap.m17Available { m17Available = snap.m17Available }
             if dstarAvailable != snap.dstarAvailable { dstarAvailable = snap.dstarAvailable }
             // D-Star's own fields are NOT in the snapshot — the engine keeps
@@ -1467,7 +1571,7 @@ public final class CallSession: ObservableObject {
             // steadily instead of flickering at the poll rate.
             let meterNow = Date()
             meters.update(
-                txDB: snap.txDB, rxDB: snap.rxDB, inputDB: snap.inputDB,
+                txDB: snap.txDB, rxDB: snap.rxDB, inputDB: snap.inputDB, voxDB: snap.voxDB,
                 txDBHeld: txPeak.push(snap.txDB, now: meterNow),
                 rxDBHeld: rxPeak.push(snap.rxDB, now: meterNow),
                 rttMS: snap.rttMS)
@@ -1605,9 +1709,9 @@ public final class CallSession: ObservableObject {
                 snap.remotePTT || rxActivityGate.update(level: snap.rxDB, now: Date())
             if receiving != nowReceiving { receiving = nowReceiving }
 
-            // Software VOX: feed the mic level to the gate and key/unkey on the
-            // edge. A separate PTT source from `pttSourceTick`/hold-to-talk; when
-            // enabled it auto-keys from the voice level.
+            // Software VOX: feed the mic level to the gate and press/release the
+            // `.vox` source on the edge. The engine ORs it with the button,
+            // serial and Bluetooth, so VOX closing never unkeys another holder.
             if voxEnabled && !txDisabled {
                 // Half-duplex (default): don't let VOX key while receiving — the
                 // far end's audio bleeding from the speaker into the mic would
@@ -1615,15 +1719,16 @@ public final class CallSession: ObservableObject {
                 if !fullDuplex && receiving {
                     if voxKeyed {
                         voxKeyed = false
-                        keyStation(false)
+                        keyStation(false, source: .vox)
                     }
                 } else {
-                    // Key from the continuous mic input level (metered even while
-                    // unkeyed, iax-5c30) — not txDB, which is floored until we key.
-                    let keyed = voxGate.update(level: snap.inputDB, now: Date())
+                    // Key from the continuous mic loudness (metered even while
+                    // unkeyed, iax-5c30) — not txDB, which is floored until we
+                    // key, and not the peak `inputDB`, which one click fills.
+                    let keyed = voxGate.update(level: snap.voxDB, now: now())
                     if keyed != voxKeyed {
                         voxKeyed = keyed
-                        keyStation(keyed)
+                        keyStation(keyed, source: .vox)
                     }
                 }
             }
@@ -1633,7 +1738,7 @@ public final class CallSession: ObservableObject {
             // station's single-thread contract. A non-nil result is a keying
             // edge to forward; `nil` means "leave PTT alone this tick".
             if let pttSourceTick, let on = pttSourceTick(snap.remotePTT, snap.rxDB) {
-                keyStation(on)
+                keyStation(on, source: .serial)
             }
         }
         while (try? station.readEvent()) != nil {}
@@ -2638,8 +2743,6 @@ public final class CallSession: ObservableObject {
         }
     }
 
-    /// Key (`true`) or unkey (`false`) the local transmit. Honors listen-only:
-    /// a key request while `txDisabled` is forced to unkeyed.
     /// Whether the live network can transmit at all.
     ///
     /// `false` for NXDN and for DMR, both of which astar can hear but not yet
@@ -2657,28 +2760,81 @@ public final class CallSession: ObservableObject {
     /// one of them removes it from here and nothing else changes.
     private static let receiveOnlyNetworks: Set<Network> = [.nxdn, .dmr]
 
+    /// Listen-only is on, or the live network is receive-only: nothing this
+    /// session forwards can key the radio. The UI says "won't transmit" from it.
+    public var transmitBlocked: Bool { txDisabled || !canTransmit }
+
+    /// True while a source other than `.manual` holds: a press of the on-screen
+    /// button or Space then stops instead of keying.
+    public var manualPressStops: Bool { !pttSources.subtracting(.manual).isEmpty }
+
+    /// The on-screen button and Space: the `.manual` source. A press made while
+    /// any other source holds the key is the universal stop instead — the one
+    /// control a stuck wireless or serial source cannot hold down. The holder
+    /// set is read fresh from the station (the published one can be a poll
+    /// stale), falling back to the published set only if the read fails.
+    /// Listen-only and receive-only networks turn a press into a release.
     public func setPTT(_ on: Bool) throws {
-        try station.setPTT(on && !txDisabled && canTransmit)
+        guard on else {
+            try station.pttSource(.manual, on: false)
+            return
+        }
+        let holding = (try? station.readSnapshot().pttSources) ?? pttSources
+        if !holding.subtracting(.manual).isEmpty {
+            try station.pttStopAll()
+            return
+        }
+        try station.pttSource(.manual, on: !txDisabled && canTransmit)
     }
 
-    /// Single choke point for the auto/edge keying sources (VOX, serial). Forces
-    /// unkeyed while listen-only so the radio never transmits. Best-effort.
-    private func keyStation(_ on: Bool) {
+    /// Release every source and latch every one that was holding. Each must
+    /// release before it keys again. Best-effort: the engine never refuses it.
+    public func stopAllTransmit() {
+        try? station.pttStopAll()
+    }
+
+    /// Single choke point for the auto/edge keying sources (VOX, serial). Each
+    /// drives only its own source, so one closing never unkeys another that
+    /// still holds. Forces a release while listen-only. Best-effort.
+    private func keyStation(_ on: Bool, source: StationPTTSource) {
         // `canTransmit` matters most HERE, not on the button: VOX and serial
         // PTT key without anyone pressing anything, so a network that cannot
         // transmit has to be refused at the choke point rather than only by
         // hiding a control.
-        try? station.setPTT(on && !txDisabled && canTransmit)
+        try? station.pttSource(source, on: on && !txDisabled && canTransmit)
     }
 
-    /// Enable/disable listen-only (monitor) mode. When enabling, fail-safe unkey
-    /// and drop any VOX hold so nothing is left on air. Persisted.
+    /// The serial PTT source is going away (unplug, disable, config switch).
+    /// Release it. Safe to call when it was not holding.
+    ///
+    /// The driver calls this from its teardown, before it drops
+    /// `pttSourceTick`: once the hook is gone no tick can ever forward the
+    /// release, and a radio left keyed by a pulled cable stays on air.
+    public func releaseSerialSource() {
+        // Always, and never refused: releasing a source that does not hold is a
+        // no-op in the engine, and it also clears a latch a forced stop left on
+        // it. Other sources keep the key. Because the latch is gone, the driver
+        // gates the next client with `SerialPTTArming`: a line still held at
+        // the re-open never keys until it is released.
+        try? station.pttSource(.serial, on: false)
+    }
+
+    /// Enable/disable listen-only (monitor) mode. When enabling, stop every
+    /// source (Bluetooth and Legacy included, which this session never keyed
+    /// itself) so nothing is left on air. Turning it off again never re-keys:
+    /// the stop latched whatever was holding, and each holder re-arms only
+    /// by releasing. Persisted.
     public func setTxDisabled(_ on: Bool) {
         txDisabled = on
         if on {
-            voxGate = VoxGate()
-            voxKeyed = false
-            try? station.setPTT(false)
+            stopAllTransmit()
+            // Reset the gate's timing but keep the user's threshold and hang
+            // time. `voxKeyed` stays as it was on purpose: the stop latched
+            // `.vox`, and VOX must re-arm the way every source does, by
+            // releasing. After listen-only goes off, the first quiet sample is
+            // a falling edge that releases `.vox` (clearing the latch); a mic
+            // that stays loud sends no edge, so it never re-keys by itself.
+            voxGate = VoxGate(config: voxGate.config)
         }
         persistAudio { $0.txDisabled = on }
     }
@@ -3435,15 +3591,17 @@ public final class CallSession: ObservableObject {
         noiseReduction = s.noiseReduction
     }
 
-    /// Enable/disable voice-activated PTT. When turning off, fail-safe unkey if
-    /// VOX currently held the line. Persisted.
+    /// Enable/disable voice-activated PTT. When turning off, release the VOX
+    /// source if it held the line; any other source keeps the key. Persisted.
     public func setVoxEnabled(_ on: Bool) {
         voxEnabled = on
+        try? station.setVoxPrerollMs(on ? Self.voxPrerollMS : 0)
         if !on {
-            voxGate = VoxGate()
+            // Reset the timing only; the threshold, hang time and attack stay.
+            voxGate = VoxGate(config: voxGate.config)
             if voxKeyed {
                 voxKeyed = false
-                try? station.setPTT(false)
+                try? station.pttSource(.vox, on: false)
             }
         }
         persistAudio { $0.voxEnabled = on }
@@ -3461,6 +3619,17 @@ public final class CallSession: ObservableObject {
         voxHangtimeMS = ms
         voxGate.config.hangoverMS = ms
         persistAudio { $0.voxHangtimeMS = ms }
+    }
+
+    /// Set the one app-wide transmit time-out (whole seconds). Normalised to a
+    /// whole minute in 60...600 first, so nothing can turn it off; published,
+    /// persisted as `audio.txTimeoutSeconds` and pushed to the station, which
+    /// is what enforces it.
+    public func setTxTimeoutSeconds(_ seconds: Int) {
+        let normalized = AudioSettings.normalizedTxTimeoutSeconds(Double(seconds))
+        if txTimeoutSeconds != normalized { txTimeoutSeconds = normalized }
+        persistAudio { $0.txTimeoutSeconds = normalized }
+        try? station.setTxTimeout(.seconds(normalized))
     }
 
     // MARK: - Mic characterization
@@ -3645,10 +3814,9 @@ public final class CallSession: ObservableObject {
     }
 
     /// Resolve an AllStar node number to a display name (saved
-    /// favorite/directory label), or `nil` when unknown — for showing names
-    /// wherever a bare number appears. Backed by a `NameResolver` so a second
-    /// source (the online AllStarLink-DB lookup, astar-6c65) can plug in later
-    /// without touching call sites.
+    /// favorite/directory label, else the AllStar directory's callsign and
+    /// location), or `nil` when unknown — for showing names wherever a bare
+    /// number appears. Backed by a `NameResolver` consulting both in order.
     public func name(forNode node: String) -> String? {
         nameResolver.name(forNode: node)
     }
@@ -3940,12 +4108,19 @@ public final class CallSession: ObservableObject {
         rxCompression = settings.rxCompression
         rxCompressionLevel = settings.rxCompressionLevel
         voxEnabled = settings.voxEnabled
+        try? station.setVoxPrerollMs(settings.voxEnabled ? Self.voxPrerollMS : 0)
         txDisabled = settings.txDisabled
         fullDuplex = settings.fullDuplex
         voxThresholdDBFS = settings.voxThresholdDBFS
         voxGate.config.thresholdDBFS = settings.voxThresholdDBFS
         voxHangtimeMS = settings.voxHangtimeMS
         voxGate.config.hangoverMS = settings.voxHangtimeMS
+        // The transmit time-out is independent of VOX's hang time above. The
+        // stored value is normalised again here because an AudioSettings can
+        // be built in code with any Int.
+        let txTimeout = AudioSettings.normalizedTxTimeoutSeconds(Double(settings.txTimeoutSeconds))
+        txTimeoutSeconds = txTimeout
+        try? station.setTxTimeout(.seconds(txTimeout))
         micProfileID = settings.micProfileID
         applyMicProfile(id: settings.micProfileID)
     }
@@ -4068,4 +4243,23 @@ private func engineDetail(_ error: StationError) -> String {
         detail
         .trimmingCharacters(in: .whitespacesAndNewlines)
         .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+}
+
+extension CallSession {
+    /// The sentence for a stopped speaker and/or mic. One headset that lost
+    /// both is named once; two devices each get a line.
+    static func audioDeviceWarning(speakerStopped: String?, micStopped: String?) -> String? {
+        switch (speakerStopped, micStopped) {
+        case (nil, nil):
+            return nil
+        case (let speaker?, nil):
+            return "Speaker stopped: \(speaker)"
+        case (nil, let mic?):
+            return "Microphone stopped: \(mic)"
+        case (let speaker?, let mic?) where speaker == mic:
+            return "Speaker and microphone stopped: \(speaker)"
+        case (let speaker?, let mic?):
+            return "Speaker stopped: \(speaker)\nMicrophone stopped: \(mic)"
+        }
+    }
 }

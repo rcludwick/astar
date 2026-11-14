@@ -1,0 +1,39 @@
+{
+  "appVersion": "0.1.16-beta",
+  "exportedAt": "2026-10-08T12:00:00Z",
+  "rigs": {
+    "defaultSetupID": "5E2B7A10-3C4D-4E8F-9A1B-2C3D4E5F6A7B",
+    "micProfiles": [],
+    "selectedSetupID": "5E2B7A10-3C4D-4E8F-9A1B-2C3D4E5F6A7B",
+    "setups": [
+      {
+        "bluetoothPTT": {
+          "deviceID": "inrico-b02ptt",
+          "preferredName": "B02PTT-6522"
+        },
+        "fullDuplex": false,
+        "hardwareProfileID": "headset",
+        "id": "5E2B7A10-3C4D-4E8F-9A1B-2C3D4E5F6A7B",
+        "name": "B02PTT handheld",
+        "serial": {
+          "debounceMs": 30,
+          "keyActiveHigh": true,
+          "keyLineRaw": 0,
+          "radioActiveHigh": true,
+          "radioLineRaw": 0,
+          "rxFloorDb": -45,
+          "rxHangMs": 250,
+          "rxModeRaw": 0,
+          "transportRaw": 1
+        },
+        "voxEnabled": false
+      }
+    ]
+  },
+  "settings": {
+    "audio.txTimeoutSeconds": 300,
+    "audio.voxEnabled": false,
+    "audio.voxHangtimeMS": 500
+  },
+  "version": 1
+}

@@ -9,7 +9,7 @@ const $ = (id) => document.getElementById(id);
 function safeNext(n) {
   return (
     typeof n === "string" &&
-    (n === "/" || n.startsWith("/admin/")) &&
+    (n === "/" || n.startsWith("/admin/") || n.startsWith("/nets/")) &&
     !n.includes("//") &&
     !n.includes("\\") &&
     !n.includes("/../")

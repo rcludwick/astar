@@ -1,0 +1,18 @@
+{
+  "name": "adapter_unauthorized_status",
+  "device": "inrico-b02ptt",
+  "steps": [
+    { "at_ms": 0, "event": {"kind": "enable", "confirmed": true},
+      "expect": {"intent": "none", "status": "searching", "cmds": []} },
+    { "at_ms": 1, "event": {"kind": "adapter", "state": "unauthorized"},
+      "expect": {"intent": "none", "status": "unauthorized", "cmds": []} },
+    { "at_ms": 2, "event": {"kind": "adapter", "state": "unsupported"},
+      "expect": {"intent": "none", "status": "unsupported", "cmds": []} },
+    { "at_ms": 3, "event": {"kind": "adapter", "state": "resetting"},
+      "expect": {"intent": "none", "status": "bluetooth_off", "cmds": []} },
+    { "at_ms": 4, "event": {"kind": "adapter", "state": "off"},
+      "expect": {"intent": "none", "status": "bluetooth_off", "cmds": []} },
+    { "at_ms": 5, "event": {"kind": "adapter", "state": "on"},
+      "expect": {"intent": "none", "status": "searching", "cmds": []} }
+  ]
+}

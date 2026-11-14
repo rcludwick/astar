@@ -6,8 +6,8 @@ import Foundation
 
 /// A source that can map an AllStar node number to a human-readable display name
 /// (a callsign or label). The directory (saved favorites/recents) is one source;
-/// a future online AllStarLink-DB lookup (astar-6c65) is another — it plugs in by
-/// conforming to this protocol and being appended to a `NameResolver`'s sources.
+/// the AllStar directory from hamcall-db is another — each conforms to this
+/// protocol and is listed in a `NameResolver`'s sources.
 ///
 /// Platform-neutral (no AppKit) so it's iOS-ready and testable.
 public protocol NameSource {
@@ -18,8 +18,7 @@ public protocol NameSource {
 
 /// Resolves a node number to a display name by consulting an **ordered** list of
 /// sources, first hit wins. The saved directory comes first (a user's curated
-/// label always beats a remote callsign); additional sources (e.g. the online
-/// AllStarLink-DB lookup, astar-6c65) append after it.
+/// label always beats a downloaded callsign), then the AllStar directory.
 ///
 /// `name(forNode:)` returns `nil` when no source knows the node, so callers fall
 /// back to showing the bare number. `displayName(forNode:)` does that fallback
@@ -82,5 +81,44 @@ public struct DirectoryNameSource: NameSource {
             return nil
         }
         return label
+    }
+}
+
+/// A lock-protected holder for the current `AllStarIndex`, so a `NameSource`
+/// (which is a plain value, not main-actor bound) can read whatever the app has
+/// most recently loaded or synced. The session owns one and the app swaps the
+/// index in when the AllStar directory publishes a new one.
+public final class AllStarIndexBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: AllStarIndex
+
+    public init(_ index: AllStarIndex = .empty) { stored = index }
+
+    public var index: AllStarIndex {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return stored
+        }
+        set {
+            lock.lock()
+            defer { lock.unlock() }
+            stored = newValue
+        }
+    }
+}
+
+/// Names an AllStar node from the public node directory: the callsign, with the
+/// location after a middle dot when the directory has one ("WB6NIL · AWS
+/// US-EAST-1"). Sits after `DirectoryNameSource`, so a saved label wins.
+public struct AllStarNameSource: NameSource {
+    private let box: AllStarIndexBox
+
+    public init(_ box: AllStarIndexBox) { self.box = box }
+
+    public func name(forNode node: String) -> String? {
+        guard let entry = box.index.node(node) else { return nil }
+        if let location = entry.location { return "\(entry.callsign) \u{00B7} \(location)" }
+        return entry.callsign
     }
 }

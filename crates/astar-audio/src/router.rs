@@ -80,6 +80,8 @@ struct MicSlot {
     /// Kept alive so the cpal input stream stays open; read by
     /// [`AudioRouter::close_mic`] when the lane is torn down.
     handle: Box<dyn StreamHandle>,
+    /// The device's name, for saying which mic stopped.
+    name: String,
     dest: MicDest,
     gate: Arc<AtomicBool>,
     /// Capture-gain cell (f32 bits, default 1.0) shared with the lane.
@@ -107,6 +109,11 @@ struct MicSlot {
     /// metered CONTINUOUSLY — even while unkeyed — so a consumer's VOX can key
     /// from silence (iax-5c30).
     mic_input_peak: Arc<AtomicU32>,
+    /// Shared VOX loudness cell (f32 bits): the mean power of the same
+    /// post-gain, pre-denoise input over the last 50 ms ([`crate::VoxLevel`]).
+    /// Same tap as `mic_input_peak`; this is what VOX keys from, so a single
+    /// click cannot.
+    mic_vox_power: Arc<AtomicU32>,
     /// VOX pre-roll length in ms (iax-2733): how much look-back audio the lane
     /// flushes ahead of the live stream on key-up. `0` = disabled (the lane
     /// keeps today's cheap unkeyed early-return; no ring, no unkeyed DSP).
@@ -135,6 +142,8 @@ struct OutSlot {
     /// Kept alive so the cpal output stream stays open; read by
     /// [`AudioRouter::close_output`] when the bus is torn down.
     handle: Box<dyn StreamHandle>,
+    /// The device's name, for saying which speaker stopped.
+    name: String,
     mixer: Arc<Mutex<Mixer>>,
     /// Shared output-gain cell (f32 bits, default 1.0) for this bus.
     rx_gain: Arc<AtomicU32>,
@@ -169,12 +178,18 @@ struct OutSlot {
 struct MeteredInput {
     inner: Box<dyn InputSink>,
     peak: Arc<AtomicU32>,
+    vox_power: Arc<AtomicU32>,
+    vox: crate::VoxLevel,
+    /// The rate `write` delivers at (the stream config's pipeline rate).
+    rate: u32,
 }
 
 impl InputSink for MeteredInput {
     fn write(&mut self, samples: &[f32], meter: f32) {
         self.peak
             .store(crate::peak(samples).min(1.0).to_bits(), Ordering::Relaxed);
+        let power = self.vox.update(samples, 1.0, self.rate);
+        self.vox_power.store(power.to_bits(), Ordering::Relaxed);
         self.inner.write(samples, meter);
     }
 
@@ -184,6 +199,31 @@ impl InputSink for MeteredInput {
     fn device_rate_stage(&mut self, samples: &mut Vec<f32>, device_rate: u32) {
         self.inner.device_rate_stage(samples, device_rate);
     }
+}
+
+/// A device whose stream stopped and could not be rebuilt
+/// ([`AudioRouter::stopped_output`], [`AudioRouter::stopped_mic`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoppedDevice {
+    /// The device's name, as the device list shows it — what a UI names.
+    pub name: String,
+    /// Why the last rebuild failed, for the log and for anyone digging.
+    pub reason: String,
+}
+
+/// The first stopped stream by device name, so a caller polling with several
+/// stopped sees a stable answer rather than `HashMap` order.
+fn first_stopped<'a>(
+    slots: impl Iterator<Item = (&'a str, &'a dyn StreamHandle)>,
+) -> Option<StoppedDevice> {
+    slots
+        .filter_map(|(name, handle)| {
+            handle.failure().map(|reason| StoppedDevice {
+                name: name.to_string(),
+                reason,
+            })
+        })
+        .min_by(|a, b| a.name.cmp(&b.name))
 }
 
 pub struct AudioRouter {
@@ -289,8 +329,9 @@ impl AudioRouter {
             .ok_or_else(|| AudioError::DeviceNotFound(id.to_string()))
     }
 
-    /// Open (or reuse) the mic lane + output bus and return the call's channel
-    /// ends. A mic opens at most once; an output opens at most once and its
+    /// Open (or reuse) the mic lane, then the output bus, and return the
+    /// call's channel ends. The mic opens first so a hands-free headset has
+    /// switched rate before its speaker stream is built. A mic opens at most once; an output opens at most once and its
     /// `Mixer` gains one lane per call routed to it. Static wiring (Phase 2):
     /// the returned TX channel is wired straight into the mic lane's
     /// destination with a throwaway waker — Phase 3's `Manager` supplies the
@@ -304,9 +345,24 @@ impl AudioRouter {
         out: &OutputId,
         config: StreamConfig,
     ) -> Result<CallAudio, AudioError> {
-        // 1. Open or reuse the output bus, then add this call's RX lane.
+        // 1. Open or reuse the mic lane FIRST. A Bluetooth headset runs its
+        // speaker in A2DP (44.1 kHz stereo) until its mic opens, when macOS
+        // switches it to hands-free (16 kHz mono). A speaker stream built
+        // before that switch is left at the old rate and stops for good, so
+        // the device has to settle before its speaker opens.
+        let mic_was_open = self.mics.contains_key(mic);
+        self.ensure_mic(mic, config)?;
+
+        // 2. Open or reuse the output bus, then add this call's RX lane. If it
+        // fails, close a mic lane this call opened rather than leaving the
+        // device held open by a call that never started.
         let (spk_tx, spk_rx) = channel::<RxFrame>();
-        self.ensure_output(out, config)?;
+        if let Err(e) = self.ensure_output(out, config) {
+            if !mic_was_open {
+                self.mics.remove(mic);
+            }
+            return Err(e);
+        }
         let out_slot = self
             .outputs
             .get(out)
@@ -317,9 +373,8 @@ impl AudioRouter {
             .expect("mixer mutex poisoned")
             .add_call(spk_rx);
 
-        // 2. Open or reuse the mic lane, then wire this call's TX destination.
+        // 3. Wire this call's TX destination into the mic lane.
         let (mic_tx, mic_rx) = channel::<Vec<i16>>();
-        self.ensure_mic(mic, config)?;
         let mic_slot = self.mics.get(mic).expect("mic lane just ensured present");
         let waker = throwaway_waker();
         // VOX pre-roll lead cell (iax-2733): owned by the call, handed to the
@@ -620,9 +675,17 @@ impl AudioRouter {
     }
 
     /// Open the output bus for `out` if it isn't already open.
+    ///
+    /// A bus whose stream stopped for good and carries no call is opened
+    /// afresh: the device may be back, and keeping the dead slot would leave
+    /// every later call without a speaker. One still carrying a call is left
+    /// alone — reopening it would drop that call's mixer lane.
     fn ensure_output(&mut self, out: &OutputId, config: StreamConfig) -> Result<(), AudioError> {
-        if self.outputs.contains_key(out) {
-            return Ok(());
+        if let Some(slot) = self.outputs.get(out) {
+            if slot.handle.failure().is_none() || self.bus_call_count(out) != 0 {
+                return Ok(());
+            }
+            self.outputs.remove(out);
         }
         let out_dev = self.resolve(out.as_str(), Direction::Output)?;
         let mixer = Arc::new(Mutex::new(
@@ -641,6 +704,7 @@ impl AudioRouter {
             out.clone(),
             OutSlot {
                 handle,
+                name: out_dev.name,
                 mixer,
                 rx_gain,
                 rx_peak,
@@ -654,9 +718,16 @@ impl AudioRouter {
     }
 
     /// Open the mic lane for `mic` if it isn't already open.
+    ///
+    /// Like [`Self::ensure_output`], a lane whose stream stopped for good is
+    /// opened afresh, but only while nothing is bound to it.
     fn ensure_mic(&mut self, mic: &MicId, config: StreamConfig) -> Result<(), AudioError> {
-        if self.mics.contains_key(mic) {
-            return Ok(());
+        if let Some(slot) = self.mics.get(mic) {
+            let bound = slot.dest.lock().expect("dest mutex poisoned").is_some();
+            if slot.handle.failure().is_none() || bound {
+                return Ok(());
+            }
+            self.mics.remove(mic);
         }
         let in_dev = self.resolve(mic.as_str(), Direction::Input)?;
         let dest: MicDest = Arc::new(Mutex::new(None));
@@ -682,6 +753,7 @@ impl AudioRouter {
         let tx_peak = lane.tx_peak();
         let tx_spectrum = lane.tx_spectrum();
         let mic_input_peak = lane.mic_input_peak();
+        let mic_vox_power = lane.mic_vox_power();
         let preroll_ms = lane.preroll_ms_cell();
         let denoise_status = lane.denoise_status_cell();
         let denoise_strength = lane.denoise_strength_cell();
@@ -695,6 +767,7 @@ impl AudioRouter {
             mic.clone(),
             MicSlot {
                 handle,
+                name: in_dev.name,
                 dest,
                 gate,
                 gain,
@@ -707,6 +780,7 @@ impl AudioRouter {
                 tx_peak,
                 tx_spectrum,
                 mic_input_peak,
+                mic_vox_power,
                 preroll_ms,
                 overruns,
                 denoise_status,
@@ -746,6 +820,7 @@ impl AudioRouter {
             mic.clone(),
             MicSlot {
                 handle: in_handle,
+                name: in_dev.name,
                 dest: Arc::new(Mutex::new(None)),
                 gate: Arc::new(AtomicBool::new(false)),
                 gain: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
@@ -758,6 +833,7 @@ impl AudioRouter {
                 tx_peak: Arc::new(AtomicU32::new(0)),
                 tx_spectrum: Arc::new(Mutex::new(SpectrumAnalyzer::new(config.sample_rate))),
                 mic_input_peak: Arc::new(AtomicU32::new(0)),
+                mic_vox_power: Arc::new(AtomicU32::new(0)),
                 preroll_ms: Arc::new(AtomicU32::new(0)),
                 overruns,
                 // No `MicLane` on this path — the monitor and loopback sinks
@@ -773,6 +849,7 @@ impl AudioRouter {
             out.clone(),
             OutSlot {
                 handle: out_handle,
+                name: out_dev.name,
                 mixer: Arc::new(Mutex::new(Mixer::new())),
                 rx_gain: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
                 rx_peak: Arc::new(AtomicU32::new(0)),
@@ -809,9 +886,13 @@ impl AudioRouter {
         // exactly how the VOX calibration meter came to read nothing unless a
         // call happened to be up.
         let mic_input_peak = Arc::new(AtomicU32::new(0));
+        let mic_vox_power = Arc::new(AtomicU32::new(0));
         let sink: Box<dyn InputSink> = Box::new(MeteredInput {
             inner: sink,
             peak: Arc::clone(&mic_input_peak),
+            vox_power: Arc::clone(&mic_vox_power),
+            vox: crate::VoxLevel::new(),
+            rate: config.sample_rate,
         });
         let handle = self
             .backend
@@ -820,6 +901,7 @@ impl AudioRouter {
             mic.clone(),
             MicSlot {
                 handle,
+                name: in_dev.name,
                 dest: Arc::new(Mutex::new(None)),
                 gate: Arc::new(AtomicBool::new(false)),
                 gain: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
@@ -832,6 +914,7 @@ impl AudioRouter {
                 tx_peak: Arc::new(AtomicU32::new(0)),
                 tx_spectrum: Arc::new(Mutex::new(SpectrumAnalyzer::new(config.sample_rate))),
                 mic_input_peak,
+                mic_vox_power,
                 preroll_ms: Arc::new(AtomicU32::new(0)),
                 overruns,
                 // No `MicLane` on this path — the monitor and loopback sinks
@@ -854,6 +937,34 @@ impl AudioRouter {
     #[must_use]
     pub fn output_count(&self) -> usize {
         self.outputs.len()
+    }
+
+    /// An output bus whose stream stopped and could not be rebuilt, or
+    /// `None` while every speaker is playing.
+    ///
+    /// This is how a call that would otherwise be silently deaf gets said
+    /// out loud: the stream worker rebuilds a stream whose device changed
+    /// under it, and only reports here once every rebuild has failed. With
+    /// more than one stopped, the first by device name is returned, so the
+    /// answer does not flicker between polls.
+    #[must_use]
+    pub fn stopped_output(&self) -> Option<StoppedDevice> {
+        first_stopped(
+            self.outputs
+                .values()
+                .map(|slot| (slot.name.as_str(), slot.handle.as_ref())),
+        )
+    }
+
+    /// A mic lane whose stream stopped and could not be rebuilt, or `None`
+    /// while every mic is capturing. See [`Self::stopped_output`].
+    #[must_use]
+    pub fn stopped_mic(&self) -> Option<StoppedDevice> {
+        first_stopped(
+            self.mics
+                .values()
+                .map(|slot| (slot.name.as_str(), slot.handle.as_ref())),
+        )
     }
 
     /// Number of calls mixed onto the given output bus (0 if not open).
@@ -1039,6 +1150,18 @@ impl AudioRouter {
         self.mics
             .get(mic)
             .map(|s| crate::peak_to_dbfs(f32::from_bits(s.mic_input_peak.load(Ordering::Relaxed))))
+    }
+
+    /// The loudness VOX judges on an open lane, in dBFS: the mean power of
+    /// the same input [`AudioRouter::mic_input_dbfs`] peaks, over the last
+    /// 50 ms ([`crate::VoxLevel`]). Same tap — post-gain, pre-denoise,
+    /// metered continuously while unkeyed — and the same observer-lane
+    /// caveat (no gain there). A click too short to matter barely moves it.
+    #[must_use]
+    pub fn mic_vox_dbfs(&self, mic: &MicId) -> Option<f32> {
+        self.mics
+            .get(mic)
+            .map(|s| crate::power_to_dbfs(f32::from_bits(s.mic_vox_power.load(Ordering::Relaxed))))
     }
 
     /// Which mic noise-reduction chain is live on `mic`, and at what device
@@ -1436,6 +1559,11 @@ pub struct MicLane {
     /// callback regardless of the gate, so VOX can key from silence
     /// (iax-5c30). Published from `device_rate_stage` on the capture path.
     mic_input_peak: Arc<AtomicU32>,
+    /// VOX loudness (f32 bits, mean square over 50 ms) of the same input
+    /// `mic_input_peak` peaks, published from the same two places.
+    mic_vox_power: Arc<AtomicU32>,
+    /// The windowed-power meter behind `mic_vox_power` (audio-thread-private).
+    vox_level: crate::VoxLevel,
     /// The neural stage. Allocated at lane construction (on the control
     /// thread) whatever the flag says, because the device rate that decides
     /// whether it may run is only known once the stream opens — and by then
@@ -1529,6 +1657,8 @@ impl MicLane {
             tx_peak: Arc::new(AtomicU32::new(0)),
             tx_spectrum: Arc::new(Mutex::new(SpectrumAnalyzer::new(sample_rate))),
             mic_input_peak: Arc::new(AtomicU32::new(0)),
+            mic_vox_power: Arc::new(AtomicU32::new(0)),
+            vox_level: crate::VoxLevel::new(),
             rnnoise: RnnoiseStage::with_strength(Arc::clone(&vad_cell), Arc::clone(&strength_cell)),
             denoise_mode: DenoiseMode::from_env(),
             stage: DeviceRateState::default(),
@@ -1569,6 +1699,12 @@ impl MicLane {
     #[must_use]
     pub fn mic_input_peak(&self) -> Arc<AtomicU32> {
         Arc::clone(&self.mic_input_peak)
+    }
+    /// Shared VOX-loudness cell (f32 bits, mean square over 50 ms): the level
+    /// VOX keys from. Same tap as [`MicLane::mic_input_peak`].
+    #[must_use]
+    pub fn mic_vox_power(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.mic_vox_power)
     }
     /// Latest voice-activity probability from the neural stage (f32 bits,
     /// `0.0..=1.0`). Telemetry: published so the question "would VAD-driven
@@ -1722,10 +1858,13 @@ impl InputSink for MicLane {
     /// assertion is established while it is trivially true — and when it
     /// later breaks, the network is unambiguously why.
     ///
+    /// It publishes two levels of the same gained input: the peak (for
+    /// meters) and the 50 ms windowed power VOX keys from
+    /// ([`crate::VoxLevel`]), so a single click cannot key the radio.
+    ///
     /// Keeping VOX on raw audio is the decision the design argues at length.
-    /// `voxThresholdDBFS` is persisted and calibrated against the raw noise
-    /// floor, and `VoxBackgroundCheck` measures that floor from this same
-    /// tap. Denoising upstream of it would silently change what a saved
+    /// The VOX threshold (`audio.voxThresholdRMSDBFS`) is persisted and
+    /// calibrated against the raw noise floor, measured from this same tap. Denoising upstream of it would silently change what a saved
     /// threshold means — and only while an unrelated checkbox happened to be
     /// ticked.
     ///
@@ -1739,6 +1878,8 @@ impl InputSink for MicLane {
         let input_peak = (g * peak(samples)).min(1.0);
         self.mic_input_peak
             .store(input_peak.to_bits(), Ordering::Relaxed);
+        let power = self.vox_level.update(samples, g, device_rate);
+        self.mic_vox_power.store(power.to_bits(), Ordering::Relaxed);
         self.stage.peak_published = true;
         self.stage.device_rate = device_rate;
 
@@ -1797,6 +1938,8 @@ impl InputSink for MicLane {
             let input_peak = (g * peak(samples)).min(1.0);
             self.mic_input_peak
                 .store(input_peak.to_bits(), Ordering::Relaxed);
+            let power = self.vox_level.update(samples, g, self.sample_rate);
+            self.mic_vox_power.store(power.to_bits(), Ordering::Relaxed);
         }
 
         let keyed = self.gate.load(Ordering::Relaxed);
@@ -2421,7 +2564,7 @@ mod tests {
 
         // (peak published to VOX, samples the network handed onward, whether
         // the neural stage claimed this callback)
-        let run = |denoise: bool| -> (f32, Vec<f32>, bool) {
+        let run = |denoise: bool| -> (f32, f32, Vec<f32>, bool) {
             let lane_dest = Arc::new(Mutex::new(None));
             let mut lane = MicLane::new(
                 8_000,
@@ -2433,15 +2576,21 @@ mod tests {
             );
             lane.denoise_flag().store(denoise, Ordering::Relaxed);
             let cell = lane.mic_input_peak();
+            let vox = lane.mic_vox_power();
             let mut buf = onset.clone();
             crate::InputSink::device_rate_stage(&mut lane, &mut buf, 48_000);
             let active = lane.neural_active();
             crate::InputSink::write(&mut lane, &buf, 0.0);
-            (f32::from_bits(cell.load(Ordering::Relaxed)), buf, active)
+            (
+                f32::from_bits(cell.load(Ordering::Relaxed)),
+                f32::from_bits(vox.load(Ordering::Relaxed)),
+                buf,
+                active,
+            )
         };
 
-        let (on, on_audio, on_active) = run(true);
-        let (off, off_audio, off_active) = run(false);
+        let (on, on_vox, on_audio, on_active) = run(true);
+        let (off, off_vox, off_audio, off_active) = run(false);
 
         // The test is only meaningful if the network actually ran.
         assert!(
@@ -2458,6 +2607,78 @@ mod tests {
         assert!(
             (on - off).abs() < f32::EPSILON,
             "VOX input peak moved when noise reduction was toggled: {on} vs {off}"
+        );
+        // The windowed VOX loudness rides the same tap and must hold too.
+        assert!(on_vox > 0.0, "the VOX level must see a real onset");
+        assert!(
+            (on_vox - off_vox).abs() < f32::EPSILON,
+            "VOX loudness moved when noise reduction was toggled: {on_vox} vs {off_vox}"
+        );
+    }
+
+    /// The lane's VOX loudness ignores a click and tracks a sustained tone,
+    /// and means the same at 16 kHz and 48 kHz device rates. Post-gain, like
+    /// the peak beside it.
+    #[test]
+    #[allow(clippy::cast_precision_loss)] // sample indices into f32, test signal only
+    fn lane_vox_level_ignores_a_click_and_tracks_a_tone_at_any_device_rate() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::sync::{Arc, Mutex};
+        let run = |rate: u32, signal: &dyn Fn(usize) -> f32, ms: u32| -> (f32, f32) {
+            let mut lane = MicLane::new(
+                8_000,
+                Arc::new(Mutex::new(None)),
+                Arc::new(AtomicBool::new(false)),
+                Arc::new(Mutex::new(None)),
+                Arc::new(AtomicU32::new(0)),
+                Arc::new(Mutex::new(None)),
+            );
+            lane.gain_cell().store(0.5_f32.to_bits(), Ordering::Relaxed);
+            let vox = lane.mic_vox_power();
+            let mut loudest = 0.0_f32;
+            let per_cb = (rate / 100) as usize; // 10 ms callbacks
+            let total = (rate * ms / 1000) as usize;
+            let all: Vec<f32> = (0..total)
+                .map(|i| signal(i * 48_000 / rate as usize))
+                .collect();
+            for chunk in all.chunks(per_cb) {
+                let mut buf = chunk.to_vec();
+                crate::InputSink::device_rate_stage(&mut lane, &mut buf, rate);
+                crate::InputSink::write(&mut lane, &buf, 0.0);
+                loudest = loudest.max(f32::from_bits(vox.load(Ordering::Relaxed)));
+            }
+            (
+                crate::power_to_dbfs(loudest),
+                crate::power_to_dbfs(f32::from_bits(vox.load(Ordering::Relaxed))),
+            )
+        };
+        // A 5 ms full-scale click 100 ms into silence (index in 48 kHz ticks).
+        let click = |i: usize| {
+            if (4_800..5_040).contains(&i) {
+                1.0
+            } else {
+                0.0
+            }
+        };
+        // A steady 300 Hz tone at 0.2 → 0.1 after the 0.5 gain → ≈ -23 dBFS RMS.
+        let tone = |i: usize| 0.2 * (std::f32::consts::TAU * 300.0 * i as f32 / 48_000.0).sin();
+        let tone_rms = 20.0 * (0.1_f32 / std::f32::consts::SQRT_2).log10();
+        let mut tone_levels = Vec::new();
+        for rate in [16_000, 48_000] {
+            let (worst, end) = run(rate, &click, 300);
+            // Peak after gain is 0.5 = -6 dBFS; the windowed level stays 10 dB under.
+            assert!(worst < -15.0, "{rate} Hz: click read {worst} dBFS");
+            assert!(end <= -59.9, "{rate} Hz: click not forgotten: {end}");
+            let (_, at_150) = run(rate, &tone, 150);
+            assert!(
+                (at_150 - tone_rms).abs() < 0.5,
+                "{rate} Hz: tone {at_150} dBFS at 150 ms, want ≈ {tone_rms}"
+            );
+            tone_levels.push(at_150);
+        }
+        assert!(
+            (tone_levels[0] - tone_levels[1]).abs() < 0.2,
+            "{tone_levels:?}"
         );
     }
 
@@ -2571,6 +2792,29 @@ mod tests {
             (p - 0.5).abs() < 1e-6,
             "expected 0.5 from a direct write, got {p}"
         );
+    }
+
+    /// The `write` fallback arm publishes the VOX loudness too, at the lane's
+    /// own pipeline rate: 60 ms of a constant 0.5 is a full window of power
+    /// 0.25 (≈ -6 dBFS).
+    #[test]
+    fn write_alone_still_publishes_the_vox_level() {
+        use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+        use std::sync::{Arc, Mutex};
+        let mut lane = MicLane::new(
+            8_000,
+            Arc::new(Mutex::new(None)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(None)),
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(Mutex::new(None)),
+        );
+        let cell = lane.mic_vox_power();
+        for _ in 0..3 {
+            crate::InputSink::write(&mut lane, &[0.5_f32; 160], 0.0);
+        }
+        let p = f32::from_bits(cell.load(Ordering::Relaxed));
+        assert!((p - 0.25).abs() < 1e-4, "expected 0.25, got {p}");
     }
 
     #[test]
@@ -3620,5 +3864,237 @@ mod tests {
         controls.push_mic(&[0.25_f32; 160]);
         assert!(drain(&heard).is_empty(), "no heard after clearing");
         assert!(drain(&sent).is_empty(), "no sent after clearing");
+    }
+
+    /// Records the order streams open in, and can be told to refuse the
+    /// output open, so `open_call`'s ordering and its failure cleanup are
+    /// pinned without a sound card.
+    struct OrderBackend {
+        opened: OpenLog,
+        fail_output: bool,
+        /// One failure cell per stream opened, in open order, so a test can
+        /// make a stream report that it stopped for good.
+        failures: Arc<Mutex<Vec<FailureCell>>>,
+    }
+
+    type FailureCell = Arc<Mutex<Option<String>>>;
+    /// The order streams opened in ("input" / "output").
+    type OpenLog = Arc<Mutex<Vec<&'static str>>>;
+
+    impl OrderBackend {
+        fn handle(&self) -> Box<dyn StreamHandle> {
+            let failure = FailureCell::default();
+            self.failures.lock().unwrap().push(Arc::clone(&failure));
+            Box::new(FlagHandle { failure })
+        }
+    }
+
+    impl crate::AudioBackend for OrderBackend {
+        fn devices(&self) -> Result<Vec<crate::DeviceInfo>, AudioError> {
+            let dev = |dir, tag: &str| crate::DeviceInfo {
+                id: crate::DeviceId::new(tag.to_string()),
+                name: tag.to_string(),
+                direction: dir,
+                channels: 1,
+                native_sample_rates: vec![8_000],
+            };
+            Ok(vec![
+                dev(Direction::Input, "in:test"),
+                dev(Direction::Output, "out:test"),
+            ])
+        }
+        fn default_input(&self) -> Option<crate::DeviceInfo> {
+            None
+        }
+        fn default_output(&self) -> Option<crate::DeviceInfo> {
+            None
+        }
+        fn open_input(
+            &self,
+            _d: &crate::DeviceInfo,
+            _c: StreamConfig,
+            _sink: Box<dyn InputSink>,
+            _overruns: Arc<AtomicU64>,
+        ) -> Result<Box<dyn StreamHandle>, AudioError> {
+            self.opened.lock().unwrap().push("input");
+            Ok(self.handle())
+        }
+        fn open_output(
+            &self,
+            _d: &crate::DeviceInfo,
+            _c: StreamConfig,
+            _s: Box<dyn OutputSource>,
+        ) -> Result<Box<dyn StreamHandle>, AudioError> {
+            if self.fail_output {
+                return Err(AudioError::BuildStream("refused by the test".into()));
+            }
+            self.opened.lock().unwrap().push("output");
+            Ok(self.handle())
+        }
+    }
+
+    /// A no-op stream handle whose failure the test can set.
+    struct FlagHandle {
+        failure: FailureCell,
+    }
+
+    impl StreamHandle for FlagHandle {
+        fn stop(self: Box<Self>) {}
+        fn pause(&self) -> Result<(), AudioError> {
+            Ok(())
+        }
+        fn resume(&self) -> Result<(), AudioError> {
+            Ok(())
+        }
+        fn failure(&self) -> Option<String> {
+            self.failure.lock().unwrap().clone()
+        }
+    }
+
+    fn order_router(fail_output: bool) -> (AudioRouter, OpenLog, Arc<Mutex<Vec<FailureCell>>>) {
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let failures = Arc::new(Mutex::new(Vec::new()));
+        let router = AudioRouter::new(Box::new(OrderBackend {
+            opened: Arc::clone(&opened),
+            fail_output,
+            failures: Arc::clone(&failures),
+        }));
+        (router, opened, failures)
+    }
+
+    #[test]
+    fn open_call_opens_the_mic_before_the_speaker() {
+        // A Bluetooth headset switches to hands-free (16 kHz mono) when its
+        // mic opens. A speaker stream opened before that is built at the old
+        // rate and stops for good, so the mic has to come first.
+        let (mut router, opened, _) = order_router(false);
+        let _audio = router
+            .open_call(
+                &MicId::new("in:test"),
+                &OutputId::new("out:test"),
+                StreamConfig::default(),
+            )
+            .expect("both streams open");
+        assert_eq!(*opened.lock().unwrap(), vec!["input", "output"]);
+    }
+
+    #[test]
+    fn open_call_closes_the_mic_it_opened_when_the_speaker_fails() {
+        // The mic now opens first. If the speaker then refuses, the lane this
+        // call created must not be left behind holding the device open.
+        let (mut router, _, _) = order_router(true);
+        let result = router.open_call(
+            &MicId::new("in:test"),
+            &OutputId::new("out:test"),
+            StreamConfig::default(),
+        );
+        assert!(matches!(result, Err(AudioError::BuildStream(_))));
+        assert_eq!(router.mic_count(), 0);
+        assert_eq!(router.output_count(), 0);
+    }
+
+    #[test]
+    fn a_speaker_that_stopped_for_good_is_reported_by_device_name() {
+        let (mut router, _, failures) = order_router(false);
+        let _audio = router
+            .open_call(
+                &MicId::new("in:test"),
+                &OutputId::new("out:test"),
+                StreamConfig::default(),
+            )
+            .expect("both streams open");
+        assert_eq!(router.stopped_output(), None);
+        assert_eq!(router.stopped_mic(), None);
+
+        // Opened mic first, speaker second.
+        *failures.lock().unwrap()[1].lock().unwrap() = Some("stream build failed: gone".into());
+        assert_eq!(
+            router.stopped_output(),
+            Some(StoppedDevice {
+                name: "out:test".into(),
+                reason: "stream build failed: gone".into(),
+            })
+        );
+        assert_eq!(router.stopped_mic(), None);
+    }
+
+    #[test]
+    fn a_mic_that_stopped_for_good_is_reported_by_device_name() {
+        let (mut router, _, failures) = order_router(false);
+        let _audio = router
+            .open_call(
+                &MicId::new("in:test"),
+                &OutputId::new("out:test"),
+                StreamConfig::default(),
+            )
+            .expect("both streams open");
+        *failures.lock().unwrap()[0].lock().unwrap() = Some("stream build failed: gone".into());
+        assert_eq!(
+            router.stopped_mic(),
+            Some(StoppedDevice {
+                name: "in:test".into(),
+                reason: "stream build failed: gone".into(),
+            })
+        );
+        assert_eq!(router.stopped_output(), None);
+    }
+
+    #[test]
+    fn an_idle_stopped_bus_and_lane_are_opened_afresh_by_the_next_call() {
+        // A device that came back after its stream gave up must not stay
+        // dead for every later call just because the router kept the slot.
+        let (mut router, opened, failures) = order_router(false);
+        let mic = MicId::new("in:test");
+        let out = OutputId::new("out:test");
+        let (_audio, tx, mix_id) = router
+            .open_monitor_call(&out, StreamConfig::default())
+            .expect("bus opens");
+        router
+            .bind_mic(
+                &mic,
+                (tx, throwaway_waker(), Arc::default()),
+                StreamConfig::default(),
+            )
+            .expect("mic opens");
+        for cell in failures.lock().unwrap().iter() {
+            *cell.lock().unwrap() = Some("stream build failed: gone".into());
+        }
+        // Hang up: the call leaves the bus and unbinds the mic.
+        router.unbind_mic(&mic);
+        router.remove_from_bus(&out, mix_id);
+
+        let (_audio, tx, _) = router
+            .open_monitor_call(&out, StreamConfig::default())
+            .expect("bus reopens");
+        router
+            .bind_mic(
+                &mic,
+                (tx, throwaway_waker(), Arc::default()),
+                StreamConfig::default(),
+            )
+            .expect("mic reopens");
+        assert_eq!(
+            *opened.lock().unwrap(),
+            vec!["output", "input", "output", "input"]
+        );
+        assert_eq!(router.stopped_output(), None);
+        assert_eq!(router.stopped_mic(), None);
+    }
+
+    #[test]
+    fn a_stopped_bus_still_carrying_a_call_is_left_in_place() {
+        // Reopening under a live call would drop its mixer lane; the call
+        // keeps its (reported) failure instead.
+        let (mut router, opened, failures) = order_router(false);
+        let out = OutputId::new("out:test");
+        let _first = router
+            .open_monitor_call(&out, StreamConfig::default())
+            .expect("bus opens");
+        *failures.lock().unwrap()[0].lock().unwrap() = Some("stream build failed: gone".into());
+        let _second = router
+            .open_monitor_call(&out, StreamConfig::default())
+            .expect("second call joins");
+        assert_eq!(*opened.lock().unwrap(), vec!["output"]);
+        assert_eq!(router.bus_call_count(&out), 2);
     }
 }

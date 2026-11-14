@@ -98,6 +98,25 @@ IAX_ERR_RECORD = -23
 # library built without EchoLink. Mirrored so a caller can name it; this
 # binding does not expose the EchoLink entry points.
 IAX_ERR_ECHOLINK = -24
+# PTT arbiter refusals (the Bluetooth PTT work).
+IAX_ERR_NOT_LEASED = -25  # renew on a source that holds no lease
+IAX_ERR_INVALID = -26  # an argument out of range (time-out, lease TTL, source id)
+IAX_ERR_PTT_LATCHED = -27  # press on a latched source: release it first
+
+# PTT source ids (mirror IAX_PTT_*). The radio is on air while any unlatched
+# source holds; this binding's set_ptt() is PTT_LEGACY.
+PTT_MANUAL = 0
+PTT_VOX = 1
+PTT_SERIAL = 2
+PTT_BLUETOOTH = 3
+PTT_LEGACY = 4
+
+# Snapshot.ptt_forced_reason values (mirror IAX_PTT_FORCED_*).
+PTT_FORCED_NONE = 0
+PTT_FORCED_LEASE_EXPIRED = 1
+PTT_FORCED_TX_TIMEOUT = 2
+
+_U32_MAX = 0xFFFF_FFFF
 
 
 # --------------------------------------------------------------------------- #
@@ -270,6 +289,15 @@ class _IaxState(ctypes.Structure):
         ("echolink_available", c_bool),  # this library was built with EchoLink
         ("echolink_active", c_bool),  # an EchoLink call or node-leg station is up
         ("echolink_logged_in", c_bool),  # logged in to the EchoLink directory
+        ("speaker_stopped", c_bool),  # speaker stream stopped and could not be rebuilt
+        ("mic_stopped", c_bool),  # mic stream stopped and could not be rebuilt
+        ("ptt_sources", c_uint32),  # mask of held PTT sources, bit 1 << PTT_*
+        ("ptt_latched", c_uint32),  # mask of sources that must release before keying
+        ("ptt_forced_seq", c_uint32),  # last forced stop's sequence; 0 = none yet
+        ("ptt_forced_sources", c_uint32),  # sources the last forced stop released
+        ("ptt_forced_reason", c_uint32),  # PTT_FORCED_*
+        ("ptt_tx_timeout_ms", c_uint32),  # transmit time-out in force; 120000 by default
+        ("vox_db", c_float),  # VOX loudness: mean power over the last 50 ms (dBFS)
     ]
 
 
@@ -317,7 +345,7 @@ class Snapshot:
     remote_ptt: bool
     tx_db: float
     rx_db: float
-    input_db: float  # continuous mic input level (dBFS); drive VOX from this
+    input_db: float  # continuous mic input PEAK (dBFS), for level meters
     rtt_ms: int | None  # None when unknown (C returns -1)
     mode: Mode  # current top-level operating mode (WT dial-out vs Node)
     tx_reanchors: int  # cumulative voice-ts-ladder re-anchors; growth = choppy TX
@@ -351,6 +379,19 @@ class Snapshot:
     echolink_available: bool  # this library was built with its echolink feature
     echolink_active: bool  # an EchoLink call or node-leg station is up
     echolink_logged_in: bool  # logged in to the EchoLink directory
+    ptt_sources: int  # mask of PTT sources holding the key, bit 1 << PTT_*
+    ptt_latched: int  # sources that must release first (Legacy: time-out/stop-all only)
+    ptt_forced_seq: int  # sequence of the last forced stop; 0 = none yet
+    ptt_forced_sources: int  # mask of the sources the last forced stop released
+    ptt_forced_reason: int  # PTT_FORCED_* (why the last forced stop happened)
+    ptt_tx_timeout_ms: int  # the transmit time-out in force, ms (60000..600000)
+    # The loudness VOX judges (dBFS): mean power of the same input over the
+    # last 50 ms, so a click barely moves it. Drive VOX from this.
+    vox_db: float = -60.0
+    # Name of the device whose stream stopped and could not be rebuilt (the
+    # engine already rebuilds one whose device changed under it), else None.
+    speaker_stopped: str | None = None
+    mic_stopped: str | None = None
 
 
 @dataclass(frozen=True)
@@ -513,9 +554,28 @@ def _bind(lib: ctypes.CDLL) -> None:
 
     lib.iax_station_incoming_from.argtypes = [_IaxStationPtr, c_char_p, c_size_t]
     lib.iax_station_incoming_from.restype = c_int
+    lib.iax_station_speaker_stopped.argtypes = [_IaxStationPtr, c_char_p, c_size_t]
+    lib.iax_station_speaker_stopped.restype = c_int
+    lib.iax_station_mic_stopped.argtypes = [_IaxStationPtr, c_char_p, c_size_t]
+    lib.iax_station_mic_stopped.restype = c_int
 
     lib.iax_station_set_ptt.argtypes = [_IaxStationPtr, c_bool]
     lib.iax_station_set_ptt.restype = c_int
+
+    lib.iax_station_ptt_source.argtypes = [_IaxStationPtr, c_uint32, c_bool]
+    lib.iax_station_ptt_source.restype = c_int
+
+    lib.iax_station_ptt_stop_all.argtypes = [_IaxStationPtr]
+    lib.iax_station_ptt_stop_all.restype = c_int
+
+    lib.iax_station_ptt_lease_press.argtypes = [_IaxStationPtr, c_uint32, c_uint32]
+    lib.iax_station_ptt_lease_press.restype = c_int
+
+    lib.iax_station_ptt_lease_renew.argtypes = [_IaxStationPtr, c_uint32]
+    lib.iax_station_ptt_lease_renew.restype = c_int
+
+    lib.iax_station_set_tx_timeout_ms.argtypes = [_IaxStationPtr, c_uint32]
+    lib.iax_station_set_tx_timeout_ms.restype = c_int
 
     lib.iax_station_set_input_gain.argtypes = [_IaxStationPtr, c_float]
     lib.iax_station_set_input_gain.restype = c_int
@@ -931,14 +991,98 @@ class Station:
         rc = self._lib.iax_station_incoming_from(self._handle, buf, len(buf))
         if rc < 0:
             self._check(rc)
-        return buf.value.decode("utf-8", "replace")
+        return buf.value.decode("utf-8", "replace") or None
 
     # -- transmit + gains ------------------------------------------------- #
 
     def set_ptt(self, on: bool) -> None:
-        """Set local transmit (PTT). Raises ``NOT_CONNECTED`` while idle."""
+        """Set local transmit as the Legacy source (``PTT_LEGACY``).
+
+        ``True`` presses Legacy; ``False`` stops every source and re-arms
+        Legacy. Raises ``NOT_CONNECTED`` while idle. Raises ``PTT_LATCHED``
+        for a ``True`` only after the transmit time-out or ``ptt_stop_all()``
+        stopped a held Legacy key, until a ``False`` re-arms it. A refused
+        ``True`` latches nothing, and a Legacy key held when the call hangs
+        up is released with no latch. A key held past the transmit time-out
+        (2 min by default) unkeys.
+        """
         self._require_handle()
         self._check(self._lib.iax_station_set_ptt(self._handle, bool(on)))
+
+    def _u32_arg(self, value: int) -> int:
+        """Refuse an int that does not fit a C ``uint32_t``.
+
+        ctypes truncates silently, so ``2**32 + 60_000`` would reach the
+        library as an accepted ``60_000``. Raise the library's own
+        ``IAX_ERR_INVALID`` instead, so callers see one error type.
+        """
+        v = int(value)
+        if not 0 <= v <= _U32_MAX:
+            self._check(IAX_ERR_INVALID)
+        return v
+
+    def ptt_source(self, source: int, on: bool) -> None:
+        """Press (``on``) or release one PTT source (``PTT_*``).
+
+        The radio is on air while any unlatched source holds. Release never
+        raises. A press raises ``PTT_LATCHED`` on a latched source, or the
+        console's refusal (``NOT_CONNECTED`` while idle), after which the
+        source stays latched until it releases (``PTT_LEGACY`` excepted: a
+        refused Legacy press latches nothing). Unknown ids raise ``INVALID``.
+        A press of ``PTT_BLUETOOTH`` raises ``INVALID`` and changes nothing:
+        Bluetooth keys only through ``ptt_lease_press``, so the engine bounds
+        every Bluetooth hold. Its release is accepted.
+        """
+        self._require_handle()
+        self._check(
+            self._lib.iax_station_ptt_source(
+                self._handle, c_uint32(self._u32_arg(source)), bool(on)
+            )
+        )
+
+    def ptt_stop_all(self) -> None:
+        """Stop transmitting whoever holds the key; every held source latches,
+        ``PTT_LEGACY`` included (``set_ptt(False)`` re-arms it)."""
+        self._require_handle()
+        self._check(self._lib.iax_station_ptt_stop_all(self._handle))
+
+    def ptt_lease_press(self, source: int, ttl_ms: int) -> None:
+        """Press ``PTT_BLUETOOTH`` with a lease the engine expires by itself.
+
+        ``ttl_ms`` must be 1..5000 and ``source`` must be ``PTT_BLUETOOTH``;
+        anything else raises ``INVALID`` and changes nothing.
+        """
+        self._require_handle()
+        self._check(
+            self._lib.iax_station_ptt_lease_press(
+                self._handle,
+                c_uint32(self._u32_arg(source)),
+                c_uint32(self._u32_arg(ttl_ms)),
+            )
+        )
+
+    def ptt_lease_renew(self, source: int) -> None:
+        """Extend a held lease. Raises ``NOT_LEASED`` otherwise; never presses."""
+        self._require_handle()
+        self._check(
+            self._lib.iax_station_ptt_lease_renew(
+                self._handle, c_uint32(self._u32_arg(source))
+            )
+        )
+
+    def set_tx_timeout_ms(self, ms: int) -> None:
+        """Set the transmit time-out, 60000..600000 ms (1 to 10 minutes).
+
+        It bounds continuous on-air time across every source and cannot be
+        turned off: ``0`` or any value out of range raises ``INVALID`` and the
+        value in force stays. A new station runs on 120000.
+        """
+        self._require_handle()
+        self._check(
+            self._lib.iax_station_set_tx_timeout_ms(
+                self._handle, c_uint32(self._u32_arg(ms))
+            )
+        )
 
     def set_input_gain(self, gain: float) -> None:
         """Set the input (TX/mic) gain multiplier (clamped ``[0.0, 4.0]``)."""
@@ -1033,7 +1177,35 @@ class Station:
             echolink_available=bool(out.echolink_available),
             echolink_active=bool(out.echolink_active),
             echolink_logged_in=bool(out.echolink_logged_in),
+            speaker_stopped=(
+                self._read_name(self._lib.iax_station_speaker_stopped)
+                if out.speaker_stopped
+                else None
+            ),
+            mic_stopped=(
+                self._read_name(self._lib.iax_station_mic_stopped)
+                if out.mic_stopped
+                else None
+            ),
+            ptt_sources=int(out.ptt_sources),
+            ptt_latched=int(out.ptt_latched),
+            ptt_forced_seq=int(out.ptt_forced_seq),
+            ptt_forced_sources=int(out.ptt_forced_sources),
+            ptt_forced_reason=int(out.ptt_forced_reason),
+            ptt_tx_timeout_ms=int(out.ptt_tx_timeout_ms),
+            vox_db=float(out.vox_db),
         )
+
+    def _read_name(self, fn) -> str | None:
+        """Read a device name out of a sizing-then-fill C getter; ``None`` when empty."""
+        needed = fn(self._handle, None, 0)
+        if needed < 0:
+            self._check(needed)
+        buf = ctypes.create_string_buffer(needed + 1)
+        rc = fn(self._handle, buf, len(buf))
+        if rc < 0:
+            self._check(rc)
+        return buf.value.decode("utf-8", "replace")
 
     def next_event(self) -> Event | None:
         """Drain one queued lifecycle event, or ``None`` if none is queued."""

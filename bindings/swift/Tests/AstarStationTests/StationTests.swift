@@ -24,6 +24,9 @@ final class StationTests: XCTestCase {
         XCTAssertEqual(snap.txCaptureOverruns, 0)
         // No call → no negotiated codec (iax-3e53).
         XCTAssertNil(snap.negotiatedFormat)
+        // Nothing has stopped on a fresh station (astar-hfpout).
+        XCTAssertNil(snap.speakerStopped)
+        XCTAssertNil(snap.micStopped)
     }
 
     // MARK: Codec policy (iax-3e53)
@@ -601,7 +604,7 @@ final class StationTests: XCTestCase {
         let json = """
             {"link":"linked","talker":"AJ7HR","slow_text":"hi there",\
             "backend":"thumbdv","tx_capable":true,"ptt":false,\
-            "tx_db":-60.0,"rx_db":-31.25,"input_db":-45.5}
+            "tx_db":-60.0,"rx_db":-31.25,"input_db":-45.5,"vox_db":-52.25}
             """
         let state = try XCTUnwrap(DStarState(json: json))
         XCTAssertEqual(state.link, .linked)
@@ -612,6 +615,7 @@ final class StationTests: XCTestCase {
         XCTAssertFalse(state.ptt)
         XCTAssertEqual(state.rxDB, -31.25)
         XCTAssertEqual(state.inputDB, -45.5)
+        XCTAssertEqual(state.voxDB, -52.25)
     }
 
     func testDStarStateTreatsAMissingTalkerAsNil() throws {
@@ -623,6 +627,7 @@ final class StationTests: XCTestCase {
         XCTAssertEqual(state.link, .linking)
         XCTAssertNil(state.talker, "JSON null must decode as nil, not the string \"null\"")
         XCTAssertNil(state.slowText)
+        XCTAssertEqual(state.voxDB, -60, "an engine without vox_db reads the floor")
     }
 
     func testDStarStateRejectsTheEmptyDocumentAndDegradesOnAnUnknownLink() throws {

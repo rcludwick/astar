@@ -96,6 +96,8 @@ jobs:
       # they enforce held only on whichever Mac last ran `just guards`:
       # guard-codec2-licensing.sh (no LGPL in a default build) and
       # guard-discord-feature.sh (no tokio/songbird in a default build).
+      # guard-ble-ptt.sh keeps the Bluetooth PTT core dependency-free, out of
+      # astar-server, and CoreBluetooth confined to one app file.
       - name: Merge invariants
         run: |
           ./ci/guard-safety-env.sh
@@ -105,6 +107,7 @@ jobs:
           ./ci/guard-codec2-licensing.sh
           ./ci/guard-dstar-soft-ambe.sh
           ./ci/guard-discord-feature.sh
+          ./ci/guard-ble-ptt.sh
           ./ci/guard-no-tiny-http.sh
           ./ci/guard-echolink.sh
           ./ci/guard-packet-log.sh

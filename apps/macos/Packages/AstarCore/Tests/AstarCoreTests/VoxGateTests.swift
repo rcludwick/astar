@@ -92,4 +92,67 @@ final class VoxGateTests: XCTestCase {
             gate.update(level: -50, now: at(510)),
             "500 ms after the drop → finally unkeyed")
     }
+
+    // MARK: - The shipped 120 ms attack, polled every 50 ms
+
+    private func shippedGate() -> VoxGate {
+        VoxGate(config: VoxConfig(thresholdDBFS: -50, hangoverMS: 1500, attackMS: 120))
+    }
+
+    /// Feed `level` at each 50 ms poll in `polls`, quiet otherwise, from 0 to
+    /// `untilMS`; return whether the gate ever keyed.
+    private func everKeys(loudAt polls: Set<Int>, untilMS: Int = 600) -> Bool {
+        var gate = shippedGate()
+        var keyed = false
+        for ms in stride(from: 0, through: untilMS, by: 50) {
+            let level: Float = polls.contains(ms) ? -20 : -60
+            keyed = gate.update(level: level, now: at(Double(ms))) || keyed
+        }
+        return keyed
+    }
+
+    func testA50msBurstDoesNotKeyThe120msAttack() {
+        // Loud for one 50 ms poll interval (two consecutive samples).
+        XCTAssertFalse(everKeys(loudAt: [100, 150]), "a 50 ms burst must not key")
+    }
+
+    func testA200msBurstKeysThe120msAttack() {
+        XCTAssertTrue(everKeys(loudAt: [100, 150, 200, 250, 300]), "200 ms of voice keys")
+    }
+
+    func testADipDuringTheAttackRestartsIt() {
+        var gate = shippedGate()
+        XCTAssertFalse(gate.update(level: -20, now: at(0)))
+        XCTAssertFalse(gate.update(level: -20, now: at(100)))
+        XCTAssertFalse(gate.update(level: -60, now: at(110)), "dip: attack restarts")
+        XCTAssertFalse(
+            gate.update(level: -20, now: at(150)), "loud again: the attack counts from here")
+        XCTAssertFalse(gate.update(level: -20, now: at(250)), "100 ms since the restart")
+        XCTAssertTrue(gate.update(level: -20, now: at(270)), "120 ms since the restart")
+    }
+
+    // MARK: - The meter floor
+
+    func testAFloorReadingNeverKeysEvenAtTheSliderMinimum() {
+        var gate = VoxGate(
+            config: VoxConfig(
+                thresholdDBFS: VoxThreshold.range.lowerBound, hangoverMS: 500, attackMS: 120))
+        for ms in stride(from: 0, through: 5_000, by: 50) {
+            XCTAssertFalse(gate.update(level: -60, now: at(Double(ms))), "silent room at \(ms) ms")
+        }
+    }
+
+    func testAFloorReadingNeverKeysEvenWithAThresholdAtTheFloor() {
+        // A hand-built config the slider cannot produce: still no keying.
+        var gate = VoxGate(config: VoxConfig(thresholdDBFS: -60, hangoverMS: 500))
+        XCTAssertFalse(gate.update(level: -60, now: at(0)))
+        XCTAssertFalse(gate.update(level: -60, now: at(1_000)))
+    }
+
+    func testAFloorReadingClosesAnOpenGate() {
+        var gate = VoxGate(config: VoxConfig(thresholdDBFS: -60, hangoverMS: 100))
+        XCTAssertTrue(gate.update(level: -40, now: at(0)))
+        XCTAssertTrue(gate.update(level: -60, now: at(50)), "hangover running")
+        XCTAssertFalse(gate.update(level: -60, now: at(150)), "the floor lets go")
+    }
 }

@@ -1,0 +1,32 @@
+{
+  "name": "idle_probe_misses_never_release",
+  "device": "inrico-b02ptt",
+  "steps": [
+    { "at_ms": 0,     "event": {"kind": "enable", "confirmed": true},
+      "expect": {"intent": "none", "status": "searching", "cmds": []} },
+    { "at_ms": 1,     "event": {"kind": "adapter", "state": "on"},
+      "expect": {"intent": "none", "status": "searching", "cmds": []} },
+    { "at_ms": 10,    "event": {"kind": "connected", "epoch": 1},
+      "expect": {"intent": "none", "status": "connecting", "cmds": []} },
+    { "at_ms": 20,    "event": {"kind": "gatt_accepted", "epoch": 1},
+      "expect": {"intent": "none", "status": "connecting", "cmds": []} },
+    { "at_ms": 30,    "event": {"kind": "subscribed", "epoch": 1},
+      "expect": {"intent": "none", "status": "ready", "cmds": []} },
+    { "at_ms": 100,   "event": {"kind": "tick"},
+      "expect": {"intent": "none", "status": "ready", "cmds": ["probe"], "pressed": false} },
+    { "at_ms": 5099,  "event": {"kind": "tick"},
+      "expect": {"intent": "none", "status": "ready", "cmds": [], "pressed": false} },
+    { "at_ms": 5100,  "event": {"kind": "tick"},
+      "expect": {"intent": "none", "status": "ready", "cmds": ["probe"], "pressed": false} },
+    { "at_ms": 10100, "event": {"kind": "tick"},
+      "expect": {"intent": "none", "status": "ready", "cmds": ["probe"], "pressed": false} },
+    { "at_ms": 10200, "event": {"kind": "probe_failed", "epoch": 1},
+      "expect": {"intent": "none", "status": "ready", "cmds": [], "pressed": false} },
+    { "at_ms": 10300, "event": {"kind": "probe_failed", "epoch": 1},
+      "expect": {"intent": "none", "status": "ready", "cmds": [], "pressed": false} },
+    { "at_ms": 15100, "event": {"kind": "tick"},
+      "expect": {"intent": "none", "status": "ready", "cmds": ["probe"], "pressed": false} },
+    { "at_ms": 15200, "event": {"kind": "notify", "epoch": 1, "bytes": [1]},
+      "expect": {"intent": "press", "status": "ready", "cmds": [], "pressed": true, "raw_pressed": true} }
+  ]
+}

@@ -542,10 +542,7 @@
                 onChoose(String(node))
                 return
             }
-            let call = station.call
-            onChoose(
-                !call.isEmpty && call.allSatisfy(Network.echolink.admitsDialCharacter)
-                    ? call : String(node))
+            onChoose(echolinkDialText(for: station))
         }
     }
 

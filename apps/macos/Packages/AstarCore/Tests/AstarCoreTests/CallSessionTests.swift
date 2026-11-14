@@ -88,7 +88,13 @@ final class FakeStation: StationDriving {
     var monitorStartFailsFor: String?
     struct MonitorStartFailure: Error {}
 
-    func readSnapshot() throws -> CallSnapshot { snapshotToReturn }
+    /// When set, `readSnapshot()` throws — to prove the manual stop rule falls
+    /// back to the last published source set instead of keying blind.
+    var snapshotError: Error?
+    func readSnapshot() throws -> CallSnapshot {
+        if let snapshotError { throw snapshotError }
+        return snapshotToReturn
+    }
     func readEvent() throws -> Event? { events.isEmpty ? nil : events.removeFirst() }
     func connectWT(destNode: String) throws {
         waitForGateIfSet()
@@ -114,7 +120,63 @@ final class FakeStation: StationDriving {
         callLog.append("disconnect")
         if let disconnectError { throw disconnectError }
     }
-    func setPTT(_ on: Bool) throws { pttCalls.append(on) }
+    func setPTT(_ on: Bool) throws {
+        pttCalls.append(on)
+        pttLog.append("setPTT(\(on))")
+    }
+
+    // MARK: - PTT sources, lease, transmit time-out (recording surface)
+
+    private(set) var pttSourceCalls: [(source: StationPTTSource, on: Bool)] = []
+    private(set) var stopAllCount = 0
+    private(set) var leasePressCalls: [(source: StationPTTSource, ttl: Duration)] = []
+    private(set) var leaseRenewCalls: [StationPTTSource] = []
+    private(set) var txTimeoutCalls: [Duration] = []
+    /// Ordered log across every PTT call, for exact-sequence assertions:
+    /// "setPTT(true)", "pttSource(manual,true)", "pttStopAll",
+    /// "pttLeasePress(bluetooth,1500ms)", "pttLeaseRenew(bluetooth)", "setTxTimeout(120s)"
+    private(set) var pttLog: [String] = []
+    /// Thrown by `pttSource` when `on == true`. A release is never refused, as
+    /// in the engine. Every failing call below is recorded before it throws,
+    /// so a test sees the attempt.
+    var pttSourceError: Error?
+    var leasePressError: Error?
+    var leaseRenewError: Error?
+    var txTimeoutError: Error?
+
+    func pttSource(_ source: StationPTTSource, on: Bool) throws {
+        pttSourceCalls.append((source, on))
+        pttLog.append("pttSource(\(source),\(on))")
+        // As the engine does: Bluetooth keys only through a lease, so a test
+        // that wrongly keys it through pttSource fails here, not on hardware.
+        if on, source == .bluetooth {
+            throw StationError(code: StationError.invalidArgumentCode, text: "invalid argument")
+        }
+        if on, let pttSourceError { throw pttSourceError }
+    }
+    func pttStopAll() throws {
+        stopAllCount += 1
+        pttLog.append("pttStopAll")
+    }
+    func pttLeasePress(_ source: StationPTTSource, ttl: Duration) throws {
+        leasePressCalls.append((source, ttl))
+        pttLog.append("pttLeasePress(\(source),\(Self.wholeMilliseconds(ttl))ms)")
+        if let leasePressError { throw leasePressError }
+    }
+    func pttLeaseRenew(_ source: StationPTTSource) throws {
+        leaseRenewCalls.append(source)
+        pttLog.append("pttLeaseRenew(\(source))")
+        if let leaseRenewError { throw leaseRenewError }
+    }
+    func setTxTimeout(_ timeout: Duration) throws {
+        txTimeoutCalls.append(timeout)
+        pttLog.append("setTxTimeout(\(timeout.components.seconds)s)")
+        if let txTimeoutError { throw txTimeoutError }
+    }
+    private static func wholeMilliseconds(_ duration: Duration) -> Int64 {
+        let c = duration.components
+        return c.seconds * 1_000 + c.attoseconds / 1_000_000_000_000_000
+    }
     private(set) var dtmfCalls: [Character] = []
     /// When set, `sendDTMF` throws (to prove CallSession propagates the failure).
     var dtmfError: Error?
@@ -151,6 +213,8 @@ final class FakeStation: StationDriving {
     func setCompression(_ on: Bool) throws { compressionCalls.append(on) }
     func setCompressionLevel(_ level: Float) throws { compressionLevelCalls.append(level) }
     func setTxTrim(_ gain: Float) throws { txTrimCalls.append(gain) }
+    private(set) var prerollCalls: [UInt32] = []
+    func setVoxPrerollMs(_ ms: UInt32) throws { prerollCalls.append(ms) }
     func setNoiseReduction(_ on: Bool) throws { noiseReductionCalls.append(on) }
     var denoiseStrengthCalls: [Float] = []
     func setDenoiseStrength(_ level: Float) throws { denoiseStrengthCalls.append(level) }
@@ -498,6 +562,14 @@ final class FakeStation: StationDriving {
     }
 }
 
+extension FakeStation {
+    /// `pttLog` without the transmit time-out pushes, so a keying assertion
+    /// compares the exact sequence of key, release and stop calls and nothing
+    /// else. Any `setPTT(…)` entry here is a bug: after the arbiter migration
+    /// no `CallSession` path may call it.
+    var keyingLog: [String] { pttLog.filter { !$0.hasPrefix("setTxTimeout(") } }
+}
+
 /// A station whose device enumeration always throws, to verify CallSession's
 /// device-listing accessors degrade to `[]` rather than propagating.
 private struct ThrowingStation: StationDriving {
@@ -509,6 +581,11 @@ private struct ThrowingStation: StationDriving {
     func connect(dest: String, calling: String, secret: String?) throws {}
     func disconnect() throws {}
     func setPTT(_ on: Bool) throws {}
+    func pttSource(_ source: StationPTTSource, on: Bool) throws { throw Boom() }
+    func pttStopAll() throws { throw Boom() }
+    func pttLeasePress(_ source: StationPTTSource, ttl: Duration) throws { throw Boom() }
+    func pttLeaseRenew(_ source: StationPTTSource) throws { throw Boom() }
+    func setTxTimeout(_ timeout: Duration) throws { throw Boom() }
     func sendDTMF(_ digit: Character) throws { throw Boom() }
     func sendDTMF(sequence: String) throws { throw Boom() }
     func cancelDTMF() throws { throw Boom() }
@@ -2018,7 +2095,8 @@ final class CallSessionTests: XCTestCase {
         try session.setPTT(true)
         try session.setPTT(false)
 
-        XCTAssertEqual(fake.pttCalls, [true, false])
+        // The on-screen button and Space are the `.manual` arbiter source.
+        XCTAssertEqual(fake.keyingLog, ["pttSource(manual,true)", "pttSource(manual,false)"])
     }
 
     func testTokenMintPassesThroughToStation() throws {
@@ -2138,7 +2216,9 @@ final class CallSessionTests: XCTestCase {
 
         XCTAssertEqual(seenRemote, true, "tick should receive the snapshot's remotePTT")
         XCTAssertEqual(seenRx, -33, "tick should receive the snapshot's rxDB")
-        XCTAssertEqual(fake.pttCalls, [true], "a non-nil tick result drives setPTT")
+        XCTAssertEqual(
+            fake.keyingLog, ["pttSource(serial,true)"],
+            "a non-nil tick result drives the serial source")
     }
 
     func testPttSourceTickReturningNilDoesNotCallSetPTT() throws {
@@ -2148,7 +2228,7 @@ final class CallSessionTests: XCTestCase {
 
         session.poll()
 
-        XCTAssertTrue(fake.pttCalls.isEmpty, "a nil tick result must not call setPTT")
+        XCTAssertEqual(fake.keyingLog, [], "a nil tick result must not touch PTT")
     }
 
     func testPttSourceTickFalseUnkeys() throws {
@@ -2158,7 +2238,9 @@ final class CallSessionTests: XCTestCase {
 
         session.poll()
 
-        XCTAssertEqual(fake.pttCalls, [false], "a false tick result unkeys via setPTT")
+        XCTAssertEqual(
+            fake.keyingLog, ["pttSource(serial,false)"],
+            "a false tick result releases the serial source")
     }
 
     func testPollWithoutPttSourceLeavesPTTUntouched() throws {
@@ -2167,7 +2249,96 @@ final class CallSessionTests: XCTestCase {
 
         session.poll()
 
-        XCTAssertTrue(fake.pttCalls.isEmpty, "no source means setPTT is never called from poll")
+        XCTAssertEqual(fake.keyingLog, [], "no source means poll never touches PTT")
+    }
+
+    // MARK: - Serial source going away (unplug, disable, config switch)
+
+    func testSerialUnplugWhileKeyedUnkeys() {
+        // The interface failed or was torn down mid-over: the serial source is
+        // released (the arbiter unkeys if nothing else holds).
+        let fake = FakeStation()
+        let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+        var edges: [Bool?] = [true]
+        session.pttSourceTick = { _, _ in edges.isEmpty ? nil : edges.removeFirst() }
+        session.poll()
+
+        session.releaseSerialSource()
+
+        XCTAssertEqual(fake.keyingLog, ["pttSource(serial,true)", "pttSource(serial,false)"])
+        XCTAssertEqual(fake.stopAllCount, 0, "a serial unplug never stops the other sources")
+    }
+
+    func testReleaseSerialSourceWhenUnkeyedReleasesOnlySerial() {
+        // Since the arbiter, the release is unconditional: it is a no-op for an
+        // unheld source and it clears a latch a forced stop left on it.
+        let fake = FakeStation()
+        let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+
+        session.releaseSerialSource()
+
+        XCTAssertEqual(fake.keyingLog, ["pttSource(serial,false)"])
+    }
+
+    func testReleaseSerialSourceAfterSerialUnkeyedReleasesAgain() {
+        // The last edge was already an unkey; the teardown releases `.serial`
+        // once more. Harmless in the engine, and it never stops anything else.
+        let fake = FakeStation()
+        let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+        session.pttSourceTick = { _, _ in true }
+        session.poll()
+        session.pttSourceTick = { _, _ in false }
+        session.poll()
+
+        session.pttSourceTick = nil
+        session.releaseSerialSource()
+
+        XCTAssertEqual(
+            fake.keyingLog,
+            ["pttSource(serial,true)", "pttSource(serial,false)", "pttSource(serial,false)"])
+        XCTAssertEqual(fake.stopAllCount, 0)
+    }
+
+    func testReleaseSerialSourceTwiceOnlyReleases() {
+        // teardown() can run more than once (a tick failure, then disable).
+        // Each run releases `.serial` and nothing more: no stop, no key.
+        let fake = FakeStation()
+        let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+        session.pttSourceTick = { _, _ in true }
+        session.poll()
+        session.pttSourceTick = nil
+
+        session.releaseSerialSource()
+        session.releaseSerialSource()
+
+        XCTAssertEqual(
+            fake.keyingLog,
+            ["pttSource(serial,true)", "pttSource(serial,false)", "pttSource(serial,false)"])
+        XCTAssertEqual(fake.stopAllCount, 0)
+    }
+
+    func testSerialTickFailureInsideTickUnkeys() throws {
+        // The real teardown shape: SerialController.handleTickFailure runs
+        // INSIDE the tick closure during poll(), releases the source, drops
+        // the hook and returns nil. The release must still reach the station.
+        let fake = FakeStation()
+        let session = CallSession(station: fake)
+        var n = 0
+        // `unowned`: the session owns this closure, so a strong capture would
+        // be a retain cycle (a leak in the test process).
+        session.pttSourceTick = { [unowned session] _, _ in
+            n += 1
+            if n == 1 { return true }
+            session.releaseSerialSource()
+            session.pttSourceTick = nil
+            return nil
+        }
+
+        session.poll()
+        session.poll()
+
+        XCTAssertEqual(fake.keyingLog, ["pttSource(serial,true)", "pttSource(serial,false)"])
+        XCTAssertEqual(fake.stopAllCount, 0)
     }
 
     // MARK: - Voice compression + noise reduction
@@ -2422,14 +2593,16 @@ final class CallSessionTests: XCTestCase {
         let fake = FakeStation()
         fake.snapshotToReturn = CallSnapshot(
             status: .answered, ptt: false, remotePTT: false,
-            txDB: -10, rxDB: -60, inputDB: -10, rttMS: 20  // -10 > -40 threshold
+            txDB: -10, rxDB: -60, inputDB: -10, rttMS: 20, voxDB: -10  // -10 > -50 threshold
         )
         let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+        session.voxGate.config.attackMS = 0  // the attack has its own tests
         session.setVoxEnabled(true)
 
         session.poll()
 
-        XCTAssertEqual(fake.pttCalls, [true], "loud mic with VOX on keys the radio")
+        XCTAssertEqual(
+            fake.keyingLog, ["pttSource(vox,true)"], "loud mic with VOX on keys the radio")
     }
 
     func testVoxKeysFromInputLevelWhileTxFloored() throws {
@@ -2439,14 +2612,76 @@ final class CallSessionTests: XCTestCase {
         let fake = FakeStation()
         fake.snapshotToReturn = CallSnapshot(
             status: .answered, ptt: false, remotePTT: false,
-            txDB: -60, rxDB: -60, inputDB: -10, rttMS: 20  // txDB floored, mic loud
+            txDB: -60, rxDB: -60, inputDB: -10, rttMS: 20, voxDB: -10  // txDB floored, mic loud
         )
         let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+        session.voxGate.config.attackMS = 0  // the attack has its own tests
         session.setVoxEnabled(true)
 
         session.poll()
 
-        XCTAssertEqual(fake.pttCalls, [true], "VOX keys from inputDB even when txDB is floored")
+        XCTAssertEqual(
+            fake.keyingLog, ["pttSource(vox,true)"],
+            "VOX keys from its loudness even when txDB is floored")
+    }
+
+    /// The quiet-room bug: a click fills the per-callback PEAK (`inputDB`)
+    /// while the 50 ms loudness (`voxDB`) barely moves. VOX must judge the
+    /// loudness, so the click keys nothing.
+    func testVoxIgnoresAPeakWhenTheLoudnessIsQuiet() {
+        let fake = FakeStation()
+        fake.snapshotToReturn = CallSnapshot(
+            status: .answered, ptt: false, remotePTT: false,
+            txDB: -60, rxDB: -60, inputDB: -10, rttMS: 20, voxDB: -58)
+        let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+        session.voxGate.config.attackMS = 0  // even with no attack at all
+        session.setVoxEnabled(true)
+        session.poll()
+        XCTAssertEqual(fake.keyingLog, [], "a click's peak must not key VOX")
+    }
+
+    /// VOX keys only once the loudness has held over the threshold for the
+    /// 120 ms attack, timed on the session's injected clock.
+    func testVoxKeysAfterTheAttackHoldsOnTheSessionClock() {
+        var clock = Date(timeIntervalSince1970: 5_000)
+        let fake = FakeStation()
+        fake.snapshotToReturn = CallSnapshot(
+            status: .answered, ptt: false, remotePTT: false,
+            txDB: -60, rxDB: -60, inputDB: -60, rttMS: 20, voxDB: -20)
+        let session = CallSession(
+            station: fake, audioStore: MemoryAudioStore(), now: { clock })
+        XCTAssertEqual(session.voxGate.config.attackMS, 120, "the shipped attack")
+        session.setVoxEnabled(true)
+        for _ in 0..<3 {  // 0, 50, 100 ms: still in the attack
+            session.poll()
+            clock.addTimeInterval(0.05)
+        }
+        XCTAssertEqual(fake.keyingLog, [], "under 120 ms of loudness keys nothing")
+        session.poll()  // 150 ms
+        XCTAssertEqual(fake.keyingLog, ["pttSource(vox,true)"])
+    }
+
+    /// Turning VOX on asks the engine for pre-roll, so the attack's wait is
+    /// sent ahead of the over; turning it off stops it.
+    func testVoxTogglesTheEnginePreroll() {
+        let fake = FakeStation()
+        let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+        session.setVoxEnabled(true)
+        session.setVoxEnabled(false)
+        XCTAssertEqual(fake.prerollCalls.suffix(2), [250, 0])
+    }
+
+    /// Switching VOX off and on keeps the user's threshold, hang time and
+    /// attack; only the gate's timing resets.
+    func testVoxOffAndOnKeepsTheGateTuning() {
+        let session = CallSession(station: FakeStation(), audioStore: MemoryAudioStore())
+        session.setVoxThreshold(-33)
+        session.setVoxHangtime(900)
+        session.setVoxEnabled(true)
+        session.setVoxEnabled(false)
+        XCTAssertEqual(session.voxGate.config.thresholdDBFS, -33)
+        XCTAssertEqual(session.voxGate.config.hangoverMS, 900)
+        XCTAssertEqual(session.voxGate.config.attackMS, 120)
     }
 
     func testSetVoxThresholdPublishesAndPersists() {
@@ -2463,24 +2698,26 @@ final class CallSessionTests: XCTestCase {
         let fake = FakeStation()
         fake.snapshotToReturn = CallSnapshot(
             status: .answered, ptt: false, remotePTT: false,
-            txDB: -60, rxDB: -60, inputDB: -10, rttMS: 20)
+            txDB: -60, rxDB: -60, inputDB: -10, rttMS: 20, voxDB: -10)
         let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+        session.voxGate.config.attackMS = 0  // the attack has its own tests
         session.setVoxThreshold(-5)
         session.setVoxEnabled(true)
         session.poll()
-        XCTAssertTrue(fake.pttCalls.isEmpty, "mic below the raised VOX threshold doesn't key")
+        XCTAssertEqual(fake.keyingLog, [], "mic below the raised VOX threshold doesn't key")
     }
 
     func testApplyAudioSettingsRestoresVoxThreshold() {
         let fake = FakeStation()
         fake.snapshotToReturn = CallSnapshot(
             status: .answered, ptt: false, remotePTT: false,
-            txDB: -60, rxDB: -60, inputDB: -10, rttMS: 20)
+            txDB: -60, rxDB: -60, inputDB: -10, rttMS: 20, voxDB: -10)
         let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+        session.voxGate.config.attackMS = 0  // the attack has its own tests
         session.applyAudioSettings(AudioSettings(voxEnabled: true, voxThresholdDBFS: -5))
         XCTAssertEqual(session.voxThresholdDBFS, -5)
         session.poll()
-        XCTAssertTrue(fake.pttCalls.isEmpty, "the restored threshold applies to the gate")
+        XCTAssertEqual(fake.keyingLog, [], "the restored threshold applies to the gate")
     }
 
     func testSetVoxHangtimePublishesAppliesToGateAndPersists() {
@@ -2503,10 +2740,11 @@ final class CallSessionTests: XCTestCase {
         let fake = FakeStation()
         fake.snapshotToReturn = CallSnapshot(
             status: .answered, ptt: false, remotePTT: false,
-            txDB: -60, rxDB: -60, inputDB: -22, rttMS: 20)
+            txDB: -60, rxDB: -60, inputDB: -22, rttMS: 20, voxDB: -31)
         let session = CallSession(station: fake, audioStore: MemoryAudioStore())
         session.poll()
         XCTAssertEqual(session.meters.inputDB, -22)
+        XCTAssertEqual(session.meters.voxDB, -31, "the VOX meter shows the VOX loudness")
     }
 
     func testVoxDoesNothingWhenDisabled() throws {
@@ -2516,25 +2754,30 @@ final class CallSessionTests: XCTestCase {
             txDB: -10, rxDB: -60, rttMS: 20
         )
         let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+        session.voxGate.config.attackMS = 0  // the attack has its own tests
 
         session.poll()
 
-        XCTAssertTrue(fake.pttCalls.isEmpty, "VOX off → poll never keys from mic level")
+        XCTAssertEqual(fake.keyingLog, [], "VOX off → poll never keys from mic level")
     }
 
     func testDisablingVoxUnkeysIfItWasHolding() throws {
         let fake = FakeStation()
         fake.snapshotToReturn = CallSnapshot(
             status: .answered, ptt: false, remotePTT: false,
-            txDB: -10, rxDB: -60, inputDB: -10, rttMS: 20
+            txDB: -10, rxDB: -60, inputDB: -10, rttMS: 20, voxDB: -10
         )
         let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+        session.voxGate.config.attackMS = 0  // the attack has its own tests
         session.setVoxEnabled(true)
         session.poll()  // keys: [true]
 
         session.setVoxEnabled(false)  // should fail-safe unkey
 
-        XCTAssertEqual(fake.pttCalls, [true, false], "turning VOX off releases the key")
+        // Releases only `.vox`; under OR a held handset or button keeps the key.
+        XCTAssertEqual(
+            fake.keyingLog, ["pttSource(vox,true)", "pttSource(vox,false)"],
+            "turning VOX off releases the VOX source")
     }
 
     // MARK: - Full / half duplex
@@ -2545,49 +2788,55 @@ final class CallSessionTests: XCTestCase {
         let fake = FakeStation()
         fake.snapshotToReturn = CallSnapshot(
             status: .answered, ptt: false, remotePTT: false,
-            txDB: -60, rxDB: -20, inputDB: -10, rttMS: 20  // loud mic, but RX active
+            txDB: -60, rxDB: -20, inputDB: -10, rttMS: 20, voxDB: -10  // loud mic, but RX active
         )
         let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+        session.voxGate.config.attackMS = 0  // the attack has its own tests
         session.setVoxEnabled(true)
 
         session.poll()
 
-        XCTAssertFalse(fake.pttCalls.contains(true), "half-duplex blocks VOX while receiving")
+        XCTAssertEqual(fake.keyingLog, [], "half-duplex blocks VOX while receiving")
     }
 
     func testFullDuplexAllowsVoxWhileReceiving() throws {
         let fake = FakeStation()
         fake.snapshotToReturn = CallSnapshot(
             status: .answered, ptt: false, remotePTT: false,
-            txDB: -60, rxDB: -20, inputDB: -10, rttMS: 20
+            txDB: -60, rxDB: -20, inputDB: -10, rttMS: 20, voxDB: -10
         )
         let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+        session.voxGate.config.attackMS = 0  // the attack has its own tests
         session.setVoxEnabled(true)
         session.setFullDuplex(true)
 
         session.poll()
 
-        XCTAssertTrue(
-            fake.pttCalls.contains(true), "full duplex lets VOX key while receiving (headphones)")
+        XCTAssertEqual(
+            fake.keyingLog, ["pttSource(vox,true)"],
+            "full duplex lets VOX key while receiving (headphones)")
     }
 
     func testHalfDuplexReleasesVoxKeyWhenReceivingStarts() throws {
         let fake = FakeStation()
         fake.snapshotToReturn = CallSnapshot(  // loud mic, no RX → VOX keys
             status: .answered, ptt: false, remotePTT: false,
-            txDB: -60, rxDB: -60, inputDB: -10, rttMS: 20
+            txDB: -60, rxDB: -60, inputDB: -10, rttMS: 20, voxDB: -10
         )
         let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+        session.voxGate.config.attackMS = 0  // the attack has its own tests
         session.setVoxEnabled(true)
         session.poll()  // keys: [true]
 
         fake.snapshotToReturn = CallSnapshot(  // RX now active
             status: .answered, ptt: false, remotePTT: true,
-            txDB: -60, rxDB: -20, inputDB: -10, rttMS: 20
+            txDB: -60, rxDB: -20, inputDB: -10, rttMS: 20, voxDB: -10
         )
         session.poll()
 
-        XCTAssertEqual(fake.pttCalls.last, false, "RX starting releases the VOX key in half-duplex")
+        XCTAssertEqual(
+            fake.keyingLog, ["pttSource(vox,true)", "pttSource(vox,false)"],
+            "RX starting releases the VOX source in half-duplex")
     }
 
     func testSetFullDuplexPublishesAndPersists() throws {
@@ -2615,11 +2864,15 @@ final class CallSessionTests: XCTestCase {
     func testTxDisabledBlocksManualPTT() throws {
         let fake = FakeStation()
         let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+        session.voxGate.config.attackMS = 0  // the attack has its own tests
         session.setTxDisabled(true)
 
         try session.setPTT(true)
 
-        XCTAssertFalse(fake.pttCalls.contains(true), "listen-only must never key the radio")
+        // Listen-only stops everything first, then the press arrives as a release.
+        XCTAssertEqual(
+            fake.keyingLog, ["pttStopAll", "pttSource(manual,false)"],
+            "listen-only must never key the radio")
     }
 
     func testTxDisabledBlocksVoxKeying() throws {
@@ -2630,24 +2883,28 @@ final class CallSessionTests: XCTestCase {
             txDB: -10, rxDB: -60, rttMS: 20  // -10 > -40 threshold
         )
         let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+        session.voxGate.config.attackMS = 0  // the attack has its own tests
         session.setVoxEnabled(true)
         session.setTxDisabled(true)
 
         session.poll()
 
-        XCTAssertFalse(fake.pttCalls.contains(true), "VOX cannot key while listen-only")
+        XCTAssertEqual(fake.keyingLog, ["pttStopAll"], "VOX cannot key while listen-only")
     }
 
     func testTxDisabledBlocksSerialTick() throws {
         // A serial source asking to key must be suppressed while listen-only.
         let fake = FakeStation()
         let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+        session.voxGate.config.attackMS = 0  // the attack has its own tests
         session.setTxDisabled(true)
         session.pttSourceTick = { _, _ in true }
 
         session.poll()
 
-        XCTAssertFalse(fake.pttCalls.contains(true), "serial handset cannot key while listen-only")
+        XCTAssertEqual(
+            fake.keyingLog, ["pttStopAll", "pttSource(serial,false)"],
+            "serial handset cannot key while listen-only")
     }
 
     func testEnablingTxDisabledFailSafeUnkeys() throws {
@@ -2655,16 +2912,19 @@ final class CallSessionTests: XCTestCase {
         let fake = FakeStation()
         fake.snapshotToReturn = CallSnapshot(
             status: .answered, ptt: false, remotePTT: false,
-            txDB: -10, rxDB: -60, inputDB: -10, rttMS: 20
+            txDB: -10, rxDB: -60, inputDB: -10, rttMS: 20, voxDB: -10
         )
         let session = CallSession(station: fake, audioStore: MemoryAudioStore())
+        session.voxGate.config.attackMS = 0  // the attack has its own tests
         session.setVoxEnabled(true)
         session.poll()  // keys: [true]
 
         session.setTxDisabled(true)
 
-        XCTAssertEqual(fake.pttCalls.last, false, "enabling listen-only releases any held key")
-        XCTAssertTrue(fake.pttCalls.contains(true), "VOX should have keyed first (from inputDB)")
+        // Listen-only is a stop of every source, not a VOX-only release.
+        XCTAssertEqual(
+            fake.keyingLog, ["pttSource(vox,true)", "pttStopAll"],
+            "VOX keys first (from voxDB), then enabling listen-only stops everything")
     }
 
     func testTxReEnabledAllowsPTTAgain() throws {
@@ -2675,7 +2935,9 @@ final class CallSessionTests: XCTestCase {
 
         try session.setPTT(true)
 
-        XCTAssertEqual(fake.pttCalls.last, true, "turning TX back on restores keying")
+        XCTAssertEqual(
+            fake.keyingLog, ["pttStopAll", "pttSource(manual,true)"],
+            "turning TX back on restores keying")
     }
 
     func testApplyAudioSettingsAppliesTxDisabled() throws {
@@ -3113,5 +3375,152 @@ final class CallSessionTests: XCTestCase {
                 CallSession.callsignPrefill(from: input), expected,
                 "callsignPrefill(from: \(input ?? "nil"))")
         }
+    }
+}
+
+/// The PTT half of the `StationDriving` seam: the binding's five calls, the
+/// snapshot fields they report through, and the recording surface every later
+/// keying test asserts against.
+final class StationSeamPTTTests: XCTestCase {
+    func testFakeStationLogsEveryPTTCallInOrder() throws {
+        let fake = FakeStation()
+        try fake.setPTT(true)
+        try fake.pttSource(.manual, on: true)
+        try fake.pttStopAll()
+        try fake.pttLeasePress(.bluetooth, ttl: .milliseconds(1_500))
+        try fake.pttLeaseRenew(.bluetooth)
+        try fake.setTxTimeout(.seconds(120))
+        try fake.pttSource(.vox, on: false)
+
+        XCTAssertEqual(
+            fake.pttLog,
+            [
+                "setPTT(true)", "pttSource(manual,true)", "pttStopAll",
+                "pttLeasePress(bluetooth,1500ms)", "pttLeaseRenew(bluetooth)",
+                "setTxTimeout(120s)", "pttSource(vox,false)",
+            ])
+        XCTAssertEqual(fake.pttCalls, [true])
+        XCTAssertEqual(fake.pttSourceCalls.map { $0.source }, [.manual, .vox])
+        XCTAssertEqual(fake.pttSourceCalls.map { $0.on }, [true, false])
+        XCTAssertEqual(fake.stopAllCount, 1)
+        XCTAssertEqual(fake.leasePressCalls.map { $0.source }, [.bluetooth])
+        XCTAssertEqual(fake.leasePressCalls.map { $0.ttl }, [.milliseconds(1_500)])
+        XCTAssertEqual(fake.leaseRenewCalls, [.bluetooth])
+        XCTAssertEqual(fake.txTimeoutCalls, [.seconds(120)])
+    }
+
+    func testFakeStationRecordsAFailingCallBeforeThrowing() {
+        struct Refused: Error {}
+        let fake = FakeStation()
+        fake.pttSourceError = Refused()
+        fake.leasePressError = Refused()
+        fake.leaseRenewError = Refused()
+        fake.txTimeoutError = Refused()
+
+        XCTAssertThrowsError(try fake.pttSource(.manual, on: true))
+        XCTAssertNoThrow(try fake.pttSource(.manual, on: false), "a release is never refused")
+        XCTAssertThrowsError(try fake.pttLeasePress(.bluetooth, ttl: .milliseconds(1_500)))
+        XCTAssertThrowsError(try fake.pttLeaseRenew(.bluetooth))
+        XCTAssertThrowsError(try fake.setTxTimeout(.seconds(60)))
+        XCTAssertEqual(
+            fake.pttLog,
+            [
+                "pttSource(manual,true)", "pttSource(manual,false)",
+                "pttLeasePress(bluetooth,1500ms)", "pttLeaseRenew(bluetooth)",
+                "setTxTimeout(60s)",
+            ])
+    }
+
+    func testFakeStationRefusesABluetoothPressLikeTheEngine() {
+        let fake = FakeStation()
+        XCTAssertThrowsError(try fake.pttSource(.bluetooth, on: true)) {
+            XCTAssertEqual(($0 as? StationError)?.code, StationError.invalidArgumentCode)
+        }
+        XCTAssertNoThrow(try fake.pttSource(.bluetooth, on: false), "its release is accepted")
+        XCTAssertEqual(fake.pttLog, ["pttSource(bluetooth,true)", "pttSource(bluetooth,false)"])
+    }
+
+    func testNullStationPTTCallsAreNoOps() throws {
+        let null = NullStation()
+        try null.pttSource(.manual, on: true)
+        try null.pttStopAll()
+        try null.pttLeasePress(.bluetooth, ttl: .milliseconds(1_500))
+        try null.pttLeaseRenew(.bluetooth)
+        try null.setTxTimeout(.seconds(120))
+        XCTAssertEqual(try null.readSnapshot(), .idle)
+    }
+
+    func testCallSnapshotPTTDefaults() {
+        let idle = CallSnapshot.idle
+        XCTAssertEqual(idle.pttSources, [])
+        XCTAssertEqual(idle.pttLatched, [])
+        XCTAssertEqual(idle.pttForcedSeq, 0)
+        XCTAssertEqual(idle.pttForcedSources, [])
+        XCTAssertNil(idle.pttForcedReason)
+        XCTAssertEqual(idle.pttTxTimeoutMS, 120_000)
+    }
+
+    func testCallSnapshotCarriesPTTFields() {
+        let snap = CallSnapshot(
+            status: .answered, ptt: true, remotePTT: false, txDB: -20, rxDB: -60, rttMS: nil,
+            pttSources: [.bluetooth, .vox], pttLatched: .serial, pttForcedSeq: 3,
+            pttForcedSources: [.manual, .serial], pttForcedReason: .txTimeout,
+            pttTxTimeoutMS: 300_000)
+        XCTAssertEqual(snap.pttSources, [.bluetooth, .vox])
+        XCTAssertEqual(snap.pttLatched, .serial)
+        XCTAssertEqual(snap.pttForcedSeq, 3)
+        XCTAssertEqual(snap.pttForcedSources, [.manual, .serial])
+        XCTAssertEqual(snap.pttForcedReason, .txTimeout)
+        XCTAssertEqual(snap.pttTxTimeoutMS, 300_000)
+        XCTAssertNotEqual(
+            snap,
+            CallSnapshot(
+                status: .answered, ptt: true, remotePTT: false, txDB: -20, rxDB: -60, rttMS: nil),
+            "the PTT fields take part in equality")
+    }
+
+    func testCallSnapshotInitMapsEveryPTTField() throws {
+        // A fresh, idle engine's snapshot (no call, no audio, no network),
+        // with its public PTT vars set by hand. Nothing is pressed, so nothing
+        // can key. Every mask is different, so a dropped or swapped field fails.
+        var snap = try Station().snapshot()
+        snap.pttSources = [.manual, .bluetooth]
+        snap.pttLatched = .serial
+        snap.pttForcedSeq = 3
+        snap.pttForcedSources = [.manual, .legacy]
+        snap.pttForcedReason = .txTimeout
+        snap.pttTxTimeoutMS = 300_000
+        let call = CallSnapshot(snap)
+        XCTAssertEqual(call.pttSources, [.manual, .bluetooth])
+        XCTAssertEqual(call.pttLatched, .serial)
+        XCTAssertEqual(call.pttForcedSeq, 3)
+        XCTAssertEqual(call.pttForcedSources, [.manual, .legacy])
+        XCTAssertEqual(call.pttForcedReason, .txTimeout)
+        XCTAssertEqual(call.pttTxTimeoutMS, 300_000)
+
+        snap.pttForcedReason = .leaseExpired
+        XCTAssertEqual(CallSnapshot(snap).pttForcedReason, .leaseExpired)
+        snap.pttForcedReason = nil
+        XCTAssertNil(CallSnapshot(snap).pttForcedReason)
+    }
+
+    func testRealStationReadSnapshotMapsPTTFields() throws {
+        // A fresh, idle engine: no call, no audio, no network. Every press is
+        // refused with -3, so nothing here can key.
+        let station = try Station()
+        XCTAssertEqual(try station.readSnapshot().pttTxTimeoutMS, 120_000)
+        try station.setTxTimeout(.seconds(300))
+        XCTAssertEqual(try station.readSnapshot().pttTxTimeoutMS, 300_000)
+        XCTAssertThrowsError(try station.setTxTimeout(.seconds(0))) {
+            XCTAssertEqual(($0 as? StationError)?.code, StationError.invalidArgumentCode)
+        }
+        XCTAssertEqual(try station.readSnapshot().pttTxTimeoutMS, 300_000, "0 is refused")
+        XCTAssertThrowsError(try station.pttLeasePress(.bluetooth, ttl: .milliseconds(1_500))) {
+            XCTAssertEqual(($0 as? StationError)?.code, -3, "no call: not connected")
+        }
+        let snap = try station.readSnapshot()
+        XCTAssertEqual(snap.pttLatched, .bluetooth)
+        XCTAssertEqual(snap.pttSources, [])
+        XCTAssertEqual(snap.pttForcedSeq, 0, "a refused press is not a forced stop")
     }
 }

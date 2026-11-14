@@ -587,6 +587,22 @@ fn run_serve_mode(
         ctrl.set_auth(auth);
     }
 
+    // The net recordings pages (`[netrec]`): read-only over astar-netrec's
+    // archive, plus an admin's delete. Before the bind, so no request can see
+    // the table half-installed. A missing folder is an empty list; nothing
+    // here creates it.
+    if let Some(n) = &cfg.netrec {
+        #[cfg(feature = "auth")]
+        let sign_in = ctrl.auth().is_some_and(|a| a.disabled().is_none());
+        #[cfg(not(feature = "auth"))]
+        let sign_in = false;
+        ctrl.set_nets(Arc::new(astar_server::run::nets_pages(n, sign_in)));
+        eprintln!(
+            "astar-server: net recordings at /nets/ from {}",
+            n.archive.display()
+        );
+    }
+
     // Bind the HTTP control server; fail fast if the address is unavailable.
     let bind_str = bind.to_string();
     let server = match astar_server::server::bind_control(&ctrl, &bind_str) {

@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 use std::net::SocketAddr;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
-use std::thread::JoinHandle;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError, Weak};
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use astar_audio::AudioBackend;
@@ -28,13 +30,129 @@ use astar_record::tap::{
 use astar_record::{Layout, RecordError, RecordState, Recorder, RecorderConfig, RecorderInputs};
 
 use crate::config::NodeConfig;
-use crate::{RegisterConfig, StationConfig, StationError, StationEvent};
+use crate::{
+    NotLeased, PressOutcome, PttArbiter, PttEdge, PttSnapshot, PttSource, RegisterConfig,
+    StationConfig, StationError, StationEvent, TxTimeoutOutOfRange,
+};
 
 type BackendFactory = Box<dyn Fn() -> Box<dyn AudioBackend> + Send + Sync>;
 
 /// Default in-band DTMF tone duration (ms) for [`Station::send_dtmf`]. One
 /// keypress = one complete tone of this length.
 pub const DEFAULT_DTMF_MS: u32 = 250;
+
+/// How often `astar-ptt-watch` applies the transmit time-out and the
+/// Bluetooth lease. It bounds how late either can fire (one period plus
+/// scheduling slack, so within 100 ms of the deadline), and it is the
+/// engine's own clock, so neither limit depends on a UI thread, a poll loop
+/// or the Bluetooth stack staying alive.
+const PTT_WATCH_PERIOD: Duration = Duration::from_millis(50);
+
+/// The lease TTL range [`Station::ptt_lease_press`] accepts. Zero would be a
+/// lease that is already expired; above 5 s a wedged client could hold the
+/// key for longer than a person notices.
+const MIN_LEASE_TTL: Duration = Duration::from_millis(1);
+const MAX_LEASE_TTL: Duration = Duration::from_millis(5_000);
+
+/// The call identity the arbiter is given in Node mode, in place of
+/// `ConsoleState::answered_seq`. On a multi-call node that counter bumps for
+/// every caller who links (iax-a82f), and a held `/key` is not over just
+/// because another node joined: the node daemon's only intended PTT
+/// behaviour change is the transmit time-out, so a second caller linking
+/// must not latch anything held. (A held `/key` is `Legacy`, which a call
+/// change never latches; this keeps a Manual, VOX, serial or Bluetooth hold
+/// on a Node station from being latched either.) Feeding a fixed value means
+/// only `!answered` latches in Node mode; `Station::observe_ptt_call` handles
+/// a new caller itself, without a latch.
+const NODE_PTT_CALL_SEQ: u64 = 0;
+
+/// Lock `m`, recovering the guard if another thread panicked while holding
+/// it. PTT state must stay reachable after a panic elsewhere: refusing to
+/// lock would leave a keyed radio with nothing able to unkey it.
+fn relock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Test hook for the watchdog (feature `test-hooks`): when armed, the next
+/// tick panics once while it holds the arbiter guard, so a test can prove
+/// that `ptt_watch_tick`'s `catch_unwind` keeps enforcement alive and that
+/// `relock` recovers the poisoned arbiter. Zero-sized and inert in every
+/// other build.
+#[derive(Clone, Default)]
+struct PttWatchHook {
+    #[cfg(feature = "test-hooks")]
+    panic_next: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl PttWatchHook {
+    #[cfg_attr(not(feature = "test-hooks"), allow(clippy::unused_self))]
+    fn maybe_panic(&self) {
+        #[cfg(feature = "test-hooks")]
+        assert!(
+            !self.panic_next.swap(false, Ordering::SeqCst),
+            "astar-ptt-watch: injected tick panic (test hook)"
+        );
+    }
+}
+
+/// The running `astar-ptt-watch` thread. Dropping `stop` wakes it at once
+/// and it exits; `Station::drop` then joins `handle`.
+struct PttWatch {
+    stop: mpsc::Sender<()>,
+    handle: JoinHandle<()>,
+}
+
+/// Spawn `astar-ptt-watch`. It holds only `Weak` references, so it can never
+/// keep a dropped `Station`'s arbiter (or a shared session) alive, and it
+/// exits on the first of: the stop channel closing, either `Weak` failing to
+/// upgrade.
+fn spawn_ptt_watch(
+    ptt: Weak<Mutex<PttArbiter>>,
+    session: Weak<Mutex<ConsoleSession>>,
+    hook: PttWatchHook,
+) -> std::io::Result<PttWatch> {
+    let (stop, stopped) = mpsc::channel::<()>();
+    let handle = thread::Builder::new()
+        .name("astar-ptt-watch".into())
+        .spawn(move || {
+            loop {
+                match stopped.recv_timeout(PTT_WATCH_PERIOD) {
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+                }
+                let (Some(ptt), Some(session)) = (ptt.upgrade(), session.upgrade()) else {
+                    return;
+                };
+                ptt_watch_tick(&ptt, &session, &hook, Instant::now());
+            }
+        })?;
+    Ok(PttWatch { stop, handle })
+}
+
+/// One watchdog step: let the arbiter apply the transmit time-out and the
+/// lease, and forward an unkey to the console while still holding the
+/// arbiter (lock order arbiter → session), so no press can slip in between
+/// the decision and the unkey. The console's answer is ignored: a call that
+/// is already gone is already unkeyed.
+///
+/// The step runs under `catch_unwind` so a panic in one tick (in the
+/// arbiter, or inside `ConsoleSession::set_ptt`) cannot end the thread and
+/// with it every later lease and time-out. The guards it held are poisoned
+/// by such a panic, and `relock` recovers them on the next tick.
+fn ptt_watch_tick(
+    ptt: &Mutex<PttArbiter>,
+    session: &Mutex<ConsoleSession>,
+    hook: &PttWatchHook,
+    now: Instant,
+) {
+    let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+        let mut arbiter = relock(ptt);
+        hook.maybe_panic();
+        if arbiter.tick(now) == PttEdge::Unkey {
+            let _ = relock(session).set_ptt(false);
+        }
+    }));
+}
 
 /// Floor for a DTMF tone duration: short enough to feel responsive, long enough
 /// that the receiver's Goertzel decoder sees several analysis blocks (~25 ms
@@ -544,6 +662,24 @@ pub struct Station {
     /// app can point at its own bundled library before
     /// [`Station::m17_connect`].
     codec_dirs: Mutex<Vec<std::path::PathBuf>>,
+    /// The PTT arbiter: the OR of held sources, per-source latches, the
+    /// Bluetooth lease and the one transmit time-out. Every keying entry
+    /// point (`set_ptt`, `ptt_source`, `ptt_lease_press`) goes through it and
+    /// only its OR edges reach `ConsoleSession::set_ptt`. `Arc` so the
+    /// watchdog can hold a `Weak`. Lock order everywhere: `ptt`, then
+    /// `session`; never take `ptt` while holding the session guard.
+    ptt: Arc<Mutex<PttArbiter>>,
+    /// `astar-ptt-watch`, spawned on the first press of any source and
+    /// respawned by the next press if it has exited. A leaf lock: taken
+    /// alone, never while `ptt` or `session` is held.
+    ptt_watch: Mutex<Option<PttWatch>>,
+    /// The `ConsoleState::answered_seq` the PTT observer last saw, so a Node
+    /// station can tell a new caller apart (the arbiter is fed
+    /// `NODE_PTT_CALL_SEQ` there). Read and written only while `ptt` is
+    /// held, so `Relaxed` is enough.
+    ptt_seen_seq: AtomicU64,
+    /// The watchdog's test hook; inert unless built with `test-hooks`.
+    ptt_watch_hook: PttWatchHook,
     /// Memoized [`Station::m17_available`] probe, keyed on the exact
     /// `codec_dirs` value it was computed against (iax-f2b8 Task 4).
     /// `codec2_available`'s static backend does a full `Codec2::new()`
@@ -635,6 +771,10 @@ impl Station {
             dtmf_mode: Mutex::new(DtmfMode::default()),
             dtmf_queue: Mutex::new(None),
             codec_dirs: Mutex::new(Vec::new()),
+            ptt: Arc::new(Mutex::new(PttArbiter::new())),
+            ptt_watch: Mutex::new(None),
+            ptt_seen_seq: AtomicU64::new(0),
+            ptt_watch_hook: PttWatchHook::default(),
             #[cfg(feature = "m17")]
             codec2_probe_cache: Mutex::new(None),
             recording: Mutex::new(RecordSlot::default()),
@@ -685,6 +825,10 @@ impl Station {
             dtmf_mode: Mutex::new(DtmfMode::default()),
             dtmf_queue: Mutex::new(None),
             codec_dirs: Mutex::new(Vec::new()),
+            ptt: Arc::new(Mutex::new(PttArbiter::new())),
+            ptt_watch: Mutex::new(None),
+            ptt_seen_seq: AtomicU64::new(0),
+            ptt_watch_hook: PttWatchHook::default(),
             #[cfg(feature = "m17")]
             codec2_probe_cache: Mutex::new(None),
             recording: Mutex::new(RecordSlot::default()),
@@ -1162,6 +1306,10 @@ impl Station {
     /// (`Call::hangup` joins the runtime thread / drops cpal streams, which can
     /// briefly block — never under the session lock).
     pub fn disconnect(&self) {
+        // First, before anything is torn down: every held PTT source is
+        // released (latched unless it is Legacy) and the console unkeyed, so
+        // nothing held through this hangup can key whatever call comes next.
+        self.ptt_call_ended();
         // Finish an app recording before the call it records goes away. A
         // no-op, taps untouched, when none is running.
         let _ = self.record_stop();
@@ -2070,6 +2218,7 @@ impl Station {
     /// Disconnect the live M17 session, if any (iax-f2b8 Task 4). No-op when
     /// none is active (and when the `m17` feature isn't compiled in).
     pub fn m17_disconnect(&self) {
+        self.ptt_call_ended();
         #[cfg(feature = "m17")]
         {
             self.session.lock().unwrap().m17_disconnect();
@@ -2419,6 +2568,7 @@ impl Station {
     /// when none is active (and when the `dstar` feature isn't compiled
     /// in).
     pub fn dstar_disconnect(&self) {
+        self.ptt_call_ended();
         #[cfg(feature = "dstar")]
         {
             self.session.lock().unwrap().dstar_disconnect();
@@ -2537,6 +2687,7 @@ impl Station {
     /// Disconnect the live YSF link, if any. No-op when none is active (and
     /// when the `ysf` feature isn't compiled in).
     pub fn ysf_disconnect(&self) {
+        self.ptt_call_ended();
         #[cfg(feature = "ysf")]
         {
             self.session.lock().unwrap().ysf_disconnect();
@@ -2703,6 +2854,7 @@ impl Station {
     /// Disconnect the live NXDN link, if any. No-op when none is active (and
     /// when the `nxdn` feature isn't compiled in).
     pub fn nxdn_disconnect(&self) {
+        self.ptt_call_ended();
         #[cfg(feature = "nxdn")]
         {
             self.session.lock().unwrap().nxdn_disconnect();
@@ -2983,6 +3135,7 @@ impl Station {
     /// Disconnect the live DMR link, if any. No-op when none is active (and
     /// when the `dmr` feature isn't compiled in).
     pub fn dmr_disconnect(&self) {
+        self.ptt_call_ended();
         #[cfg(feature = "dmr")]
         {
             self.session.lock().unwrap().dmr_disconnect();
@@ -3275,6 +3428,9 @@ impl Station {
         snap.mode = mode;
         snap.dtmf_played = dtmf_played;
         snap.dtmf_total = dtmf_total;
+        // The session guard above was a statement temporary and is released:
+        // lock order is arbiter → session, so the arbiter may be taken here.
+        self.observe_ptt_call(&mut relock(&self.ptt), &mut snap);
         // iax-f2b8-fix Fix 2: override the session's dirs-blind
         // `astar_console::m17_available()` mirror with the dirs-aware,
         // memoized `Station::m17_available()` — the contract documented at
@@ -3295,6 +3451,9 @@ impl Station {
         let call_active = self.session.lock().unwrap().is_active();
         if let Some(db) = self.monitor_input_dbfs().filter(|_| !call_active) {
             snap.input_level_db = db;
+        }
+        if let Some(db) = self.monitor_vox_dbfs().filter(|_| !call_active) {
+            snap.vox_level_db = db;
         }
         // Which noise-reduction chain WOULD run, when none is running to
         // measure. Idle is when this gets configured, so a capability line
@@ -3349,13 +3508,26 @@ impl Station {
     #[must_use]
     pub fn try_snapshot(&self) -> Option<ConsoleState> {
         let mode = self.mode();
-        self.session.try_lock().ok().map(|mut s| {
-            let mut snap = s.snapshot();
-            snap.mode = mode;
-            // iax-f2b8-fix Fix 2: same dirs-aware override as `snapshot()`.
-            snap.m17_available = self.m17_available();
-            snap
-        })
+        // The guard moves into the closure and is released when it returns,
+        // before the arbiter is touched below (lock order arbiter → session).
+        let mut snap = self.session.try_lock().ok().map(|mut s| s.snapshot())?;
+        snap.mode = mode;
+        // iax-f2b8-fix Fix 2: same dirs-aware override as `snapshot()`.
+        snap.m17_available = self.m17_available();
+        // Non-blocking like the rest of this method: a busy arbiter is
+        // observed by the next poll. Only when a loss is actually found does
+        // this block, briefly, to forward the unkey. A poisoned arbiter is
+        // recovered, as `relock` does everywhere else, so a panic elsewhere
+        // can never stop this method from noticing a lost call.
+        let arbiter = match self.ptt.try_lock() {
+            Ok(guard) => Some(guard),
+            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        };
+        if let Some(mut arbiter) = arbiter {
+            self.observe_ptt_call(&mut arbiter, &mut snap);
+        }
+        Some(snap)
     }
 
     /// Push an announcement service config into the session (and the live
@@ -3446,14 +3618,34 @@ impl Station {
 
     /// Set local transmit (PTT) on the active call, whatever network that
     /// call is on: an IAX2 call, an M17 session, or — since iax-2f6b — a
-    /// D-Star session.
+    /// D-Star session. This is the `Legacy` PTT source: the one `astar-server`
+    /// (`POST /key`, `/unkey`), the CLI, the Python binding and the Iced
+    /// client use.
+    ///
+    /// `set_ptt(true)` is [`Station::ptt_source`]`(PttSource::Legacy, true)`.
+    /// `set_ptt(false)` stops everything — every held source is released and
+    /// latched, Legacy's own latch is cleared because `false` is the only
+    /// release a Legacy caller has — and then ALWAYS forwards an unkey to the
+    /// console, returning its answer, so an idle station still reports
+    /// [`StationError::NotConnected`] exactly as before.
+    ///
+    /// The transmit time-out ([`Station::set_tx_timeout`], 2 min on a new
+    /// station) bounds a Legacy key like every other source: a `/key` held
+    /// past it is unkeyed and latched, and the next `set_ptt(true)` needs a
+    /// `set_ptt(false)` first. That time-out (and [`Station::ptt_stop_all`],
+    /// which `astar-server` never calls) is the only thing that latches
+    /// Legacy: a `set_ptt(true)` the console refuses, and a Legacy key still
+    /// held when the call ends, are released without a latch, so the next
+    /// `set_ptt(true)` behaves exactly as it did before the arbiter existed.
     ///
     /// # Remote-control surfaces
     ///
-    /// This is the ONE entry point that can key a transmitter, and it is
-    /// network-agnostic by design, so anything that can reach a `Station` can
-    /// key it. `astar-server` exposes exactly that: `POST /key` (`http.rs`)
-    /// and a TUI keystroke, both landing here.
+    /// `Station` is the ONE path to the console that can key a transmitter —
+    /// `set_ptt`, [`Station::ptt_source`] and [`Station::ptt_lease_press`] all
+    /// go through the arbiter, and only its OR edges reach the console — and
+    /// it is network-agnostic by design, so anything that can reach a
+    /// `Station` can key it. `astar-server` exposes exactly that: `POST /key`
+    /// (`http.rs`) and a TUI keystroke, both landing here.
     ///
     /// D-Star is not remotely keyable, and that is ENFORCED rather than
     /// arranged: `astar-server`'s `NodeCommand::Key` handler refuses while
@@ -3469,15 +3661,298 @@ impl Station {
     /// check — this method will not make it for you.
     ///
     /// # Errors
-    /// [`StationError::NotConnected`] if no call is active.
+    /// [`StationError::NotConnected`] if no call is active;
+    /// [`StationError::PttLatched`] for a press while Legacy is latched (only
+    /// after the transmit time-out or a stop-all); the console's own refusal
+    /// (NXDN, DMR, no capture device) for a press, which latches nothing.
     pub fn set_ptt(&self, on: bool) -> Result<(), StationError> {
-        // Uniform: the session keys the active call's routed mic regardless of
-        // whether it was dialed (WT) or adopted from an inbound offer (Node).
-        self.session
-            .lock()
-            .unwrap()
-            .set_ptt(on)
+        if on {
+            return self.press_source(PttSource::Legacy, None);
+        }
+        let mut arbiter = relock(&self.ptt);
+        let _ = arbiter.legacy_off();
+        // Uniform: the session unkeys the active call's routed mic regardless
+        // of whether it was dialed (WT) or adopted from an inbound offer
+        // (Node). Forwarded even when the arbiter saw no edge, so a caller
+        // that only ever sends `false` still clears whatever the console holds.
+        relock(&self.session)
+            .set_ptt(false)
             .map_err(map_console_err)
+    }
+
+    /// Press (`on`) or release one PTT source. The radio is on air while any
+    /// held, unlatched source is pressed; releasing one source never cuts off
+    /// another that still holds.
+    ///
+    /// Release is never refused and returns `Ok` even while idle: it clears
+    /// the source's hold AND its latch, which is how a source re-arms after a
+    /// forced stop.
+    ///
+    /// # Errors
+    /// For a press: [`StationError::InvalidArgument`]
+    /// (`"bluetooth presses need a lease"`) for [`PttSource::Bluetooth`],
+    /// which keys only through [`Station::ptt_lease_press`] so that the engine
+    /// bounds every Bluetooth hold — refused before the arbiter is touched, so
+    /// nothing is held or latched; [`StationError::PttLatched`] while the
+    /// source is latched; otherwise the console's own refusal
+    /// ([`StationError::NotConnected`], [`StationError::Audio`] for no capture
+    /// device, [`StationError::Nxdn`], [`StationError::Dmr`]), after the press
+    /// is rolled back and — for every source but [`PttSource::Legacy`] —
+    /// latched, so a button held through dialing does not key on the answer.
+    /// A refused Legacy press is rolled back without a latch.
+    pub fn ptt_source(&self, src: PttSource, on: bool) -> Result<(), StationError> {
+        if on && src == PttSource::Bluetooth {
+            return Err(StationError::InvalidArgument(
+                "bluetooth presses need a lease",
+            ));
+        }
+        if on {
+            return self.press_source(src, None);
+        }
+        let mut arbiter = relock(&self.ptt);
+        if arbiter.release(src) == PttEdge::Unkey {
+            let _ = relock(&self.session).set_ptt(false);
+        }
+        Ok(())
+    }
+
+    /// Press `src` with a lease of `ttl`: unless [`Station::ptt_lease_renew`]
+    /// extends it, the `astar-ptt-watch` thread releases and latches the
+    /// source when the lease runs out. This is what bounds a wireless button
+    /// whose client stops talking to the engine (a wedged UI thread, a stalled
+    /// Bluetooth stack) to `ttl` of stuck transmit.
+    ///
+    /// Bluetooth only. Pressing an already-held lease re-arms its deadline.
+    ///
+    /// # Errors
+    /// [`StationError::InvalidArgument`] for any source other than
+    /// [`PttSource::Bluetooth`], or a `ttl` outside 1..=5000 ms; otherwise as
+    /// for a press through [`Station::ptt_source`].
+    pub fn ptt_lease_press(&self, src: PttSource, ttl: Duration) -> Result<(), StationError> {
+        if src != PttSource::Bluetooth {
+            return Err(StationError::InvalidArgument(
+                "lease source must be bluetooth",
+            ));
+        }
+        if !(MIN_LEASE_TTL..=MAX_LEASE_TTL).contains(&ttl) {
+            return Err(StationError::InvalidArgument(
+                "lease ttl must be 1..=5000 ms",
+            ));
+        }
+        self.press_source(src, Some(ttl))
+    }
+
+    /// Extend a held lease by its TTL from now. Never presses: on a source that
+    /// is released, latched or was never leased it changes nothing, so a
+    /// renew timer that outlives its button can never key the radio.
+    ///
+    /// # Errors
+    /// [`StationError::NotLeased`] unless `src` is held with a lease.
+    pub fn ptt_lease_renew(&self, src: PttSource) -> Result<(), StationError> {
+        relock(&self.ptt)
+            .lease_renew(src, Instant::now())
+            .map_err(|NotLeased| StationError::NotLeased)
+    }
+
+    /// The universal stop: release every source, latch every held one, and
+    /// ALWAYS forward an unkey to the console (its answer is ignored — an idle
+    /// console is already unkeyed). Each latched source must release before it
+    /// can key again.
+    pub fn ptt_stop_all(&self) {
+        let mut arbiter = relock(&self.ptt);
+        let _ = arbiter.stop_all();
+        let _ = relock(&self.session).set_ptt(false);
+    }
+
+    /// Set the one transmit time-out: continuous on-air time of the combined
+    /// keyed state, whichever sources hold it, after which everything is
+    /// stopped and latched. It can never be disabled. Applies to the running
+    /// clock immediately (compared at the watchdog's next tick).
+    ///
+    /// # Errors
+    /// [`StationError::InvalidArgument`] for anything outside 60..=600 s
+    /// (including zero); the value already in force is kept.
+    pub fn set_tx_timeout(&self, timeout: Duration) -> Result<(), StationError> {
+        relock(&self.ptt)
+            .set_tx_timeout(timeout)
+            .map_err(|TxTimeoutOutOfRange| {
+                StationError::InvalidArgument("transmit time-out must be 60..=600 s")
+            })
+    }
+
+    /// The transmit time-out in force: 120 s on a new station until a client
+    /// pushes its own value, so the server, the CLI and Python run on the
+    /// default without ever calling [`Station::set_tx_timeout`].
+    #[must_use]
+    pub fn tx_timeout(&self) -> Duration {
+        relock(&self.ptt).tx_timeout()
+    }
+
+    /// The arbiter's state for a UI: held and latched source masks, the last
+    /// forced stop, and the time-out in force. Never observes the call, so it
+    /// is cheap and side-effect free.
+    #[must_use]
+    pub fn ptt_snapshot(&self) -> PttSnapshot {
+        relock(&self.ptt).snapshot()
+    }
+
+    /// Test-only: set the transmit time-out to anything from 1 ms to 600 s, so
+    /// a test can watch the watchdog fire without waiting a minute. Even here
+    /// zero is refused: no build of astar can disable the time-out.
+    ///
+    /// # Errors
+    /// [`StationError::InvalidArgument`] outside 1 ms..=600 s; the value
+    /// already in force is kept.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn set_tx_timeout_for_test(&self, timeout: Duration) -> Result<(), StationError> {
+        if !(Duration::from_millis(1)..=crate::MAX_TX_TIMEOUT).contains(&timeout) {
+            return Err(StationError::InvalidArgument(
+                "test transmit time-out must be 1 ms..=600 s",
+            ));
+        }
+        relock(&self.ptt).set_tx_timeout_unchecked(timeout);
+        Ok(())
+    }
+
+    /// Test-only: make the next `astar-ptt-watch` tick panic once while it
+    /// holds the arbiter guard, so a test can prove a panicking tick neither
+    /// ends enforcement nor leaves the arbiter unreachable (its mutex is
+    /// poisoned, and every PTT path recovers it through `relock`).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn panic_next_ptt_watch_tick_for_test(&self) {
+        self.ptt_watch_hook.panic_next.store(true, Ordering::SeqCst);
+    }
+
+    /// Test-only: end the running `astar-ptt-watch` but leave its slot
+    /// occupied by the finished thread — the state a watchdog that exited on
+    /// its own would leave — so a test can prove the next press respawns it.
+    /// Returns `true` when a running watchdog was ended, `false` when there
+    /// was none or it did not finish within one second.
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn kill_ptt_watch_for_test(&self) -> bool {
+        let slot = relock(&self.ptt_watch);
+        let Some(watch) = slot.as_ref() else {
+            return false;
+        };
+        if watch.handle.is_finished() || watch.stop.send(()).is_err() {
+            return false;
+        }
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !watch.handle.is_finished() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        true
+    }
+
+    /// Record a press (with a lease when `lease` is `Some`) and key the
+    /// console on the OR's rising edge. A console refusal rolls the press
+    /// back (`rollback_press` latches the source unless it is `Legacy`).
+    /// Holds the arbiter across the console call
+    /// (lock order arbiter → session) so the OR and the console cannot
+    /// disagree.
+    fn press_source(&self, src: PttSource, lease: Option<Duration>) -> Result<(), StationError> {
+        self.ensure_ptt_watch()?;
+        let mut arbiter = relock(&self.ptt);
+        let now = Instant::now();
+        let outcome = match lease {
+            Some(ttl) => arbiter.lease_press(src, ttl, now),
+            None => arbiter.press(src, now),
+        };
+        match outcome {
+            PressOutcome::Ignored => Err(StationError::PttLatched),
+            PressOutcome::Held => Ok(()),
+            PressOutcome::KeyNow => {
+                let keyed = relock(&self.session).set_ptt(true).map_err(map_console_err);
+                if keyed.is_err() {
+                    arbiter.rollback_press(src);
+                }
+                keyed
+            }
+        }
+    }
+
+    /// Spawn `astar-ptt-watch` if it is not running: on the first press, and
+    /// again whenever the thread has exited for any reason (its dead handle
+    /// is joined first). A press is refused when the thread cannot start: a
+    /// lease or time-out nothing enforces is worse than no key at all. That
+    /// refusal is `StationError::Audio("could not start the ptt watchdog")`,
+    /// whose text names the real cause; `Unsupported` would tell the caller
+    /// the mode cannot transmit, which is not what happened.
+    fn ensure_ptt_watch(&self) -> Result<(), StationError> {
+        let mut slot = relock(&self.ptt_watch);
+        let dead = slot.as_ref().is_some_and(|w| w.handle.is_finished());
+        if slot.is_none() || dead {
+            if let Some(finished) = slot.take() {
+                let _ = finished.handle.join();
+            }
+            let watch = spawn_ptt_watch(
+                Arc::downgrade(&self.ptt),
+                Arc::downgrade(&self.session),
+                self.ptt_watch_hook.clone(),
+            )
+            .map_err(|_| StationError::Audio("could not start the ptt watchdog".into()))?;
+            *slot = Some(watch);
+        }
+        Ok(())
+    }
+
+    /// The call the held sources were pressed on is ending: release every
+    /// held source, latching all but `Legacy`, and unkey. Runs first on every
+    /// disconnect path, so a button held through a hangup never keys the next
+    /// call; a `/key` held through it is released, so the next call's `/key`
+    /// keys as before.
+    fn ptt_call_ended(&self) {
+        let mut arbiter = relock(&self.ptt);
+        if arbiter.call_ended() == PttEdge::Unkey {
+            let _ = relock(&self.session).set_ptt(false);
+        }
+    }
+
+    /// Release every held source, latching all but `Legacy`, when the call
+    /// they were pressed on is gone (not answered any more, or — in Wt mode —
+    /// a different call answered), and make the snapshot that noticed say so. Called with the session
+    /// guard already released and the arbiter held; takes the session again
+    /// only to forward the unkey.
+    ///
+    /// Node mode is different for a NEW caller only. On a multi-call node
+    /// another node linking bumps `answered_seq`, and the console's own adopt
+    /// moves the active call to the newcomer and clears its key mirror. A
+    /// held `/key` is not latched for that (the node daemon's only intended
+    /// PTT behaviour change is the transmit time-out): the held sources are
+    /// released WITHOUT a latch, matching the console, so the next `/key`
+    /// keys the new active call exactly as before. `!answered` still latches
+    /// every held source but `Legacy`.
+    fn observe_ptt_call(&self, arbiter: &mut PttArbiter, snap: &mut ConsoleState) {
+        let answered = matches!(snap.status, CallStatus::Answered);
+        let node = snap.mode == OperatingMode::Node;
+        let last_seq = self.ptt_seen_seq.swap(snap.answered_seq, Ordering::Relaxed);
+        let call_seq = if node {
+            NODE_PTT_CALL_SEQ
+        } else {
+            snap.answered_seq
+        };
+        if arbiter.observe_call(answered, call_seq) == PttEdge::Unkey {
+            let _ = relock(&self.session).set_ptt(false);
+            snap.ptt = false;
+            return;
+        }
+        if node && last_seq != snap.answered_seq && arbiter.is_on_air() {
+            let held = arbiter.snapshot().sources;
+            for src in PttSource::ALL {
+                if held & src.bit() != 0 {
+                    let _ = arbiter.release(src);
+                }
+            }
+            let _ = relock(&self.session).set_ptt(false);
+            snap.ptt = false;
+        }
     }
 
     /// Select how [`Station::send_dtmf`] emits digits (iax-7fff): an in-band
@@ -3961,6 +4436,18 @@ impl Station {
             .and_then(|(_, mon)| mon.input_dbfs())
     }
 
+    /// The monitor lane's VOX loudness (dBFS, mean power over 50 ms), or
+    /// `None` when not monitoring. What the VOX calibration meter shows with
+    /// no call up — the same number VOX compares against its threshold.
+    #[must_use]
+    pub fn monitor_vox_dbfs(&self) -> Option<f32> {
+        self.monitor
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|(_, mon)| mon.vox_dbfs())
+    }
+
     /// Copy the live voice-band mic spectrum (iax-e73e) into `out` and return the
     /// number of log-binned dBFS values written (`0` if not monitoring). Poll
     /// this ~20 Hz to draw the spectrum. The bins are log-spaced over the voice
@@ -4209,6 +4696,17 @@ impl std::fmt::Debug for Station {
 
 impl Drop for Station {
     fn drop(&mut self) {
+        // Unkey before anything else is torn down: every held source is
+        // released and latched and the console told to unkey.
+        self.ptt_stop_all();
+        // Nothing is held now, so the watchdog has nothing left to enforce.
+        // Closing its channel wakes it at once; join so no thread outlives
+        // the station.
+        let watch = relock(&self.ptt_watch).take();
+        if let Some(watch) = watch {
+            drop(watch.stop);
+            let _ = watch.handle.join();
+        }
         // Finish an open recording first (`disconnect` does too; idempotent).
         let _ = self.record_stop();
         // Hang up any live call. `disconnect()` itself now also clears any

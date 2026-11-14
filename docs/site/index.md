@@ -101,6 +101,10 @@ device, not a special case. Raw USB is the default transport and needs no
 driver; the tty path is opt-in and on macOS needs WCH's driver. See
 [Hardware](macos/hardware.md).
 
+On macOS, the push-to-talk button on an **Inrico B02PTT** Bluetooth speaker-mic
+keys astar too, with its mic and speaker as an ordinary Bluetooth headset. See
+[Bluetooth PTT button](macos/bluetooth-ptt.md).
+
 D-Star and System Fusion are hardware-only. AMBE+2 has no freely licensable
 software implementation, so the codec runs on a dongle — a DVMEGA DVstick 30
 or a ThumbDV / DV3000, either works — Codec 2 you can install, AMBE you have

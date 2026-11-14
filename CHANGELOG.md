@@ -13,6 +13,74 @@ pre-release to the patch number, which sorts wrongly: `0.1.10beta` is newer
 than `0.1.9beta` and a string comparison says the opposite. Shipped versions
 are left as they were spelled.
 
+## 0.1.21-beta — 2026-11-13
+
+Bluetooth headsets that work for a whole call, a push-to-talk button you can
+hold in your hand, and a directory search that finds AllStar nodes and
+EchoLink stations alongside the reflectors.
+
+### Added
+
+- **A Bluetooth push-to-talk button.** The Inrico B02PTT, a Bluetooth
+  speaker-mic with a push-to-talk button, keys astar while you hold the
+  button, the same as the Space bar. Choose it as the PTT in Quick settings →
+  Station, press it once to prove it is yours, and astar finds it by itself
+  from then on. It goes through the same transmit time-out as everything
+  else, and if the link drops while you are transmitting, astar stops within
+  about 2.5 seconds and waits for you to let go before it will key again.
+  See
+  [Bluetooth PTT](https://rcludwick.github.io/astar/macos/bluetooth-ptt/).
+
+- **AllStar nodes in the directory search.** The search pane has an AllStar
+  filter, and All networks includes AllStar nodes as soon as you type. Search
+  by node number, callsign, town or frequency. Node numbers now show with
+  their callsign and location in recents, favorites and the call header. The
+  list ships with the app, so it works on first launch with no network, and
+  refreshes itself weekly from hamcall-db.
+
+- **EchoLink stations in the directory search.** While you are logged in to
+  EchoLink, the filter in the top right of the search pane offers EchoLink,
+  and All networks includes the stations too. If the login drops, the filter
+  goes back to All networks, and returns to EchoLink when you log back in.
+  See [Searching the reflector directory](https://rcludwick.github.io/astar/macos/reflectors/).
+
+- **Net recordings you can browse.** The net recorder from 0.1.20-beta now
+  has pages to go with it: a list of recorded nets, each session's overs
+  with a waveform and who spoke, and a player that jumps to any over.
+  astar-server serves them under `/nets/` behind sign-in, and
+  `astar-netrec` serves them on 127.0.0.1 on the Mac it runs on. See
+  [Net recordings](https://rcludwick.github.io/astar/server/nets/).
+
+### Changed
+
+- **VOX ignores clicks.** VOX used to key on the single loudest sample of
+  the last few milliseconds, so a tap on the mic, a breath pop or a Bluetooth
+  glitch keyed you for the whole hang time. It now listens to how loud the
+  mic has been over the last 50 ms and keys only once that has stayed above
+  the threshold for 120 ms; nothing shorter than about 70 ms can key it.
+  To keep the first word whole, astar sends the 250 ms before VOX keyed
+  along with the over. Because loudness reads about 10 dB lower than peaks,
+  your threshold is converted once (−40 becomes −50), and the slider now
+  stops at −58, because a reading at the very bottom of the meter is
+  silence. While VOX is on, the other ways of keying send that 250 ms too.
+
+- **Settings is easier to scan.** Audio configs (renamed from "Saved audio
+  configs") and Mic Profiles are at the top, and Transmit folds away like
+  every other section.
+
+### Fixed
+
+- **A Bluetooth headset no longer goes silent when the call starts.** Opening
+  a Bluetooth headset's microphone switches it into its hands-free mode,
+  which changes its sample rate and used to kill the speaker for the rest
+  of the call: astar said Connected and you heard nothing. astar now opens
+  the mic first and rebuilds a stream whose device changes under it. If a
+  rebuild ever fails, the window says "Speaker stopped" instead of staying
+  quietly deaf.
+
+- **Turning VOX off no longer forgets its settings.** The threshold and hang
+  time went back to their defaults until the next launch.
+
 ## 0.1.20-beta — 2026-11-07
 
 A way to capture exactly what a call receives, so a bad moment on the air

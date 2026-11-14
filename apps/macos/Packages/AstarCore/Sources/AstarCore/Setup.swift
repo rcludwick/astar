@@ -38,16 +38,29 @@ public struct Setup: Codable, Equatable, Identifiable {
     public var noiseReduction: Bool?
     /// Voice-activated PTT for this rig; `nil` = don't override.
     public var voxEnabled: Bool?
-    /// VOX trigger level (dBFS) for this rig; `nil` = don't override.
+    /// VOX trigger level (dBFS, on the 50 ms mean-power scale — see
+    /// `VoxThreshold`) for this rig; `nil` = don't override. Encoded as
+    /// `voxThresholdRMS`; a config saved before that key existed carries a
+    /// peak-scale `voxThreshold`, which decodes translated by
+    /// `VoxThreshold.fromPeak`.
     public var voxThreshold: Float?
     /// Full-duplex audio for this rig; `nil` = don't override (defaults half).
     public var fullDuplex: Bool?
     /// Per-config serial line settings (for a serial radio like the UCI150).
-    /// `nil` = use the `hardwareProfileID` preset / no serial.
+    /// `nil` = use the `hardwareProfileID` preset / no serial. Kept even while
+    /// `bluetoothPTT` is set, so switching back to serial restores it intact.
     public var serial: SerialLineSpec?
     /// Selected mic-profile id for this config. `nil` = the built-in Default
     /// profile (unfiltered). Switching to this config applies this profile.
     public var micProfileID: String?
+    /// The Bluetooth LE PTT button this config keys from, or `nil` for none.
+    ///
+    /// When set, the config's PTT hardware is that button and serial stays
+    /// closed, whatever `hardwareProfileID` says (one PTT device per config).
+    /// Optional and decoded leniently, so configs and exports written before it
+    /// existed read as `nil` and keep today's behaviour. That is why adding it
+    /// does not move `ConfigVersion`. See `PTTHardwarePlan`.
+    public var bluetoothPTT: BluetoothPTTSpec?
 
     // Deliberately NO per-Setup codec-policy override: wideband is always on
     // (astar-e542) — there is no knob anywhere, per-Setup or app-global. The
@@ -64,7 +77,8 @@ public struct Setup: Codable, Equatable, Identifiable {
         noiseReduction: Bool? = nil,
         voxEnabled: Bool? = nil, voxThreshold: Float? = nil,
         fullDuplex: Bool? = nil, serial: SerialLineSpec? = nil,
-        micProfileID: String? = nil
+        micProfileID: String? = nil,
+        bluetoothPTT: BluetoothPTTSpec? = nil
     ) {
         self.id = id
         self.name = name
@@ -82,6 +96,71 @@ public struct Setup: Codable, Equatable, Identifiable {
         self.fullDuplex = fullDuplex
         self.serial = serial
         self.micProfileID = micProfileID
+        self.bluetoothPTT = bluetoothPTT
+    }
+
+    // MARK: Coding
+
+    /// Every key is the property's own name except the VOX threshold, which
+    /// moved to `voxThresholdRMS` when its scale changed. `legacyVoxThreshold`
+    /// is the old peak-scale key, decoded only.
+    private enum CodingKeys: String, CodingKey {
+        case id, name, hardwareProfileID, inputDevice, outputDevice
+        case inputGain, outputGain, compression, compressionLevel, txTrim
+        case noiseReduction, voxEnabled, fullDuplex, serial, micProfileID
+        case bluetoothPTT
+        case voxThreshold = "voxThresholdRMS"
+        case legacyVoxThreshold = "voxThreshold"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        hardwareProfileID = try c.decode(String.self, forKey: .hardwareProfileID)
+        inputDevice = try c.decodeIfPresent(String.self, forKey: .inputDevice)
+        outputDevice = try c.decodeIfPresent(String.self, forKey: .outputDevice)
+        inputGain = try c.decodeIfPresent(Float.self, forKey: .inputGain)
+        outputGain = try c.decodeIfPresent(Float.self, forKey: .outputGain)
+        compression = try c.decodeIfPresent(Bool.self, forKey: .compression)
+        compressionLevel = try c.decodeIfPresent(Float.self, forKey: .compressionLevel)
+        txTrim = try c.decodeIfPresent(Float.self, forKey: .txTrim)
+        noiseReduction = try c.decodeIfPresent(Bool.self, forKey: .noiseReduction)
+        voxEnabled = try c.decodeIfPresent(Bool.self, forKey: .voxEnabled)
+        if let rms = try c.decodeIfPresent(Float.self, forKey: .voxThreshold) {
+            voxThreshold = VoxThreshold.clamped(rms)
+        } else {
+            voxThreshold = try c.decodeIfPresent(Float.self, forKey: .legacyVoxThreshold)
+                .map(VoxThreshold.fromPeak)
+        }
+        fullDuplex = try c.decodeIfPresent(Bool.self, forKey: .fullDuplex)
+        serial = try c.decodeIfPresent(SerialLineSpec.self, forKey: .serial)
+        micProfileID = try c.decodeIfPresent(String.self, forKey: .micProfileID)
+        bluetoothPTT = try c.decodeIfPresent(BluetoothPTTSpec.self, forKey: .bluetoothPTT)
+    }
+
+    /// Never writes the old key: an older astar reading this config sees no
+    /// threshold ("don't override") rather than a power-scale number it would
+    /// take for a peak.
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(hardwareProfileID, forKey: .hardwareProfileID)
+        try c.encodeIfPresent(inputDevice, forKey: .inputDevice)
+        try c.encodeIfPresent(outputDevice, forKey: .outputDevice)
+        try c.encodeIfPresent(inputGain, forKey: .inputGain)
+        try c.encodeIfPresent(outputGain, forKey: .outputGain)
+        try c.encodeIfPresent(compression, forKey: .compression)
+        try c.encodeIfPresent(compressionLevel, forKey: .compressionLevel)
+        try c.encodeIfPresent(txTrim, forKey: .txTrim)
+        try c.encodeIfPresent(noiseReduction, forKey: .noiseReduction)
+        try c.encodeIfPresent(voxEnabled, forKey: .voxEnabled)
+        try c.encodeIfPresent(voxThreshold, forKey: .voxThreshold)
+        try c.encodeIfPresent(fullDuplex, forKey: .fullDuplex)
+        try c.encodeIfPresent(serial, forKey: .serial)
+        try c.encodeIfPresent(micProfileID, forKey: .micProfileID)
+        try c.encodeIfPresent(bluetoothPTT, forKey: .bluetoothPTT)
     }
 
     /// The named devices this Setup needs that aren't currently enumerated — so

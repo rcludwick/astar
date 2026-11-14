@@ -18,8 +18,8 @@ icon: lucide/construction
 What this page will eventually cover:
 
 * Adding your AllStarLink account and connecting to a node.
-* Push-to-talk: UI press-and-hold, a hardware operator key, and VOX.
-* Favorites, recents, and saved configs.
+* Push-to-talk: UI press-and-hold, a hardware operator key, a Bluetooth PTT button, and VOX.
+* Favorites, recents, and audio configs.
 * Sending DTMF commands to the far end.
 * Reading the level meters and the spectrum display.
 * Microphone characterization and per-profile gain.
@@ -30,3 +30,5 @@ In the meantime:
 
 * [Build the app](../build/macos-app.md) — from a clean Mac to a running app.
 * [Hardware](hardware.md) — USB radio interfaces and PTT wiring.
+* [Bluetooth PTT button](bluetooth-ptt.md) — the Inrico B02PTT's button as
+  your push-to-talk.

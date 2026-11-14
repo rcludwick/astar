@@ -323,11 +323,14 @@ final class VocoderSettingsTests: XCTestCase {
     func testTheNoTrustedVocoderErrorOffersSettings() {
         XCTAssertTrue(
             VocoderSetupPrompt.offersSettings(
-                for: "Couldn’t connect to XLX836 A: No trusted vocoder — add one in Settings → Vocoders."))
+                for:
+                    "Couldn’t connect to XLX836 A: No trusted vocoder — add one in Settings → Vocoders."
+            ))
         XCTAssertTrue(
             VocoderSetupPrompt.offersSettings(
                 for: CallSession.ConnectError.noTrustedVocoder(.dstar).errorDescription))
-        XCTAssertFalse(VocoderSetupPrompt.offersSettings(for: "Node 61057 is not registered in Allstar."))
+        XCTAssertFalse(
+            VocoderSetupPrompt.offersSettings(for: "Node 61057 is not registered in Allstar."))
         XCTAssertFalse(VocoderSetupPrompt.offersSettings(for: nil))
     }
 }

@@ -76,7 +76,7 @@ another network, star it beside the dial field, where its target is built.
 
 Exporting your configuration (Settings → **Backup** → **Export…**) carries
 favorites and recents from every network in its **Node directory** section; see
-[Saved configs](configs.md#export). Importing that file on another Mac adds
+[Audio configs](configs.md#export). Importing that file on another Mac adds
 what it doesn't have yet and updates what it does, matching each one by its
 network and target. An import never removes a favorite. Files exported by
 older versions of astar import as they always did: their entries are AllStar

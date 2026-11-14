@@ -20,7 +20,7 @@ public enum PTTSource: String, Equatable, CaseIterable {
 ///   keyLineRaw:  CTS=0, DCD=1, DSR=2, RI=3   (`KeyLine`)
 ///   radioLineRaw: RTS=0, DTR=1               (`RadioLine`)
 ///   rxModeRaw:   RemotePTT=0, RxActivity=1   (`RxKeyMode`)
-public struct SerialLineSpec: Equatable, Codable {
+public struct SerialLineSpec: Equatable, Codable, Sendable {
     public var portPath: String?  // the manually-chosen port (used when !isAutodetect)
     /// Whether to autodetect the serial port at open time vs. use `portPath`.
     /// `nil` = autodetect (the legacy default, so specs stored before this flag

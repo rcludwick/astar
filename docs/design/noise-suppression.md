@@ -377,6 +377,15 @@ than a peak meter — it is the thing VOX has always been approximating.
    a translation. A noise-reduction feature should not be spending a config
    version number.
 
+> **Update 2026-11-11.** VOX no longer keys from the peak. The same tap now
+> also publishes `mic_vox_power`, the mean power over the last 50 ms
+> (`VoxLevel` in `astar-audio`'s `meter.rs`), and the app keys from that with a
+> 120 ms attack. The tap position and the argument below are unchanged — the
+> loudness is pinned identical with denoise on and off just as the peak is. The
+> threshold's scale did change, so it moved to a new key,
+> `audio.voxThresholdRMSDBFS`, with an old peak-scale value translated once by
+> −10 dB (`VoxThreshold.swift`) rather than spending a config version.
+
 **Recommendation: keep the VOX tap on raw audio.** Publish `mic_input_peak` from
 the new device-rate hook, *before* the network runs, rather than from `write`.
 Gain is a scalar, so `g × peak(pre-resample)` and `g × peak(post-resample)`

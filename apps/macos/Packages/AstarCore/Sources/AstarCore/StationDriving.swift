@@ -21,6 +21,29 @@ public protocol StationDriving {
     /// Generic IAX2 dial (the guest/unauthenticated path, e.g. the parrot).
     func connect(dest: String, calling: String, secret: String?) throws
     func setPTT(_ on: Bool) throws
+
+    // MARK: PTT sources (the engine's arbiter)
+    //
+    // There are no default implementations: a conformer that forgot one would
+    // otherwise key or unkey silently through a no-op. Each mirrors the
+    // `Station` method of the same name 1:1.
+
+    /// Press or release one source. The engine keys while ANY source holds, so
+    /// releasing one never cuts off another. A release is never refused. A
+    /// press of `.bluetooth` throws -24: Bluetooth keys only through
+    /// `pttLeasePress`, so every Bluetooth hold has an engine deadline.
+    func pttSource(_ source: StationPTTSource, on: Bool) throws
+    /// Release every source, latch every one that was holding, and unkey. This
+    /// is the universal stop.
+    func pttStopAll() throws
+    /// Press `.bluetooth` under a lease the engine expires by itself unless it
+    /// is renewed.
+    func pttLeasePress(_ source: StationPTTSource, ttl: Duration) throws
+    /// Extend a held lease. It never presses, and throws when no lease is held.
+    func pttLeaseRenew(_ source: StationPTTSource) throws
+    /// Set the one transmit time-out (60...600 s). Anything else throws and
+    /// leaves the old value in force, because the time-out can never be off.
+    func setTxTimeout(_ timeout: Duration) throws
     /// Send a single DTMF digit to the active call as one fixed-duration in-band
     /// tone (the binding owns the ~250 ms duration). Throws while idle or on an
     /// invalid digit. Mirrors `Station.sendDTMF(_:)` 1:1. Kept for engine
@@ -348,9 +371,17 @@ public protocol StationDriving {
     func characterize(harmonicComb: Bool, peakMarginDb: Float?, thresholdDbfs: Float?) throws
         -> String
     func setMicProfile(_ json: String?) throws
+    /// VOX pre-roll / look-back (ms, the engine clamps to 0...250): audio
+    /// captured just before a key-up is sent ahead of the live stream, so
+    /// the VOX attack time does not clip the first syllable. 0 = off.
+    func setVoxPrerollMs(_ ms: UInt32) throws
 }
 
 extension StationDriving {
+    /// Fakes that do not care accept the length and do nothing with it. The
+    /// real `Station` implements it.
+    public func setVoxPrerollMs(_ ms: UInt32) throws {}
+
     /// Stations that have no engine (and test fakes that do not care) accept
     /// the choice and do nothing with it. The real `Station` implements it.
     public func setDStarVocoder(_ vocoder: DStarVocoder) throws {}

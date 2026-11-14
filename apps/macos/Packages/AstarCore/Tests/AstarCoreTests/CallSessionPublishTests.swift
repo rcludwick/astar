@@ -125,10 +125,11 @@ final class CallSessionPublishTests: XCTestCase {
     func testVoxStillKeysFromRawInputLevel() {
         // Quantization is display-only: the VOX gate must keep seeing the raw
         // snapshot level, keying exactly at threshold as before.
+        session.voxGate.config.attackMS = 0  // the attack has its own tests
         session.setVoxEnabled(true)
         session.setVoxThreshold(-40)
-        fake.snapshotToReturn.inputDB = -39.9
+        fake.snapshotToReturn.voxDB = -39.9
         session.poll()
-        XCTAssertEqual(fake.pttCalls.last, true, "VOX keys from the raw mic level")
+        XCTAssertEqual(fake.keyingLog, ["pttSource(vox,true)"], "VOX keys from the raw VOX level")
     }
 }

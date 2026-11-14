@@ -55,46 +55,64 @@ public protocol ReflectorDirectoryStoring: AnyObject {
     func writeSyncMetadata(_ metadata: ReflectorSyncMetadata) throws
 }
 
-/// The real store.
+/// The real store, for any feed that follows the bundle-plus-cache layout.
 ///
-/// Bundled snapshot: `astar.app/Contents/Resources/reflectors.json`, so a
+/// Bundled snapshot: `astar.app/Contents/Resources/<feedFileName>`, so a
 /// first launch with no network still has a directory.
-/// Cache: `~/Library/Application Support/astar/reflectors.json`, plus
-/// `reflectors-sync.json` for the validators.
+/// Cache: `~/Library/Application Support/astar/<feedFileName>`, plus
+/// `<metadataFileName>` for the validators. The defaults are the reflector
+/// directory's (`reflectors.json`, `reflectors-sync.json`); the AllStar
+/// directory passes `allstar.json` and `allstar-sync.json`.
 public final class FileReflectorDirectoryStorage: ReflectorDirectoryStoring {
     private let directory: URL
     private let bundledURL: URL?
 
-    /// Default file name for both the bundled snapshot and the cache — they
-    /// hold the same format, so they share a name.
-    public static let feedFileName = "reflectors.json"
-    public static let metadataFileName = "reflectors-sync.json"
+    /// File name for both the bundled snapshot and the cache — they hold the
+    /// same format, so they share a name.
+    public let feedFileName: String
+    public let metadataFileName: String
 
-    public var cacheURL: URL { directory.appendingPathComponent(Self.feedFileName) }
-    public var metadataURL: URL { directory.appendingPathComponent(Self.metadataFileName) }
+    public var cacheURL: URL { directory.appendingPathComponent(feedFileName) }
+    public var metadataURL: URL { directory.appendingPathComponent(metadataFileName) }
 
     /// - Parameters:
     ///   - directory: where the cache lives. Defaults to
     ///     `~/Library/Application Support/astar`.
     ///   - bundle: the bundle holding the shipped snapshot. `nil` disables the
     ///     bundled layer, which is what a build that does not ship one has.
+    ///   - feedFileName: the cache's file name, and the bundled snapshot's.
+    ///   - metadataFileName: the sync metadata's file name.
     public init(
         directory: URL? = nil,
-        bundle: Bundle? = .main
+        bundle: Bundle? = .main,
+        feedFileName: String = "reflectors.json",
+        metadataFileName: String = "reflectors-sync.json"
     ) {
         self.directory =
             directory
             ?? FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("astar", isDirectory: true)
-        self.bundledURL = bundle?.url(forResource: "reflectors", withExtension: "json")
+        let resource = feedFileName as NSString
+        self.bundledURL = bundle?.url(
+            forResource: resource.deletingPathExtension,
+            withExtension: resource.pathExtension.isEmpty ? nil : resource.pathExtension)
+        self.feedFileName = feedFileName
+        self.metadataFileName = metadataFileName
     }
 
     /// Explicit-path initializer, for tests and for a build that keeps its
     /// snapshot somewhere other than the bundle root.
-    public init(directory: URL, bundledSnapshotURL: URL?) {
+    public init(
+        directory: URL,
+        bundledSnapshotURL: URL?,
+        feedFileName: String = "reflectors.json",
+        metadataFileName: String = "reflectors-sync.json"
+    ) {
         self.directory = directory
         self.bundledURL = bundledSnapshotURL
+        self.feedFileName = feedFileName
+        self.metadataFileName = metadataFileName
     }
 
     public func bundledSnapshot() -> Data? {

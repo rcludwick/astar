@@ -10,11 +10,13 @@ import Foundation
 /// sheet's checkboxes compose without overlap and an import can apply exactly
 /// what the user ticked.
 public enum ConfigSection: String, CaseIterable, Codable, Sendable {
-    /// Saved configs and the mic profiles they reference.
+    /// Audio configs and the mic profiles they reference.
     case rigs
     /// Favorites and recents.
     case directory
-    /// Audio, M17 audio overrides, and serial/PTT settings.
+    /// Audio, M17 audio overrides, serial/PTT settings and the transmit
+    /// time-out. Bluetooth PTT confirmations (`blePTT.`) are per-Mac and
+    /// never part of it; the Bluetooth spec travels with its config in `rigs`.
     case settings
     /// The operator's callsign and radio IDs — separated out because they
     /// identify the operator, so a shareable export can leave them behind.
@@ -30,7 +32,7 @@ public enum ConfigSection: String, CaseIterable, Codable, Sendable {
     /// Checkbox label.
     public var title: String {
         switch self {
-        case .rigs: return "Saved configs"
+        case .rigs: return "Audio configs"
         case .directory: return "Node directory"
         case .settings: return "Audio and serial settings"
         case .callsign: return "Callsign and radio IDs"
@@ -43,7 +45,7 @@ public enum ConfigSection: String, CaseIterable, Codable, Sendable {
         switch self {
         case .rigs: return "Your rigs and their mic profiles"
         case .directory: return "Favorites and recents"
-        case .settings: return "Devices, gains, VOX, compression, serial PTT"
+        case .settings: return "Devices, gains, VOX, compression, serial and Bluetooth PTT"
         case .callsign: return "Identifies you — leave off to share this file"
         case .interface: return "Which panels are open, Dock icon, network"
         }
@@ -155,7 +157,7 @@ public struct ConfigArchive: Codable, Equatable {
     public var nxdnRadioID: String?
     public var interface: [String: SettingValue]?
 
-    /// Saved configs travel with their mic profiles: a `Setup` references a
+    /// Audio configs travel with their mic profiles: a `Setup` references a
     /// profile by id, so importing one without the other yields a config that
     /// points at nothing.
     public struct Rigs: Codable, Equatable {
@@ -217,7 +219,12 @@ public struct ConfigArchive: Codable, Equatable {
 
     /// `audio.wideband` is a documented dead key (astar-e542). Exporting cruft
     /// would propagate it into every future import.
-    private static let dead: Set<String> = ["audio.wideband"]
+    /// `audio.voxThresholdDBFS` is the old peak-scale VOX threshold
+    /// (`VoxThreshold.legacyPeakKey`): it is translated into
+    /// `audio.voxThresholdRMSDBFS` once and then never read, so exporting the
+    /// stale copy would only hand an older astar a number from before the
+    /// user's last change.
+    private static let dead: Set<String> = ["audio.wideband", VoxThreshold.legacyPeakKey]
 
     /// Per-machine hardware that must never travel in a file, whatever its
     /// key says otherwise. `vocoder.` holds the vocoder trust list — the USB

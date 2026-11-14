@@ -890,6 +890,7 @@ mod tests {
             tz: jiff::tz::TimeZone::get("America/Denver").unwrap(),
             visibility: Visibility::Private,
             my_side: false,
+            my_callsigns: Vec::new(),
             video: false,
             youtube_live: false,
             youtube_upload: false,

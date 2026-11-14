@@ -115,6 +115,14 @@ impl MicMonitor {
         self.router.mic_input_dbfs(&self.mic)
     }
 
+    /// The loudness VOX judges on the monitored lane (dBFS, mean power over
+    /// the last 50 ms) — what the VOX calibration meter shows, so the
+    /// threshold is set against the same number VOX compares.
+    #[must_use]
+    pub fn vox_dbfs(&self) -> Option<f32> {
+        self.router.mic_vox_dbfs(&self.mic)
+    }
+
     /// Copy the current log-binned, peak-held spectrum (dBFS) into `out` (up to
     /// `out.len()` bins) and return the number of bins written (iax-e73e). The
     /// front-end polls this ~20 Hz to draw the live mic spectrum.
@@ -184,6 +192,11 @@ mod tests {
             .input_dbfs()
             .expect("the monitored lane is open, so it has a level");
         assert!(db > -60.0, "a driven mic must read above the floor: {db}");
+        let vox = mon.vox_dbfs().expect("open lane has a VOX level");
+        assert!(
+            vox > -60.0,
+            "a driven mic must reach the VOX level too: {vox}"
+        );
     }
 
     #[test]

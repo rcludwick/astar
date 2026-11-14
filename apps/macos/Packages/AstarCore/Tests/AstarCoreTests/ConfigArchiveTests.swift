@@ -258,6 +258,75 @@ final class ConfigArchiveTests: XCTestCase {
         XCTAssertEqual(keys, ["audio.inputGain"])
     }
 
+    // MARK: - Bluetooth PTT
+
+    func testSettingsDetailNamesBluetoothPTT() {
+        XCTAssertEqual(
+            ConfigSection.settings.detail,
+            "Devices, gains, VOX, compression, serial and Bluetooth PTT")
+    }
+
+    /// The confirm-press binding is per-Mac and must never travel. The real
+    /// binding is `Data`, which `SettingValue` drops on its own. So this domain
+    /// also holds a scalar under the same prefix. Without it, the rule that
+    /// `blePTT.` is outside every section would go untested.
+    func testBluetoothConfirmationsAreNotExported() {
+        let defaults: [String: Any] = [
+            "audio.txTimeoutSeconds": 120,
+            UserDefaultsBluetoothPTTLocalStore.key: Data(#"{"inrico-b02ptt":[]}"#.utf8),
+            "blePTT.lastName": "B02PTT-6522",
+        ]
+        XCTAssertEqual(
+            Set(ConfigArchive.settingsSlice(from: defaults).keys), ["audio.txTimeoutSeconds"])
+        XCTAssertTrue(ConfigArchive.interfaceSlice(from: defaults).isEmpty)
+    }
+
+    /// The same rule against a real defaults domain written by the real store.
+    func testBluetoothConfirmationsInARealDomainAreNotExported() throws {
+        let name = "astar.tests.archive.bleptt.\(UUID().uuidString)"
+        let d = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { d.removePersistentDomain(forName: name) }
+        UserDefaultsBluetoothPTTLocalStore(d).confirm(
+            BLEConfirmation(
+                platformID: try XCTUnwrap(UUID(uuidString: "1B3E5C2A-7D44-4F0B-9A61-2C8E0F5D7A13")),
+                advertisedName: "B02PTT-6522",
+                confirmedAt: Date(timeIntervalSince1970: 1_791_000_000)),
+            deviceID: "inrico-b02ptt")
+        d.set(300, forKey: "audio.txTimeoutSeconds")
+        d.set("B02PTT-6522", forKey: "blePTT.lastName")
+
+        let keys = Set(ConfigArchive.settingsSlice(from: d.dictionaryRepresentation()).keys)
+        let ours: Set<String> = [
+            "audio.txTimeoutSeconds", UserDefaultsBluetoothPTTLocalStore.key, "blePTT.lastName",
+        ]
+        XCTAssertEqual(keys.intersection(ours), ["audio.txTimeoutSeconds"])
+    }
+
+    func testExportCarriesSpecInRigs() throws {
+        let spec = BluetoothPTTSpec(deviceID: "inrico-b02ptt", preferredName: "B02PTT-6522")
+        let rig = Setup(
+            id: "s1", name: "Handheld", hardwareProfileID: HardwareProfileRegistry.headsetID,
+            serial: .uci150, bluetoothPTT: spec)
+        let sources = ConfigArchive.Sources(
+            defaults: [
+                "audio.txTimeoutSeconds": 300,
+                UserDefaultsBluetoothPTTLocalStore.key: Data(#"{"inrico-b02ptt":[]}"#.utf8),
+                "blePTT.lastName": "B02PTT-6522",
+            ],
+            setups: [rig], micProfiles: [], selectedSetupID: "s1", defaultSetupID: "s1",
+            directory: [], callsign: nil)
+
+        let data = try ConfigArchive.encode(
+            ConfigArchive.make(sections: Set(ConfigSection.allCases), from: sources))
+        let back = try ConfigArchive.decode(data)
+
+        XCTAssertEqual(back.rigs?.setups, [rig])
+        XCTAssertEqual(back.rigs?.setups.first?.bluetoothPTT, spec)
+        XCTAssertEqual(back.settings, ["audio.txTimeoutSeconds": .int(300)])
+        XCTAssertEqual(back.version, 1, "an added field is not a new format")
+        XCTAssertFalse(String(decoding: data, as: UTF8.self).contains("blePTT"))
+    }
+
     // MARK: - Archive round trip
 
     func testArchiveSurvivesAFullJSONRoundTrip() throws {

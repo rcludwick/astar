@@ -18,10 +18,14 @@
 //                    thrown StationError carrying `iax_error_text`.
 //   * astarstation-parrot — a small offline example executable.
 //
-// The C-ABI is PTT-source-agnostic and serial-free (no `serialport`/IOKit), so
-// it builds for every Apple platform including iOS. A hardware PTT source (e.g.
-// the UCI150 serial PTT) is a separate, optional library that drives keying via
-// `iax_station_set_ptt` (iax-0c79).
+// The C-ABI is serial-free and Bluetooth-free (no `serialport`/IOKit/
+// CoreBluetooth), so it builds for every Apple platform including iOS. Each PTT
+// source presses and releases itself via `iax_station_ptt_source`, and the
+// engine keys while any one holds. A Bluetooth button uses the engine-enforced
+// lease (`iax_station_ptt_lease_press`/`_renew`). One transmit time-out,
+// 60...600 s and never 0, covers them all. `iax_station_set_ptt` is the legacy
+// source. Hardware transports (e.g. the UCI150 serial PTT, iax-0c79) live in
+// separate, optional libraries.
 //
 // LINKING. The C-ABI lives in the astar-sys *static* library. Two modes,
 // selected automatically by whether the prebuilt xcframework is on disk — no

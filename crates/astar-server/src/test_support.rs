@@ -13,6 +13,32 @@ use std::time::{Duration, Instant};
 
 use astar_m17::{BROADCAST, ControlPacket, Lsf, StreamPacket, encode_callsign};
 
+/// The private net of the `/nets/` fixture, as its URL names it.
+pub(crate) const NETS_PRIVATE_NET: &str = "thursday-d-star-net";
+
+/// astar-netarchive's fixture archive in a temp dir, mounted on `ctrl` as
+/// `[netrec]`. `sign_in` is whether the pages offer a sign-in link.
+pub(crate) fn mount_nets_fixture(
+    ctrl: &crate::controller::NodeController,
+    sign_in: bool,
+) -> (tempfile::TempDir, astar_netarchive::fixture::Fixture) {
+    let dir = tempfile::tempdir().unwrap();
+    let f = astar_netarchive::fixture::write_fixture(dir.path());
+    let cfg = crate::config::NetrecCfg {
+        archive: dir.path().to_path_buf(),
+    };
+    ctrl.set_nets(Arc::new(crate::run::nets_pages(&cfg, sign_in)));
+    (dir, f)
+}
+
+/// Whether the fixture session `net`/`session` (slugs) is still in the
+/// archive under `root`, as an admin would see it.
+pub(crate) fn nets_session_exists(root: &Path, net: &str, session: &str) -> bool {
+    astar_netarchive::Archive::new(root.to_path_buf())
+        .find_for(astar_netarchive::Access::Admin, net, session)
+        .is_some()
+}
+
 /// `[packet_log]` with debug mode on, over `dir`.
 pub(crate) fn packet_log_cfg(dir: &Path) -> crate::config::PacketLogCfg {
     crate::config::PacketLogCfg {

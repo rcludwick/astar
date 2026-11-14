@@ -82,8 +82,8 @@ struct AstarApp: App {
         }
     }
 
-    /// Owns the long-lived `CallSession` + serial PTT source and stands up the
-    /// menu-bar status item once the app finishes launching.
+    /// Owns the long-lived `CallSession`, the serial and Bluetooth PTT sources,
+    /// and stands up the menu-bar status item once the app finishes launching.
     @MainActor
     final class AppDelegate: NSObject, NSApplicationDelegate {
         let session = CallSession.live()
@@ -94,10 +94,16 @@ struct AstarApp: App {
         // snapshot in `Contents/Resources/reflectors.json` means this is
         // populated on a first launch with no network.
         let reflectors = ReflectorDirectory(storage: FileReflectorDirectoryStorage())
+        /// The AllStar node directory, searched from the same pane.
+        let allstar = AllStarDirectory(
+            storage: FileReflectorDirectoryStorage(
+                feedFileName: "allstar.json", metadataFileName: "allstar-sync.json"))
         /// Keeps `session.reflectorIndex` equal to the directory's, so a sync
         /// that replaces the feed also replaces what the dial field resolves
         /// against. Retained here; the subscription is what does the work.
         private var reflectorIndexSubscription: AnyCancellable?
+        /// Same, for `session.allstarIndex`: node names follow the AllStar directory.
+        private var allstarIndexSubscription: AnyCancellable?
         // The macOS-only serial PTT source (UCI150). Owns the IOKit-linked
         // SerialClient and installs CallSession's serial-free pttSourceTick hook, so
         // AstarCore stays multiplatform. Re-opens on launch if previously enabled.
@@ -105,6 +111,15 @@ struct AstarApp: App {
         // Named hardware Setups ("UCI150 desk" ↔ "Jabra mobile"): one-click rig
         // switching that drives `serial` + the session's device selection together.
         let setups = SetupController()
+        // The Bluetooth LE PTT button (Inrico B02PTT). Built at launch but inert:
+        // no Bluetooth central exists, so macOS shows no prompt, until the active
+        // config's PTT hardware is the button and a unit is confirmed on this
+        // Mac, or the user picks the button in the PTT picker. The factory is
+        // the only route to CoreBluetooth in the app.
+        let bluetooth = BluetoothPTTController(centralFactory: { CoreBluetoothCentral() })
+        /// System sleep/wake observers for `bluetooth`. Retained here; the
+        /// subscriptions are what does the work.
+        private var powerSubscriptions = Set<AnyCancellable>()
         // Reactive audio-device list backed by a CoreAudio hotplug listener, so the
         // pickers never enumerate on view-appear (which froze the Quick-settings
         // reveal) and stay live when a mic/interface is plugged in or removed.
@@ -157,15 +172,19 @@ struct AstarApp: App {
             session.reflectorIndex = reflectors.index
             reflectorIndexSubscription = reflectors.$index
                 .sink { [weak session] index in session?.reflectorIndex = index }
-            setups.attach(session: session, serial: serial)
+            session.allstarIndex = allstar.index
+            allstarIndexSubscription = allstar.$index
+                .sink { [weak session] index in session?.allstarIndex = index }
+            observeSystemPower()
+            setups.attach(session: session, serial: serial, bluetooth: bluetooth)
             statusController = StatusItemController(
-                session: session, serial: serial, setups: setups, micAnalyzer: micAnalyzer,
-                deviceMonitor: deviceMonitor, navigation: navigation, reflectors: reflectors,
-                vocoders: vocoders)
+                session: session, serial: serial, bluetooth: bluetooth, setups: setups,
+                micAnalyzer: micAnalyzer, deviceMonitor: deviceMonitor, navigation: navigation,
+                reflectors: reflectors, allstar: allstar, vocoders: vocoders)
             // Replace SwiftUI's placeholder menu (whose Settings… item opened the
             // empty `Settings { EmptyView() }` scene) with a real one — astar-1f7d.
             MainMenu.install(target: self)
-            announcer = AccessibilityAnnouncer(session: session)
+            announcer = AccessibilityAnnouncer(session: session, bluetooth: bluetooth)
             // Baseline poll for the whole app lifetime, so the menu-bar tint, serial
             // PTT, and right-click status stay live even when the popover is closed.
             // The popover pauses this only while Settings is open (to avoid the device
@@ -197,6 +216,7 @@ struct AstarApp: App {
             // it is a conditional GET, and hamcall-db's build is byte-stable,
             // so most weeks it costs a 304.
             Task { @MainActor in try? await reflectors.sync(trigger: .automatic) }
+            Task { @MainActor in try? await allstar.sync(trigger: .automatic) }
         }
 
         /// First launch with no AllStarLink account: raise the window on Settings
@@ -236,7 +256,15 @@ struct AstarApp: App {
         /// without this every open log would be left with no end line, which
         /// the docs say means a crash. Its wait is capped at 2 s too, which
         /// makes 7 s the most a quit can take.
+        ///
+        /// Before any of that, quitting while keyed must end unkeyed. The
+        /// Bluetooth controller goes first, so its Disable releases the
+        /// button's hold and its ticker stops renewing. Then every remaining
+        /// source (on-screen button, Space, serial, VOX) is stopped at once,
+        /// before the recording, EchoLink and the packet log wind down.
         func applicationWillTerminate(_ notification: Notification) {
+            bluetooth.shutdown()
+            session.stopAllTransmit()
             if !session.finishRecordingBeforeQuit(timeout: 3) {
                 Self.log.error(
                     "Quit did not wait for the recording to finish: the stop took longer than 3 s, so its files may lack a final length"
@@ -263,6 +291,31 @@ struct AstarApp: App {
                 statusController?.showWindow()
             }
             return false
+        }
+
+        /// Release the Bluetooth PTT button around system sleep, and reconnect
+        /// on wake. Waking never re-keys: a button held across sleep must be
+        /// released and pressed again, and one that was up keys on its next
+        /// press.
+        ///
+        /// NSWorkspace posts both notifications on the main thread, so these
+        /// sinks run on the main actor straight away. No `receive(on:)` hop
+        /// is wanted: sleep must reach the controller before the Mac sleeps.
+        /// If it does not, the engine's 1.5 s lease is still the backstop.
+        ///
+        /// Both are forwarded for everyone, attached or not. The controller
+        /// guards each one, so no central is created for someone who never
+        /// chose the button. Gating wake here on `bluetooth.spec` would be
+        /// worse: sleep would still mark the controller asleep, and a wake that
+        /// never arrived would stop a later attach from connecting.
+        private func observeSystemPower() {
+            let center = NSWorkspace.shared.notificationCenter
+            center.publisher(for: NSWorkspace.willSleepNotification)
+                .sink { [weak self] _ in self?.bluetooth.systemWillSleep() }
+                .store(in: &powerSubscriptions)
+            center.publisher(for: NSWorkspace.didWakeNotification)
+                .sink { [weak self] _ in self?.bluetooth.systemDidWake() }
+                .store(in: &powerSubscriptions)
         }
     }
 

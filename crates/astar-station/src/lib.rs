@@ -38,6 +38,7 @@
 mod config;
 mod error;
 mod event;
+mod ptt_arbiter;
 mod station;
 
 /// The D-Star vocoder choice (astar-dstar-perens): the dongle by default, or
@@ -54,6 +55,10 @@ pub use astar_codec::vocoder_trust::{
 pub use config::{AnswerPolicy, InboundConfig, NodeConfig, RegisterConfig, StationConfig};
 pub use error::StationError;
 pub use event::StationEvent;
+pub use ptt_arbiter::{
+    DEFAULT_TX_TIMEOUT, ForcedReason, ForcedRecord, MAX_TX_TIMEOUT, MIN_TX_TIMEOUT, NotLeased,
+    PressOutcome, PttArbiter, PttEdge, PttSnapshot, PttSource, TxTimeoutOutOfRange,
+};
 pub use station::{
     DEFAULT_DTMF_GAP_MS, DEFAULT_DTMF_MS, DtmfMode, ECHOLINK_PASSWORD_UNSENDABLE, EchoLinkNodeEdge,
     EchoLinkPeerStatus, EchoLinkState, EchoLinkStationInfo, M17MonitorRequest, RecordRequest,

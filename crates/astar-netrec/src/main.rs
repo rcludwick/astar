@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use astar_netrec::config::{self, Config, ConfigError, NetCfg};
 use astar_netrec::daemon::{self, Made};
 use astar_netrec::runner::{Clock, RealClock};
+use astar_netrec::web;
 use clap::{Parser, Subcommand};
 
 /// Receive-only recorder of amateur-radio nets.
@@ -93,6 +94,15 @@ fn run(cli: Cli) -> Result<(), String> {
             let cfg = config::load_or_bootstrap(&cli.config).map_err(|e| e.to_string())?;
             let cfg = checked(cfg)?;
             let stop = stop_on_signal()?;
+            // Held until `run` returns. A port that will not bind costs the
+            // pages, not the recording.
+            let _pages = match web::serve_local(&cfg) {
+                Ok(server) => server,
+                Err(e) => {
+                    tracing::error!("cannot serve the recordings pages on {}: {e}", cfg.web.bind);
+                    None
+                }
+            };
             let make = |net: &NetCfg| -> Made { daemon::station_adapter(&cfg, net) };
             daemon::run(&cfg, &RealClock, &stop, &make).map_err(|e| e.to_string())
         }

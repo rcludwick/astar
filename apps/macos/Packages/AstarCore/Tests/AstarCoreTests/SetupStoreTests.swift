@@ -103,6 +103,28 @@ final class SetupStoreTests: XCTestCase {
         XCTAssertNil(store.loadDefaultID())
     }
 
+    func testAnOldPeakScaleVoxThresholdDecodesTranslated() throws {
+        let json = #"{"id":"a","name":"A","hardwareProfileID":"none","voxThreshold":-40}"#
+        let setup = try JSONDecoder().decode(Setup.self, from: Data(json.utf8))
+        XCTAssertEqual(setup.voxThreshold, -50)
+    }
+
+    func testANewScaleVoxThresholdIsUsedAsIsAndWinsOverTheOldKey() throws {
+        let json =
+            #"{"id":"a","name":"A","hardwareProfileID":"none","voxThreshold":-40,"voxThresholdRMS":-44}"#
+        let setup = try JSONDecoder().decode(Setup.self, from: Data(json.utf8))
+        XCTAssertEqual(setup.voxThreshold, -44)
+    }
+
+    func testTheVoxThresholdIsWrittenOnlyUnderTheNewKey() throws {
+        let setup = Setup(id: "a", name: "A", hardwareProfileID: "none", voxThreshold: -47)
+        let data = try JSONEncoder().encode(setup)
+        let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(obj["voxThresholdRMS"] as? Double, -47)
+        XCTAssertNil(obj["voxThreshold"], "an older astar must not read it as a peak")
+        XCTAssertEqual(try JSONDecoder().decode(Setup.self, from: data), setup)
+    }
+
     func testFullDuplexAndSerialRoundTrip() {
         var s = setup("a", "Desk")
         s.fullDuplex = true
@@ -179,6 +201,72 @@ final class SetupStoreTests: XCTestCase {
         XCTAssertNil(loaded.first?.voxEnabled)
         XCTAssertNil(loaded.first?.fullDuplex)
         XCTAssertNil(loaded.first?.serial)
+        XCTAssertNil(loaded.first?.bluetoothPTT)
+    }
+
+    // MARK: - Bluetooth PTT spec (additive; ConfigVersion stays 1)
+
+    /// A config written before `bluetoothPTT` existed (here: a real UCI150
+    /// shape, serial and all) decodes with the field nil, so it keeps
+    /// today's serial behaviour.
+    func testSetupDecodesWithoutBluetoothField() {
+        let json = #"""
+            [{"id":"a","name":"UCI150","hardwareProfileID":"uci150",
+              "serial":{"keyLineRaw":0,"keyActiveHigh":true,"radioLineRaw":0,
+                        "radioActiveHigh":true,"debounceMs":30,"rxModeRaw":0,
+                        "rxFloorDb":-45,"rxHangMs":250,"transportRaw":1}}]
+            """#
+        defaults.set(Data(json.utf8), forKey: "audio.setups")
+        let loaded = store.all()
+        XCTAssertEqual(loaded.count, 1)
+        XCTAssertNil(loaded.first?.bluetoothPTT)
+        XCTAssertEqual(loaded.first?.serial, .uci150)
+    }
+
+    func testSetupRoundTripsBluetoothField() throws {
+        let spec = BluetoothPTTSpec(deviceID: "inrico-b02ptt", preferredName: "B02PTT-6522")
+        let s = Setup(
+            id: "a", name: "Handheld", hardwareProfileID: HardwareProfileRegistry.headsetID,
+            serial: .uci150, bluetoothPTT: spec)
+        store.save(s)
+        XCTAssertEqual(store.all(), [s])
+        XCTAssertEqual(store.all().first?.bluetoothPTT, spec)
+
+        // The JSON key is `bluetoothPTT` and holds exactly the two fields.
+        let data = try XCTUnwrap(defaults.data(forKey: "audio.setups"))
+        let array = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+        let stored = try XCTUnwrap(array.first?["bluetoothPTT"] as? [String: String])
+        XCTAssertEqual(stored, ["deviceID": "inrico-b02ptt", "preferredName": "B02PTT-6522"])
+    }
+
+    /// A config without a spec writes no `bluetoothPTT` key at all, so an
+    /// export from a Mac that never chose a Bluetooth button is unchanged.
+    func testSetupWithoutSpecEncodesNoBluetoothKey() throws {
+        store.save(setup("a", "Desk", hw: HardwareProfileRegistry.uci150ID))
+        let data = try XCTUnwrap(defaults.data(forKey: "audio.setups"))
+        let array = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+        XCTAssertEqual(array.count, 1)
+        XCTAssertNil(array.first?["bluetoothPTT"])
+    }
+
+    /// An astar from before `bluetoothPTT` decodes a config that chose the
+    /// button. It ignores the unknown key. Because choosing the button moved
+    /// the profile to `headset`, it resolves to a profile that opens no serial
+    /// port, rather than to the UCI150 and RTS.
+    func testOlderReaderResolvesHeadset() throws {
+        let desk = Setup(
+            id: "a", name: "Desk", hardwareProfileID: HardwareProfileRegistry.uci150ID,
+            serial: .uci150)
+        let chosen = desk.withPTTHardware(.bluetooth(deviceID: "inrico-b02ptt"))
+        let data = try JSONEncoder().encode([chosen])
+
+        let old = try JSONDecoder().decode([PreBluetoothSetup].self, from: data)
+        XCTAssertEqual(old.count, 1)
+        XCTAssertEqual(old.first?.hardwareProfileID, HardwareProfileRegistry.headsetID)
+        let oldID = try XCTUnwrap(old.first).hardwareProfileID
+        let profile = HardwareProfileRegistry().resolve(id: oldID)
+        XCTAssertEqual(profile.usesSerial, false)
+        XCTAssertEqual(old.first?.serial, .uci150, "the serial spec rides along untouched")
     }
 
     // MARK: - Device-presence validation
@@ -206,4 +294,14 @@ final class SetupStoreTests: XCTestCase {
         let missing = s.missingDevices(inputs: ["Mic A"], outputs: ["Speaker C"])
         XCTAssertEqual(missing, ["Speaker B"])
     }
+}
+
+/// `Setup` as an astar from before `bluetoothPTT` decodes it: the same fields
+/// that affect hardware, and no `bluetoothPTT`. Synthesized `Decodable` drops
+/// unknown keys, as the shipped builds do.
+private struct PreBluetoothSetup: Decodable {
+    var id: String
+    var name: String
+    var hardwareProfileID: String
+    var serial: SerialLineSpec?
 }

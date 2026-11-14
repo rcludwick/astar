@@ -108,4 +108,41 @@ final class NameResolverTests: XCTestCase {
         init(_ table: [String: String]) { self.table = table }
         func name(forNode node: String) -> String? { table[node] }
     }
+
+    // MARK: - AllStarNameSource
+
+    private func allstarBox() -> AllStarIndexBox {
+        let box = AllStarIndexBox()
+        box.index = AllStarIndex([
+            AllStarNode(
+                node: "2002", callsign: "WB6NIL", description: "Parrot", location: "AWS US-EAST-1"),
+            AllStarNode(node: "1999", callsign: "N0CALL"),
+        ])
+        return box
+    }
+
+    func testAllStarSourceNamesCallsignAndLocation() {
+        let source = AllStarNameSource(allstarBox())
+        XCTAssertEqual(source.name(forNode: "2002"), "WB6NIL \u{00B7} AWS US-EAST-1")
+        XCTAssertEqual(source.name(forNode: "1999"), "N0CALL")
+        XCTAssertNil(source.name(forNode: "424242"))
+    }
+
+    func testSavedLabelBeatsAllStarDirectory() {
+        store.upsert(NodeEntry(label: "Parrot", node: "2002", favorite: true))
+        let resolver = NameResolver(sources: [
+            DirectoryNameSource(store), AllStarNameSource(allstarBox()),
+        ])
+        XCTAssertEqual(resolver.name(forNode: "2002"), "Parrot")
+        XCTAssertEqual(resolver.name(forNode: "1999"), "N0CALL")
+    }
+
+    func testUpdatingBoxChangesNextAnswer() {
+        let box = allstarBox()
+        let resolver = NameResolver(sources: [AllStarNameSource(box)])
+        box.index = .empty
+        XCTAssertNil(resolver.name(forNode: "2002"))
+        box.index = AllStarIndex([AllStarNode(node: "2002", callsign: "K1ABC")])
+        XCTAssertEqual(resolver.name(forNode: "2002"), "K1ABC")
+    }
 }

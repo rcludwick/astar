@@ -907,6 +907,7 @@ mod tests {
             dropped_frames: 0,
             overs: 0,
             astar_version: "0".into(),
+            my_callsigns: Vec::new(),
         };
         write_meta(&dir, &meta).unwrap();
         dir

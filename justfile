@@ -200,12 +200,14 @@ cbindgen:
     ./scripts/check-cbindgen.sh
     ./scripts/check-cbindgen-serial.sh
 
-# The ten merge invariants CI's `guard` stage enforces: no armed hardware /
+# The eleven merge invariants CI's `guard` stage enforces: no armed hardware /
 # live-network opt-in, no git dependencies (ambe-thumbdv stays vendored, with
 # its licences), no invented install channel, an AGPL SPDX header on every
 # first-party rs/swift/sh/py file, no LGPL code in a default build (Codec 2
 # stays opt-in; the software D-Star vocoder stays opt-in and D-Star only), no async runtime / voice stack in a default build (the
-# discord feature stays opt-in), no tiny_http anywhere (every HTTP server
+# discord feature stays opt-in), a dependency-free Bluetooth PTT core that the
+# node never links, with CoreBluetooth confined to one app file and no
+# characteristic writes, no tiny_http anywhere (every HTTP server
 # runs on astar-http), the EchoLink test fences (no EchoLink host name in
 # the engine; the loopback-only features never reach a real build), no packet
 # tap on a path that carries secrets, and the net recorder staying
@@ -218,6 +220,7 @@ guards:
     ./ci/guard-codec2-licensing.sh
     ./ci/guard-dstar-soft-ambe.sh
     ./ci/guard-discord-feature.sh
+    ./ci/guard-ble-ptt.sh
     ./ci/guard-no-tiny-http.sh
     ./ci/guard-echolink.sh
     ./ci/guard-packet-log.sh
@@ -269,12 +272,13 @@ app-test:
 dmg:
     apps/macos/Tools/make-dmg.sh
 
-# Refresh the bundled reflector directory snapshot
-# (apps/macos/Resources/reflectors.json → astar.app/Contents/Resources/).
+# Refresh the bundled reflector and AllStar node directory snapshots
+# (apps/macos/Resources/{reflectors,allstar}.json → astar.app/Contents/Resources/).
 # RUN THIS AT RELEASE TIME and commit the result: the snapshot is what a first
 # launch with no network reads, and nothing else ever refreshes it.
 reflectors:
     apps/macos/Tools/fetch-reflectors.sh
+    apps/macos/Tools/fetch-allstar.sh
 
 # Regenerate app icons + the menu-bar template from the art/ SVG masters.
 icons:
@@ -303,6 +307,11 @@ gui-windows:
 # Regenerate the Iced client's demo screenshots into apps/gui/.shots/.
 gui-shots *args:
     apps/gui/shots.sh {{args}}
+
+# Offscreen screenshots of the /nets/ pages into crates/astar-netarchive/.shots/
+# (headless Chrome, fixture archive in a temp dir). `--check` also tests the DOM.
+nets-shots *args:
+    crates/astar-netarchive/shots.sh {{args}}
 
 # ── node daemon (astar-server) ──────────────────────────────────────────────
 
@@ -447,19 +456,32 @@ discord-check:
     cargo test -p astar-server  --features discord
     @echo "✓ discord-check: clippy + tests with --features discord passed"
 
+# Mutation testing for the PTT safety core: crates/astar-ble-ptt and
+# crates/astar-station/src/ptt_arbiter.rs. The bar is zero survivors: every
+# mutant cargo-mutants makes must turn a test red. Too slow for `just ci`;
+# run it before merging any change to either. Output lands in
+# target/mutants.out (astar-ble-ptt) and target/mutants-ptt-arbiter/mutants.out
+# (the arbiter). Requires cargo-mutants 27.1.0.
+mutants-ble-ptt:
+    cargo mutants -p astar-ble-ptt --output target
+    cargo mutants -p astar-station --file ptt_arbiter.rs --output target/mutants-ptt-arbiter
+
 # The everyday Rust gate: format, lint, test, header-drift.
 # `guard-codec2-licensing.sh` and the rest of `just guards` are NOT in this
 # chain (they run as a separate pre-push step) — guard-discord-feature.sh IS,
 # deliberately, so a default-features build staying tokio/songbird-free is
 # checked on every `just ci`, not just before a push. The feature's own code
 # is gated by `just discord-check` / ci.yml's `discord` job, not here.
+# guard-ble-ptt.sh is in the chain for the same reason: the Bluetooth PTT core
+# staying dependency-free and out of the node is a safety property.
 ci: fmt-check clippy test cbindgen version-check release-test deploy-verify-test public-check dns-check auth-check http-check gsm-check soft-ambe-check
     ./ci/guard-discord-feature.sh
     ./ci/guard-no-tiny-http.sh
     ./ci/guard-echolink.sh
     ./ci/guard-packet-log.sh
     ./ci/guard-netrec-receive-only.sh
-    @echo "✓ ci: fmt + clippy + test + cbindgen + version-check + release-test + deploy-verify-test + public-check + dns-check + auth-check + http-check + gsm-check + soft-ambe-check + discord-guard + tiny-http-guard + echolink-guard + packet-log-guard + netrec-guard passed"
+    ./ci/guard-ble-ptt.sh
+    @echo "✓ ci: fmt + clippy + test + cbindgen + version-check + release-test + deploy-verify-test + public-check + dns-check + auth-check + http-check + gsm-check + soft-ambe-check + discord-guard + tiny-http-guard + echolink-guard + packet-log-guard + netrec-guard + ble-ptt-guard passed"
 
 # astar-server's opt-in public-tls (HTTPS, ACME, Porkbun) and stream-mp3 (LAME)
 # features, which a default-features `just clippy`/`just test` never compiles. Unlike discord it

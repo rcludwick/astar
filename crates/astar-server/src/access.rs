@@ -88,6 +88,10 @@ pub const ADMIN_ROUTES: &[(&str, &str)] = &[
     ("GET", "/packet-logs/file"),
     ("POST", "/packet-logs/delete"),
     ("POST", "/packet-logs/capture"),
+    // The net recordings' one write. The pages themselves (`/nets/`) are
+    // not admin routes: both binds answer them before the gate, with an
+    // `astar_netarchive::Access` from `nets_access`.
+    ("POST", "/nets/delete"),
     // Lifecycle.
     ("POST", "/shutdown"),
 ];
@@ -118,6 +122,19 @@ pub fn route_class(method: &str, path: &str) -> Option<RouteClass> {
         ) => RouteClass::AdminStepUp,
         _ => RouteClass::Admin,
     })
+}
+
+/// What a principal may see of the net recordings: the console or an admin
+/// user is `Admin`, any other user `Viewer`, and nobody `Anonymous`.
+#[cfg(feature = "auth")]
+#[must_use]
+pub fn nets_access(principal: Option<&crate::auth::Principal>) -> astar_netarchive::Access {
+    use astar_netarchive::Access;
+    match principal {
+        Some(p) if p.is_admin() => Access::Admin,
+        Some(_) => Access::Viewer,
+        None => Access::Anonymous,
+    }
 }
 
 /// The admin path under the `/admin/` prefix: `/admin/` → `/`,
@@ -209,6 +226,17 @@ mod tests {
         assert_eq!(route_class("GET", "/packet-logs/delete"), None);
         assert_eq!(route_class("POST", "/packet-logs/file"), None);
         assert_eq!(route_class("GET", "/packet-logs/capture"), None);
+    }
+
+    #[test]
+    fn the_only_new_write_route_is_nets_delete() {
+        let nets: Vec<_> = ADMIN_ROUTES
+            .iter()
+            .filter(|(_, p)| p.starts_with("/nets"))
+            .collect();
+        assert_eq!(nets, vec![&("POST", "/nets/delete")]);
+        assert_eq!(route_class("POST", "/nets/delete"), Some(RouteClass::Admin));
+        assert_eq!(route_class("GET", "/nets/delete"), None);
     }
 
     #[test]

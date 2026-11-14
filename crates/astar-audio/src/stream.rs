@@ -14,8 +14,11 @@
 //! control message (`Pause`, `Resume`, `Stop`) it pokes the cpal stream
 //! and either continues waiting or exits.
 //!
-//! The audio callback itself still runs on cpal's audio thread — we never
-//! touch the channel from inside the callback.
+//! The audio callback itself still runs on cpal's audio thread — the data
+//! callback never touches the channel. The error callback does, once, when
+//! the device changes rate or format under the stream or goes away: the
+//! worker then rebuilds the stream on the device's new format over the same
+//! sink or source, so the call it feeds survives (see `StreamFactory`).
 // Without `device-audio` only the traits and the backend-neutral helpers
 // stay; the cpal plumbing they serve (control channel, timeouts, the
 // callback bodies) compiles but has no caller.
@@ -138,6 +141,18 @@ pub trait StreamHandle: Send {
     fn pause(&self) -> Result<(), AudioError>;
     /// Resume sample delivery (cpal `play()`).
     fn resume(&self) -> Result<(), AudioError>;
+
+    /// Why the stream stopped for good, or `None` while it is healthy.
+    ///
+    /// A stream whose device changes rate or format under it (a Bluetooth
+    /// headset switching to hands-free) or goes away is rebuilt on the
+    /// device's new format; this is set only once every rebuild has failed,
+    /// so a caller can say the speaker or mic stopped instead of carrying on
+    /// silently. Defaults to `None`, which keeps the test doubles across the
+    /// workspace compiling untouched.
+    fn failure(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Control message sent from the public `StreamHandle` methods to the
@@ -222,11 +237,13 @@ fn join_before(handle: JoinHandle<()>, done: &Receiver<()>, timeout: Duration) -
 #[cfg(feature = "device-audio")]
 /// Concrete `StreamHandle` over a dedicated stream-owning thread.
 struct CpalStreamHandle {
-    tx: Sender<(Ctl, CtlReply)>,
+    tx: Sender<WorkerMsg>,
     join: Option<JoinHandle<()>>,
     /// Signalled by the stream thread once it has paused AND dropped the
     /// `cpal::Stream` — i.e. once joining it cannot block.
     done: Receiver<()>,
+    /// Set by the worker when its stream stopped and every rebuild failed.
+    failure: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 #[cfg(feature = "device-audio")]
@@ -234,7 +251,7 @@ impl CpalStreamHandle {
     fn send(&self, ctl: Ctl) -> Result<(), AudioError> {
         let (reply_tx, reply_rx) = channel::<Result<(), AudioError>>();
         self.tx
-            .send((ctl, reply_tx))
+            .send(WorkerMsg::Ctl(ctl, reply_tx))
             .map_err(|_| AudioError::StreamControl("stream thread gone".into()))?;
         await_reply(&reply_rx, CTL_REPLY_TIMEOUT)
     }
@@ -261,6 +278,10 @@ impl StreamHandle for CpalStreamHandle {
 
     fn resume(&self) -> Result<(), AudioError> {
         self.send(Ctl::Resume)
+    }
+
+    fn failure(&self) -> Option<String> {
+        self.failure.lock().ok().and_then(|f| f.clone())
     }
 }
 
@@ -602,6 +623,411 @@ impl AudioBackend for CpalBackend {
             )));
         }
 
+        let factory = InputFactory {
+            dev,
+            name: device.name.clone(),
+            target_rate: config.sample_rate,
+            target_channels: config.channels,
+            sink: Arc::new(std::sync::Mutex::new(sink)),
+            overruns,
+        };
+        spawn_worker(factory, "input", RetryPolicy::DEFAULT)
+    }
+
+    fn open_output(
+        &self,
+        device: &DeviceInfo,
+        config: StreamConfig,
+        source: Box<dyn OutputSource>,
+    ) -> Result<Box<dyn StreamHandle>, AudioError> {
+        let (dev, is_input) = self.find_device(&device.id)?;
+        if is_input {
+            return Err(AudioError::DeviceNotFound(format!(
+                "{} is not an output device",
+                device.name
+            )));
+        }
+        let factory = OutputFactory {
+            dev,
+            target_rate: config.sample_rate,
+            target_channels: config.channels,
+            source: Arc::new(std::sync::Mutex::new(source)),
+        };
+        spawn_worker(factory, "output", RetryPolicy::DEFAULT)
+    }
+}
+
+#[cfg(feature = "device-audio")]
+/// Messages a stream worker thread receives: control from its handle, and
+/// device-loss reports from the error callback of the stream it is running.
+enum WorkerMsg {
+    /// A control op from [`CpalStreamHandle`], answered on the reply channel.
+    Ctl(Ctl, CtlReply),
+    /// The stream built as `generation` reported that its device changed
+    /// rate or format, or went away. Reports from a stream the worker has
+    /// already replaced carry an older generation and are ignored.
+    DeviceLost { generation: u64, reason: String },
+}
+
+#[cfg(feature = "device-audio")]
+/// Whether a cpal stream error means the stream will never call back again
+/// and must be rebuilt on the device's new configuration.
+///
+/// `StreamInvalidated` is what `CoreAudio` reports as "Device sample rate
+/// changed" — a Bluetooth headset switching between A2DP and hands-free.
+/// `DeviceNotAvailable` is a device that went away; a rebuild either finds it
+/// back or fails, and the failure is then reported rather than swallowed.
+/// Everything else (an xrun, an overload) leaves the stream running.
+fn needs_rebuild(kind: cpal::ErrorKind) -> bool {
+    matches!(
+        kind,
+        cpal::ErrorKind::StreamInvalidated | cpal::ErrorKind::DeviceNotAvailable
+    )
+}
+
+#[cfg(feature = "device-audio")]
+/// Handed to every stream build: the stream's error callback reports through
+/// it, and a report that needs a rebuild wakes the worker that owns the
+/// stream.
+#[derive(Clone)]
+struct LostSignal {
+    tx: Sender<WorkerMsg>,
+    generation: u64,
+    /// "input" or "output", for the log line.
+    label: &'static str,
+}
+
+#[cfg(feature = "device-audio")]
+impl LostSignal {
+    /// Called from cpal's error callback. Never blocks: an unbounded channel
+    /// send, or a log line.
+    fn report(&self, e: &cpal::Error) {
+        if needs_rebuild(e.kind()) {
+            let _ = self.tx.send(WorkerMsg::DeviceLost {
+                generation: self.generation,
+                reason: e.to_string(),
+            });
+        } else {
+            tracing::warn!(target: "astar_audio", "cpal {} stream error: {e}", self.label);
+        }
+    }
+}
+
+#[cfg(feature = "device-audio")]
+/// The two things the worker does to a running stream. A seam so the worker's
+/// recovery can be tested with a fake stream; `cpal::Stream` is the real one.
+trait LiveStream {
+    fn play(&self) -> Result<(), AudioError>;
+    fn pause(&self) -> Result<(), AudioError>;
+}
+
+#[cfg(feature = "device-audio")]
+impl LiveStream for cpal::Stream {
+    fn play(&self) -> Result<(), AudioError> {
+        StreamTrait::play(self).map_err(|e| AudioError::StreamControl(e.to_string()))
+    }
+    fn pause(&self) -> Result<(), AudioError> {
+        StreamTrait::pause(self).map_err(|e| AudioError::StreamControl(e.to_string()))
+    }
+}
+
+#[cfg(feature = "device-audio")]
+/// Builds a stream on the device's CURRENT default configuration, over the
+/// same sink or source every time. Called once to open the stream and again
+/// on each rebuild, so a rebuilt stream gets fresh resampler and conversion
+/// state for the new rate while the call it feeds carries on untouched.
+trait StreamFactory {
+    type Stream: LiveStream;
+    fn build(&mut self, lost: LostSignal) -> Result<Self::Stream, AudioError>;
+}
+
+#[cfg(feature = "device-audio")]
+/// How hard a worker tries to rebuild a lost stream before reporting it.
+#[derive(Debug, Clone, Copy)]
+struct RetryPolicy {
+    attempts: u32,
+    backoff: Duration,
+}
+
+#[cfg(feature = "device-audio")]
+impl RetryPolicy {
+    /// Five tries a fifth of a second apart: long enough for a headset's
+    /// profile switch to settle, short enough that a gone device is reported
+    /// within about a second.
+    const DEFAULT: Self = Self {
+        attempts: 5,
+        backoff: Duration::from_millis(200),
+    };
+}
+
+#[cfg(feature = "device-audio")]
+/// What happened while a worker waited out a rebuild backoff.
+enum Waited {
+    /// Keep trying.
+    Retry,
+    /// The handle asked to stop (or is gone): leave the worker.
+    Stop,
+}
+
+#[cfg(feature = "device-audio")]
+/// The state a stream worker keeps between messages.
+struct Worker<F: StreamFactory> {
+    factory: F,
+    label: &'static str,
+    tx: Sender<WorkerMsg>,
+    stream: Option<F::Stream>,
+    generation: u64,
+    /// What the handle last asked for, so a rebuilt stream comes back paused
+    /// if it was paused.
+    paused: bool,
+    retry: RetryPolicy,
+    failure: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+#[cfg(feature = "device-audio")]
+impl<F: StreamFactory> Worker<F> {
+    fn build(&mut self) -> Result<F::Stream, AudioError> {
+        self.generation += 1;
+        let lost = LostSignal {
+            tx: self.tx.clone(),
+            generation: self.generation,
+            label: self.label,
+        };
+        self.factory.build(lost)
+    }
+
+    /// Answer a control op. `false` once the worker should stop.
+    fn control(&mut self, ctl: &Ctl, reply: &CtlReply) -> bool {
+        let res = match ctl {
+            Ctl::Pause => {
+                self.paused = true;
+                self.stream.as_ref().map_or(Ok(()), LiveStream::pause)
+            }
+            Ctl::Resume => {
+                self.paused = false;
+                match self.stream.as_ref() {
+                    Some(s) => s.play(),
+                    None => Err(AudioError::StreamControl(format!(
+                        "{} stream stopped and could not be restarted",
+                        self.label
+                    ))),
+                }
+            }
+            Ctl::Stop => {
+                // Pause first: on macOS/CoreAudio, dropping a cpal stream
+                // alone can leave the device running (it keeps
+                // capturing/playing). Pausing stops the device before the
+                // stream is dropped.
+                if let Some(s) = self.stream.as_ref() {
+                    let _ = s.pause();
+                }
+                Ok(())
+            }
+        };
+        let _ = reply.send(res);
+        !matches!(ctl, Ctl::Stop)
+    }
+
+    /// Wait out one backoff, still answering the handle. Device-loss reports
+    /// that arrive meanwhile are stale: a rebuild is already under way.
+    fn wait(&mut self, rx: &Receiver<WorkerMsg>) -> Waited {
+        let until = std::time::Instant::now() + self.retry.backoff;
+        loop {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            match rx.recv_timeout(left) {
+                Ok(WorkerMsg::Ctl(ctl, reply)) => {
+                    if !self.control(&ctl, &reply) {
+                        return Waited::Stop;
+                    }
+                }
+                Ok(WorkerMsg::DeviceLost { .. }) => {}
+                Err(RecvTimeoutError::Timeout) => return Waited::Retry,
+                Err(RecvTimeoutError::Disconnected) => return Waited::Stop,
+            }
+        }
+    }
+
+    /// Replace a stream whose device changed under it. Returns `false` if the
+    /// handle asked to stop meanwhile.
+    fn rebuild(&mut self, rx: &Receiver<WorkerMsg>, reason: &str) -> bool {
+        tracing::info!(
+            target: "astar_audio",
+            "{} stream lost ({reason}); rebuilding it on the device's new format",
+            self.label
+        );
+        // Drop the dead stream before building its replacement: CoreAudio
+        // will not hand out the device twice.
+        if let Some(old) = self.stream.take() {
+            let _ = old.pause();
+            drop(old);
+        }
+        let mut last = String::new();
+        for attempt in 1..=self.retry.attempts {
+            match self.build() {
+                Ok(s) => match if self.paused { Ok(()) } else { s.play() } {
+                    Ok(()) => {
+                        tracing::info!(
+                            target: "astar_audio",
+                            "{} stream rebuilt (attempt {attempt})",
+                            self.label
+                        );
+                        self.stream = Some(s);
+                        return true;
+                    }
+                    Err(e) => last = e.to_string(),
+                },
+                Err(e) => last = e.to_string(),
+            }
+            tracing::warn!(
+                target: "astar_audio",
+                "{} stream rebuild attempt {attempt} of {} failed: {last}",
+                self.label,
+                self.retry.attempts
+            );
+            if attempt < self.retry.attempts && matches!(self.wait(rx), Waited::Stop) {
+                return false;
+            }
+        }
+        tracing::warn!(
+            target: "astar_audio",
+            "{} stream stopped: could not rebuild it ({last})",
+            self.label
+        );
+        if let Ok(mut slot) = self.failure.lock() {
+            *slot = Some(last);
+        }
+        true
+    }
+
+    /// Service messages until told to stop, rebuilding on device loss.
+    fn run(&mut self, rx: &Receiver<WorkerMsg>) {
+        while let Ok(msg) = rx.recv() {
+            match msg {
+                WorkerMsg::Ctl(ctl, reply) => {
+                    if !self.control(&ctl, &reply) {
+                        break;
+                    }
+                }
+                WorkerMsg::DeviceLost { generation, reason } => {
+                    let current = generation == self.generation && self.stream.is_some();
+                    if current && !self.rebuild(rx, &reason) {
+                        break;
+                    }
+                }
+            }
+        }
+        // Drop the stream EXPLICITLY, before the caller signals `done`: on a
+        // removed device this drop is itself a CoreAudio call that can block,
+        // and the whole point of `done` is that it is only sent once nothing
+        // is left that could (iax-8d21).
+        drop(self.stream.take());
+    }
+}
+
+#[cfg(feature = "device-audio")]
+/// Spawn a stream-owning worker thread, build the first stream on it, and
+/// hand back its handle once it is playing.
+///
+/// `F` must be `Send` because it moves to the worker; the stream it builds
+/// never leaves that thread (cpal streams are `!Send` on some hosts).
+fn spawn_worker<F>(
+    factory: F,
+    label: &'static str,
+    retry: RetryPolicy,
+) -> Result<Box<dyn StreamHandle>, AudioError>
+where
+    F: StreamFactory + Send + 'static,
+{
+    let (tx, rx) = channel::<WorkerMsg>();
+    let (init_tx, init_rx) = channel::<Result<(), AudioError>>();
+    // Signalled by the thread once the cpal stream is paused AND dropped, so
+    // `join_before` knows when joining is safe (iax-8d21).
+    let (done_tx, done_rx) = channel::<()>();
+    let failure = Arc::new(std::sync::Mutex::new(None));
+
+    let worker_tx = tx.clone();
+    let worker_failure = Arc::clone(&failure);
+    let join = std::thread::Builder::new()
+        .name(format!("astar-audio-{label}"))
+        .spawn(move || {
+            let mut worker = Worker {
+                factory,
+                label,
+                tx: worker_tx,
+                stream: None,
+                generation: 0,
+                paused: false,
+                retry,
+                failure: worker_failure,
+            };
+            let stream = match worker.build() {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = init_tx.send(Err(e));
+                    return;
+                }
+            };
+            if let Err(e) = stream.play() {
+                let _ = init_tx.send(Err(e));
+                return;
+            }
+            worker.stream = Some(stream);
+            let _ = init_tx.send(Ok(()));
+            worker.run(&rx);
+            let _ = done_tx.send(());
+        })
+        .map_err(|e| AudioError::BuildStream(format!("thread spawn: {e}")))?;
+
+    // Bounded (iax-8d21): a device that disappeared mid-open never reports
+    // back, and this wait is on the caller's thread — unbounded, it is a dial
+    // that never returns and a Quit that never completes.
+    match init_rx.recv_timeout(BUILD_TIMEOUT) {
+        Ok(Ok(())) => Ok(Box::new(CpalStreamHandle {
+            tx,
+            join: Some(join),
+            done: done_rx,
+            failure,
+        })),
+        Ok(Err(e)) => {
+            join_before(join, &done_rx, SHUTDOWN_TIMEOUT);
+            Err(e)
+        }
+        Err(RecvTimeoutError::Timeout) => {
+            join_before(join, &done_rx, SHUTDOWN_TIMEOUT);
+            Err(AudioError::BuildStream(
+                "audio device did not open within the timeout (disabled) — it was most likely \
+                 unplugged"
+                    .into(),
+            ))
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            join_before(join, &done_rx, SHUTDOWN_TIMEOUT);
+            Err(AudioError::BuildStream("init channel closed".into()))
+        }
+    }
+}
+
+#[cfg(feature = "device-audio")]
+/// Builds cpal capture streams for one device over one shared sink.
+struct InputFactory {
+    dev: cpal::Device,
+    /// For the log line when the device offers no 48 kHz.
+    name: String,
+    target_rate: u32,
+    target_channels: u16,
+    /// Shared with every stream this factory builds, so a rebuilt stream
+    /// feeds the same sink. Only one stream exists at a time, so the
+    /// callback's `try_lock` never contends.
+    sink: Arc<std::sync::Mutex<Box<dyn InputSink>>>,
+    overruns: Arc<AtomicU64>,
+}
+
+#[cfg(feature = "device-audio")]
+impl StreamFactory for InputFactory {
+    type Stream = cpal::Stream;
+
+    fn build(&mut self, lost: LostSignal) -> Result<cpal::Stream, AudioError> {
+        let dev = &self.dev;
         let supported = dev
             .default_input_config()
             .map_err(|e| AudioError::BuildStream(e.to_string()))?;
@@ -627,15 +1053,14 @@ impl AudioBackend for CpalBackend {
         if !capability.full_band {
             tracing::info!(
                 target: "astar_audio",
-                device = %device.name,
+                device = %self.name,
                 device_rate,
                 "capture device does not offer 48 kHz; full-band stages will not run"
             );
         }
 
-        let target_rate = config.sample_rate;
-        let target_channels = config.channels;
-
+        let target_rate = self.target_rate;
+        let target_channels = self.target_channels;
         // Build cpal stream config at the device's native rate; we resample
         // inside the callback if needed.
         let cpal_cfg = CpalConfig {
@@ -644,262 +1069,108 @@ impl AudioBackend for CpalBackend {
             buffer_size: BufferSize::Default,
         };
 
-        spawn_input_stream(
-            dev,
-            cpal_cfg,
-            sample_format,
-            device_rate,
-            device_channels,
-            target_rate,
-            target_channels,
-            sink,
-            overruns,
-        )
-    }
-
-    fn open_output(
-        &self,
-        device: &DeviceInfo,
-        config: StreamConfig,
-        source: Box<dyn OutputSource>,
-    ) -> Result<Box<dyn StreamHandle>, AudioError> {
-        let (dev, is_input) = self.find_device(&device.id)?;
-        if is_input {
-            return Err(AudioError::DeviceNotFound(format!(
-                "{} is not an output device",
-                device.name
-            )));
-        }
-        let supported = dev
-            .default_output_config()
-            .map_err(|e| AudioError::BuildStream(e.to_string()))?;
-        let device_rate = supported.sample_rate();
-        let device_channels = supported.channels();
-        let sample_format = supported.sample_format();
-
-        let target_rate = config.sample_rate;
-        let target_channels = config.channels;
-
-        let cpal_cfg = CpalConfig {
-            channels: device_channels,
-            sample_rate: device_rate,
-            buffer_size: BufferSize::Default,
+        // Fresh per-stream state: a rebuilt stream may run at another rate.
+        let mut resampler = if device_rate == target_rate {
+            None
+        } else {
+            Some(AntiAliasResampler::new(device_rate, target_rate)?)
         };
+        // Scratch buffer for mono-downmixed device samples (before
+        // resampling). We size lazily on first callback.
+        let mut mono = Vec::<f32>::new();
+        // Output buffer drained from the resampler each callback.
+        let mut resampled = Vec::<f32>::new();
+        // TX instrumentation (iax-5530): watch for dropped capture buffers,
+        // counting each into the shared `overruns` cell (iax-9e55).
+        let mut gap_watch = CaptureGapWatch::new(device_rate, Arc::clone(&self.overruns));
+        let sink = Arc::clone(&self.sink);
+        let err_fn = move |e: cpal::Error| lost.report(&e);
 
-        spawn_output_stream(
-            dev,
-            cpal_cfg,
-            sample_format,
-            device_rate,
-            device_channels,
-            target_rate,
-            target_channels,
-            source,
-        )
-    }
-}
-
-#[cfg(feature = "device-audio")]
-/// Spawn the input-stream owning thread and build the cpal stream on it.
-#[allow(clippy::too_many_arguments)]
-fn spawn_input_stream(
-    dev: cpal::Device,
-    cpal_cfg: CpalConfig,
-    sample_format: SampleFormat,
-    device_rate: u32,
-    device_channels: u16,
-    target_rate: u32,
-    target_channels: u16,
-    mut sink: Box<dyn InputSink>,
-    overruns: Arc<AtomicU64>,
-) -> Result<Box<dyn StreamHandle>, AudioError> {
-    let (tx, rx) = channel::<(Ctl, CtlReply)>();
-    let (init_tx, init_rx) = channel::<Result<(), AudioError>>();
-    // Signalled by the thread once the cpal stream is paused AND dropped, so
-    // `join_before` knows when joining is safe (iax-8d21).
-    let (done_tx, done_rx) = channel::<()>();
-
-    let join = std::thread::Builder::new()
-        .name("astar-audio-input".into())
-        .spawn(move || {
-            // Build the resampler on the audio thread (rubato's resamplers
-            // aren't Send on all configs; keeping it thread-local sidesteps
-            // that).
-            let mut resampler = if device_rate == target_rate {
-                None
-            } else {
-                match AntiAliasResampler::new(device_rate, target_rate) {
-                    Ok(r) => Some(r),
-                    Err(e) => {
-                        let _ = init_tx.send(Err(e));
-                        return;
-                    }
-                }
-            };
-
-            // Scratch buffer for mono-downmixed device samples (before
-            // resampling). We size lazily on first callback.
-            let mut mono = Vec::<f32>::new();
-            // Output buffer drained from the resampler each callback.
-            let mut resampled = Vec::<f32>::new();
-            // TX instrumentation (iax-5530): watch for dropped capture buffers,
-            // counting each into the shared `overruns` cell (iax-9e55).
-            let mut gap_watch = CaptureGapWatch::new(device_rate, overruns);
-
-            let err_fn = |e| tracing::warn!(target: "astar_audio", "cpal input stream error: {e}");
-
-            let build = || -> Result<cpal::Stream, AudioError> {
-                match sample_format {
-                    SampleFormat::F32 => dev
-                        .build_input_stream(
-                            cpal_cfg,
-                            move |data: &[f32], info: &cpal::InputCallbackInfo| {
-                                gap_watch.check(info, data.len() / device_channels.max(1) as usize);
-                                process_input(
-                                    data,
-                                    device_channels,
-                                    target_channels,
-                                    device_rate,
-                                    resampler.as_mut(),
-                                    &mut mono,
-                                    &mut resampled,
-                                    sink.as_mut(),
-                                );
-                            },
-                            err_fn,
-                            None,
-                        )
-                        .map_err(|e| AudioError::BuildStream(e.to_string())),
-                    SampleFormat::I16 => dev
-                        .build_input_stream(
-                            cpal_cfg,
-                            move |data: &[i16], info: &cpal::InputCallbackInfo| {
-                                gap_watch.check(info, data.len() / device_channels.max(1) as usize);
-                                // Convert i16 -> f32 into a scratch then process.
-                                mono.clear();
-                                for &s in data {
-                                    mono.push(f32::from(s) / f32::from(i16::MAX));
-                                }
-                                let m = mono.clone();
-                                process_input(
-                                    &m,
-                                    device_channels,
-                                    target_channels,
-                                    device_rate,
-                                    resampler.as_mut(),
-                                    &mut mono,
-                                    &mut resampled,
-                                    sink.as_mut(),
-                                );
-                            },
-                            err_fn,
-                            None,
-                        )
-                        .map_err(|e| AudioError::BuildStream(e.to_string())),
-                    SampleFormat::U16 => dev
-                        .build_input_stream(
-                            cpal_cfg,
-                            move |data: &[u16], info: &cpal::InputCallbackInfo| {
-                                gap_watch.check(info, data.len() / device_channels.max(1) as usize);
-                                mono.clear();
-                                for &s in data {
-                                    let v =
-                                        (f32::from(s) - f32::from(i16::MAX)) / f32::from(i16::MAX);
-                                    mono.push(v);
-                                }
-                                let m = mono.clone();
-                                process_input(
-                                    &m,
-                                    device_channels,
-                                    target_channels,
-                                    device_rate,
-                                    resampler.as_mut(),
-                                    &mut mono,
-                                    &mut resampled,
-                                    sink.as_mut(),
-                                );
-                            },
-                            err_fn,
-                            None,
-                        )
-                        .map_err(|e| AudioError::BuildStream(e.to_string())),
-                    other => Err(AudioError::BuildStream(format!(
-                        "unsupported sample format {other:?}"
-                    ))),
-                }
-            };
-
-            let stream = match build() {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = init_tx.send(Err(e));
-                    return;
-                }
-            };
-            if let Err(e) = stream.play() {
-                let _ = init_tx.send(Err(AudioError::StreamControl(e.to_string())));
-                return;
-            }
-            let _ = init_tx.send(Ok(()));
-
-            // Service control messages until told to stop.
-            for (ctl, reply) in rx {
-                let res = match ctl {
-                    Ctl::Pause => stream
-                        .pause()
-                        .map_err(|e| AudioError::StreamControl(e.to_string())),
-                    Ctl::Resume => stream
-                        .play()
-                        .map_err(|e| AudioError::StreamControl(e.to_string())),
-                    Ctl::Stop => {
-                        // Pause first: on macOS/CoreAudio, dropping a cpal
-                        // stream alone can leave the device running (it keeps
-                        // capturing/playing). Pausing stops the device before
-                        // the stream is dropped below.
-                        let _ = stream.pause();
-                        Ok(())
-                    }
-                };
-                let stopping = matches!(ctl, Ctl::Stop);
-                let _ = reply.send(res);
-                if stopping {
-                    break;
-                }
-            }
-            // Drop the cpal stream EXPLICITLY, before signalling: on a
-            // removed device this drop is itself a CoreAudio call that can
-            // block, and the whole point of `done` is that it is only sent
-            // once nothing is left that could (iax-8d21).
-            drop(stream);
-            let _ = done_tx.send(());
-        })
-        .map_err(|e| AudioError::BuildStream(format!("thread spawn: {e}")))?;
-
-    // Wait for init result.
-    // Bounded (iax-8d21): a device that disappeared mid-open never reports
-    // back, and this wait is on the caller's thread — unbounded, it is a dial
-    // that never returns and a Quit that never completes.
-    match init_rx.recv_timeout(BUILD_TIMEOUT) {
-        Ok(Ok(())) => Ok(Box::new(CpalStreamHandle {
-            tx,
-            join: Some(join),
-            done: done_rx,
-        })),
-        Ok(Err(e)) => {
-            join_before(join, &done_rx, SHUTDOWN_TIMEOUT);
-            Err(e)
-        }
-        Err(RecvTimeoutError::Timeout) => {
-            join_before(join, &done_rx, SHUTDOWN_TIMEOUT);
-            Err(AudioError::BuildStream(
-                "audio device did not open within the timeout (disabled) — it was most likely \
-                 unplugged"
-                    .into(),
-            ))
-        }
-        Err(RecvTimeoutError::Disconnected) => {
-            join_before(join, &done_rx, SHUTDOWN_TIMEOUT);
-            Err(AudioError::BuildStream("init channel closed".into()))
+        match sample_format {
+            SampleFormat::F32 => dev
+                .build_input_stream(
+                    cpal_cfg,
+                    move |data: &[f32], info: &cpal::InputCallbackInfo| {
+                        gap_watch.check(info, data.len() / device_channels.max(1) as usize);
+                        let Ok(mut sink) = sink.try_lock() else {
+                            return;
+                        };
+                        process_input(
+                            data,
+                            device_channels,
+                            target_channels,
+                            device_rate,
+                            resampler.as_mut(),
+                            &mut mono,
+                            &mut resampled,
+                            &mut **sink,
+                        );
+                    },
+                    err_fn,
+                    None,
+                )
+                .map_err(|e| AudioError::BuildStream(e.to_string())),
+            SampleFormat::I16 => dev
+                .build_input_stream(
+                    cpal_cfg,
+                    move |data: &[i16], info: &cpal::InputCallbackInfo| {
+                        gap_watch.check(info, data.len() / device_channels.max(1) as usize);
+                        let Ok(mut sink) = sink.try_lock() else {
+                            return;
+                        };
+                        // Convert i16 -> f32 into a scratch then process.
+                        mono.clear();
+                        for &s in data {
+                            mono.push(f32::from(s) / f32::from(i16::MAX));
+                        }
+                        let m = mono.clone();
+                        process_input(
+                            &m,
+                            device_channels,
+                            target_channels,
+                            device_rate,
+                            resampler.as_mut(),
+                            &mut mono,
+                            &mut resampled,
+                            &mut **sink,
+                        );
+                    },
+                    err_fn,
+                    None,
+                )
+                .map_err(|e| AudioError::BuildStream(e.to_string())),
+            SampleFormat::U16 => dev
+                .build_input_stream(
+                    cpal_cfg,
+                    move |data: &[u16], info: &cpal::InputCallbackInfo| {
+                        gap_watch.check(info, data.len() / device_channels.max(1) as usize);
+                        let Ok(mut sink) = sink.try_lock() else {
+                            return;
+                        };
+                        mono.clear();
+                        for &s in data {
+                            let v = (f32::from(s) - f32::from(i16::MAX)) / f32::from(i16::MAX);
+                            mono.push(v);
+                        }
+                        let m = mono.clone();
+                        process_input(
+                            &m,
+                            device_channels,
+                            target_channels,
+                            device_rate,
+                            resampler.as_mut(),
+                            &mut mono,
+                            &mut resampled,
+                            &mut **sink,
+                        );
+                    },
+                    err_fn,
+                    None,
+                )
+                .map_err(|e| AudioError::BuildStream(e.to_string())),
+            other => Err(AudioError::BuildStream(format!(
+                "unsupported sample format {other:?}"
+            ))),
         }
     }
 }
@@ -1030,172 +1301,116 @@ fn process_input(
 }
 
 #[cfg(feature = "device-audio")]
-#[allow(clippy::too_many_arguments)]
-fn spawn_output_stream(
+/// Builds cpal playback streams for one device over one shared source.
+struct OutputFactory {
     dev: cpal::Device,
-    cpal_cfg: CpalConfig,
-    sample_format: SampleFormat,
-    device_rate: u32,
-    device_channels: u16,
     target_rate: u32,
     target_channels: u16,
-    mut source: Box<dyn OutputSource>,
-) -> Result<Box<dyn StreamHandle>, AudioError> {
-    let (tx, rx) = channel::<(Ctl, CtlReply)>();
-    let (init_tx, init_rx) = channel::<Result<(), AudioError>>();
-    // Signalled by the thread once the cpal stream is paused AND dropped, so
-    // `join_before` knows when joining is safe (iax-8d21).
-    let (done_tx, done_rx) = channel::<()>();
+    /// Shared with every stream this factory builds, so a rebuilt stream
+    /// plays the same mix. Only one stream exists at a time, so the
+    /// callback's `try_lock` never contends.
+    source: Arc<std::sync::Mutex<Box<dyn OutputSource>>>,
+}
 
-    let join = std::thread::Builder::new()
-        .name("astar-audio-output".into())
-        .spawn(move || {
-            // Output direction: source emits target_rate; we resample up
-            // to device_rate.
-            let mut resampler = if device_rate == target_rate {
-                None
-            } else {
-                match AntiAliasResampler::new(target_rate, device_rate) {
-                    Ok(r) => Some(r),
-                    Err(e) => {
-                        let _ = init_tx.send(Err(e));
-                        return;
-                    }
-                }
-            };
+#[cfg(feature = "device-audio")]
+impl StreamFactory for OutputFactory {
+    type Stream = cpal::Stream;
 
-            // Scratch buffer for mono samples pulled from `source` at
-            // target_rate.
-            let mut src_buf = Vec::<f32>::new();
-            // Scratch buffer for samples after resampling, at device_rate.
-            let mut up_buf = Vec::<f32>::new();
-            // Residual: device-rate mono samples that we couldn't fit into
-            // the previous callback (because device_channels > 1 or because
-            // the resampler produced more than we needed). Drained first.
-            let mut residual = std::collections::VecDeque::<f32>::new();
+    fn build(&mut self, lost: LostSignal) -> Result<cpal::Stream, AudioError> {
+        let dev = &self.dev;
+        let supported = dev
+            .default_output_config()
+            .map_err(|e| AudioError::BuildStream(e.to_string()))?;
+        let device_rate = supported.sample_rate();
+        let device_channels = supported.channels();
+        let sample_format = supported.sample_format();
+        let target_rate = self.target_rate;
+        let target_channels = self.target_channels;
 
-            let err_fn = |e| tracing::warn!(target: "astar_audio", "cpal output stream error: {e}");
+        let cpal_cfg = CpalConfig {
+            channels: device_channels,
+            sample_rate: device_rate,
+            buffer_size: BufferSize::Default,
+        };
 
-            let build = || -> Result<cpal::Stream, AudioError> {
-                match sample_format {
-                    SampleFormat::F32 => dev
-                        .build_output_stream(
-                            cpal_cfg,
-                            move |data: &mut [f32], _| {
-                                fill_output(
-                                    data,
-                                    device_channels,
-                                    target_channels,
-                                    device_rate,
-                                    target_rate,
-                                    resampler.as_mut(),
-                                    &mut src_buf,
-                                    &mut up_buf,
-                                    &mut residual,
-                                    source.as_mut(),
-                                );
-                            },
-                            err_fn,
-                            None,
-                        )
-                        .map_err(|e| AudioError::BuildStream(e.to_string())),
-                    SampleFormat::I16 => dev
-                        .build_output_stream(
-                            cpal_cfg,
-                            move |data: &mut [i16], _| {
-                                let mut tmp = vec![0.0_f32; data.len()];
-                                fill_output(
-                                    &mut tmp,
-                                    device_channels,
-                                    target_channels,
-                                    device_rate,
-                                    target_rate,
-                                    resampler.as_mut(),
-                                    &mut src_buf,
-                                    &mut up_buf,
-                                    &mut residual,
-                                    source.as_mut(),
-                                );
-                                for (d, s) in data.iter_mut().zip(tmp.iter()) {
-                                    *d = (s.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16;
-                                }
-                            },
-                            err_fn,
-                            None,
-                        )
-                        .map_err(|e| AudioError::BuildStream(e.to_string())),
-                    other => Err(AudioError::BuildStream(format!(
-                        "unsupported sample format {other:?}"
-                    ))),
-                }
-            };
+        // Output direction: source emits target_rate; we resample up to
+        // device_rate. Fresh per stream: a rebuilt one may run at another
+        // rate.
+        let mut resampler = if device_rate == target_rate {
+            None
+        } else {
+            Some(AntiAliasResampler::new(target_rate, device_rate)?)
+        };
+        // Scratch buffer for mono samples pulled from `source` at
+        // target_rate.
+        let mut src_buf = Vec::<f32>::new();
+        // Scratch buffer for samples after resampling, at device_rate.
+        let mut up_buf = Vec::<f32>::new();
+        // Residual: device-rate mono samples that we couldn't fit into the
+        // previous callback (because device_channels > 1 or because the
+        // resampler produced more than we needed). Drained first.
+        let mut residual = std::collections::VecDeque::<f32>::new();
+        let source = Arc::clone(&self.source);
+        let err_fn = move |e: cpal::Error| lost.report(&e);
 
-            let stream = match build() {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = init_tx.send(Err(e));
-                    return;
-                }
-            };
-            if let Err(e) = stream.play() {
-                let _ = init_tx.send(Err(AudioError::StreamControl(e.to_string())));
-                return;
-            }
-            let _ = init_tx.send(Ok(()));
-
-            for (ctl, reply) in rx {
-                let res = match ctl {
-                    Ctl::Pause => stream
-                        .pause()
-                        .map_err(|e| AudioError::StreamControl(e.to_string())),
-                    Ctl::Resume => stream
-                        .play()
-                        .map_err(|e| AudioError::StreamControl(e.to_string())),
-                    Ctl::Stop => {
-                        // Pause first: on macOS/CoreAudio, dropping a cpal
-                        // stream alone can leave the device running (it keeps
-                        // capturing/playing). Pausing stops the device before
-                        // the stream is dropped below.
-                        let _ = stream.pause();
-                        Ok(())
-                    }
-                };
-                let stopping = matches!(ctl, Ctl::Stop);
-                let _ = reply.send(res);
-                if stopping {
-                    break;
-                }
-            }
-            // Explicit, and before signalling — see the input path's note.
-            drop(stream);
-            let _ = done_tx.send(());
-        })
-        .map_err(|e| AudioError::BuildStream(format!("thread spawn: {e}")))?;
-
-    // Bounded (iax-8d21): a device that disappeared mid-open never reports
-    // back, and this wait is on the caller's thread — unbounded, it is a dial
-    // that never returns and a Quit that never completes.
-    match init_rx.recv_timeout(BUILD_TIMEOUT) {
-        Ok(Ok(())) => Ok(Box::new(CpalStreamHandle {
-            tx,
-            join: Some(join),
-            done: done_rx,
-        })),
-        Ok(Err(e)) => {
-            join_before(join, &done_rx, SHUTDOWN_TIMEOUT);
-            Err(e)
-        }
-        Err(RecvTimeoutError::Timeout) => {
-            join_before(join, &done_rx, SHUTDOWN_TIMEOUT);
-            Err(AudioError::BuildStream(
-                "audio device did not open within the timeout (disabled) — it was most likely \
-                 unplugged"
-                    .into(),
-            ))
-        }
-        Err(RecvTimeoutError::Disconnected) => {
-            join_before(join, &done_rx, SHUTDOWN_TIMEOUT);
-            Err(AudioError::BuildStream("init channel closed".into()))
+        match sample_format {
+            SampleFormat::F32 => dev
+                .build_output_stream(
+                    cpal_cfg,
+                    move |data: &mut [f32], _| {
+                        let Ok(mut source) = source.try_lock() else {
+                            data.fill(0.0);
+                            return;
+                        };
+                        fill_output(
+                            data,
+                            device_channels,
+                            target_channels,
+                            device_rate,
+                            target_rate,
+                            resampler.as_mut(),
+                            &mut src_buf,
+                            &mut up_buf,
+                            &mut residual,
+                            &mut **source,
+                        );
+                    },
+                    err_fn,
+                    None,
+                )
+                .map_err(|e| AudioError::BuildStream(e.to_string())),
+            SampleFormat::I16 => dev
+                .build_output_stream(
+                    cpal_cfg,
+                    move |data: &mut [i16], _| {
+                        let Ok(mut source) = source.try_lock() else {
+                            data.fill(0);
+                            return;
+                        };
+                        let mut tmp = vec![0.0_f32; data.len()];
+                        fill_output(
+                            &mut tmp,
+                            device_channels,
+                            target_channels,
+                            device_rate,
+                            target_rate,
+                            resampler.as_mut(),
+                            &mut src_buf,
+                            &mut up_buf,
+                            &mut residual,
+                            &mut **source,
+                        );
+                        for (d, s) in data.iter_mut().zip(tmp.iter()) {
+                            *d = (s.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16;
+                        }
+                    },
+                    err_fn,
+                    None,
+                )
+                .map_err(|e| AudioError::BuildStream(e.to_string())),
+            other => Err(AudioError::BuildStream(format!(
+                "unsupported sample format {other:?}"
+            ))),
         }
     }
 }
@@ -1999,6 +2214,238 @@ mod tests {
                 "join_before must return near its timeout, not wait out the thread (took {:?})",
                 started.elapsed()
             );
+        }
+    }
+
+    /// The stream worker's recovery, driven through its build seam: a fake
+    /// factory stands in for cpal so a test can change the device's rate,
+    /// deliver a stream error, and watch what the worker rebuilds.
+    mod rebuild {
+        use super::super::*;
+        use std::sync::Mutex;
+        use std::sync::atomic::AtomicU32;
+        use std::time::Instant;
+
+        /// What one fake build recorded.
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct Built {
+            /// The device rate the build read — the "new default config".
+            rate: u32,
+            /// Which shared source the stream was built over.
+            source: usize,
+        }
+
+        /// A stream that only records whether it is playing.
+        struct FakeStream {
+            playing: Arc<Mutex<Vec<bool>>>,
+        }
+
+        impl LiveStream for FakeStream {
+            fn play(&self) -> Result<(), AudioError> {
+                self.playing.lock().unwrap().push(true);
+                Ok(())
+            }
+            fn pause(&self) -> Result<(), AudioError> {
+                self.playing.lock().unwrap().push(false);
+                Ok(())
+            }
+        }
+
+        /// Shared view of the fake device the test can steer and read.
+        #[derive(Clone, Default)]
+        struct Device {
+            /// The rate the device's default config reports right now.
+            rate: Arc<AtomicU32>,
+            /// Builds after the first one fail while this is set.
+            refuse_rebuilds: Arc<std::sync::atomic::AtomicBool>,
+            /// Every build call, refused or not.
+            attempts: Arc<AtomicU32>,
+            built: Arc<Mutex<Vec<Built>>>,
+            lost: Arc<Mutex<Option<LostSignal>>>,
+            playing: Arc<Mutex<Vec<bool>>>,
+        }
+
+        struct FakeFactory {
+            device: Device,
+            /// Stands in for the `OutputSource` / `InputSink` the real
+            /// factories own: every stream must be built over this one.
+            source: Arc<()>,
+        }
+
+        impl StreamFactory for FakeFactory {
+            type Stream = FakeStream;
+            fn build(&mut self, lost: LostSignal) -> Result<FakeStream, AudioError> {
+                self.device
+                    .attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let first = self.device.built.lock().unwrap().is_empty();
+                if !first
+                    && self
+                        .device
+                        .refuse_rebuilds
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(AudioError::BuildStream("device is gone".into()));
+                }
+                self.device.built.lock().unwrap().push(Built {
+                    rate: self.device.rate.load(std::sync::atomic::Ordering::SeqCst),
+                    source: Arc::as_ptr(&self.source) as usize,
+                });
+                *self.device.lost.lock().unwrap() = Some(lost);
+                Ok(FakeStream {
+                    playing: Arc::clone(&self.device.playing),
+                })
+            }
+        }
+
+        const FAST: RetryPolicy = RetryPolicy {
+            attempts: 3,
+            backoff: Duration::from_millis(1),
+        };
+
+        fn start(device: &Device) -> (Box<dyn StreamHandle>, usize) {
+            let source = Arc::new(());
+            let id = Arc::as_ptr(&source) as usize;
+            let factory = FakeFactory {
+                device: device.clone(),
+                source,
+            };
+            let handle = spawn_worker(factory, "test", FAST).expect("fake stream opens");
+            (handle, id)
+        }
+
+        fn deliver(device: &Device, err: &cpal::Error) {
+            device
+                .lost
+                .lock()
+                .unwrap()
+                .as_ref()
+                .expect("a stream was built")
+                .report(err);
+        }
+
+        fn rate_changed() -> cpal::Error {
+            cpal::Error::with_message(
+                cpal::ErrorKind::StreamInvalidated,
+                "Device sample rate changed",
+            )
+        }
+
+        #[test]
+        fn a_rate_change_rebuilds_once_on_the_new_config_over_the_same_source() {
+            let device = Device::default();
+            device
+                .rate
+                .store(44_100, std::sync::atomic::Ordering::SeqCst);
+            let (handle, source) = start(&device);
+
+            // The headset's mic opened and it went hands-free.
+            device
+                .rate
+                .store(16_000, std::sync::atomic::Ordering::SeqCst);
+            deliver(&device, &rate_changed());
+            // The worker handles messages in order, so once this pause is
+            // answered the rebuild ahead of it has finished.
+            handle.pause().expect("pause after a rebuild");
+
+            assert_eq!(
+                *device.built.lock().unwrap(),
+                vec![
+                    Built {
+                        rate: 44_100,
+                        source
+                    },
+                    Built {
+                        rate: 16_000,
+                        source
+                    },
+                ]
+            );
+            assert_eq!(handle.failure(), None);
+            // Opened and played; the dead stream paused before it was
+            // dropped; the rebuilt one played; then paused on request.
+            assert_eq!(
+                *device.playing.lock().unwrap(),
+                vec![true, false, true, false]
+            );
+            handle.resume().expect("resume after a rebuild");
+            assert_eq!(
+                *device.playing.lock().unwrap(),
+                vec![true, false, true, false, true]
+            );
+            handle.stop();
+        }
+
+        #[test]
+        fn a_stream_rebuilt_while_paused_stays_paused() {
+            let device = Device::default();
+            let (handle, _) = start(&device);
+            handle.pause().expect("pause");
+            deliver(&device, &rate_changed());
+            handle.pause().expect("pause again");
+            assert_eq!(device.built.lock().unwrap().len(), 2);
+            // Played once at open, then only ever paused (by the caller, by
+            // the worker before dropping the dead stream, by the caller
+            // again): the rebuilt stream must not start playing behind the
+            // caller's back.
+            assert_eq!(
+                *device.playing.lock().unwrap(),
+                vec![true, false, false, false]
+            );
+            handle.stop();
+        }
+
+        #[test]
+        fn an_unplugged_device_rebuilds_too() {
+            let device = Device::default();
+            let (handle, _) = start(&device);
+            deliver(
+                &device,
+                &cpal::Error::with_message(
+                    cpal::ErrorKind::DeviceNotAvailable,
+                    "Device disconnected",
+                ),
+            );
+            handle.pause().expect("pause");
+            assert_eq!(device.built.lock().unwrap().len(), 2);
+            handle.stop();
+        }
+
+        #[test]
+        fn an_xrun_does_not_rebuild() {
+            let device = Device::default();
+            let (handle, _) = start(&device);
+            deliver(&device, &cpal::Error::new(cpal::ErrorKind::Xrun));
+            handle.pause().expect("pause");
+            assert_eq!(device.built.lock().unwrap().len(), 1);
+            handle.stop();
+        }
+
+        #[test]
+        fn a_rebuild_that_keeps_failing_is_reported_as_the_failure() {
+            let device = Device::default();
+            let (handle, _) = start(&device);
+            device
+                .refuse_rebuilds
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            deliver(&device, &rate_changed());
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while handle.failure().is_none() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            assert_eq!(
+                handle.failure(),
+                Some("stream build failed: device is gone".to_string())
+            );
+            // Only the first build succeeded; every retry was refused, and
+            // the worker gave up after the policy's attempts.
+            assert_eq!(device.built.lock().unwrap().len(), 1);
+            assert_eq!(
+                device.attempts.load(std::sync::atomic::Ordering::SeqCst),
+                1 + FAST.attempts
+            );
+            handle.stop();
         }
     }
 }

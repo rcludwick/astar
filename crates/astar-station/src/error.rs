@@ -88,6 +88,22 @@ pub enum StationError {
     /// A call-recording error — secret-free, human-readable: "already
     /// recording", "frame tap in use", or why the folder or disk refused.
     Record(String),
+    /// [`crate::Station::ptt_lease_renew`] on a source that holds no lease:
+    /// it was never pressed with a lease, it was released, or a forced stop
+    /// (lease expiry, transmit time-out, `ptt_stop_all`, a call ending)
+    /// latched it. Renew never presses, so this is how a client learns that
+    /// its key-down is gone and must wait for a fresh press.
+    NotLeased,
+    /// An argument outside its documented range: a transmit time-out outside
+    /// 60–600 s, a lease TTL outside 1–5000 ms, a lease on a source other
+    /// than Bluetooth, or a Bluetooth press without a lease. The payload names
+    /// which rule was broken; the value the caller sent is not echoed.
+    InvalidArgument(&'static str),
+    /// A press on a source that a forced stop latched (the transmit time-out,
+    /// lease expiry, `ptt_stop_all`, a call ending, or the console refusing an
+    /// earlier press). Release that source first: release-to-re-arm is what
+    /// keeps a stuck or reconnecting source from keying on its own.
+    PttLatched,
 }
 
 impl std::fmt::Display for StationError {
@@ -120,8 +136,36 @@ impl std::fmt::Display for StationError {
             Self::Dmr(msg) => write!(f, "dmr error: {msg}"),
             Self::EchoLink(msg) => write!(f, "echolink error: {msg}"),
             Self::Record(msg) => write!(f, "recording: {msg}"),
+            Self::NotLeased => write!(f, "ptt source holds no lease"),
+            Self::InvalidArgument(what) => write!(f, "invalid argument: {what}"),
+            Self::PttLatched => {
+                write!(f, "ptt source is latched: release it before keying again")
+            }
         }
     }
 }
 
 impl std::error::Error for StationError {}
+
+#[cfg(test)]
+mod tests {
+    use super::StationError;
+
+    /// The PTT variants' text is part of the contract: `astar-server` relays
+    /// `to_string()` verbatim in its `/key` error body, and T2c pins that body.
+    #[test]
+    fn ptt_variants_render_their_contract_text() {
+        assert_eq!(
+            StationError::NotLeased.to_string(),
+            "ptt source holds no lease"
+        );
+        assert_eq!(
+            StationError::InvalidArgument("lease ttl must be 1..=5000 ms").to_string(),
+            "invalid argument: lease ttl must be 1..=5000 ms"
+        );
+        assert_eq!(
+            StationError::PttLatched.to_string(),
+            "ptt source is latched: release it before keying again"
+        );
+    }
+}

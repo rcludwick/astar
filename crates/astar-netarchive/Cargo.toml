@@ -8,12 +8,25 @@ repository.workspace = true
 authors.workspace = true
 description = "astar-netarchive: the on-disk archive format of recorded nets (session metadata, over log, file naming)."
 
+[features]
+# A synthetic archive, for tests and previews.
+fixture = []
+
 [dependencies]
-astar-record = { path = "../astar-record", version = "0.1.20-beta" }
+astar-http = { path = "../astar-http", version = "0.1.21-beta" }
+astar-record = { path = "../astar-record", version = "0.1.21-beta" }
+claxon = "=0.4.3"
 jiff = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 
+[dev-dependencies]
+astar-http = { path = "../astar-http", version = "0.1.21-beta", features = ["testing"] }
+
 [lints]
 workspace = true
+
+[[example]]
+name = "nets_preview"
+required-features = ["fixture"]

@@ -233,7 +233,9 @@ final class CallSessionNXDNDialTests: XCTestCase {
         XCTAssertFalse(session.canTransmit)
 
         try session.setPTT(true)
-        XCTAssertEqual(fake.pttCalls.last, false, "a key-down must never reach the station")
+        XCTAssertTrue(session.transmitBlocked)
+        XCTAssertEqual(
+            fake.keyingLog, ["pttSource(manual,false)"], "a key-down must never reach the station")
     }
 
     // MARK: - Teardown

@@ -171,6 +171,45 @@ fn dispatch(
         }
         None => (original_path.clone(), url.clone()),
     };
+    #[cfg(feature = "auth")]
+    let seen = Seen {
+        method: &method,
+        original_path: &original_path,
+        admin_path: &path_no_query,
+        url: &url,
+        body: &body,
+        host: host.as_deref(),
+    };
+
+    // The net recordings (`[netrec]`): their own pages, answered here, before
+    // the gate, with what this request may see. Every session they name is
+    // looked up with that access, so one it may not see answers exactly as a
+    // missing one does. Their one write is `/admin/nets/delete`, an admin
+    // route: it is not a `/nets` path, so it goes through the gate and the
+    // router's guards like every other.
+    if astar_netarchive::Pages::is_nets_path(&original_path) {
+        let Some(pages) = ctrl.nets() else {
+            return to_reply(HttpResponse::error_json(404, "not found"));
+        };
+        #[cfg(feature = "auth")]
+        let access = ctrl.auth().map_or(astar_netarchive::Access::Admin, |auth| {
+            crate::access::nets_access(auth.principal(&control_req(req, &seen)).as_ref())
+        });
+        // No sign-in in this build: the port's open policy, as everywhere.
+        #[cfg(not(feature = "auth"))]
+        let access = astar_netarchive::Access::Admin;
+        let nets = astar_netarchive::NetsRequest {
+            method: &method,
+            path: &original_path,
+            access,
+            // The control port always serves `/admin/signin` when the pages
+            // were built with a sign-in URL (see `run::nets_pages`).
+            offer_sign_in: true,
+        };
+        return pages
+            .handle(&nets)
+            .into_reply(req.header("Range").map(str::to_owned));
+    }
 
     // Sign-in, when this build has it and `serve` installed it: the
     // `/auth/*` routes and the sign-in pages first, then the gate, which
@@ -178,18 +217,10 @@ fn dispatch(
     // refused at. A loopback peer is the console and passes; anyone else
     // needs a session.
     #[cfg(feature = "auth")]
-    if let Some(auth) = ctrl.auth() {
-        let seen = Seen {
-            method: &method,
-            original_path: &original_path,
-            admin_path: &path_no_query,
-            url: &url,
-            body: &body,
-            host: host.as_deref(),
-        };
-        if let Some(resp) = sign_in_or_gate(auth, req, &seen) {
-            return to_reply(resp);
-        }
+    if let Some(auth) = ctrl.auth()
+        && let Some(resp) = sign_in_or_gate(auth, req, &seen)
+    {
+        return to_reply(resp);
     }
 
     // The recording and packet log downloads, streamed: past the gate, like the event
@@ -268,16 +299,10 @@ struct Seen<'a> {
     host: Option<&'a str>,
 }
 
-/// The sign-in routes and pages, then the gate: `Some` is the answer
-/// (a sign-in response or a refusal), `None` lets the request through to
-/// the event stream or the router.
+/// The request as the sign-in code reads it.
 #[cfg(feature = "auth")]
-fn sign_in_or_gate(
-    auth: &crate::auth::AuthService,
-    request: &astar_http::Request<'_>,
-    seen: &Seen<'_>,
-) -> Option<HttpResponse> {
-    let req = crate::auth::Req {
+fn control_req<'a>(request: &'a astar_http::Request<'_>, seen: &Seen<'a>) -> crate::auth::Req<'a> {
+    crate::auth::Req {
         method: seen.method,
         path: seen.original_path,
         query: seen.url.split_once('?').map_or("", |(_, q)| q),
@@ -292,7 +317,19 @@ fn sign_in_or_gate(
         forwarded: request.forwarded(),
         surface: crate::auth::Surface::Control,
         tls: request.tls(),
-    };
+    }
+}
+
+/// The sign-in routes and pages, then the gate: `Some` is the answer
+/// (a sign-in response or a refusal), `None` lets the request through to
+/// the event stream or the router.
+#[cfg(feature = "auth")]
+fn sign_in_or_gate(
+    auth: &crate::auth::AuthService,
+    request: &astar_http::Request<'_>,
+    seen: &Seen<'_>,
+) -> Option<HttpResponse> {
+    let req = control_req(request, seen);
     if let Some(resp) = crate::auth::handle(auth, &req) {
         return Some(resp);
     }
@@ -486,6 +523,333 @@ mod tests {
             response.starts_with("HTTP/1.1 404"),
             "stripped once only: {response}"
         );
+    }
+
+    // ---- /nets/ on the control port ----------------------------------------
+
+    use crate::test_support::{NETS_PRIVATE_NET, mount_nets_fixture, nets_session_exists};
+
+    /// One raw request to `addr`; everything the server sent before it closed.
+    fn send(addr: std::net::SocketAddr, raw: &str) -> String {
+        let mut stream = TcpStream::connect(addr).expect("connect");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        stream.write_all(raw.as_bytes()).expect("write");
+        let mut out = Vec::new();
+        let _ = stream.read_to_end(&mut out);
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    /// The values of every `name` header in a raw response's head.
+    fn header_values(response: &str, name: &str) -> Vec<String> {
+        let head = response.split("\r\n\r\n").next().unwrap_or_default();
+        head.lines()
+            .filter_map(|l| l.split_once(':'))
+            .filter(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.trim().to_string())
+            .collect()
+    }
+
+    /// The body of a raw response.
+    fn body_of(response: &str) -> &str {
+        response.split_once("\r\n\r\n").map_or("", |(_, b)| b)
+    }
+
+    fn nets_get(addr: std::net::SocketAddr, path: &str, extra: &str) -> String {
+        send(
+            addr,
+            &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n{extra}Connection: close\r\n\r\n"),
+        )
+    }
+
+    /// A delete as a page on this port would post it, plus `extra` headers.
+    fn nets_delete(addr: std::net::SocketAddr, body: &str, extra: &str) -> String {
+        let host = format!("127.0.0.1:{}", addr.port());
+        send(
+            addr,
+            &format!(
+                "POST /admin/nets/delete HTTP/1.1\r\nHost: {host}\r\n{extra}\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+    }
+
+    fn delete_body(net: &str, session: &str) -> String {
+        serde_json::json!({ "net": net, "session": session }).to_string()
+    }
+
+    #[test]
+    fn control_port_loopback_console_sees_everything() {
+        // No sign-in in this build or on this node: the port's open policy.
+        let ctrl = test_controller();
+        let (_dir, f) = mount_nets_fixture(&ctrl, false);
+        let server = bind_control(&ctrl, "127.0.0.1:0").unwrap();
+        let addr = server.local_addr();
+        let r = nets_get(addr, "/nets/index.json", "");
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        assert!(
+            r.contains(&f.private_session) && r.contains(&f.public_session),
+            "{r}"
+        );
+        let private = format!("/nets/{NETS_PRIVATE_NET}/{}/", f.private_session);
+        for path in [private.clone(), format!("{private}data.json")] {
+            let r = nets_get(addr, &path, "");
+            assert!(r.starts_with("HTTP/1.1 200"), "{path}: {r}");
+        }
+        let r = nets_get(addr, "/nets", "");
+        assert!(r.starts_with("HTTP/1.1 308"), "{r}");
+        // The audio streams with byte ranges, under the pages' own policy.
+        let r = nets_get(
+            addr,
+            &format!("{private}session.flac"),
+            "Range: bytes=0-3\r\n",
+        );
+        assert!(r.starts_with("HTTP/1.1 206"), "{r}");
+        assert_eq!(body_of(&r), "fLaC");
+        assert_eq!(
+            header_values(&r, "Content-Security-Policy"),
+            vec![astar_netarchive::NETS_CSP.to_string()]
+        );
+        server.stop();
+    }
+
+    #[cfg(feature = "auth")]
+    #[test]
+    fn control_port_loopback_console_sees_everything_with_sign_in_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let auth = Arc::new(crate::auth::AuthService::open(
+            crate::auth::AuthSettings::defaults(dir.path()),
+        ));
+        let ctrl = test_controller();
+        ctrl.set_auth(auth);
+        let (_nets, f) = mount_nets_fixture(&ctrl, true);
+        let server = bind_control(&ctrl, "127.0.0.1:0").unwrap();
+        let r = nets_get(
+            server.local_addr(),
+            &format!("/nets/{NETS_PRIVATE_NET}/{}/data.json", f.private_session),
+            "",
+        );
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        server.stop();
+    }
+
+    #[test]
+    fn nets_carry_their_own_policy_and_other_routes_keep_theirs() {
+        let ctrl = test_controller();
+        let (_dir, _f) = mount_nets_fixture(&ctrl, false);
+        let server = bind_control(&ctrl, "127.0.0.1:0").unwrap();
+        let addr = server.local_addr();
+        for path in ["/nets/", "/nets/index.json", "/nets/nets.css"] {
+            let r = nets_get(addr, path, "");
+            assert_eq!(
+                header_values(&r, "Content-Security-Policy"),
+                vec![astar_netarchive::NETS_CSP.to_string()],
+                "{path}"
+            );
+            assert_eq!(header_values(&r, "X-Content-Type-Options"), vec!["nosniff"]);
+        }
+        for path in ["/status", "/", "/admin/", "/app.js"] {
+            let r = nets_get(addr, path, "");
+            assert!(r.starts_with("HTTP/1.1 200"), "{path}: {r}");
+            assert_eq!(
+                header_values(&r, "Content-Security-Policy"),
+                vec![crate::http::CSP.to_string()],
+                "{path}"
+            );
+        }
+        server.stop();
+    }
+
+    #[test]
+    fn control_port_nets_are_off_without_a_netrec_table() {
+        let ctrl = test_controller();
+        let server = bind_control(&ctrl, "127.0.0.1:0").unwrap();
+        let addr = server.local_addr();
+        for path in ["/nets/", "/nets", "/nets/index.json"] {
+            let r = nets_get(addr, path, "");
+            assert!(r.starts_with("HTTP/1.1 404"), "{path}: {r}");
+        }
+        let r = nets_delete(addr, "{}", "Content-Type: application/json\r\n");
+        assert!(r.starts_with("HTTP/1.1 404"), "{r}");
+        assert!(body_of(&r).contains("net recordings are off"), "{r}");
+        server.stop();
+    }
+
+    #[test]
+    fn control_port_nets_delete_without_sign_in_still_needs_same_origin_json() {
+        let ctrl = test_controller();
+        let (dir, f) = mount_nets_fixture(&ctrl, false);
+        let server = bind_control(&ctrl, "127.0.0.1:0").unwrap();
+        let addr = server.local_addr();
+        let body = delete_body(NETS_PRIVATE_NET, &f.private_session);
+        let exists = || nets_session_exists(dir.path(), NETS_PRIVATE_NET, &f.private_session);
+        let r = nets_delete(
+            addr,
+            &body,
+            "Origin: http://evil.example\r\nContent-Type: application/json\r\n",
+        );
+        assert!(r.starts_with("HTTP/1.1 403"), "cross-origin: {r}");
+        assert!(exists());
+        let r = nets_delete(addr, &body, "");
+        assert!(r.starts_with("HTTP/1.1 415"), "no JSON: {r}");
+        assert!(exists());
+        // Unprefixed, the URL is a page route: GET and HEAD only.
+        let r = send(
+            addr,
+            &format!(
+                "POST /nets/delete HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ),
+        );
+        assert!(r.starts_with("HTTP/1.1 405"), "{r}");
+        assert!(exists());
+        let origin = format!("Origin: http://127.0.0.1:{}\r\n", addr.port());
+        let r = nets_delete(
+            addr,
+            &body,
+            &format!("{origin}Content-Type: application/json\r\n"),
+        );
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        assert!(!exists(), "deleted");
+        server.stop();
+    }
+
+    /// The control port with sign-in on and `loopback_login`, so the
+    /// console bypass is off and every request is who its cookie says.
+    #[cfg(feature = "auth")]
+    fn strict_nets_port() -> (
+        ControlServer,
+        Arc<crate::auth::AuthService>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+        astar_netarchive::fixture::Fixture,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = crate::auth::AuthSettings::defaults(dir.path());
+        settings.loopback_login = true;
+        let auth = Arc::new(crate::auth::AuthService::open(settings));
+        let ctrl = test_controller();
+        ctrl.set_auth(Arc::clone(&auth));
+        let (nets, f) = mount_nets_fixture(&ctrl, true);
+        let server = bind_control(&ctrl, "127.0.0.1:0").unwrap();
+        (server, auth, dir, nets, f)
+    }
+
+    #[cfg(feature = "auth")]
+    fn cookie_for(
+        auth: &crate::auth::AuthService,
+        name: &str,
+        role: crate::auth::store::Role,
+    ) -> String {
+        format!(
+            "Cookie: astar_session={}\r\n",
+            auth.test_sign_in(name, role)
+        )
+    }
+
+    #[cfg(feature = "auth")]
+    #[test]
+    fn control_port_hides_private_nets_sessions_from_anonymous() {
+        // Anonymous two ways: a proxied request on a node with the console
+        // bypass, and any cookieless request with `loopback_login`.
+        let dir = tempfile::tempdir().unwrap();
+        let auth = Arc::new(crate::auth::AuthService::open(
+            crate::auth::AuthSettings::defaults(dir.path()),
+        ));
+        let ctrl = test_controller();
+        ctrl.set_auth(auth);
+        let (_nets, f) = mount_nets_fixture(&ctrl, true);
+        let proxied = bind_control(&ctrl, "127.0.0.1:0").unwrap();
+        let (strict, strict_auth, _d, _n, f2) = strict_nets_port();
+        assert_eq!(f, f2, "the fixture is deterministic");
+        for (addr, extra) in [
+            (proxied.local_addr(), "X-Forwarded-For: 198.51.100.7\r\n"),
+            (strict.local_addr(), ""),
+        ] {
+            let private = format!("/nets/{NETS_PRIVATE_NET}/{}", f.private_session);
+            let missing = format!("/nets/{NETS_PRIVATE_NET}/2001-01-01-0000");
+            for suffix in ["/data.json", "/session.flac", "/", ""] {
+                let hidden = nets_get(addr, &format!("{private}{suffix}"), extra);
+                let absent = nets_get(addr, &format!("{missing}{suffix}"), extra);
+                assert!(hidden.starts_with("HTTP/1.1 404"), "{suffix}: {hidden}");
+                assert_eq!(
+                    body_of(&hidden),
+                    body_of(&absent),
+                    "{suffix}: hidden answers as missing"
+                );
+            }
+            let public = format!("/nets/{}/{}/data.json", f.public_net, f.public_session);
+            let r = nets_get(addr, &public, extra);
+            assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+            let r = nets_get(addr, "/nets/index.json", extra);
+            assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+            assert!(
+                !r.contains(&f.private_session) && !r.contains(&f.open_session),
+                "{r}"
+            );
+            assert!(r.contains("/admin/signin?next=/nets/"), "{r}");
+        }
+        // A viewer's session sees it.
+        let viewer = cookie_for(&strict_auth, "V1EW", crate::auth::store::Role::Viewer);
+        let r = nets_get(
+            strict.local_addr(),
+            &format!("/nets/{NETS_PRIVATE_NET}/{}/data.json", f.private_session),
+            &viewer,
+        );
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        proxied.stop();
+        strict.stop();
+    }
+
+    #[cfg(feature = "auth")]
+    #[test]
+    fn control_port_nets_delete_passes_the_gate_and_the_mutating_guards() {
+        use crate::auth::store::Role;
+        let (server, auth, _d, nets, f) = strict_nets_port();
+        let addr = server.local_addr();
+        let body = delete_body(NETS_PRIVATE_NET, &f.private_session);
+        let exists = || nets_session_exists(nets.path(), NETS_PRIVATE_NET, &f.private_session);
+        let admin = cookie_for(&auth, "A1DM", Role::Admin);
+        let viewer = cookie_for(&auth, "V1EW", Role::Viewer);
+        let origin = format!("Origin: http://127.0.0.1:{}\r\n", addr.port());
+        let json = "Content-Type: application/json\r\n";
+
+        let r = nets_delete(
+            addr,
+            &body,
+            &format!("{admin}Origin: http://evil.example\r\n{json}"),
+        );
+        assert!(r.starts_with("HTTP/1.1 403"), "cross-origin: {r}");
+        let r = nets_delete(addr, &body, &format!("{admin}{origin}"));
+        assert!(r.starts_with("HTTP/1.1 415"), "no JSON: {r}");
+        let r = nets_delete(addr, &body, &format!("{viewer}{origin}{json}"));
+        assert!(r.starts_with("HTTP/1.1 403"), "viewer: {r}");
+        assert!(body_of(&r).contains("admins_only"), "{r}");
+        let r = nets_delete(addr, &body, &format!("{origin}{json}"));
+        assert!(r.starts_with("HTTP/1.1 401"), "anonymous: {r}");
+        assert!(exists(), "nothing deleted yet");
+
+        let open = delete_body(NETS_PRIVATE_NET, &f.open_session);
+        let r = nets_delete(addr, &open, &format!("{admin}{origin}{json}"));
+        assert!(r.starts_with("HTTP/1.1 409"), "open: {r}");
+        let r = nets_delete(addr, &body, &format!("{admin}{origin}{json}"));
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        assert!(body_of(&r).contains("\"deleted\":true"), "{r}");
+        assert!(!exists(), "deleted");
+        let audit = auth.read(|d| {
+            d.audit
+                .iter()
+                .map(|e| (e.event.clone(), e.user.clone()))
+                .collect::<Vec<_>>()
+        });
+        assert!(
+            audit.contains(&("web_nets_delete".to_string(), Some("A1DM".to_string()))),
+            "{audit:?}"
+        );
+        server.stop();
     }
 
     // ---- the sign-in gate on the control port (feature `auth`) -------------

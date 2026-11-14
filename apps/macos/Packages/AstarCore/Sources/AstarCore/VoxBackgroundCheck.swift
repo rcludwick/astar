@@ -12,7 +12,9 @@ public struct VoxBackgroundCheck: Equatable {
     /// The loudest background sample (dBFS) — the floor the threshold must clear.
     public let noiseFloorDBFS: Float
 
-    /// Build from a window of unkeyed mic levels. Empty input falls back to
+    /// Build from a window of unkeyed mic levels — the snapshot's `voxDB`, the
+    /// same loudness `VoxGate` compares with the threshold; measuring the
+    /// floor on any other scale would compare unlike numbers. Empty input falls back to
     /// `silenceFloor` (treat "no samples" as digital silence, not a real floor).
     public init(samples: [Float], silenceFloor: Float = -120) {
         noiseFloorDBFS = samples.max() ?? silenceFloor

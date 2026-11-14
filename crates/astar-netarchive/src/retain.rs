@@ -55,11 +55,11 @@ fn is_regular_file(path: &Path) -> bool {
 }
 
 /// One session folder found under the archive.
-struct Found {
-    net_dir: PathBuf,
-    dir: PathBuf,
+pub(crate) struct Found {
+    pub(crate) net_dir: PathBuf,
+    pub(crate) dir: PathBuf,
     /// `None` when `session.json` could not be read or parsed.
-    meta: Option<SessionMeta>,
+    pub(crate) meta: Option<SessionMeta>,
 }
 
 fn sub_dirs(dir: &Path) -> io::Result<Vec<PathBuf>> {
@@ -74,7 +74,7 @@ fn sub_dirs(dir: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-fn find_sessions(root: &Path) -> io::Result<Vec<Found>> {
+pub(crate) fn find_sessions(root: &Path) -> io::Result<Vec<Found>> {
     let nets = match sub_dirs(root) {
         Ok(n) => n,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -285,6 +285,77 @@ pub fn retain(
     })
 }
 
+/// Why [`delete_session`] did not delete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteRefusal {
+    /// `ended` is not set: the session is still recording, or it crashed and
+    /// recovery has not closed it yet.
+    Open,
+    /// `dir` is not a real session folder two levels under the archive root.
+    NotASession,
+    /// The checks passed and the removal failed part way.
+    Failed,
+}
+
+/// Delete one finished session, on a user's request.
+///
+/// `dir` must be a real folder (not a symlink) inside a real net folder
+/// directly under the resolved `root`, holding a regular `session.json` that
+/// parses and has `ended` set. Removal goes through the same checks and the
+/// same `session.json`-last order as [`retain`].
+///
+/// # Errors
+/// A [`DeleteRefusal`] saying why nothing (or not everything) was deleted.
+pub fn delete_session(root: &Path, dir: &Path) -> Result<(), DeleteRefusal> {
+    use std::path::Component;
+    let root = fs::canonicalize(root).map_err(|_| DeleteRefusal::NotASession)?;
+    // No `..` or `.` anywhere: "two levels under root" must mean exactly
+    // that, and the scan never spells a path with them.
+    if dir
+        .components()
+        .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
+        return Err(DeleteRefusal::NotASession);
+    }
+    let mut tail = dir.components().rev();
+    let (Some(Component::Normal(session)), Some(Component::Normal(net))) =
+        (tail.next(), tail.next())
+    else {
+        return Err(DeleteRefusal::NotASession);
+    };
+    let holder = dir
+        .parent()
+        .and_then(Path::parent)
+        .ok_or(DeleteRefusal::NotASession)?;
+    // The folder above the net may be spelled through a link (a symlinked
+    // root); the net and session folders themselves may not be links.
+    if fs::canonicalize(holder).ok().as_deref() != Some(root.as_path()) {
+        return Err(DeleteRefusal::NotASession);
+    }
+    let net_dir = root.join(net);
+    let dir = net_dir.join(session);
+    if !is_real_dir(&net_dir) || !is_real_dir(&dir) || !is_regular_file(&dir.join(META_FILE)) {
+        return Err(DeleteRefusal::NotASession);
+    }
+    let meta = read_meta(&dir).map_err(|_| DeleteRefusal::NotASession)?;
+    if meta.ended.is_none() {
+        return Err(DeleteRefusal::Open);
+    }
+    let candidate = Candidate {
+        dir,
+        net_dir,
+        size: 0,
+        age_time: None,
+        order_time: None,
+    };
+    let mut deleted = Vec::new();
+    if delete(&root, &candidate, &mut deleted) {
+        Ok(())
+    } else {
+        Err(DeleteRefusal::Failed)
+    }
+}
+
 /// Fill in what a crash kept a session from writing: the `overs` and `rejoins`
 /// counts, `log.csv` and `checkins.txt`, all from whatever `log.jsonl` still
 /// holds. `dropped_frames` lived only in memory, so it stays as it was. A
@@ -380,6 +451,7 @@ mod tests {
             dropped_frames: 0,
             overs: 0,
             astar_version: "t".into(),
+            my_callsigns: Vec::new(),
         }
     }
 
@@ -690,7 +762,7 @@ mod tests {
         assert!(lines[2].contains(",'=KX\u{7}0AAA,"), "{csv}");
         assert_eq!(
             fs::read_to_string(open.join("checkins.txt")).unwrap(),
-            "NC0NTL\n=KX 0AAA\n"
+            "NC0NTL\n=KX0AAA\n"
         );
     }
 
@@ -767,6 +839,78 @@ mod tests {
         symlink(&victim, open.join("log.csv")).unwrap();
         recover_unfinished(&root, now()).unwrap();
         assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+    }
+
+    #[test]
+    fn delete_refuses_an_open_session() {
+        let root = temp("delopen");
+        let open = session(&root, "net", "open", &meta("2026-11-04T01:00:00Z", None));
+        assert_eq!(delete_session(&root, &open), Err(DeleteRefusal::Open));
+        assert!(open.join(META_FILE).exists());
+    }
+
+    #[test]
+    fn delete_refuses_a_dir_outside_root() {
+        let root = temp("delroot");
+        let outside = temp("delroot-outside");
+        let done = meta("2026-01-01T01:00:00Z", Some("2026-01-01T02:00:00Z"));
+        let victim = session(&outside, "net", "victim", &done);
+        let mine = session(&root, "net", "mine", &done);
+        assert_eq!(
+            delete_session(&root, &victim),
+            Err(DeleteRefusal::NotASession)
+        );
+        // Too shallow, too deep, or spelled with `..`.
+        assert_eq!(
+            delete_session(&root, &root.join("net")),
+            Err(DeleteRefusal::NotASession)
+        );
+        let deep = session(&root, "net/mine", "deeper", &done);
+        assert_eq!(
+            delete_session(&root, &deep),
+            Err(DeleteRefusal::NotASession)
+        );
+        let dotted = root.join("net").join("..").join("net").join("mine");
+        assert_eq!(
+            delete_session(&root, &dotted),
+            Err(DeleteRefusal::NotASession)
+        );
+        #[cfg(unix)]
+        {
+            let link = root.join("net").join("linked");
+            std::os::unix::fs::symlink(&victim, &link).unwrap();
+            assert_eq!(
+                delete_session(&root, &link),
+                Err(DeleteRefusal::NotASession)
+            );
+        }
+        assert!(victim.join(META_FILE).exists());
+        assert!(mine.join(META_FILE).exists());
+        // A folder with no session.json is not a session either.
+        let empty = root.join("net").join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        assert_eq!(
+            delete_session(&root, &empty),
+            Err(DeleteRefusal::NotASession)
+        );
+        assert!(empty.exists());
+    }
+
+    #[test]
+    fn delete_removes_a_finished_session() {
+        let root = temp("deldone");
+        let done = meta("2026-01-01T01:00:00Z", Some("2026-01-01T02:00:00Z"));
+        let dir = session(&root, "net", "done", &done);
+        fs::create_dir_all(dir.join("overs")).unwrap();
+        fs::write(dir.join("overs").join("001.flac"), b"x").unwrap();
+        let keep = session(&root, "net", "keep", &done);
+        assert_eq!(delete_session(&root, &dir), Ok(()));
+        assert!(!dir.exists());
+        assert!(keep.join(META_FILE).exists());
+        // The scan's spelling (under the resolved root) works too.
+        let canon = fs::canonicalize(&keep).unwrap();
+        assert_eq!(delete_session(&root, &canon), Ok(()));
+        assert!(!keep.exists());
     }
 
     #[test]

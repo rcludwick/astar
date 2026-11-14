@@ -34,18 +34,53 @@ final class AudioSettingsStoreTests: XCTestCase {
         XCTAssertEqual(AudioSettings().outputGain, 1.0)
     }
 
-    func testVoxThresholdDefaultsToMinus40() {
-        XCTAssertEqual(AudioSettings().voxThresholdDBFS, -40)
+    func testVoxThresholdDefaultsToTheOldDefaultCarriedOver() {
+        // −40 dBFS peak was the old default; on the loudness scale that is −50.
+        XCTAssertEqual(AudioSettings().voxThresholdDBFS, -50)
         let store = UserDefaultsAudioSettingsStore(freshDefaults())
-        XCTAssertEqual(store.load().voxThresholdDBFS, -40)
+        XCTAssertEqual(store.load().voxThresholdDBFS, -50)
     }
 
-    func testVoxThresholdRoundTrips() {
-        let store = UserDefaultsAudioSettingsStore(freshDefaults())
+    func testVoxThresholdRoundTripsUnderTheNewKey() {
+        let defaults = freshDefaults()
+        let store = UserDefaultsAudioSettingsStore(defaults)
         var s = AudioSettings()
         s.voxThresholdDBFS = -28
         store.save(s)
         XCTAssertEqual(store.load().voxThresholdDBFS, -28)
+        XCTAssertEqual(defaults.object(forKey: "audio.voxThresholdRMSDBFS") as? Float, -28)
+        XCTAssertNil(
+            defaults.object(forKey: "audio.voxThresholdDBFS"), "the old key is never written")
+    }
+
+    func testAnOldPeakThresholdIsTranslatedOnceByTheCrestOffset() {
+        let defaults = freshDefaults()
+        defaults.set(Float(-40), forKey: "audio.voxThresholdDBFS")  // Rob's, on the peak scale
+        let store = UserDefaultsAudioSettingsStore(defaults)
+        XCTAssertEqual(store.load().voxThresholdDBFS, -50)
+        XCTAssertEqual(
+            defaults.object(forKey: "audio.voxThresholdRMSDBFS") as? Float, -50,
+            "the translation is written back, so it happens once")
+        // A later change to the old key (an older astar sharing this domain)
+        // is not translated again over the user's new-scale value.
+        defaults.set(Float(-20), forKey: "audio.voxThresholdDBFS")
+        XCTAssertEqual(store.load().voxThresholdDBFS, -50)
+    }
+
+    func testANewScaleThresholdIsUsedAsIs() {
+        let defaults = freshDefaults()
+        defaults.set(Float(-40), forKey: "audio.voxThresholdDBFS")
+        defaults.set(Float(-44), forKey: "audio.voxThresholdRMSDBFS")
+        XCTAssertEqual(UserDefaultsAudioSettingsStore(defaults).load().voxThresholdDBFS, -44)
+    }
+
+    func testTheTranslationClampsToTheSliderRange() {
+        XCTAssertEqual(VoxThreshold.fromPeak(-55), -58, "never below the slider's bottom")
+        XCTAssertEqual(VoxThreshold.fromPeak(-60), -58)
+        XCTAssertEqual(VoxThreshold.clamped(-60), -58, "a stored -60 cannot reach the floor")
+        XCTAssertGreaterThan(VoxThreshold.range.lowerBound, VoxGate.meterFloorDBFS)
+        XCTAssertEqual(VoxThreshold.fromPeak(5), -5)
+        XCTAssertEqual(VoxThreshold.fromPeak(.nan), VoxThreshold.defaultDBFS)
     }
 
     func testVoxHangtimeDefaultsTo500() {
@@ -212,5 +247,86 @@ final class AudioSettingsStoreTests: XCTestCase {
         store.save(settings)
 
         XCTAssertEqual(store.load(), settings)
+    }
+
+    // MARK: - Transmit time-out (one app-wide, never off)
+
+    private let txTimeoutKey = "audio.txTimeoutSeconds"
+
+    func testTxTimeoutAbsentReads120() {
+        XCTAssertEqual(AudioSettings.defaultTxTimeoutSeconds, 120)
+        XCTAssertEqual(AudioSettings.txTimeoutRange, 60...600)
+        XCTAssertEqual(AudioSettings().txTimeoutSeconds, 120)
+        let store = UserDefaultsAudioSettingsStore(freshDefaults())
+        XCTAssertEqual(store.load().txTimeoutSeconds, 120, "an absent key is the 2 min default")
+    }
+
+    func testTxTimeoutZeroLoadsAsOneMinute() {
+        // A hand-edited domain or an imported file may carry 0. The time-out
+        // can never be off, so 0 must come back as the 1 minute floor.
+        let defaults = freshDefaults()
+        defaults.set(0, forKey: txTimeoutKey)
+        let store = UserDefaultsAudioSettingsStore(defaults)
+        XCTAssertEqual(store.load().txTimeoutSeconds, 60)
+    }
+
+    func testTxTimeoutRoundsAndClamps() {
+        let cases: [(stored: Double, expected: Int)] = [
+            (-5, 60), (29, 60), (89, 60), (90, 120), (900, 600),
+            (60, 60), (600, 600), (149, 120), (150, 180), (89.5, 60), (330, 360),
+        ]
+        for (stored, expected) in cases {
+            let defaults = freshDefaults()
+            defaults.set(stored, forKey: txTimeoutKey)
+            let store = UserDefaultsAudioSettingsStore(defaults)
+            XCTAssertEqual(store.load().txTimeoutSeconds, expected, "stored \(stored)")
+        }
+    }
+
+    func testTxTimeoutNonNumericReads120() {
+        let text = freshDefaults()
+        text.set("300", forKey: txTimeoutKey)
+        XCTAssertEqual(UserDefaultsAudioSettingsStore(text).load().txTimeoutSeconds, 120)
+        let blob = freshDefaults()
+        blob.set(Data([0x01, 0x02]), forKey: txTimeoutKey)
+        XCTAssertEqual(UserDefaultsAudioSettingsStore(blob).load().txTimeoutSeconds, 120)
+    }
+
+    func testNormalizedTxTimeoutSecondsRejectsNonFinite() {
+        XCTAssertEqual(AudioSettings.normalizedTxTimeoutSeconds(.nan), 120)
+        XCTAssertEqual(AudioSettings.normalizedTxTimeoutSeconds(.infinity), 120)
+        XCTAssertEqual(AudioSettings.normalizedTxTimeoutSeconds(-.infinity), 120)
+        XCTAssertEqual(AudioSettings.normalizedTxTimeoutSeconds(1e300), 600)
+        XCTAssertEqual(AudioSettings.normalizedTxTimeoutSeconds(0), 60)
+    }
+
+    func testTxTimeoutRoundTrips() {
+        let defaults = freshDefaults()
+        let store = UserDefaultsAudioSettingsStore(defaults)
+        let settings = AudioSettings(txTimeoutSeconds: 300)
+        store.save(settings)
+        XCTAssertEqual(store.load(), settings)
+        XCTAssertEqual(defaults.object(forKey: txTimeoutKey) as? Int, 300)
+    }
+
+    func testTxTimeoutSaveWritesTheNormalisedValue() {
+        let defaults = freshDefaults()
+        let store = UserDefaultsAudioSettingsStore(defaults)
+        var settings = AudioSettings()
+        settings.txTimeoutSeconds = 0
+        store.save(settings)
+        XCTAssertEqual(defaults.object(forKey: txTimeoutKey) as? Int, 60)
+    }
+
+    func testVoxHangtimeIsNotTheTransmitTimeOut() {
+        // VOX's Hang Timeout is its "stopped talking" timer and stays its own
+        // key and value; the transmit time-out never rewrites it.
+        let defaults = freshDefaults()
+        let store = UserDefaultsAudioSettingsStore(defaults)
+        store.save(AudioSettings(voxHangtimeMS: 500, txTimeoutSeconds: 600))
+        let loaded = store.load()
+        XCTAssertEqual(loaded.voxHangtimeMS, 500)
+        XCTAssertEqual(loaded.txTimeoutSeconds, 600)
+        XCTAssertEqual(defaults.object(forKey: "audio.voxHangtimeMS") as? Int, 500)
     }
 }

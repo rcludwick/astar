@@ -57,6 +57,8 @@ final class ConfigTransferTests: XCTestCase {
         defaults.set(0.4022594, forKey: "audio.inputGain")
         defaults.set(true, forKey: "audio.compression")
         defaults.set(750, forKey: "audio.voxHangtimeMS")
+        defaults.set(-44.0, forKey: "audio.voxThresholdRMSDBFS")
+        defaults.set(-30.0, forKey: "audio.voxThresholdDBFS")  // a stale pre-upgrade copy
         defaults.set("/dev/cu.usbserial", forKey: "serial.portPath")
         defaults.set(true, forKey: "ui.showInDock")
         session.m17Callsign = "AJ7HR"
@@ -100,6 +102,9 @@ final class ConfigTransferTests: XCTestCase {
         XCTAssertEqual(suiteB.double(forKey: "audio.inputGain"), 0.4022594, accuracy: 1e-7)
         XCTAssertTrue(suiteB.bool(forKey: "audio.compression"))
         XCTAssertEqual(suiteB.integer(forKey: "audio.voxHangtimeMS"), 750)
+        XCTAssertEqual(suiteB.double(forKey: "audio.voxThresholdRMSDBFS"), -44)
+        XCTAssertNil(
+            suiteB.object(forKey: "audio.voxThresholdDBFS"), "the stale peak key stays home")
         XCTAssertEqual(suiteB.string(forKey: "serial.portPath"), "/dev/cu.usbserial")
         XCTAssertTrue(suiteB.bool(forKey: "ui.showInDock"))
         XCTAssertEqual(r.target.m17Callsign, "AJ7HR")
@@ -235,5 +240,55 @@ final class ConfigTransferTests: XCTestCase {
         let r = try roundTrip(sections: [.rigs])
         XCTAssertFalse(
             UserDefaultsSetupStore(suiteB).all().contains { $0.id == SystemDefaultSetup.id })
+    }
+
+    // MARK: - Transmit time-out
+
+    /// A session on `defaults` whose station records every push.
+    private func recordingSession(_ defaults: UserDefaults) -> (CallSession, FakeStation) {
+        let fake = FakeStation()
+        let session = CallSession(
+            station: fake,
+            audioStore: UserDefaultsAudioSettingsStore(defaults),
+            directoryStore: UserDefaultsNodeDirectoryStore(defaults),
+            userDefaults: defaults)
+        return (session, fake)
+    }
+
+    private func applySettings(from source: UserDefaults, onto target: CallSession) throws {
+        let archive = ConfigTransfer.archive(
+            sections: [.settings], session: session(source),
+            setupStore: UserDefaultsSetupStore(source),
+            profileStore: UserDefaultsMicProfileStore(source),
+            defaults: source)
+        ConfigTransfer.apply(
+            try ConfigArchive.decode(try ConfigArchive.encode(archive)), session: target,
+            setupStore: UserDefaultsSetupStore(suiteB),
+            profileStore: UserDefaultsMicProfileStore(suiteB),
+            defaults: suiteB)
+    }
+
+    func testImportedTransmitTimeOutReachesTheStation() throws {
+        // The engine enforces the time-out; it never reads defaults. An import
+        // that only wrote the key would leave the slider and the engine on the
+        // old value until relaunch.
+        suiteA.set(300, forKey: "audio.txTimeoutSeconds")
+        let (target, fake) = recordingSession(suiteB)
+
+        try applySettings(from: suiteA, onto: target)
+
+        XCTAssertEqual(fake.txTimeoutCalls, [.seconds(300)])
+        XCTAssertEqual(target.txTimeoutSeconds, 300)
+        XCTAssertEqual(UserDefaultsAudioSettingsStore(suiteB).load().txTimeoutSeconds, 300)
+    }
+
+    func testImportWithoutTransmitTimeOutPushesNothing() throws {
+        suiteA.set(750, forKey: "audio.voxHangtimeMS")
+        let (target, fake) = recordingSession(suiteB)
+
+        try applySettings(from: suiteA, onto: target)
+
+        XCTAssertEqual(fake.txTimeoutCalls, [], "no time-out in the file, nothing to push")
+        XCTAssertEqual(target.txTimeoutSeconds, 120)
     }
 }

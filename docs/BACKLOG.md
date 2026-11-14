@@ -12,7 +12,136 @@ inline. All 228 issues (164 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (178)
+## Open items (188)
+
+### iax-serenity013 — Move the Discord bridge off rustls 0.22 when serenity 0.13 ships
+*P2 medium · task · labels: security, deps, discord, server, cx:2*
+
+Seven Dependabot alerts on the private repo cover `rustls` 0.22.4 and
+`rustls-webpki` 0.102.8, among them a high one: a malformed certificate
+revocation list (CRL) can make webpki panic. Both reach the lockfile only
+through the Discord bridge: `astar-discord` → `serenity` 0.12.5 (feature
+`rustls_backend`) → `tokio-tungstenite` 0.21 → `tokio-rustls` 0.25. That is
+serenity's gateway websocket; songbird's voice websocket is already on
+rustls 0.23. Serenity 0.12.5 is the latest release and pins
+`tokio-tungstenite` ^0.21, so no update clears them (checked 2026-11-12).
+
+The risk is small. The bridge only talks TLS to Discord's gateway, its
+default config loads no CRLs, and nothing prints a session with `Debug`. Rob
+chose (2026-11-12) to leave the alerts open and wait rather than switch to
+`native_tls_backend` (vendored OpenSSL in the static server binary) or a git
+dependency on serenity's unreleased `next` branch.
+
+Fix: when serenity 0.13 (or a 0.12 release on rustls 0.23) and a songbird
+that accepts it are out, upgrade both, port `crates/astar-discord`, and run
+`just discord-check`. Confirm `rustls` 0.22 and `rustls-webpki` 0.102 have
+left `Cargo.lock`, then check the alerts close.
+
+Related: the `libcrux-chacha20poly1305` 0.0.7 alert (songbird → davey →
+openmls → hpke-rs) was dismissed as "vulnerable code not used": the
+`hpke-rs-libcrux` backend is an optional dependency no build enables, and it
+is in the lockfile only through weak features. Recheck it in the same
+upgrade.
+
+### iax-serialarm — Move the serial release-to-arm gate into the engine
+*P2 medium · task · labels: ptt, serial, safety, cross-platform, cx:2*
+
+A serial open must never key by itself. Every open releases the `Serial`
+PTT source, so a stale key from the old device cannot linger, and that
+release also clears any latch a forced stop left on it. A handset held, or a
+line stuck asserted, at the moment of the open would therefore key the radio
+as soon as the new device reports it.
+
+Today only the macOS client stops that: `SerialPTTArming` in AstarCore
+(`apps/macos/Packages/AstarCore/Sources/AstarCore/SerialPTTArming.swift`),
+fed from `SerialController`. After each open it drops any key-down until the
+line has been reported released, or has stayed quiet past the CTS debounce
+plus a 2 s settle window. That is shared safety logic sitting in one client:
+the astar-uiclone clients would each have to re-implement it, and
+`astar-c450`'s note in `docs/app/BACKLOG.md` tells them not to key serial
+without it.
+
+Fix: put the gate in the engine, in `crates/astar-ptt`'s `PttAgent` (suppress
+a held-at-open edge until the agent has seen a release) or in the station's
+serial bridge, and expose it through the C ABI and both bindings. Port
+`SerialPTTArmingTests` to Rust, with the same timing cases: a line held at
+open, an idle line, a release inside the window, a key-down after arming.
+Then let the Mac drop its Swift copy, and update `astar-c450`'s note to say
+the engine owns it.
+
+### iax-nodeptt1 — Node mode: a key pressed just after a call answers is dropped
+*P3 low · bug · labels: ptt, station, node, cx:2*
+
+`observe_ptt_call` in `crates/astar-station/src/station.rs` starts
+`ptt_seen_seq` at 0 and records `answered_seq` on every snapshot. In Node
+mode, a hold that starts after a call answers but before any snapshot has
+seen the new `answered_seq` is taken for a hold carried over from an earlier
+caller: the next snapshot sees the seq change while on air, releases the hold
+(without latching) and unkeys the console. Example: Python or the C ABI in
+Node mode — the call answers, `set_ptt(true)` returns `Ok`, and the next
+`snapshot()` drops the key.
+
+It fails safe (it unkeys), and astar-server is not affected, because its
+`Key` handler calls `station.snapshot()` right before `set_ptt(true)`
+(`crates/astar-server/src/controller.rs`). Fix: count a seq change only when
+the previous observation already saw an answered call with something held,
+or record the seq at press time. Pin it with a loopback test that keys
+before the first snapshot after answer.
+
+### iax-clitxto — `astar-cli dial` and `parrot` are not bounded by the transmit time-out
+*P3 low · task · labels: ptt, cli, safety, cx:2*
+
+`astar-cli dial` and `parrot` key the IAX2 call manager directly
+(`crates/astar-cli/src/call.rs`, `set_ptt` → `Manager::key`), below
+`Station`. So neither the PTT arbiter nor the transmit time-out applies to
+them: a key held from the CLI stays up until someone unkeys it.
+`dstar-listen` goes through `Station` and is bounded. `docs/site/about/safety.md`
+says so plainly, so this is a known gap rather than a hidden one.
+
+Fix: route the CLI's keying through a `Station` (and so through
+`ptt_source` and the watchdog), or give the CLI's own key path the same
+one-clock time-out with the engine's default and range (60–600 s, default
+120 s, never off). Then drop the exception from `docs/site/about/safety.md`.
+
+### iax-ctlapiptt — The control API page does not mention the transmit time-out
+*P3 low · docs · labels: server, ptt, docs, cx:1*
+
+`docs/site/server/control-api.md#ptt` lists `POST /key` and `POST /unkey`
+with only the D-Star refusal. It says nothing about what the node now does
+under the PTT arbiter: a `/key` held past the transmit time-out (the 2 minute
+default; the node has no setting) unkeys, and the next `/key` answers
+`ptt source is latched: release it before keying again` until an `/unkey`.
+Only the time-out latches; a refused `/key` and a hang-up leave nothing to
+clear. `docs/site/about/safety.md` (The transmit time-out) already says all
+of this; the API page should state the error text and the `/unkey` rule in
+its own table or admonition and link there.
+
+### iax-pttguard — Harden the Bluetooth PTT and node-keying guards
+*P3 low · task · labels: ptt, ci, safety, cx:2*
+
+Three source-text guards each have a known hole. None is exploited today.
+
+1. `ci/guard-ble-ptt.sh` rules 1 and 2 run `cargo tree` with cargo's
+   defaults: default features, host target only. A dependency behind a
+   non-default feature or a `[target.'cfg(...)'.dependencies]` table would
+   pass both: in `astar-ble-ptt` itself, or as an edge from `astar-server` to
+   `astar-ble-ptt` under its `discord` feature. Add
+   `--all-features --target all` to both calls. The crate is clean under
+   those flags today.
+2. Rule 3 matches the literal `CBCentralManager(`, so
+   `CBCentralManager.init(` or `CBCentralManager (` would construct a
+   central outside `CoreBluetoothCentral.swift` unnoticed. Use a regex such
+   as `CBCentralManager[[:space:]]*(\.init)?[[:space:]]*\(`.
+3. `crates/astar-server/src/controller.rs`,
+   `node_commands_never_reach_lease_source_or_timeout_calls`: the check that
+   no new source file escapes the guard reads only the top level of `src/`,
+   so a module at `src/<name>/mod.rs` would sit outside it. Recurse, or
+   assert no subdirectory of `src/` holds `.rs` files. Its forbidden list
+   (`ptt_lease`, `ptt_source`, `set_tx_timeout`) also omits `ptt_stop_all`;
+   that can only unkey, but naming it pins the claim that `NodeCommand`
+   reaches PTT only through `set_ptt`.
+
+Each change gets the usual mutate-expect-red check.
 
 ### iax-vtrust — DONE 2026-10-31: A D-Star connect could key a radio on an FT-X CAT/PTT cable
 *P1 high · safety · labels: dstar, ambe, thumbdv, serial, on-air-safety*
@@ -3489,3 +3618,28 @@ Needed before the first VPS deploy of `astar-netrec`. Two parts:
 
 - A `just` recipe and a check script for a static VPS build of `astar-netrec`, beside `just server-release` and the checks astar-server's release has. Today `docs/RELEASING.md` has only a plain `cargo build --release -p astar-netrec --features release`, which is not cross-built and is attached to a release by hand.
 - A watchdog for a frozen D-Star loop or a poisoned pump. Either one can leave a session running with its link reading as up while no audio arrives, and nothing notices until the window ends.
+
+### netrec-settings — `[netrec]` on the astar-server settings page
+*P3 low · feature · labels: server, netrec*
+
+`[netrec] archive` is edited in `node.toml` only (design ruling S15). Add it to the settings page like the other sections, with a restart note, and document it on `docs/site/server/nets.md`.
+
+### netrec-m4a — a compressed `session.m4a`, if Safari seeking proves poor
+*P3 low · feature · labels: netrec, web*
+
+The recordings page plays `session.flac` with byte ranges (ruling S1). If Rob's Safari checks (Mac and iPhone, a long session) show bad seeking, write a `session.m4a` beside the FLAC when a session closes and have the page prefer it there. Do nothing until the check says so.
+
+### netrec-talker-stamp — a per-frame talker stamp
+*P3 low · feature · labels: netrec, engine*
+
+Stage 1's R19: an over takes its talker from the stream header or the first frame, so a talker change inside one continuous stream is not seen. A per-frame stamp from the engine would split such overs.
+
+### netrec-public-signin — a link to the admin bind's sign-in, from the public bind
+*P3 low · feature · labels: server, netrec, auth*
+
+With `[web] admin_on_public` off, the public bind has no sign-in, so `/nets/` there treats every reader as anonymous, shows only public sessions, and (since the netpage branch) offers no "Sign in" link, because `/admin/signin` would 404 on that bind. A later idea: when the operator names a reachable admin address, link the signed-out reader there instead. Needs a config key for that address; nothing is broken without it.
+
+### netrec-delete-crashed — delete a crashed session without running the recorder
+*P3 low · feature · labels: server, netrec*
+
+A session whose recorder crashed has no `ended` stamp, so astar-server's `/nets/` reads it as still recording and refuses the delete (409) until astar-netrec starts once and its crash recovery closes the session. A node that no longer runs the recorder cannot delete such a session from the page at all. Let an admin delete (or close) a session that is open but has no live recorder behind it, once the page can tell that no recorder is running.

@@ -237,6 +237,8 @@ function render() {
   $("links-body").replaceChildren(...rows);
   // Only an operator who turned M17 on needs telling that it cannot decode.
   $("badge-m17codec").hidden = !(snap.m17_enabled && !snap.m17_available);
+  // The net recordings link, only on a node with [netrec].
+  $("nets-link").hidden = !snap.nets;
   renderM17Relay(snap.m17_relay);
   renderDiscord(snap.discord);
   renderEchoLink(snap.echolink);

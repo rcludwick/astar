@@ -78,6 +78,98 @@ IAX2 and the console's own M17 client session are remotely keyable; the node's
 M17 *monitor* has no transmit path toward the reflector, and `POST /key` cannot
 reach it.
 
+## How keying is limited
+
+astar can be keyed several ways at once: the on-screen PTT button and the
+Spacebar, VOX, the PTT switch on a USB radio interface, a
+[Bluetooth PTT button](../macos/bluetooth-ptt.md), and the key command of
+astar-server, the Python binding and the CLI's `dstar-listen`. The engine combines them, and it
+enforces the Bluetooth lease, the transmit time-out and the release-to-re-arm
+latches itself, on its own thread, so those do not depend on the app's window,
+its timers or the Bluetooth stack staying healthy. Faster link-loss detection
+for the Bluetooth button runs in the app, with the engine's lease behind it.
+
+### Sources combine
+
+You are on air while any source holds the key. Releasing one never cuts off
+another that is still held: VOX going quiet does not unkey a handset whose PTT
+switch is down.
+
+### The on-screen button is the universal stop
+
+Pressing the on-screen PTT button, or Space, while another source holds the key
+stops transmitting outright. It is the one control a stuck wireless button
+cannot hold down. With VOX on, the call card shows the VOX indicator instead of the PTT button,
+and the indicator is not a button: Space is the stop then, while the astar
+window is in front. **TX disabled — listening only** does the same the moment you
+turn it on, and turning it off again keys nothing. astar-server's
+[`POST /unkey`](../server/control-api.md#ptt) is a stop too.
+
+### Release to re-arm
+
+After any forced stop, a source that was holding the key cannot key again
+until it has been released: the button let go, the PTT switch up, VOX quiet. A
+reconnect, a wake from sleep or a new call never keys by itself, and a button
+held through the end of one call does not key the next.
+
+A Bluetooth button that was **up** when its link dropped has nothing to
+release: once astar reconnects, its next press keys normally. A button that
+was down at the drop, or down as the link came back, is latched instead:
+let it go, and the press after that keys normally. astar-server's `/key` is
+latched only by the transmit time-out, below.
+
+### The Bluetooth lease
+
+A Bluetooth button's hold is a lease of 1.5 seconds that the app renews every
+250 ms while the button is down. If the renewals stop — the app hangs, the
+Bluetooth stack stalls — the engine unkeys when the lease runs out.
+
+Separately, the app watches the link itself and catches one that dies faster
+than the operating system would notice: in about 2.5 seconds. That detection
+runs in the app, through the Bluetooth stack. If the app or the stack stalls,
+the engine's 1.5-second lease is the backstop, and the transmit time-out backs
+up everything.
+
+### The transmit time-out
+
+astar stops transmitting after a set time continuously on air, **whatever is
+keying**.
+
+* **One clock for the whole over.** It starts when the radio keys and resets
+  only when the radio unkeys. Handing over from Space to the Bluetooth button
+  mid-over does not restart it.
+* **1 to 10 minutes, default 2, and never off.** Set it in Settings →
+  **Transmit** → **Transmit time-out**, in whole minutes. The engine refuses
+  anything outside that range, 0 included, from every client and binding, and
+  keeps the value it had. A config file carrying 0 loads as 1 minute.
+* **It stops everything.** Every source that was holding the key is released
+  and must re-arm before anything keys again. The banner reads "Transmit stopped after 2 minutes. Release to talk again." with your setting's minutes.
+* **One value for the whole app**, not per config. It travels in config
+  exports with the other audio settings.
+* **It covers astar-server.** The node has no setting for it and runs on the
+  2 minute default, so a [`POST /key`](../server/control-api.md#ptt) held
+  longer than that unkeys, and the next `/key` is refused with
+  `ptt source is latched: release it before keying again` until an `/unkey`.
+  Only the time-out needs that `/unkey`. A `/key` the node refuses (no call
+  up yet) leaves nothing latched, and a `/key` still held when a call ends is
+  simply released by the hang-up, so the next call's `/key` keys.
+  The Windows/Linux client and the CLI's `dstar-listen` also run on the
+  2 minute default, with no setting and no banner. `astar-cli dial` and
+  `parrot` key the IAX2 call directly, below the station, so neither the
+  arbiter nor the transmit time-out applies to them. A Python script runs on
+  the default too unless it calls `Station.set_tx_timeout_ms`
+  (60 000–600 000 ms; 0 is refused).
+* **It limits what astar sends to the network.** The radio line of a USB
+  radio interface, which astar keys while the far end is talking (see
+  [PTT wiring](../macos/hardware.md#ptt-wiring)), follows that incoming
+  traffic and is not timed by it.
+* **It is not VOX's Hang Timeout.** Hang Timeout is how long VOX waits after
+  you stop talking; the transmit time-out is how long you may stay on air. VOX
+  re-arms once it has been quiet for its Hang Timeout.
+
+D-Star keeps its own 5-minute network time-out as well; whichever is shorter
+fires first.
+
 ## Listening is always safe
 
 If you only want to hear what is happening, astar has a **TX disabled —

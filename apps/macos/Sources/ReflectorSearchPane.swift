@@ -4,6 +4,7 @@
 
 #if os(macOS)
     import AstarCore
+    import AstarStation
     import SwiftUI
 
     /// Browse and search the cached reflector directory (astar-refl-ui).
@@ -25,11 +26,17 @@
     /// room, the registry publishes none of them, and a picker that quietly
     /// filled in "A" would put an operator into someone else's conversation
     /// keyed up under their own callsign. The letter is asked for, out loud.
+    ///
+    /// While EchoLink is logged in, the directory's EchoLink stations are
+    /// searched alongside the reflectors and the filter offers EchoLink. They
+    /// come from the login, not the reflector feed, so they leave the list
+    /// (and the filter) the moment the login ends. The search itself is
+    /// AstarCore's (`ReflectorDirectory.search(_:filter:echolink:)`).
     struct ReflectorSearchPane: View {
         /// Pre-selects the network filter — whatever the dial field is set to
         /// dial right now. `nil` means the app network has no directory
         /// counterpart (AllStar), and the pane opens showing everything.
-        let preferredNetwork: ReflectorNetwork?
+        let preferredNetwork: DirectorySearchNetwork?
         /// Hands back the finished dial text **and the network it belongs
         /// to**. The pane writes a string, not a target: the dial field stays
         /// the single source of truth for what will be dialled, so there is no
@@ -43,13 +50,30 @@
         /// favorites menu already switches to a favorite's own network.
         /// Leave the pane.
         let onBack: () -> Void
-        let onSelect: (String, ReflectorNetwork) -> Void
+        let onSelect: (String, DirectorySearchNetwork) -> Void
 
         @EnvironmentObject private var reflectors: ReflectorDirectory
+        @EnvironmentObject private var allstar: AllStarDirectory
+        @EnvironmentObject private var session: CallSession
 
         @State private var query = ""
-        @State private var filter: ReflectorNetwork?
-        @State private var results: [DirectoryEntry] = []
+        /// The filter the operator chose. Kept apart from the one shown so a
+        /// brief EchoLink log-out does not lose it: while EchoLink is away the
+        /// pane shows "All networks", and when the login returns it shows
+        /// EchoLink again — unless the operator picked something else in the
+        /// meantime, which replaces the choice.
+        @State private var chosenFilter: DirectorySearchNetwork?
+        /// Cached: the window re-renders at the poll rate, and with EchoLink
+        /// logged in the two lists together run to thousands of rows, so the
+        /// search runs only when one of its inputs changes.
+        @State private var results: [DirectorySearchResult] = []
+        /// The EchoLink station list made ready to search, rebuilt only when
+        /// the list or the login changes, so a keystroke only filters. `nil`
+        /// while EchoLink is not logged in.
+        @State private var echolinkIndex: EchoLinkSearchIndex?
+        /// How many AllStar nodes the current query matches, before the
+        /// result limit cuts the list. Set by `refresh`, for the footer.
+        @State private var allstarTotalMatches = 0
         /// The reflector whose module is being chosen — the second step. `nil`
         /// while browsing.
         @State private var choosingModuleFor: DirectoryEntry?
@@ -66,10 +90,25 @@
                 }
             }
             .onAppear {
-                filter = preferredNetwork
+                rebuildEchoLinkIndex()
+                chosenFilter = preferredNetwork
                 refresh()
                 searchFocused = true
             }
+            // The EchoLink rows follow the login: a refreshed station list
+            // re-runs the search, and a log-out takes EchoLink out of the
+            // filter, showing "All networks" until the login returns.
+            .onChange(of: session.echolinkStations) { _ in
+                rebuildEchoLinkIndex()
+                refresh()
+            }
+            .onChange(of: session.echolinkLogin) { _ in
+                rebuildEchoLinkIndex()
+                refresh()
+            }
+            // A node list that finishes loading or syncing while the pane is
+            // open adds the AllStar filter and its rows.
+            .onChange(of: allstar.index.count) { _ in refresh() }
         }
 
         // MARK: - Step one: find the reflector
@@ -78,7 +117,14 @@
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 8) {
                     backButton("Back to the call", action: onBack)
-                    Text("Reflectors").font(.headline)
+                    Text(
+                        filter == .allstar
+                            ? "AllStar nodes"
+                            : echolinkStations == nil
+                                ? "Reflectors"
+                                : "Reflectors and EchoLink"
+                    )
+                    .font(.headline)
                     Spacer()
                 }
                 .padding(.horizontal, 14)
@@ -89,10 +135,17 @@
                         Image(systemName: "magnifyingglass")
                             .foregroundStyle(.secondary)
                             .accessibilityHidden(true)
-                        TextField("Name, place or sponsor", text: $query)
-                            .textFieldStyle(.plain)
-                            .focused($searchFocused)
-                            .accessibilityLabel("Search reflectors")
+                        TextField(
+                            echolinkStations == nil
+                                ? "Name, place or sponsor" : "Name, place, callsign or node",
+                            text: $query
+                        )
+                        .textFieldStyle(.plain)
+                        .disableAutocorrection(true)
+                        .focused($searchFocused)
+                        .accessibilityLabel(
+                            echolinkStations == nil
+                                ? "Search reflectors" : "Search reflectors and EchoLink stations")
                         if !query.isEmpty {
                             Button {
                                 query = ""
@@ -111,10 +164,13 @@
                     // A menu, not segments: six networks plus "All" will not
                     // fit across a 330 pt popover, and the filter is a
                     // narrowing tool rather than a mode.
-                    Picker("Network", selection: $filter) {
-                        Text("All networks").tag(ReflectorNetwork?.none)
-                        ForEach(availableNetworks, id: \.rawValue) { network in
-                            Text(network.displayName).tag(ReflectorNetwork?.some(network))
+                    Picker(
+                        "Network",
+                        selection: Binding(get: { filter }, set: { chosenFilter = $0 })
+                    ) {
+                        Text("All networks").tag(DirectorySearchNetwork?.none)
+                        ForEach(availableNetworks, id: \.id) { network in
+                            Text(network.displayName).tag(DirectorySearchNetwork?.some(network))
                         }
                     }
                     .labelsHidden()
@@ -124,20 +180,33 @@
                 .padding(.horizontal, 14)
                 .padding(.bottom, 8)
                 .onChange(of: query) { _ in refresh() }
-                .onChange(of: filter) { _ in refresh() }
+                .onChange(of: chosenFilter) { _ in refresh() }
 
                 Divider()
 
-                if reflectors.entries.isEmpty {
-                    emptyState(
-                        "No directory yet",
-                        "astar could not load a reflector list. Try Sync Now in Settings.")
-                } else if results.isEmpty {
-                    emptyState("No matches", "Nothing in the directory matches “\(query)”.")
+                if results.isEmpty {
+                    if filter == .echolink && (echolinkStations ?? []).isEmpty {
+                        emptyState(
+                            "Waiting for the station list", "EchoLink’s directory is on its way.")
+                    } else if filter == .allstar {
+                        emptyState("No matches", "No AllStar node matches “\(query)”.")
+                    } else if reflectors.entries.isEmpty && (echolinkStations ?? []).isEmpty {
+                        emptyState(
+                            "No directory yet",
+                            "astar could not load a reflector list. Try Sync Now in Settings.")
+                    } else {
+                        emptyState("No matches", "Nothing in the directory matches “\(query)”.")
+                    }
                 } else {
-                    List(results, id: \.key) { entry in
-                        row(for: entry)
-                            .listRowSeparator(.visible)
+                    List(results) { result in
+                        Group {
+                            switch result {
+                            case .reflector(let entry): row(for: entry)
+                            case .echolink(let station): row(for: station)
+                            case .allstar(let node): row(for: node)
+                            }
+                        }
+                        .listRowSeparator(.visible)
                     }
                     .listStyle(.plain)
                     .scrollContentBackground(.hidden)
@@ -148,20 +217,132 @@
             }
         }
 
-        /// Networks the loaded feed actually contains, in the order
-        /// `ReflectorNetwork.known` lists them, with anything this build has
-        /// never heard of after them. Built from the data rather than from the
-        /// enum so the filter cannot offer a network with nothing behind it —
-        /// and cannot hide one hamcall-db added after this build shipped.
-        private var availableNetworks: [ReflectorNetwork] {
-            let present = Set(reflectors.entries.map(\.network))
-            let known = ReflectorNetwork.known.filter(present.contains)
-            let unknown = present.subtracting(known).sorted { $0.rawValue < $1.rawValue }
-            return known + unknown
+        /// The EchoLink stations to search: the directory's list while
+        /// logged in, `nil` (none, and no EchoLink filter) otherwise.
+        private var echolinkStations: [EchoLinkStationEntry]? {
+            session.echolinkLogin == .loggedIn ? session.echolinkStations : nil
+        }
+
+        /// The filter in effect: the chosen one while it is on offer, and
+        /// "All networks" (`nil`) while it is not — EchoLink while logged out.
+        private var filter: DirectorySearchNetwork? {
+            DirectorySearchNetwork.keeping(chosenFilter, available: availableNetworks)
+        }
+
+        /// The filter's choices: the networks the loaded feed actually
+        /// contains, then EchoLink while logged in. See
+        /// `DirectorySearchNetwork.available`.
+        private var availableNetworks: [DirectorySearchNetwork] {
+            DirectorySearchNetwork.available(
+                reflectors: reflectors.entries, echolinkLoggedIn: echolinkStations != nil,
+                allstarAvailable: allstarIndex != nil)
+        }
+
+        /// The AllStar node list to search: `nil` until one is loaded, so the
+        /// filter is not offered with nothing behind it.
+        private var allstarIndex: AllStarIndex? {
+            allstar.index.count > 0 ? allstar.index : nil
         }
 
         private func refresh() {
-            results = reflectors.search(query, network: filter)
+            let counted = reflectors.searchCountingAllStar(
+                query, filter: filter, echolink: echolinkIndex, allstar: allstarIndex)
+            results = counted.results
+            allstarTotalMatches = counted.allstarTotalMatches
+        }
+
+        private func rebuildEchoLinkIndex() {
+            echolinkIndex = echolinkStations.map(EchoLinkSearchIndex.init)
+        }
+
+        /// An EchoLink station: callsign, node number, the EchoLink label and
+        /// its location and free/busy status. Always choosable — the
+        /// directory lists only stations that are on the air.
+        private func row(for station: EchoLinkStationEntry) -> some View {
+            let subtitle = echolinkSubtitle(for: station)
+            return Button {
+                onSelect(echolinkDialText(for: station), .echolink)
+                onBack()
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        // Directory text is written by whoever runs the
+                        // station: shown verbatim, never as markup.
+                        Text(verbatim: station.call)
+                            .font(.callout.weight(.medium))
+                            .lineLimit(1)
+                        Text(verbatim: String(station.node))
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Spacer(minLength: 6)
+                        networkBadge(DirectorySearchNetwork.echolink.displayName)
+                    }
+                    Text(verbatim: subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                .contentShape(Rectangle())
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text(verbatim: station.call))
+            .accessibilityValue(
+                Text(verbatim: "EchoLink, node \(station.node), \(subtitle)")
+            )
+            .accessibilityHint("Fills the dial field")
+        }
+
+        /// Location text, then whether the station is free or busy.
+        private func echolinkSubtitle(for station: EchoLinkStationEntry) -> String {
+            let place = station.description.trimmingCharacters(in: .whitespacesAndNewlines)
+            return [place, station.status.spokenName].filter { !$0.isEmpty }
+                .joined(separator: " · ")
+        }
+
+        /// An AllStar node: number, callsign, then description and location.
+        private func row(for node: AllStarNode) -> some View {
+            let subtitle = [node.description, node.location]
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: " · ")
+            return Button {
+                onSelect(node.node, .allstar)
+                onBack()
+            } label: {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(verbatim: "\(node.node)  \(node.callsign)")
+                            .font(.callout.weight(.medium))
+                            .lineLimit(1)
+                        Spacer(minLength: 6)
+                        networkBadge(DirectorySearchNetwork.allstar.displayName)
+                    }
+                    if !subtitle.isEmpty {
+                        Text(verbatim: subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                }
+                .contentShape(Rectangle())
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text(verbatim: "\(node.node) \(node.callsign)"))
+            .accessibilityValue(Text(verbatim: "AllStar, \(subtitle)"))
+            .accessibilityHint("Fills the dial field")
+        }
+
+        /// The capsule naming a row's network, the same on both kinds of row.
+        private func networkBadge(_ name: String) -> some View {
+            Text(name)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(.quaternary, in: Capsule())
         }
 
         @ViewBuilder
@@ -185,12 +366,7 @@
                                 .lineLimit(1)
                         }
                         Spacer(minLength: 6)
-                        Text(entry.network.displayName)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(.quaternary, in: Capsule())
+                        networkBadge(entry.network.displayName)
                     }
                     if let subtitle = subtitle(for: entry) {
                         Text(subtitle)
@@ -237,7 +413,7 @@
         private func select(_ entry: DirectoryEntry) {
             guard entry.isDialable else { return }
             if ReflectorModuleOptions.options(for: entry.dial).isEmpty {
-                onSelect(entry.id, entry.network)
+                onSelect(entry.id, .reflector(entry.network))
                 onBack()
             } else {
                 choosingModuleFor = entry
@@ -311,7 +487,9 @@
                 // A recollection, written down only because the operator
                 // actually chose it. Nothing reads this at dial time.
                 memory.remember(letter, for: entry)
-                onSelect(ReflectorDialText.applying(module: letter, to: entry.id), entry.network)
+                onSelect(
+                    ReflectorDialText.applying(module: letter, to: entry.id),
+                    .reflector(entry.network))
                 onBack()
             } label: {
                 Text(String(letter))
@@ -362,12 +540,46 @@
         /// the data appears, and this pane is the place it most obviously
         /// appears — a credit that lives only in Settings is one refactor from
         /// being the only copy, and then from being gone.
+        private var countLine: String {
+            let limit = AllStarIndex.resultLimit
+            let allstarClause =
+                allstarTotalMatches > limit
+                ? "Showing \(limit) of \(allstarTotalMatches.formatted()) AllStar nodes — type to narrow"
+                : "\(allstarRowCount.formatted()) of \((allstarIndex?.count ?? 0).formatted()) AllStar nodes"
+            if filter == .allstar { return allstarClause }
+            let others = results.count - allstarRowCount
+            let base: String
+            if let echolinkStations {
+                let total = reflectors.entries.count + echolinkStations.count
+                base =
+                    "\(others.formatted()) of \(total.formatted()) reflectors and EchoLink stations"
+            } else {
+                base = "\(others.formatted()) of \(reflectors.entries.count.formatted()) reflectors"
+            }
+            return allstarRowCount > 0 ? "\(base) · \(allstarClause)" : base
+        }
+
+        private var allstarRowCount: Int {
+            results.reduce(0) { count, result in
+                if case .allstar = result { return count + 1 }
+                return count
+            }
+        }
+
         private var footer: some View {
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(results.count) of \(reflectors.entries.count) reflectors")
+                Text(countLine)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                if let attribution = reflectors.attribution {
+                if allstarRowCount > 0 || filter == .allstar, !allstar.feed.attribution.isEmpty {
+                    Text(allstar.feed.attribution)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if allstarRowCount < results.count || filter != .allstar,
+                    let attribution = reflectors.attribution
+                {
                     // Not line-limited: a truncated credit is a broken one,
                     // and this is the surface where the data is most visibly
                     // being used.

@@ -34,6 +34,14 @@ public struct VoxConfig: Equatable {
 ///  - Once open, stays open until the level stays below threshold for the full
 ///    `hangoverMS`; any sample back over threshold resets the hangover.
 public struct VoxGate {
+    /// The level meters' floor, dBFS: the engine reports -60 for anything at
+    /// or below it, silence included (`peak_to_dbfs` / `power_to_dbfs`), and
+    /// the level bars map -60...0. A reading at the floor says "quiet, or
+    /// quieter than we measure", never "loud enough", so the gate treats it
+    /// as below every threshold. Without this, a threshold at the floor
+    /// keys on a silent room and never lets go.
+    public static let meterFloorDBFS: Float = -60
+
     public var config: VoxConfig
 
     private var keyed = false
@@ -48,7 +56,7 @@ public struct VoxGate {
 
     /// Advance the gate by one sample. Returns the keyed state to apply.
     public mutating func update(level: Float, now: Date) -> Bool {
-        let isAbove = level >= config.thresholdDBFS
+        let isAbove = level > Self.meterFloorDBFS && level >= config.thresholdDBFS
 
         if keyed {
             if isAbove {

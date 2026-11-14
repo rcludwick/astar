@@ -1,0 +1,141 @@
+{
+ "api_version": "v1",
+ "attribution": "AllStarLink node data courtesy of AllStarLink, Inc. (https://www.allstarlink.org/).",
+ "client_refresh_days": 7,
+ "count": 20,
+ "generated": "2026-11-12",
+ "license": "none-stated",
+ "license_url": "https://github.com/rcludwick/hamcall-db/blob/main/NOTICE",
+ "modifications": "Reformatted from AllStarLink's pipe-separated node list. Malformed lines dropped; locations that look like street addresses removed; email addresses removed from free text.",
+ "nodes": [
+  {
+   "callsign": "WB6NIL",
+   "description": "ASL Public Hub",
+   "location": "aws-east2ls-ast0",
+   "node": "2000"
+  },
+  {
+   "callsign": "WB6NIL",
+   "description": "ASL Public Hub",
+   "location": "aws-east2ls-ast0",
+   "node": "2001"
+  },
+  {
+   "callsign": "WB6NIL",
+   "description": "AllStarLink Parrot",
+   "location": "AWS US-EAST-1",
+   "node": "2002"
+  },
+  {
+   "callsign": "KM6RPT",
+   "description": "448.280-",
+   "location": "San Diego County, CA",
+   "node": "2003"
+  },
+  {
+   "callsign": "KC1AR",
+   "description": null,
+   "location": null,
+   "node": "27110"
+  },
+  {
+   "callsign": "KC1AR",
+   "description": null,
+   "location": null,
+   "node": "27921"
+  },
+  {
+   "callsign": "KC1AR",
+   "description": null,
+   "location": null,
+   "node": "27924"
+  },
+  {
+   "callsign": "KC1AR",
+   "description": null,
+   "location": null,
+   "node": "28081"
+  },
+  {
+   "callsign": "WA6ZFT",
+   "description": "TBD",
+   "location": "La Mesa, CA",
+   "node": "2014"
+  },
+  {
+   "callsign": "WA6ZFT",
+   "description": "TBD",
+   "location": "La Mesa, CA",
+   "node": "2017"
+  },
+  {
+   "callsign": "WA6ZFT",
+   "description": "TBD",
+   "location": "La Mesa, CA",
+   "node": "2018"
+  },
+  {
+   "callsign": "WA6ZFT",
+   "description": "Lab Dev Box",
+   "location": "La Mesa, CA",
+   "node": "2019"
+  },
+  {
+   "callsign": "KB9LFZ",
+   "description": "Test Dummy Node",
+   "location": "Tyler, TX",
+   "node": "29314"
+  },
+  {
+   "callsign": "K5LEW",
+   "description": "147.120+",
+   "location": "Taos County, NM",
+   "node": "29324"
+  },
+  {
+   "callsign": "W5UOK",
+   "description": null,
+   "location": "Buffalo, TX",
+   "node": "29326"
+  },
+  {
+   "callsign": "K4BRY",
+   "description": "443.050+",
+   "location": "Pembroke Pines, FL",
+   "node": "29336"
+  },
+  {
+   "callsign": "MB7IWO",
+   "description": "145.2875",
+   "location": "Witney, UK",
+   "node": "55828"
+  },
+  {
+   "callsign": "W4AJC",
+   "description": "143.135",
+   "location": "Three Way, TN",
+   "node": "55834"
+  },
+  {
+   "callsign": "W7YP",
+   "description": "434.500",
+   "location": "Columbia Falls, MT",
+   "node": "55842"
+  },
+  {
+   "callsign": "NR1T",
+   "description": null,
+   "location": "Trumbull, CT",
+   "node": "55856"
+  }
+ ],
+ "rights": "Information about users' nodes (AllStarLink User Content), redistributed under AllStarLink's 'reasonable use of published directories'. No rights granted beyond those AllStarLink provides.",
+ "schema_version": 1,
+ "sources": [
+  {
+   "fetched": "2026-11-12",
+   "name": "allstarlink",
+   "url": "http://allmondb.allstarlink.org/"
+  }
+ ]
+}

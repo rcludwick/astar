@@ -218,7 +218,7 @@ my_side = false
 | `root` | required | The folder the archive is kept in. The recorder creates it if it is missing. |
 | `callsign` | required | The callsign it logs in with. The placeholder `N0CALL` works but draws a warning. |
 | `callsign_suffix` | `"R"` | One uppercase letter or digit appended to the callsign for the login, so the reflector lists `N0CALL R`. Anything else is refused: a space would make the login read as your own callsign. |
-| `my_callsigns` | `[]` | Callsigns that count as "my side". Used by the page that comes in a later release; required if any net sets `my_side = true`. |
+| `my_callsigns` | `[]` | Callsigns that count as "my side" on the [recordings page](#the-recordings-page). Required if any net sets `my_side = true`. Each session records the list in its `session.json` when it starts, so later edits do not change old sessions. |
 | `max_bytes` | `"50 GB"` | The most the archive may hold. `KB`, `MB` and `GB` count in thousands; `KiB`, `MiB` and `GiB` count in 1024s; a bare number is bytes. A value under 500 MB draws a warning, because an archive that small may delete sessions soon after recording them. This limit is separate from the free space on the disk; see [When the disk fills](#when-the-disk-fills). |
 | `max_age_days` | `365` | How many days a finished session is kept, 1 to 3650. |
 | `pre_roll` | `"5m"` | How long before a net's start the recorder joins. At most 24 hours. |
@@ -243,8 +243,8 @@ check-in and the last goodnight are on the file.
 | `when` | required | The schedule; see [Saying when](#saying-when). |
 | `duration` | required | How long the net runs, from more than zero up to 24 hours. |
 | `tz` | required | The time zone `when` is read in, such as `America/Denver`. |
-| `visibility` | `"private"` | `"private"` or `"public"`. Recorded in `session.json`; the page that uses it is a later release. |
-| `my_side` | `false` | Whether the page should default to "my side". Later release. |
+| `visibility` | `"private"` | `"private"` or `"public"`. Recorded in `session.json`. On `astar-server` a public session is listed for anyone and a private one only after sign-in; see [Net recordings](server/nets.md). |
+| `my_side` | `false` | Whether the session page opens with the "My side" switch on. |
 | `video` | `true` | Read now and used by a later release; it does nothing yet. |
 | `youtube_live`, `youtube_upload` | `false` | Read now and used by later releases; they do nothing yet. Both need `visibility = "public"`. |
 
@@ -258,8 +258,18 @@ Two nets cannot share a name, or two names that make the same folder, such as
 
 ### `[web]`
 
-`local` and `bind` are read and checked, but nothing serves a page yet. They
-are for a later release.
+```toml
+[web]
+local = true
+bind = "127.0.0.1:8050"
+```
+
+With `local = true` the recorder also serves the [recordings
+page](#the-recordings-page) on `bind`. With `local = false`, the default, it
+serves nothing. `check` refuses a `bind` that is not a loopback address
+(`127.0.0.1` or `[::1]`), because this page has no sign-in and
+must never be reachable from another machine. If the port cannot be bound,
+the recorder logs it and keeps recording.
 
 ### Saying when
 
@@ -301,6 +311,7 @@ session, named for the local date and time the recorder joined:
   tuesday-m17-net/
     2026-11-10 1855/
       session.flac
+      peaks.json
       overs/
         001 19-00-12 N0CALL.flac
         002 19-01-40 KD0XYZ.flac
@@ -313,11 +324,12 @@ session, named for the local date and time the recorder joined:
 | File | What it holds |
 |---|---|
 | `session.flac` | The whole session, start to finish, as one mono FLAC file. It runs on the wall clock: silence stays in, so a position in the file is a time of day. |
-| `overs/NNN HH-MM-SS CALL.flac` | One file per over: its number, the local time it started, and who the network said was talking (`unknown` when it did not say). Each ends with about a second of tail so it does not stop on the last syllable. |
+| `peaks.json` | How loud each over is along its length: 48 loudness values per over, however long it ran, which the page draws as the bars of each bubble. Written when the session closes. A session without one still shows; its bars are flat. |
+| `overs/NNN HH-MM-SS CALL.flac` | One file per over: its number, the local time it started, and who the network said was talking, as the **base call** (`unknown` when it did not say). A talker the network reports as `KX0AAA E` or `KX0AAA-1` is filed as `KX0AAA`. Each ends with about a second of tail so it does not stop on the last syllable. |
 | `log.jsonl` | One JSON line for each event: `joined`, `over`, `dropped`, `rejoined`, `left`, `error`. It is written as things happen, so it survives a crash. |
 | `log.csv` | The overs as a spreadsheet: `start,end,duration_s,talker,file`. Written when the session closes, or rebuilt from `log.jsonl` after a crash. |
-| `checkins.txt` | Each callsign heard, once, in the order it first spoke. Written and rebuilt like `log.csv`. |
-| `session.json` | The session's facts: the version of this file's layout (`format`, 1 for now), net, network, target, window start and end, `visibility`, `my_side`, `sample_rate`, when it started and ended, **how** it ended (`window`, `stopped`, `crashed` or `error`), how many times it rejoined, how many frames were dropped, and how many overs there were. |
+| `checkins.txt` | Each base call heard, once, in the order it first spoke: `KX0AAA E` and `KX0AAA` are one entry. Written and rebuilt like `log.csv`. |
+| `session.json` | The session's facts: the version of this file's layout (`format`, 1 for now), net, network, target, window start and end, `visibility`, `my_side`, `my_callsigns`, `sample_rate`, when it started and ended, **how** it ended (`window`, `stopped`, `crashed` or `error`), how many times it rejoined, how many frames were dropped, and how many overs there were. |
 
 Two files live in `root` itself: `.netrec-state.json`, which `status` reads,
 and `.netrec.lock`, described [above](#one-recorder-at-a-time).
@@ -359,6 +371,101 @@ told it to.
 The recorder refuses to start a session, and stops a running one cleanly,
 with an `error` row in the log, once the volume holding `root` has less
 than 500 MB free. What was recorded is kept.
+
+## The recordings page
+
+Here is the quickest way to hear a night you recorded. Set `local = true` in
+`[web]`, restart the recorder, and open `http://127.0.0.1:8050/nets/` in a
+browser on the same machine. (On a node running `astar-server`, the server
+serves the same page too, with sign-in; see [Net recordings](server/nets.md).)
+
+There is no sign-in on this port. The page binds only to the loopback
+address, so only programs on this machine can reach it, and it treats whoever
+does as the owner: private sessions show, and anyone on the machine can delete
+a finished session. The recorder also checks the `Host` header on every
+request, and answers 421 to one that is not `127.0.0.1`, `localhost` or `[::1]`
+with the port it really bound, so a web page in your browser cannot use a
+rebinding trick to read your recordings.
+
+### The list
+
+The first page lists your nets as cards. Inside a card, each row is one night:
+the date and start time, how long the recording ran, and how many check-ins
+(different stations heard). A session that is not public shows a "Private"
+tag, and one still being recorded shows "Recording". Each row opens that
+night's page.
+
+### One session
+
+A session page is the net as a conversation. Each over is a bubble, on the left
+for other stations and on the right for you, with a row of bars showing how
+loud it was, the length, and who spoke. The callsign is the **base call** in
+normal type with any suffix (a D-Star module letter, or `-1`) small beside it, so
+`KX0AAA E` and `KX0AAA` read as the same person.
+
+One round **play button** at the top plays the whole session from the start
+and follows along: the bubble being heard lights up and the page scrolls to keep
+it in view. Click a bubble to play from that over.
+
+The audio comes from `session.flac`, the one long file, and the browser reads
+only the part it needs, so a click in the middle of a long net does not wait for
+the rest. Safari has been the awkward browser for seeking in long FLAC files,
+so if you see a pause or a jump to the wrong place there, that is worth
+reporting.
+
+| Key | What it does |
+|---|---|
+| Space | Play or pause. On a focused bubble, play from it. |
+| Left, Right arrow | Step to the previous or next over. |
+| Esc | Close the replay view. |
+
+The keys step aside when you are typing in a field, or when a button has the
+focus and wants the key itself.
+
+### Short key-ups
+
+A key-up shorter than 1.5 seconds, a station tapping the microphone to check the
+link, is not a sentence. Those show as small **chips** in the row of
+conversation instead of full bubbles. A chip plays when you click it, like a
+bubble.
+
+### My side
+
+The **My side** switch moves every station listed in `my_callsigns` to the right
+and everyone else to the left, the way a messaging app lays out a chat. With it
+off, everyone is on the left. The switch remembers your choice in the browser; the
+first time, it follows the net's `my_side` setting.
+
+The switch appears only when the session has callsigns to match: an M17 or
+D-Star session with at least one entry in its `my_callsigns` (or, on the local
+page, in the config's). Without any, there is no "my side" to show, so the
+page leaves the switch out and everyone sits on the left.
+
+The list is read from the session's own `session.json`, where the recorder wrote
+`my_callsigns` when the session began. A session recorded before that was
+written has none, and the local page then uses the `my_callsigns` in the
+current config. (`astar-server` has no copy of your config, so on the server
+an old session shows everyone on the left.)
+
+### The replay view
+
+The **Replay** button opens a full-screen view: the clock of the net, the play
+button, and the overs scrolling past with the one being heard in the middle. It
+is the view to put on a screen while the net plays back. Esc closes it.
+
+### Links to a moment
+
+Add `#t=` and a number of seconds to a session's address, as in
+`http://127.0.0.1:8050/nets/.../#t=1260`, and the page opens at that moment,
+scrolled to the over that was on the air. Add `&replay` (or use `#replay` alone)
+to open the replay view straight away.
+
+### Deleting a session
+
+An admin sees a **Delete** button on a finished session, and it asks before it
+acts. It removes the whole session folder. A session that is still recording
+cannot be deleted: the page answers that it is still open. On this local page you
+are the admin; on `astar-server` only administrators see the button.
 
 ## Retention
 
@@ -449,8 +556,5 @@ them either do nothing or are refused:
   EchoLink login. Until then they are refused as "not yet supported".
 * **Looking up a reflector by name**, so `reflector = "M17-XYZ"` replaces
   `host` and `port`.
-* **A web page** to browse sessions and play overs, with the "my side"
-  view (`[web]`, `visibility`, `my_side`, `my_callsigns`).
-* **A compressed `session.m4a` and a `peaks.json`** waveform for the page.
 * **Video**, and **YouTube**: live streaming and upload (`video`,
   `youtube_live`, `youtube_upload`).

@@ -6,7 +6,7 @@
     import AstarCore
     import SwiftUI
 
-    /// Manage named **Saved configs**: each is a one-click rig (hardware + serial +
+    /// Manage named **Audio configs**: each is a one-click rig (hardware + serial +
     /// devices + audio). Cards collapse to a radio + name; expand to edit the whole
     /// config. Editing autosaves; the radio applies; drag to reorder; ★ sets the
     /// launch default. Editing the *active* config also takes effect live.
@@ -146,11 +146,16 @@
         @EnvironmentObject private var session: CallSession
         @EnvironmentObject private var serial: SerialController
         @EnvironmentObject private var micAnalyzer: MicAnalyzerController
+        @EnvironmentObject private var bluetooth: BluetoothPTTController
+        /// Why the last "Set up the B02PTT on this Mac" click on this card
+        /// started nothing (an apply refused for a missing device), shown
+        /// under the button.
+        @State private var setUpRefusal: String?
 
         @State private var expanded = false
         @State private var inputGain = 0.90
         @State private var outputGain = 1.0
-        @State private var voxThreshold = -40.0
+        @State private var voxThreshold = Double(VoxThreshold.defaultDBFS)
         @FocusState private var nameFocused: Bool
 
         private let audioStore = UserDefaultsAudioSettingsStore()
@@ -159,8 +164,21 @@
 
         private var isActive: Bool { setup.id == setups.selectedID }
         private var isDefault: Bool { setup.id == setups.defaultID }
+        /// The Bluetooth spec wins over the stored hardware profile: a config
+        /// whose PTT device is a Bluetooth button shows no serial editor, even
+        /// if its profile says serial.
         private var usesSerial: Bool {
-            setups.registry.resolve(id: setup.hardwareProfileID).usesSerial
+            if case .serial = PTTHardwarePlan.plan(for: setup, registry: setups.registry) {
+                return true
+            }
+            return false
+        }
+
+        private var usesBluetoothPTT: Bool {
+            if case .bluetooth = PTTHardwarePlan.plan(for: setup, registry: setups.registry) {
+                return true
+            }
+            return false
         }
 
         var body: some View {
@@ -176,7 +194,7 @@
             .onAppear {
                 inputGain = Double(setup.inputGain ?? 0.90)
                 outputGain = Double(setup.outputGain ?? 1.0)
-                voxThreshold = Double(setup.voxThreshold ?? -40)
+                voxThreshold = Double(setup.voxThreshold ?? VoxThreshold.defaultDBFS)
                 if setups.focusNewID == setup.id {
                     expanded = true
                     // One hop: clearing a published flag (and moving focus) inside
@@ -306,10 +324,39 @@
 
                 Divider()
 
-                Picker("Radio hardware", selection: hardwareBinding) {
-                    Text("None / headset").tag(HardwareProfileRegistry.headsetID)
-                    Text("AllScan UCI150").tag(HardwareProfileRegistry.uci150ID)
-                    Text("Custom serial").tag(HardwareProfileRegistry.customID)
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    label(PTTHardwarePickerModel.rowLabel)
+                    VStack(alignment: .leading, spacing: 3) {
+                        PTTHardwarePicker(
+                            selection: PTTHardwarePickerModel.selection(for: setup),
+                            isEditable: PTTHardwarePickerModel.isEditable(setup)
+                        ) { choosePTTHardware($0) }
+                        .accessibilityHint(PTTHardwarePickerModel.caption(for: setup) ?? "")
+                        if let caption = PTTHardwarePickerModel.caption(for: setup) {
+                            Text(caption)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                // The picker's hint already says it to VoiceOver.
+                                .accessibilityHidden(true)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                }
+                if usesBluetoothPTT {
+                    BluetoothPTTConfigSection(
+                        setup: setup, isActive: isActive, inputs: inputs, outputs: outputs,
+                        // A refusal belongs to the click on a card that was
+                        // not active; once this config is live it is stale.
+                        setUpRefusal: isActive ? nil : setUpRefusal,
+                        onUseAudio: { input, output in
+                            edit(
+                                { s in
+                                    s.inputDevice = input
+                                    s.outputDevice = output
+                                }, live: { applyDevicesLive($0) })
+                        },
+                        onSetUp: { setUpBluetoothPTT() })
                 }
                 if usesSerial {
                     ConfigSerialEditor(spec: serialBinding)
@@ -328,7 +375,11 @@
         private var voxLevel: some View {
             HStack(spacing: 8) {
                 label("VOX dB")
-                Slider(value: $voxThreshold, in: -60...0) { editing in
+                Slider(
+                    value: $voxThreshold,
+                    in: Double(
+                        VoxThreshold.range.lowerBound)...Double(VoxThreshold.range.upperBound)
+                ) { editing in
                     if !editing { commitVoxThreshold() }
                 }
                 .tint(.orange)
@@ -490,11 +541,36 @@
                 set: { v in edit({ $0.voxEnabled = v }, live: { _ in session.setVoxEnabled(v) }) })
         }
 
-        private var hardwareBinding: Binding<String> {
-            Binding(
-                get: { setup.hardwareProfileID },
-                set: { v in edit({ $0.hardwareProfileID = v }, live: { setups.applyHardware($0) }) }
-            )
+        /// The active config goes through `setActivePTTHardware`, which saves,
+        /// applies live and starts setup for an unconfirmed B02PTT. Any other
+        /// config only stores the choice: no Bluetooth, no serial. The
+        /// decision is `PTTHardwarePickerModel.route`, tested in AstarCore;
+        /// this only acts on it.
+        private func choosePTTHardware(_ choice: PTTHardwareChoice) {
+            switch PTTHardwarePickerModel.route(choice, setup: setup, isActive: isActive) {
+            case .applyLive(let live):
+                setups.setActivePTTHardware(live)
+            case .storeOnly(let stored):
+                setups.update(stored)
+            }
+        }
+
+        /// "Set up the B02PTT on this Mac" on a config that is not active:
+        /// apply it first, so the controller is attached to this spec, then
+        /// start setup. An apply refused for a missing device (a config naming
+        /// the unit's HFP mic before it is paired) starts nothing, and its
+        /// reason shows under the button rather than only in Quick settings.
+        private func setUpBluetoothPTT() {
+            if !isActive { setups.apply(setup) }
+            guard
+                BluetoothPTTSettingsText.setUpAllowed(
+                    selectedID: setups.selectedID, setupID: setup.id)
+            else {
+                setUpRefusal = setups.lastError
+                return
+            }
+            setUpRefusal = nil
+            bluetooth.beginSetup()
         }
 
         private var serialBinding: Binding<SerialLineSpec> {

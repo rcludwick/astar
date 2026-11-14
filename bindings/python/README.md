@@ -71,7 +71,12 @@ portal_node=None, secret=None, lib=None)`
 | `connect(dest, calling, *, secret=None, name=...)` | `iax_station_connect` |
 | `connect_wt(dest_node)` | `iax_station_connect_wt` |
 | `disconnect()` | `iax_station_disconnect` |
-| `set_ptt(on)` | `iax_station_set_ptt` |
+| `set_ptt(on)` (the Legacy source, `PTT_LEGACY`: `True` presses it, `False` stops every source and re-arms Legacy; only the transmit time-out or `ptt_stop_all()` latches it) | `iax_station_set_ptt` |
+| `ptt_source(source, on)` (press or release one `PTT_*` source; release never raises) | `iax_station_ptt_source` |
+| `ptt_stop_all()` (stop every source; each one that held must release before it keys again) | `iax_station_ptt_stop_all` |
+| `ptt_lease_press(source, ttl_ms)` (`PTT_BLUETOOTH` only, `ttl_ms` 1–5000; the engine unkeys when the lease runs out) | `iax_station_ptt_lease_press` |
+| `ptt_lease_renew(source)` (extends a held lease; never presses) | `iax_station_ptt_lease_renew` |
+| `set_tx_timeout_ms(ms)` (60000–600000) | `iax_station_set_tx_timeout_ms` |
 | `set_input_gain(g)` / `set_output_gain(g)` | `iax_station_set_*_gain` |
 | `set_compression(on)` / `set_noise_reduction(on)` | `iax_station_set_compression` / `iax_station_set_noise_reduction` |
 | `set_compression_level(level)` (0.0–1.0, default 0.90) | `iax_station_set_compression_level` |
@@ -86,6 +91,32 @@ portal_node=None, secret=None, lib=None)`
 Negative C return codes raise `StationError(code, text)` where `text` comes from
 `iax_error_text` (generic, secret-free).
 
+### PTT sources and the transmit time-out
+
+The radio is on air while any PTT source holds the key and is not latched.
+The source ids are `PTT_MANUAL` (0), `PTT_VOX` (1), `PTT_SERIAL` (2),
+`PTT_BLUETOOTH` (3) and `PTT_LEGACY` (4); `set_ptt()` is `PTT_LEGACY`. A source
+whose press was refused, or that was holding when the call hung up or the
+station stopped it, is latched: its next press raises `IAX_ERR_PTT_LATCHED`
+(-27) until it releases. `PTT_LEGACY` is the exception: it latches only when
+the transmit time-out or `ptt_stop_all()` stops it while held, so only then
+does `set_ptt(True)` need a `set_ptt(False)` first. A refused `set_ptt(True)`
+latches nothing, and a hang-up releases a held Legacy key with no latch.
+`ptt_lease_renew()` on a source with no lease raises
+`IAX_ERR_NOT_LEASED` (-25). `PTT_BLUETOOTH` keys only through
+`ptt_lease_press()`: `ptt_source(PTT_BLUETOOTH, True)` raises
+`IAX_ERR_INVALID` (-26) and changes nothing, so the engine bounds every
+Bluetooth hold; its release is accepted.
+
+The transmit time-out bounds continuous on-air time across every source
+combined. It is 60000 to 600000 ms, starts at 120000, and can never be turned
+off: `0`, any other value outside that range, and any int that does not fit a
+C `uint32_t` raise `IAX_ERR_INVALID` (-26) and keep the value in force. An
+unknown source id or a lease TTL outside 1–5000 ms raises the same code.
+
+`Snapshot.ptt_forced_reason` is `PTT_FORCED_NONE` (0),
+`PTT_FORCED_LEASE_EXPIRED` (1) or `PTT_FORCED_TX_TIMEOUT` (2).
+
 ### Dataclasses
 
 ```python
@@ -98,6 +129,13 @@ class Snapshot:
     rx_db: float              # dBFS
     rtt_ms: int | None        # None when unknown (C -1)
     mode: Mode                # current operating mode (WT | NODE)
+    # ... (the remaining audio, jitter-buffer and network fields)
+    ptt_sources: int          # mask of held PTT sources, bit 1 << PTT_*
+    ptt_latched: int          # mask of sources that must release before keying
+    ptt_forced_seq: int       # sequence of the last forced stop; 0 = none yet
+    ptt_forced_sources: int   # mask of the sources that forced stop released
+    ptt_forced_reason: int    # PTT_FORCED_*
+    ptt_tx_timeout_ms: int    # transmit time-out in force (60000..600000)
 
 @dataclass(frozen=True)
 class Event:

@@ -8,5 +8,10 @@
 	     input device. -->
 	<key>com.apple.security.device.audio-input</key>
 	<true/>
+	<!-- Bluetooth needs no entitlement in this build. astar uses the hardened
+	     runtime but is not sandboxed, so the Bluetooth PTT button needs only the
+	     NSBluetoothAlwaysUsageDescription text in the generated Info.plist
+	     (project.yml). A sandboxed build would also need
+	     com.apple.security.device.bluetooth. -->
 </dict>
 </plist>

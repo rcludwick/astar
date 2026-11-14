@@ -8,6 +8,7 @@
 //! A server, not a framework: routing stays in each application.
 
 pub mod deadline;
+pub mod files;
 pub mod guards;
 pub mod limits;
 pub mod parse;

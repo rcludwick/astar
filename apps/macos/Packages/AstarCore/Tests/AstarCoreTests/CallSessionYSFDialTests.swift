@@ -188,10 +188,12 @@ final class CallSessionYSFDialTests: XCTestCase {
         try session.connect(node: "US-KCWIDE", network: .ysf)
         XCTAssertTrue(session.canTransmit, "Fusion is transceive")
 
+        XCTAssertFalse(session.transmitBlocked)
         try session.setPTT(true)
-        XCTAssertEqual(fake.pttCalls.last, true, "a key-down must reach the station")
+        XCTAssertEqual(
+            fake.keyingLog, ["pttSource(manual,true)"], "a key-down must reach the station")
         try session.setPTT(false)
-        XCTAssertEqual(fake.pttCalls.last, false)
+        XCTAssertEqual(fake.keyingLog, ["pttSource(manual,true)", "pttSource(manual,false)"])
         try session.disconnect()
     }
 
@@ -203,7 +205,7 @@ final class CallSessionYSFDialTests: XCTestCase {
         session.setTxDisabled(true)
         try session.setPTT(true)
         XCTAssertEqual(
-            fake.pttCalls.last, false,
+            fake.keyingLog, ["pttStopAll", "pttSource(manual,false)"],
             "listen-only must force unkeyed whatever the network")
         try session.disconnect()
     }

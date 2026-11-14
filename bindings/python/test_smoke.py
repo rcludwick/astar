@@ -20,10 +20,19 @@ import os
 import re
 import sys
 
+from typing import Callable
+
 from astarstation import (
+    IAX_ERR_INVALID,
     IAX_ERR_NOT_CONNECTED,
+    IAX_ERR_NOT_LEASED,
     IAX_ERR_NULL,
+    IAX_ERR_PTT_LATCHED,
     IAX_ERR_RESOLVE,
+    PTT_BLUETOOTH,
+    PTT_FORCED_NONE,
+    PTT_LEGACY,
+    PTT_MANUAL,
     AnswerPolicy,
     AuthPolicy,
     Mode,
@@ -127,6 +136,9 @@ def test_new_snapshot_idle_ptt_event_free() -> None:
         assert snap.echolink_active is False, f"got {snap.echolink_active}"
         assert snap.echolink_logged_in is False, f"got {snap.echolink_logged_in}"
         assert isinstance(snap.echolink_available, bool)
+        # Nothing has stopped on a fresh station, and the getters agree.
+        assert snap.speaker_stopped is None, f"got {snap.speaker_stopped!r}"
+        assert snap.mic_stopped is None, f"got {snap.mic_stopped!r}"
 
         # set_ptt(True) while idle -> NOT_CONNECTED.
         try:
@@ -319,6 +331,89 @@ def test_characterize_idle_is_empty() -> None:
         assert st.characterize(harmonic_comb=True, threshold_dbfs=-90.0) == ""
 
 
+def _expect_code(code: int, call: Callable[..., None], *args: object) -> None:
+    """Call ``call(*args)`` and require a StationError carrying exactly ``code``."""
+    try:
+        call(*args)
+    except StationError as e:
+        assert e.code == code, f"{call.__name__}{args}: expected {code}, got {e.code}"
+    else:
+        raise AssertionError(f"{call.__name__}{args} should raise {code}")
+
+
+def test_ptt_surface_mirrors_the_ffi_refusals() -> None:
+    """The PTT source, lease and transmit time-out calls refuse exactly what
+    the C ABI refuses, and a refusal leaves the value in force untouched.
+
+    On-air safe: the station is never connected, so every press is refused by
+    the console (NOT_CONNECTED) before anything could key.
+    """
+    with Station() as st:
+        snap = st.snapshot()
+        assert snap.ptt_sources == 0, f"got {snap.ptt_sources}"
+        assert snap.ptt_latched == 0, f"got {snap.ptt_latched}"
+        assert snap.ptt_forced_seq == 0, f"got {snap.ptt_forced_seq}"
+        assert snap.ptt_forced_sources == 0, f"got {snap.ptt_forced_sources}"
+        assert snap.ptt_forced_reason == PTT_FORCED_NONE, f"got {snap.ptt_forced_reason}"
+        assert snap.ptt_tx_timeout_ms == 120_000, f"got {snap.ptt_tx_timeout_ms}"
+        assert snap.vox_db == -60.0, f"idle VOX level must be the floor, got {snap.vox_db}"
+
+        # The time-out cannot be turned off or leave 1..10 min. Values that do
+        # not fit a u32 are refused here rather than silently wrapped (2**32 +
+        # 60_000 would otherwise arrive as an accepted 60_000).
+        for ms in (0, 1, 59_999, 600_001, 2**32 + 60_000, -1):
+            _expect_code(IAX_ERR_INVALID, st.set_tx_timeout_ms, ms)
+            got = st.snapshot().ptt_tx_timeout_ms
+            assert got == 120_000, f"refused {ms} changed the time-out to {got}"
+        st.set_tx_timeout_ms(60_000)
+        assert st.snapshot().ptt_tx_timeout_ms == 60_000
+        _expect_code(IAX_ERR_INVALID, st.set_tx_timeout_ms, 0)
+        assert st.snapshot().ptt_tx_timeout_ms == 60_000
+        st.set_tx_timeout_ms(600_000)
+        assert st.snapshot().ptt_tx_timeout_ms == 600_000
+
+        # Lease arguments: Bluetooth only, 1..=5000 ms. Refusals latch nothing.
+        _expect_code(IAX_ERR_INVALID, st.ptt_lease_press, PTT_BLUETOOTH, 0)
+        _expect_code(IAX_ERR_INVALID, st.ptt_lease_press, PTT_BLUETOOTH, 5_001)
+        _expect_code(IAX_ERR_INVALID, st.ptt_lease_press, PTT_MANUAL, 1_500)
+        assert st.snapshot().ptt_latched == 0
+
+        # Unknown source ids are refused, never mapped onto a default.
+        for src in (5, 2**32 - 1, -1):
+            _expect_code(IAX_ERR_INVALID, st.ptt_source, src, True)
+            _expect_code(IAX_ERR_INVALID, st.ptt_lease_renew, src)
+
+        _expect_code(IAX_ERR_NOT_LEASED, st.ptt_lease_renew, PTT_BLUETOOTH)
+        # Bluetooth keys only through a lease: a plain press is refused and
+        # holds or latches nothing; its release is accepted.
+        _expect_code(IAX_ERR_INVALID, st.ptt_source, PTT_BLUETOOTH, True)
+        assert st.snapshot().ptt_latched == 0
+        st.ptt_source(PTT_BLUETOOTH, False)
+        st.ptt_stop_all()  # idle: OK, must not raise
+        st.ptt_source(PTT_LEGACY, False)  # release is never refused
+
+        # A refused Legacy press latches nothing (Rob, 2026-10-09): the second
+        # attempt is the console's refusal again, never PTT_LATCHED.
+        for _ in range(2):
+            _expect_code(IAX_ERR_NOT_CONNECTED, st.set_ptt, True)
+            snap = st.snapshot()
+            assert snap.ptt_sources == 0, f"got {snap.ptt_sources}"
+            assert snap.ptt_latched == 0, f"got {snap.ptt_latched}"
+            _expect_code(IAX_ERR_NOT_CONNECTED, st.ptt_source, PTT_LEGACY, True)
+            assert st.snapshot().ptt_latched == 0
+
+        # An idle lease press is refused by the console and latches Bluetooth
+        # until it releases; renew never presses.
+        _expect_code(IAX_ERR_NOT_CONNECTED, st.ptt_lease_press, PTT_BLUETOOTH, 1_500)
+        snap = st.snapshot()
+        assert snap.ptt_sources == 0, f"got {snap.ptt_sources}"
+        assert snap.ptt_latched == 1 << PTT_BLUETOOTH, f"got {snap.ptt_latched}"
+        _expect_code(IAX_ERR_PTT_LATCHED, st.ptt_lease_press, PTT_BLUETOOTH, 1_500)
+        _expect_code(IAX_ERR_NOT_LEASED, st.ptt_lease_renew, PTT_BLUETOOTH)
+        st.ptt_source(PTT_BLUETOOTH, False)
+        assert st.snapshot().ptt_latched == 0
+
+
 def main() -> int:
     tests = [
         test_struct_layout_matches_library,
@@ -338,6 +433,7 @@ def main() -> int:
         test_deregister_idempotent,
         test_m17_snapshot_fields,
         test_characterize_idle_is_empty,
+        test_ptt_surface_mirrors_the_ffi_refusals,
     ]
     for t in tests:
         t()

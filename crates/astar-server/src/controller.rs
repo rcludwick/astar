@@ -316,6 +316,10 @@ pub struct NodeController {
     /// The node logger, once `serve` has started one (`[recording]`). No
     /// feature gate: recording needs neither `auth` nor `stream`.
     recordings: std::sync::OnceLock<Arc<crate::recording::logger::NodeLogger>>,
+    /// The net recordings pages (`[netrec]`), once `serve` has built them.
+    /// Both binds read them through [`NodeController::nets`]; they only read
+    /// the archive, except an admin's delete.
+    nets: std::sync::OnceLock<Arc<astar_netarchive::Pages>>,
     /// `[packet_log]`, when the table exists. Held across a capture change,
     /// a listing or a delete, so a listing can't interleave with a change.
     /// All of those run on per-connection threads, so the wait costs one
@@ -522,6 +526,7 @@ impl NodeController {
             #[cfg(feature = "auth")]
             auth: std::sync::OnceLock::new(),
             recordings: std::sync::OnceLock::new(),
+            nets: std::sync::OnceLock::new(),
             packet_log: Mutex::new(None),
             m17: Mutex::new(M17NodeState::default()),
             m17_op: Mutex::new(()),
@@ -633,6 +638,7 @@ impl NodeController {
             #[cfg(feature = "auth")]
             auth: std::sync::OnceLock::new(),
             recordings: std::sync::OnceLock::new(),
+            nets: std::sync::OnceLock::new(),
             packet_log: Mutex::new(None),
             m17: Mutex::new(M17NodeState::default()),
             m17_op: Mutex::new(()),
@@ -2502,6 +2508,7 @@ impl NodeController {
             m17_relay,
             echolink_enabled: echolink_cfg.is_some(),
             echolink,
+            nets: self.nets.get().is_some(),
             public: self
                 .public_status
                 .lock()
@@ -3111,6 +3118,17 @@ impl NodeController {
         self.recordings.get()
     }
 
+    /// Install the net recordings pages. Once only; a second call is ignored.
+    pub fn set_nets(&self, pages: Arc<astar_netarchive::Pages>) {
+        let _ = self.nets.set(pages);
+    }
+
+    /// The net recordings pages, when `[netrec]` is set.
+    #[must_use]
+    pub fn nets(&self) -> Option<&Arc<astar_netarchive::Pages>> {
+        self.nets.get()
+    }
+
     fn packet_log_table(&self) -> MutexGuard<'_, Option<crate::config::PacketLogCfg>> {
         self.packet_log.lock().expect("packet log table poisoned")
     }
@@ -3704,6 +3722,13 @@ fn station_event_to_node_events(
 mod tests {
     use super::*;
     use crate::command::{NodeCommand, NodeReply};
+    use astar_iax_core::Subclass;
+    use astar_iax_core::frame::{Frame, FullFrame, encode, parse_lenient};
+    use astar_iax_core::ie::Ies;
+    use astar_iax_core::subclass::{FrameType, IaxCommand, VoiceFormat};
+    use astar_station::{ForcedReason, PttSource};
+    use std::net::{SocketAddr, UdpSocket};
+    use std::time::{Duration, Instant};
 
     /// Build a test controller backed by `NullBackend` (no audio hardware).
     fn test_controller() -> NodeController {
@@ -3962,6 +3987,7 @@ mod tests {
             echolink: None,
             echolink_enabled: false,
             public: None,
+            nets: false,
         };
         let connected = link_event_to_node_events(
             astar_iax::LinkEvent::Connected {
@@ -6357,6 +6383,457 @@ mod tests {
         assert!(
             key_refusal(false, false, false, false, false).is_none(),
             "IAX2 and the console's own M17 client keying must be unaffected by the dongle-network guard; the node's M17 monitor has no transmit path"
+        );
+    }
+
+    // --- ble-ptt: `/unkey` and `/key` under the PTT arbiter and the
+    // transmit time-out. The handlers above did not change: `/key` is
+    // `Station::set_ptt(true)` (a `Legacy` press) and `/unkey` is
+    // `Station::set_ptt(false)` (stop every source, re-arm `Legacy`). These
+    // tests pin what that now means on a real answered IAX2 call between two
+    // sockets on 127.0.0.1, with a `NullBackend`: nothing reaches a radio. ---
+
+    /// The first loopback caller's call number in its hand-built `NEW`; a
+    /// second caller uses `PTT_PEER_CALL + 1`.
+    const PTT_PEER_CALL: u16 = 13885;
+
+    fn ptt_enc(frame: &Frame<'_>) -> Vec<u8> {
+        let mut b = Vec::new();
+        encode(frame, &mut b).expect("encode");
+        b
+    }
+
+    /// An unauthenticated inbound `NEW` offering G.711, the same shape
+    /// `crates/astar-station/tests/node_loopback.rs` uses.
+    fn ptt_new_datagram(source_call: u16) -> Vec<u8> {
+        let ies = Ies {
+            called_number: Some("s"),
+            calling_number: Some("1001"),
+            calling_name: Some("Rob"),
+            capability: Some(VoiceFormat::G711U.as_u32() | VoiceFormat::G711A.as_u32()),
+            format: Some(VoiceFormat::G711U.as_u32()),
+            version: Some(2),
+            calltoken: Some(b""),
+            ..Ies::empty()
+        };
+        ptt_enc(&Frame::Full(Box::new(FullFrame {
+            source_call,
+            dest_call: 0,
+            retransmission: false,
+            timestamp: 0,
+            oseqno: 0,
+            iseqno: 0,
+            frame_type: FrameType::Iax,
+            subclass: Subclass::Iax(IaxCommand::New),
+            ies,
+            payload: &[],
+        })))
+    }
+
+    /// Drain what the station sent one loopback caller and ACK every
+    /// reliable full frame, so its call reaches `Answered` and stays up.
+    fn ptt_pump_acks(sock: &UdpSocket, listener: SocketAddr, my_call: u16) {
+        let mut buf = [0u8; 4096];
+        while let Ok((n, _src)) = sock.recv_from(&mut buf) {
+            let bytes = buf[..n].to_vec();
+            let Ok(Frame::Full(f)) = parse_lenient(&bytes) else {
+                continue;
+            };
+            if !matches!(f.subclass, Subclass::Iax(IaxCommand::Ack)) {
+                let ack = ptt_enc(&Frame::Full(Box::new(FullFrame {
+                    source_call: my_call,
+                    dest_call: f.source_call,
+                    retransmission: false,
+                    timestamp: f.timestamp,
+                    oseqno: f.iseqno,
+                    iseqno: f.oseqno.wrapping_add(1),
+                    frame_type: FrameType::Iax,
+                    subclass: Subclass::Iax(IaxCommand::Ack),
+                    ies: Ies::empty(),
+                    payload: &[],
+                })));
+                let _ = sock.send_to(&ack, listener);
+            }
+        }
+    }
+
+    /// A controller over a Node-mode `NullBackend` station listening on
+    /// 127.0.0.1 with no call up yet, and the listener's address.
+    fn ptt_node_controller() -> (NodeController, SocketAddr) {
+        let cfg = astar_station::StationConfig {
+            mode: astar_station::OperatingMode::Node,
+            node: Some(astar_station::NodeConfig {
+                bind: "127.0.0.1:0".parse().unwrap(),
+                policy: astar_station::IncomingCallPolicy {
+                    auth: astar_station::IncomingAuthPolicy::Off,
+                    ..astar_station::IncomingCallPolicy::default()
+                },
+                answer: astar_station::AnswerPolicy::Auto,
+                register: None,
+                max_calls: 20,
+                allowlist: None,
+            }),
+            ..astar_station::StationConfig::default()
+        };
+        let station = Station::with_backend_factory(
+            cfg,
+            Box::new(|| Box::new(astar_audio::NullBackend::new())),
+        );
+        station
+            .set_mode(astar_station::OperatingMode::Node)
+            .expect("node mode");
+        let ctl = NodeController::new(station, SecretProvider::new());
+        let listener = ctl.station.node_bind_addr().expect("node listener bound");
+        assert!(
+            listener.ip().is_loopback(),
+            "the PTT tests must only ever listen on loopback, got {listener}"
+        );
+        (ctl, listener)
+    }
+
+    /// Place one inbound call from a fresh caller socket on 127.0.0.1 with
+    /// call number `my_call`, and wait until the station auto-answers it.
+    /// The caller socket comes back: a test that waits must keep acknowledging.
+    fn ptt_answer_call(ctl: &NodeController, listener: SocketAddr, my_call: u16) -> UdpSocket {
+        let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        peer.set_read_timeout(Some(Duration::from_millis(50)))
+            .unwrap();
+        peer.send_to(&ptt_new_datagram(my_call), listener).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline
+            && ctl.station.snapshot().status != astar_station::CallStatus::Answered
+        {
+            ptt_pump_acks(&peer, listener, my_call);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            ctl.station.snapshot().status,
+            astar_station::CallStatus::Answered,
+            "the loopback call {my_call} must be answered before the PTT checks run"
+        );
+        peer
+    }
+
+    /// [`ptt_node_controller`] with one answered call from `PTT_PEER_CALL`.
+    fn answered_node_controller() -> (NodeController, UdpSocket, SocketAddr) {
+        let (ctl, listener) = ptt_node_controller();
+        let peer = ptt_answer_call(&ctl, listener, PTT_PEER_CALL);
+        (ctl, peer, listener)
+    }
+
+    /// Drive the station (and keep acknowledging the `PTT_PEER_CALL` caller's
+    /// frames) until the console reports unkeyed; return how long after
+    /// `since` that was first seen, or `None` if it was still keyed after 3 s.
+    fn ptt_wait_unkeyed(
+        ctl: &NodeController,
+        peer: &UdpSocket,
+        listener: SocketAddr,
+        since: Instant,
+    ) -> Option<Duration> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if !ctl.station.snapshot().ptt {
+                return Some(since.elapsed());
+            }
+            ptt_pump_acks(peer, listener, PTT_PEER_CALL);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        None
+    }
+
+    /// `/unkey` is the universal stop: it clears a Bluetooth-held arbiter,
+    /// not just the `Legacy` hold a `/key` made, and leaves Bluetooth
+    /// latched so the button must be released before it keys again. The
+    /// Bluetooth latch must not block the next `/key`.
+    #[test]
+    fn unkey_clears_a_bluetooth_held_arbiter() {
+        let (ctl, _peer, _listener) = answered_node_controller();
+        ctl.station
+            .ptt_lease_press(PttSource::Bluetooth, Duration::from_millis(5000))
+            .expect("a lease press on an answered loopback call keys");
+        assert_eq!(
+            ctl.station.ptt_snapshot().sources,
+            PttSource::Bluetooth.bit(),
+            "only Bluetooth holds before the /unkey"
+        );
+        assert!(
+            ctl.station.snapshot().ptt,
+            "the lease press keyed the console"
+        );
+
+        let reply = ctl
+            .execute(NodeCommand::Unkey)
+            .expect("/unkey on an answered call");
+        assert!(matches!(reply, NodeReply::Ok), "got {reply:?}");
+
+        let ptt = ctl.station.ptt_snapshot();
+        assert_eq!(
+            ptt.forced.seq, 0,
+            "no lease-expiry forced stop happened first: /unkey did the clearing"
+        );
+        assert_eq!(
+            ptt.sources, 0,
+            "/unkey releases every source, Bluetooth too"
+        );
+        assert_eq!(
+            ptt.latched,
+            PttSource::Bluetooth.bit(),
+            "Bluetooth is latched until the button is released; Legacy is re-armed"
+        );
+        assert!(!ctl.station.snapshot().ptt, "/unkey unkeys the console");
+
+        ctl.execute(NodeCommand::Key)
+            .expect("a latched Bluetooth source never blocks /key");
+        assert_eq!(ctl.station.ptt_snapshot().sources, PttSource::Legacy.bit());
+        ctl.execute(NodeCommand::Unkey).expect("final /unkey");
+    }
+
+    /// The transmit time-out covers `/key`: a remote key left held is the
+    /// case it exists for. 1 s stands in for the 2 min default, through the
+    /// dev-only `test-hooks` setter; long enough that the keyed check right
+    /// after `/key` cannot race the watchdog on a loaded runner.
+    #[test]
+    fn key_held_past_the_transmit_time_out_unkeys() {
+        let (ctl, peer, listener) = answered_node_controller();
+        ctl.station
+            .set_tx_timeout_for_test(Duration::from_secs(1))
+            .expect("1 s is inside the test-hook range");
+
+        let started = Instant::now();
+        ctl.execute(NodeCommand::Key)
+            .expect("/key on an answered call");
+        assert!(ctl.station.snapshot().ptt, "/key keys the console");
+
+        let unkeyed_after = ptt_wait_unkeyed(&ctl, &peer, listener, started)
+            .expect("a /key held past the transmit time-out must unkey within 3 s");
+        assert!(
+            unkeyed_after >= Duration::from_secs(1),
+            "the time-out fired early, after {unkeyed_after:?}"
+        );
+
+        let ptt = ctl.station.ptt_snapshot();
+        assert_eq!(ptt.sources, 0, "the time-out stops every source");
+        assert_eq!(
+            ptt.latched,
+            PttSource::Legacy.bit(),
+            "and latches the one that held"
+        );
+        assert_eq!(ptt.forced.reason, Some(ForcedReason::TxTimeout));
+        assert_eq!(ptt.forced.sources, PttSource::Legacy.bit());
+        assert_eq!(
+            ptt.forced.seq, 1,
+            "exactly one forced stop on a fresh station"
+        );
+    }
+
+    /// After the time-out, `/key` is refused with the latch's own message
+    /// until an `/unkey` re-arms `Legacy`; then `/key` keys again.
+    #[test]
+    fn key_after_time_out_needs_unkey_first() {
+        let (ctl, peer, listener) = answered_node_controller();
+        ctl.station
+            .set_tx_timeout_for_test(Duration::from_millis(200))
+            .expect("200 ms is inside the test-hook range");
+        let started = Instant::now();
+        ctl.execute(NodeCommand::Key).expect("first /key");
+        ptt_wait_unkeyed(&ctl, &peer, listener, started)
+            .expect("the first /key times out within 3 s");
+        // Back to a long time-out, so the re-armed /key below cannot be cut
+        // off by the watchdog before its keyed check runs.
+        ctl.station
+            .set_tx_timeout_for_test(Duration::from_secs(600))
+            .expect("600 s is inside the test-hook range");
+
+        let refused = ctl
+            .execute(NodeCommand::Key)
+            .expect_err("a /key after the time-out must be refused until /unkey");
+        assert_eq!(
+            refused.message,
+            "ptt source is latched: release it before keying again"
+        );
+        assert!(!ctl.station.snapshot().ptt, "the refused /key did not key");
+
+        ctl.execute(NodeCommand::Unkey)
+            .expect("/unkey on an answered call");
+        assert_eq!(
+            ctl.station.ptt_snapshot().latched,
+            0,
+            "/unkey re-armed Legacy"
+        );
+
+        ctl.execute(NodeCommand::Key)
+            .expect("/key after /unkey keys again");
+        assert!(
+            ctl.station.snapshot().ptt,
+            "the re-armed /key keyed the console"
+        );
+        ctl.execute(NodeCommand::Unkey).expect("final /unkey");
+    }
+
+    /// A `/key` the console refuses (no call up: TUI `k` before the answer,
+    /// or `POST /key` while dialing) latches nothing: `Legacy` latches only
+    /// on the transmit time-out. Once a call answers, `/key` keys with no
+    /// `/unkey` in between.
+    #[test]
+    fn refused_key_does_not_latch_legacy() {
+        let (ctl, listener) = ptt_node_controller();
+        let first = ctl
+            .execute(NodeCommand::Key)
+            .expect_err("/key with no call is refused by the console");
+        assert_eq!(first.message, "no active call");
+        let ptt = ctl.station.ptt_snapshot();
+        assert_eq!(ptt.sources, 0, "the refused /key holds nothing");
+        assert_eq!(ptt.latched, 0, "a refused /key never latches Legacy");
+        assert_eq!(ptt.forced.seq, 0, "a refusal is not a forced stop");
+
+        let second = ctl
+            .execute(NodeCommand::Key)
+            .expect_err("still no call, so the console refuses again");
+        assert_eq!(
+            second.message, "no active call",
+            "the console's refusal, never the latch's message"
+        );
+
+        let _peer = ptt_answer_call(&ctl, listener, PTT_PEER_CALL);
+        ctl.execute(NodeCommand::Key)
+            .expect("after a call answers, /key keys with no /unkey first");
+        assert_eq!(ctl.station.ptt_snapshot().sources, PttSource::Legacy.bit());
+        assert!(ctl.station.snapshot().ptt, "the /key keyed the console");
+        ctl.execute(NodeCommand::Unkey).expect("final /unkey");
+    }
+
+    /// A `/key` still held when the call ends is released by the hang-up
+    /// with no latch, so the next call never comes up keyed and its first
+    /// `/key` keys with no `/unkey` in between.
+    #[test]
+    fn key_held_through_hangup_is_released_without_a_latch() {
+        let (ctl, _first_peer, listener) = answered_node_controller();
+        ctl.execute(NodeCommand::Key)
+            .expect("/key on an answered call");
+        assert_eq!(ctl.station.ptt_snapshot().sources, PttSource::Legacy.bit());
+        assert!(ctl.station.snapshot().ptt, "the /key keyed the console");
+
+        ctl.execute(NodeCommand::Hangup).expect("hangup");
+        let ptt = ctl.station.ptt_snapshot();
+        assert_eq!(ptt.sources, 0, "the hangup released the held /key");
+        assert_eq!(ptt.latched, 0, "and did not latch it");
+        assert_eq!(ptt.forced.seq, 0, "a hangup is not a forced stop");
+        assert!(
+            !ctl.station.snapshot().ptt,
+            "the hangup unkeyed the console"
+        );
+
+        let _second_peer = ptt_answer_call(&ctl, listener, PTT_PEER_CALL + 1);
+        assert!(
+            !ctl.station.snapshot().ptt,
+            "the next call does not come up keyed"
+        );
+        ctl.execute(NodeCommand::Key)
+            .expect("the next call's /key keys with no /unkey between");
+        assert_eq!(ctl.station.ptt_snapshot().sources, PttSource::Legacy.bit());
+        assert!(
+            ctl.station.snapshot().ptt,
+            "the next call's /key keyed the console"
+        );
+        ctl.execute(NodeCommand::Unkey).expect("final /unkey");
+    }
+
+    /// The server never sets the time-out, so every station it builds runs
+    /// on the engine's 2 min default. Spelled as a literal, not as
+    /// `DEFAULT_TX_TIMEOUT`, so a change to the default turns this red.
+    #[test]
+    fn server_station_runs_on_the_default_tx_timeout() {
+        let two_minutes = Duration::from_secs(120);
+        let idle = test_controller();
+        assert_eq!(idle.station.tx_timeout(), two_minutes);
+        assert_eq!(idle.station.ptt_snapshot().tx_timeout, two_minutes);
+
+        let configured = test_controller_with_dtmf_enabled();
+        assert_eq!(configured.station.tx_timeout(), two_minutes);
+
+        let (answered, _peer, _listener) = answered_node_controller();
+        assert_eq!(answered.station.tx_timeout(), two_minutes);
+    }
+
+    /// `NodeCommand` reaches PTT only through `set_ptt`. The lease, the
+    /// per-source calls and the time-out setter must never be reachable
+    /// from HTTP, the TUI or stdin, so no production file here names them.
+    #[test]
+    fn node_commands_never_reach_lease_source_or_timeout_calls() {
+        let controller = include_str!("controller.rs");
+        let split = controller
+            .find("\n#[cfg(test)]\nmod tests {")
+            .expect("controller.rs has a top-level test module");
+        let production = &controller[..split];
+        let files: [(&str, &str); 25] = [
+            ("controller.rs", production),
+            ("access.rs", include_str!("access.rs")),
+            ("build_info.rs", include_str!("build_info.rs")),
+            ("command.rs", include_str!("command.rs")),
+            ("conference_tap.rs", include_str!("conference_tap.rs")),
+            ("config.rs", include_str!("config.rs")),
+            ("discord_commands.rs", include_str!("discord_commands.rs")),
+            ("dtmf_commands.rs", include_str!("dtmf_commands.rs")),
+            ("echolink_node.rs", include_str!("echolink_node.rs")),
+            ("golden_tests.rs", include_str!("golden_tests.rs")),
+            ("http.rs", include_str!("http.rs")),
+            ("lib.rs", include_str!("lib.rs")),
+            ("m17_directory.rs", include_str!("m17_directory.rs")),
+            ("m17_relay.rs", include_str!("m17_relay.rs")),
+            ("main.rs", include_str!("main.rs")),
+            ("run.rs", include_str!("run.rs")),
+            ("secrets.rs", include_str!("secrets.rs")),
+            ("server.rs", include_str!("server.rs")),
+            ("settings.rs", include_str!("settings.rs")),
+            ("settings_store.rs", include_str!("settings_store.rs")),
+            ("sse.rs", include_str!("sse.rs")),
+            ("template.rs", include_str!("template.rs")),
+            ("test_support.rs", include_str!("test_support.rs")),
+            ("tui.rs", include_str!("tui.rs")),
+            ("vocoder.rs", include_str!("vocoder.rs")),
+        ];
+        for (name, text) in files {
+            for forbidden in ["ptt_lease", "ptt_source", "set_tx_timeout"] {
+                assert!(
+                    !text.contains(forbidden),
+                    "{name} names `{forbidden}`: astar-server keys only through set_ptt"
+                );
+            }
+        }
+
+        // The list above must be every source file, so a new module cannot
+        // sit outside the guard.
+        let mut on_disk: Vec<String> =
+            std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src"))
+                .expect("crates/astar-server/src is readable")
+                .map(|entry| entry.expect("readable dir entry").path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+                .map(|path| {
+                    path.file_name()
+                        .and_then(std::ffi::OsStr::to_str)
+                        .expect("UTF-8 file name")
+                        .to_owned()
+                })
+                .collect();
+        on_disk.sort();
+        let mut guarded: Vec<String> = files.iter().map(|(name, _)| (*name).to_owned()).collect();
+        guarded.sort();
+        assert_eq!(
+            guarded, on_disk,
+            "a new astar-server source file must be added to this guard"
+        );
+
+        // The forbidden-name loop runs first so that a mutation replacing a
+        // set_ptt call with ptt_source trips the guard's own assertion; a bad
+        // split still turns the test red here.
+        assert!(
+            production.contains("self.station.set_ptt(true)"),
+            "the split must leave the /key handler in the production half"
+        );
+        assert!(
+            production.contains("self.station.set_ptt(false)"),
+            "the split must leave the /unkey handler in the production half"
         );
     }
 }

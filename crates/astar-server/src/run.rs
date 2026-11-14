@@ -17,6 +17,25 @@ use std::time::Duration;
 
 use crate::{command::NodeCommand, controller::NodeController, server::ControlServer};
 
+/// The net recordings pages over `[netrec]`'s archive. `sign_in` is whether
+/// this node offers sign-in, so a signed-out reader is pointed at it; the
+/// public bind withholds the link per request when it serves no sign-in
+/// (`admin_on_public` off; see `public::http::nets_route`). The
+/// folder may be missing (the list is then empty); nothing here creates it.
+/// Deletes post to `/admin/nets/delete`, which the admin router answers
+/// behind the gate and the same-origin JSON rule on both binds.
+#[must_use]
+pub fn nets_pages(cfg: &crate::config::NetrecCfg, sign_in: bool) -> astar_netarchive::Pages {
+    astar_netarchive::Pages::new(
+        cfg.archive.clone(),
+        astar_netarchive::ViewOpts {
+            delete_url: Some("/admin/nets/delete".into()),
+            sign_in_url: sign_in.then(|| "/admin/signin?next=/nets/".into()),
+            fallback_my_calls: vec![],
+        },
+    )
+}
+
 /// Pump-tick interval for the serve loop.
 const PUMP_INTERVAL: Duration = Duration::from_millis(50);
 

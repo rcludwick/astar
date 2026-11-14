@@ -60,6 +60,17 @@ public enum ConfigTransfer {
             appVersion: appVersion)
     }
 
+    /// Whether `key` belongs to this Mac alone, so an import must never write
+    /// it. `blePTT.` keys are this Mac's confirm-press bindings for Bluetooth
+    /// PTT buttons. No export section takes them, and a crafted file could
+    /// otherwise pre-confirm someone else's button here. `ConfigMerge.summarize`
+    /// uses it too, so the import summary never counts a key nobody wrote.
+    /// Every key `ConfigArchive.isImportable` refuses (the vocoder trust list,
+    /// the packet log, folded Settings sections) is local-only as well.
+    static func isLocalOnlyKey(_ key: String) -> Bool {
+        key.hasPrefix("blePTT.") || !ConfigArchive.isImportable(key: key)
+    }
+
     // MARK: - Applying
 
     /// Merge an archive into these stores. Additive only — nothing is removed.
@@ -100,12 +111,24 @@ public enum ConfigTransfer {
             for entry in merged.merged { session.directoryUpsert(entry) }
         }
 
-        // Machine-local keys (the vocoder trust list) never come in from a
-        // file, even a hand-edited one — see `ConfigArchive.machineLocalPrefixes`.
-        for (key, value) in archive.settings ?? [:] where ConfigArchive.isImportable(key: key) {
+        // Machine-local keys (the vocoder trust list, see
+        // `ConfigArchive.machineLocalPrefixes`, and this Mac's Bluetooth PTT
+        // confirmations) never come in from a file, even a hand-edited one.
+        // An old file's peak-scale VOX threshold arrives translated, under the
+        // new key (`VoxThreshold.translatingLegacy`).
+        let settings = VoxThreshold.translatingLegacy(archive.settings ?? [:])
+        for (key, value) in settings where !isLocalOnlyKey(key) {
             defaults.set(value.defaultsValue, forKey: key)
         }
-        for (key, value) in archive.interface ?? [:] where ConfigArchive.isImportable(key: key) {
+        // The engine enforces the transmit time-out and never reads defaults,
+        // so an imported one has to reach the session (the slider) and the
+        // station now, not at the next launch. Read back through the store so
+        // it is normalised: a 0 in the file arrives as 60, never Off.
+        if archive.settings?[UserDefaultsAudioSettingsStore.txTimeoutSecondsKey] != nil {
+            session.setTxTimeoutSeconds(
+                UserDefaultsAudioSettingsStore(defaults).load().txTimeoutSeconds)
+        }
+        for (key, value) in archive.interface ?? [:] where !isLocalOnlyKey(key) {
             defaults.set(value.defaultsValue, forKey: key)
         }
         if let callsign = archive.callsign, !callsign.isEmpty {

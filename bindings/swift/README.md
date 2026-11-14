@@ -44,7 +44,8 @@ if snap.status == .idle { /* ... */ }
 try st.connect(dest: "55553", calling: "55553",    // generic IAX2 path
                secret: "allstar", name: "me")      // secret is an in-arg only
 try st.connectWT(destNode: "55553")                // AllStar WT convenience
-try st.setPTT(true)
+try st.pttSource(.manual, on: true)                // sources OR together
+try st.pttSource(.manual, on: false)               // releases only .manual
 try st.setInputGain(0.8); try st.setOutputGain(1.2)
 try st.setCompression(true); try st.setNoiseReduction(true)  // mic DSP, live
 try st.setCompressionLevel(0.9)                              // strength 0..1 (default 0.90)
@@ -54,9 +55,20 @@ try st.setDevices(input: ins.first, output: outs.first)
 try st.disconnect()
 ```
 
-PTT *source* is the app's choice — a button, a spacebar handler, a serial
-device — and it drives keying via `setPTT(_:)`. Hardware sources (e.g. the UCI150
-serial PTT) live in a separate, optional library, not in this binding.
+PTT *sources* are the app's choice — a button, a spacebar handler, VOX, a serial
+device, a Bluetooth button — and each one presses and releases only itself with
+`pttSource(_:on:)`. The engine keys while ANY source holds, so releasing one never
+cuts another off, and `pttStopAll()` is the one universal stop. A Bluetooth
+button presses with `pttLeasePress(.bluetooth, ttl:)` and renews with
+`pttLeaseRenew(.bluetooth)`: the engine enforces the lease and unkeys by itself
+when renewals stop, so a client that goes quiet ends unkeyed. One transmit
+time-out covers every source; `setTxTimeout(_:)` takes 60...600 s and refuses
+anything else, including 0, keeping the old value, because it can never be off.
+After a forced stop each holding source must be released before it re-arms.
+`BLEButtonMachine` is the engine's pure Bluetooth button machine and device
+table. `setPTT(_:)` still works: it is the legacy source, under the same
+time-out. Hardware transports (e.g. the UCI150 serial PTT, CoreBluetooth) live
+outside this binding.
 
 Every method maps a non-zero C code to a thrown `StationError(code, text)` whose
 `text` comes from `iax_error_text` (generic, secret-free).

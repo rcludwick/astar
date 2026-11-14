@@ -17,6 +17,9 @@
     final class StatusItemController: NSObject, NSMenuDelegate {
         private let session: CallSession
         private let serial: SerialController
+        /// The Bluetooth PTT button. Passed through to the window's views as an
+        /// environment object; the AppDelegate owns it.
+        private let bluetooth: BluetoothPTTController
         private let setups: SetupController
         private let micAnalyzer: MicAnalyzerController
         private let deviceMonitor: AudioDeviceMonitor
@@ -28,6 +31,8 @@
         /// the AppDelegate owns it, because the dial path subscribes to its
         /// index at launch.
         private let reflectors: ReflectorDirectory
+        /// The AllStar node directory, for the same search pane.
+        private let allstar: AllStarDirectory
         /// Settings → Vocoders' model (vocoder trust). Owned by the AppDelegate,
         /// which wires its changes into the session's station.
         private let vocoders: VocoderSettings
@@ -38,18 +43,20 @@
         private lazy var window: NSWindow = makeWindow()
 
         init(
-            session: CallSession, serial: SerialController, setups: SetupController,
-            micAnalyzer: MicAnalyzerController, deviceMonitor: AudioDeviceMonitor,
-            navigation: AppNavigation, reflectors: ReflectorDirectory,
-            vocoders: VocoderSettings
+            session: CallSession, serial: SerialController, bluetooth: BluetoothPTTController,
+            setups: SetupController, micAnalyzer: MicAnalyzerController,
+            deviceMonitor: AudioDeviceMonitor, navigation: AppNavigation,
+            reflectors: ReflectorDirectory, allstar: AllStarDirectory, vocoders: VocoderSettings
         ) {
             self.session = session
             self.serial = serial
+            self.bluetooth = bluetooth
             self.setups = setups
             self.micAnalyzer = micAnalyzer
             self.deviceMonitor = deviceMonitor
             self.navigation = navigation
             self.reflectors = reflectors
+            self.allstar = allstar
             self.vocoders = vocoders
             self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
             super.init()
@@ -122,7 +129,9 @@
                 rootView: MenuPopover()
                     .environmentObject(session)
                     .environmentObject(reflectors)
+                    .environmentObject(allstar)
                     .environmentObject(serial)
+                    .environmentObject(bluetooth)
                     .environmentObject(setups)
                     .environmentObject(micAnalyzer)
                     .environmentObject(deviceMonitor)

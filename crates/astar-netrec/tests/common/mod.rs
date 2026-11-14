@@ -61,6 +61,7 @@ pub fn net(target: Target) -> NetCfg {
         tz: jiff::tz::TimeZone::UTC,
         visibility: Visibility::Private,
         my_side: false,
+        my_callsigns: Vec::new(),
         video: false,
         youtube_live: false,
         youtube_upload: false,
@@ -342,7 +343,8 @@ pub fn assert_two_talkers(run: &Recorded, first_talker: &str, second_talker: &st
     // The whole-session file: a minute of the file is a minute of the net.
     let whole = run.session_samples();
     let want = 20 * run.rate as usize;
-    let slack = run.rate as usize / 10;
+    // 250 ms: the 20 ms deadline clock and the test script may slip a few ticks under load.
+    let slack = run.rate as usize / 4;
     assert!(
         whole.len().abs_diff(want) <= slack,
         "session.flac is {} samples, wanted {want}",

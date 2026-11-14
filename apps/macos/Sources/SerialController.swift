@@ -49,6 +49,10 @@
 
         private weak var session: CallSession?
         private var client: SerialClient?
+        /// Release-to-arm for the line after each open: a handset held (or a
+        /// line stuck keyed) when the device opens never keys until it is
+        /// released, so a re-open never keys by itself. Fresh per client.
+        private var arming = SerialPTTArming(openedAt: 0, debounceMs: 0)
         private let store: SerialSettingsStore
         private let profileStore: HardwareProfileStore
 
@@ -159,6 +163,12 @@
         /// permissions, driver missing).
         private func open() {
             guard let session else { return }
+            // Re-opening replaces the client and its tick; the new tick only
+            // reports edges, so a key the old device held would never be
+            // released. Drop it before the swap. The release also clears a
+            // forced-stop latch, so `arming` (reset below) keeps a line still
+            // held at the open from keying until it is released.
+            session.releaseSerialSource()
             do {
                 // RX keying is always level-driven now — the "RX key mode" picker was
                 // removed because the remote-PTT path doesn't fire for most AllStar
@@ -167,6 +177,8 @@
                 cfg.rxMode = .rxActivity
                 let c = try SerialClient(cfg)
                 client = c
+                arming = SerialPTTArming(
+                    openedAt: ProcessInfo.processInfo.systemUptime, debounceMs: cfg.debounceMs)
                 isActive = true
                 lastError = nil
                 // Recovered (or first open): stop any auto-retry loop.
@@ -189,7 +201,8 @@
                     do {
                         let (changed, on) = try client.pttTick(remoteKeyed: remoteKeyed, rxDb: rxDb)
                         if changed { self.keyDetected = on }  // mirror for the self-test
-                        return changed ? on : nil
+                        return self.arming.filter(
+                            edge: changed ? on : nil, now: ProcessInfo.processInfo.systemUptime)
                     } catch {
                         // Serial I/O failed (USB unplugged mid-call): tear down so a
                         // dead device can't wedge the loop, and surface it.
@@ -208,7 +221,11 @@
         }
 
         /// Drop the client + the poll hook (deinit fail-safes the radio line).
+        /// Release the serial PTT source first: once the hook is gone no tick
+        /// can forward an unkey, so a device that dies (or is disabled or
+        /// switched away) while keyed would otherwise leave the call on air.
         private func teardown() {
+            session?.releaseSerialSource()
             session?.pttSourceTick = nil
             client = nil
             isActive = false

@@ -714,6 +714,18 @@ dynamic DNS and the live audio streams have a page of their own:
 `admin_on_public`, `rp_id`, `session_idle_days`, `session_max_days`,
 `step_up_minutes`) is described in [Signing in](admin.md#settings).
 
+## `[netrec]` — the net recordings pages
+
+```toml
+[netrec]
+archive = "/var/lib/astar/netrec"    # the folder astar-netrec records into
+```
+
+With `[netrec]` present, the node serves the recordings pages at `/nets/` on
+the folder `astar-netrec` writes. Without it, `/nets/` answers 404. The key
+`archive` is the same folder as `root` in `netrec.toml`. Who sees what, and
+how deleting works, is on [Net recordings](nets.md).
+
 ## `[recording]` — recording every transmission
 
 The node can save every transmission its conference carries to a folder,

@@ -182,4 +182,165 @@ public final class AccessibilityAnnouncementPlanner {
         guard let newPhase, newPhase != .green else { return [] }
         return [Announcement(text: TalkTimer.help(for: newPhase), priority: .high)]
     }
+
+    // MARK: - Forced stops (high) and Bluetooth PTT link loss: wording
+
+    /// An engine forced stop: the transmit time-out fired, or the Bluetooth
+    /// lease expired because the app stopped renewing it. The wording is the
+    /// banner's, built by the same function
+    /// (`BluetoothPTTPresentation.forcedStopBanner`), so VoiceOver and the
+    /// orange banner can never say two different things about one stop.
+    /// `.high`: the operator was on air and now is not.
+    public func pttForcedStop(reason: StationPTTForcedReason, txTimeoutSeconds: Int)
+        -> [Announcement]
+    {
+        // Only `reason` and `txTimeoutSeconds` reach the wording; the other
+        // fields are bookkeeping the banner's 8 s window uses.
+        let stop = PTTForcedStop(
+            seq: 0, sources: [], reason: reason, txTimeoutSeconds: txTimeoutSeconds,
+            at: Date(timeIntervalSince1970: 0))
+        return [
+            Announcement(text: BluetoothPTTPresentation.forcedStopBanner(stop), priority: .high)
+        ]
+    }
+
+    /// The Bluetooth PTT button's link went down. `whileKeyed` true means it was
+    /// holding the key, so the engine unkeyed and the button must be released
+    /// before it keys again: that is the banner's text, at `.high`. False means
+    /// nothing was on air, so it is a `.medium` notice that queues behind
+    /// whatever VoiceOver is saying.
+    ///
+    /// The device name comes from the device table, not from a literal here,
+    /// so AstarCore never carries a device fact of its own. The announcer's
+    /// path goes through `bluetoothForcedReleaseChanged`, which passes the
+    /// attached device's `namePrefix` to the overload below.
+    public func blePttLinkLost(whileKeyed: Bool) -> [Announcement] {
+        blePttLinkLost(
+            whileKeyed: whileKeyed,
+            shortName: BLEButtonDevices.all.first?.namePrefix ?? "Bluetooth PTT")
+    }
+
+    /// The worker behind `blePttLinkLost(whileKeyed:)`, with the device's short
+    /// name passed in. Internal: the forced-release channel calls it with the
+    /// attached device's name, and the tests call it with a name that is not
+    /// in the table so a hard-coded name turns them red.
+    func blePttLinkLost(whileKeyed: Bool, shortName: String) -> [Announcement] {
+        guard whileKeyed else {
+            return [Announcement(text: "Bluetooth PTT button disconnected", priority: .medium)]
+        }
+        guard let text = BluetoothPTTPresentation.releaseBanner(.linkLost, shortName: shortName)
+        else { return [] }
+        return [Announcement(text: text, priority: .high)]
+    }
+
+    /// Any other forced Bluetooth release: adapter off, the Mac sleeping, or a
+    /// value the button should never send. Returns nothing for `.button` and
+    /// `.disabled` (the user let go, or switched configs: not forced) and for
+    /// `.linkLost`, which `blePttLinkLost(whileKeyed:)` reports, so one loss is
+    /// announced once.
+    public func bluetoothRelease(reason: BLEReleaseReason, shortName: String) -> [Announcement] {
+        guard reason != .linkLost,
+            let text = BluetoothPTTPresentation.releaseBanner(reason, shortName: shortName)
+        else { return [] }
+        return [Announcement(text: text, priority: .high)]
+    }
+
+    // MARK: - Forced-stop channel (high)
+
+    private var primedForcedStop = false
+    private var lastForcedStop: PTTForcedStop?
+
+    /// Feed every `CallSession.lastForcedStop` delivery. Speaks once per
+    /// forced stop: the value Combine replays on subscribe is swallowed (the
+    /// "primed" rule), a re-publish of the same stop is silent, and the value
+    /// clearing to nil says nothing. A stop is compared whole, not by seq: a
+    /// station rebuilt after a credential change counts from 1 again, and its
+    /// first stop (same seq, new `at`) is news.
+    public func forcedStopChanged(to stop: PTTForcedStop?) -> [Announcement] {
+        guard primedForcedStop else {
+            primedForcedStop = true
+            lastForcedStop = stop
+            return []
+        }
+        guard let stop, stop != lastForcedStop else { return [] }
+        lastForcedStop = stop
+        return pttForcedStop(reason: stop.reason, txTimeoutSeconds: stop.txTimeoutSeconds)
+    }
+
+    // MARK: - Bluetooth forced-release channel (high)
+
+    private var primedBluetoothRelease = false
+    private var lastBluetoothReleaseSeq: Int?
+
+    /// Feed every `BluetoothPTTController.lastForcedStop` delivery, with the
+    /// attached device's short name (nil when no Bluetooth device is attached).
+    /// Same primed and seq rules as `forcedStopChanged(to:)`. A `.linkLost`
+    /// release means the button was keyed when the link went, so it gets the
+    /// keyed link-loss text here and the status channel stays quiet for it.
+    /// With no device the release is consumed silently: after a switch to a
+    /// serial config an old release must not speak.
+    public func bluetoothForcedReleaseChanged(
+        to release: BluetoothForcedRelease?, shortName: String?
+    ) -> [Announcement] {
+        guard primedBluetoothRelease else {
+            primedBluetoothRelease = true
+            lastBluetoothReleaseSeq = release?.seq
+            return []
+        }
+        guard let release, release.seq != lastBluetoothReleaseSeq else { return [] }
+        lastBluetoothReleaseSeq = release.seq
+        guard let shortName else { return [] }
+        if release.reason == .linkLost {
+            return blePttLinkLost(whileKeyed: true, shortName: shortName)
+        }
+        return bluetoothRelease(reason: release.reason, shortName: shortName)
+    }
+
+    // MARK: - Bluetooth link-status channel (medium)
+
+    /// `.disabled` until the first delivery. The value Combine replays on
+    /// subscribe can therefore never be a drop: a drop needs a linked
+    /// previous status, and `.disabled` is not one.
+    private var lastBluetoothStatus: BLELinkStatus = .disabled
+    /// The keyed release (`.linkLost` or `.sleep`) the status channel last
+    /// attributed a drop to, so one release explains one drop and a later
+    /// drop still speaks.
+    private var forcedReleaseSeqSeenByStatus: Int?
+    /// The release reasons that mean the button was keyed when the link
+    /// went, and that the forced-release channel already announces: a lost
+    /// link, and the Mac going to sleep (sleep cancels the link too).
+    private static let keyedLossReasons: Set<BLEReleaseReason> = [.linkLost, .sleep]
+
+    /// How recent a `.linkLost` release must be to explain a drop. It bounds
+    /// the RSSI path (two missed probes, then the link is cancelled) with
+    /// room to spare, and stops a stale release from swallowing a later,
+    /// unrelated disconnect.
+    static let keyedLossWindow: TimeInterval = 10
+
+    /// Statuses in which the link is up, so a move to `.reconnecting` is a
+    /// real drop and not a failed first connect.
+    private static let linkedStatuses: Set<BLELinkStatus> = [.ready, .releaseToArm, .needsConfirm]
+
+    /// Feed every `BluetoothPTTController.status` delivery, with the
+    /// controller's current `lastForcedStop` and the time. Speaks only on a
+    /// linked → `.reconnecting` edge. If a fresh `.linkLost` or `.sleep`
+    /// release the status channel has not used yet explains the drop, the button was keyed
+    /// and the forced-release channel owns it, so this returns nothing.
+    /// Otherwise nothing was on air and it is the `.medium` notice. One loss,
+    /// one announcement, whichever channel is delivered first.
+    public func bluetoothStatusChanged(
+        to newStatus: BLELinkStatus, lastForcedStop: BluetoothForcedRelease?, now: Date
+    ) -> [Announcement] {
+        defer { lastBluetoothStatus = newStatus }
+        guard newStatus == .reconnecting, Self.linkedStatuses.contains(lastBluetoothStatus)
+        else { return [] }
+        if let stop = lastForcedStop, Self.keyedLossReasons.contains(stop.reason),
+            stop.seq != forcedReleaseSeqSeenByStatus,
+            now.timeIntervalSince(stop.at) < Self.keyedLossWindow
+        {
+            forcedReleaseSeqSeenByStatus = stop.seq
+            return []
+        }
+        return blePttLinkLost(whileKeyed: false)
+    }
 }

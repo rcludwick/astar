@@ -174,12 +174,14 @@ public enum ConfigMerge {
             summary.directoryAdded = d.added
             summary.directoryUpdated = d.updated
         }
-        // Counted as `ConfigTransfer.apply` writes them: machine-local keys a
-        // hand-edited file carries are refused, so they are not "applied".
+        // Count only what `ConfigTransfer.apply` writes: it skips this Mac's
+        // local-only keys (machine-local ones a hand-edited file carries
+        // included), so a crafted file never reads as "1 setting applied".
         summary.settingsApplied =
-            archive.settings?.keys.filter(ConfigArchive.isImportable(key:)).count ?? 0
+            archive.settings.map(VoxThreshold.translatingLegacy)?.keys
+            .filter { !ConfigTransfer.isLocalOnlyKey($0) }.count ?? 0
         summary.interfaceApplied =
-            archive.interface?.keys.filter(ConfigArchive.isImportable(key:)).count ?? 0
+            archive.interface?.keys.filter { !ConfigTransfer.isLocalOnlyKey($0) }.count ?? 0
         summary.callsignApplied = archive.callsign?.isEmpty == false
         // One line for both numbers: the summary tells the operator their
         // identity landed, not which of the two fields did.

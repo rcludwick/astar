@@ -400,6 +400,7 @@ mod tests {
             echolink: None,
             echolink_enabled: false,
             public: None,
+            nets: false,
         }
     }
 

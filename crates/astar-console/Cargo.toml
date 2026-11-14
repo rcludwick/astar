@@ -22,18 +22,18 @@ astar-ysf = { path = "../astar-ysf", optional = true }
 # 33-byte network frame and a link FSM, plus a loopback reflector to test
 # against. Pure but for that reflector; optional + gated behind the `nxdn`
 # feature (OFF by default — see below).
-astar-nxdn = { path = "../astar-nxdn", version = "0.1.20-beta", optional = true }
+astar-nxdn = { path = "../astar-nxdn", version = "0.1.21-beta", optional = true }
 # DMR protocol primitives (iax-d4f7): the homebrew/MMDVM wire, the 33-byte
 # burst, a link FSM and a loopback master to test against. Pure but for that
 # master; optional + gated behind the `dmr` feature (OFF by default — see
 # below).
-astar-dmr = { path = "../astar-dmr", version = "0.1.20-beta", optional = true }
+astar-dmr = { path = "../astar-dmr", version = "0.1.21-beta", optional = true }
 # Underlay socket for applying a deferred `WireGuard` link transport when the
 # engine is first built (iax-5bbd); config/status types come via `astar-iax`.
 astar-wireguard = { path = "../astar-wireguard" }
 # Recording taps only (`Tap`, `TapSlot`, `FrameEvent`): no writer, so no
 # FLAC/tar code is linked into the console.
-astar-record = { path = "../astar-record", version = "0.1.20-beta", default-features = false }
+astar-record = { path = "../astar-record", version = "0.1.21-beta", default-features = false }
 # StreamID generation for the M17 TX path (iax-f2b8 Task 3); optional, only
 # pulled in by the `m17` feature.
 rand = { workspace = true, optional = true }

@@ -392,7 +392,25 @@ final class CallSessionDMRDialTests: XCTestCase {
         XCTAssertFalse(session.canTransmit)
 
         try session.setPTT(true)
-        XCTAssertEqual(fake.pttCalls.last, false, "a key-down must never reach the station")
+        XCTAssertTrue(session.transmitBlocked)
+        XCTAssertEqual(
+            fake.keyingLog, ["pttSource(manual,false)"], "a key-down must never reach the station")
+    }
+
+    func testSerialTickCannotKeyOnDMR() throws {
+        // The serial handset keys without anyone touching the UI, so the
+        // receive-only refusal has to live at the choke point too: a tick that
+        // asks to key arrives at the station as a release.
+        let (session, fake) = session()
+        try session.connect(node: "freedmr-network-server-freedmr-eu/91/2", network: .dmr)
+        session.pttSourceTick = { _, _ in true }
+
+        session.poll()
+
+        XCTAssertFalse(session.canTransmit, "still on the receive-only network")
+        XCTAssertEqual(
+            fake.keyingLog, ["pttSource(serial,false)"],
+            "a serial key-down must never reach the station on DMR")
     }
 
     // MARK: - Teardown

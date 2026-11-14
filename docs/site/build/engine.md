@@ -29,8 +29,9 @@ One cargo workspace, `resolver = "2"`, everything sharing a version
 | `astar-codec` | Audio codecs and the jitter buffer. G.711 µ-law/A-law and signed-linear (8/16 kHz) on the IAX2 path; Codec 2 for M17; AMBE via the ThumbDV dongle |
 | `astar-audio` | Device enumeration, capture/playback, resampling, metering |
 | `astar-ptt` | PTT backends — raw USB, tty, CM108 HID |
+| `astar-ble-ptt` | The Bluetooth LE PTT button's device table and button state machine. Pure: no dependencies, no I/O, no clock |
 | `astar-serial-sys` | The serial C ABI |
-| `astar-station` | The multi-network station facade the clients drive |
+| `astar-station` | The multi-network station facade the clients drive, including the PTT arbiter |
 | `astar-console` | The operating runtime beneath the station |
 | `astar-sys` | The main C ABI (`astar.h`) |
 | `astar-server` | The node daemon — see [astar-server](server.md) |
@@ -128,6 +129,66 @@ suites run green on a machine with nothing plugged in. They run only when
 
     No test may reach anything outside `127.0.0.1`. The `just guards` recipe
     fails the build if any hardware or live-network opt-in is armed.
+
+## Push-to-talk in the engine
+
+Every decision about whether astar transmits is made here, not in a client.
+
+**The arbiter.** `astar-station`'s `PttArbiter` sits between every keying
+source and the console session. The sources are `Manual` (the on-screen button
+and Space), `Vox`, `Serial`, `Bluetooth`, and `Legacy` — `Station::set_ptt`,
+used by astar-server, the Python binding, the Windows/Linux client and the
+CLI's `dstar-listen`. (`astar-cli dial` and `parrot` key the IAX2 call
+manager directly and do not go through the arbiter.)
+
+* The radio is on air while any held source is not latched, and only an edge
+  of that combined state reaches the console session.
+* A press the session refuses (not connected, a receive-only network) is
+  rolled back, and the source is latched until it releases. `Legacy` is the
+  exception: a refused `set_ptt(true)` leaves nothing held or latched.
+* A release clears that source's hold and latch, and is never refused.
+* `Station::ptt_stop_all` releases every source and latches every held one.
+  `set_ptt(false)` means exactly that, and also re-arms `Legacy`.
+* A call ending latches every held source except `Legacy`, which the
+  hang-up simply releases, so astar-server's next `/key` keys on the next
+  call.
+* `Bluetooth` is leased: `ptt_lease_press` takes a time to live (1.5 s from
+  the Mac) and `ptt_lease_renew` extends it (every 250 ms). Renew never
+  presses.
+* The transmit time-out is one clock of continuous on-air time on the
+  combined state. `Station::set_tx_timeout` accepts 60–600 s and keeps the old
+  value otherwise; a new `Station` starts at 120 s. When it fires, every held
+  source is released and latched, `Legacy` included: the time-out and
+  `ptt_stop_all` are the only things that latch `Legacy`, and after it
+  `set_ptt(true)` returns `ptt source is latched: release it before keying
+  again` until `set_ptt(false)`.
+
+**The watchdog.** The thread `astar-ptt-watch` starts on the first press,
+checks the lease and the time-out every 50 ms, holds only weak references, and
+ends when the `Station` drops. Locks are always taken arbiter first, then
+session.
+
+**`astar-ble-ptt`.** The device table (one row: the Inrico B02PTT's service
+and characteristic), advertised-name matching, GATT acceptance, decoding, and
+`ButtonMachine`, a state machine the caller passes time into. It latches the
+button on a link loss only when the button was down at the loss, so an idle
+drop reconnects to ready and the next press keys. The JSON traces in
+`crates/astar-ble-ptt/scenarios/` are replayed by both the Rust and the Swift
+tests. `ci/guard-ble-ptt.sh` (part of `just guards`) keeps the crate free of
+normal dependencies and out of astar-server's dependency tree. The Bluetooth
+transport itself is the client's: on macOS, CoreBluetooth in the app.
+
+**Over the C ABI.** `iax_station_ptt_source`, `iax_station_ptt_stop_all`,
+`iax_station_ptt_lease_press`, `iax_station_ptt_lease_renew` and
+`iax_station_set_tx_timeout_ms` — which returns `IAX_ERR_INVALID` below 60 000
+ms (0 included) and above 600 000 ms, keeping the old value, so no binding can
+switch the time-out off. The snapshot's `IaxState` carries the `ptt_*` fields,
+and `iax_bleptt_*` exposes the machine and the device table. The Python binding
+has `Station.ptt_source`, `ptt_stop_all`, `ptt_lease_press`, `ptt_lease_renew`
+and `set_tx_timeout_ms`.
+
+`just mutants-ble-ptt` runs mutation testing over `astar-ble-ptt` and the
+arbiter; it expects zero survivors and is too slow for `just ci`.
 
 ## The C ABI and the bindings
 

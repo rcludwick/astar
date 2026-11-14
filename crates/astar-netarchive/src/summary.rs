@@ -11,6 +11,7 @@ use std::fmt::Write as _;
 use std::io;
 use std::path::Path;
 
+use crate::callsign::base_call;
 use crate::log::replace_file;
 use crate::model::{LogKind, LogRow};
 
@@ -87,7 +88,8 @@ fn csv_text(overs: &[OverRec]) -> String {
 }
 
 /// Whether a network names who is talking. `network` is `session.json`'s.
-fn carries_callsigns(network: &str) -> bool {
+#[must_use]
+pub fn carries_callsigns(network: &str) -> bool {
     matches!(network, "m17" | "dstar")
 }
 
@@ -96,12 +98,15 @@ fn checkins_text(overs: &[OverRec], network: &str) -> String {
     if !carries_callsigns(network) {
         text.push_str("# This network carries no callsigns.\n");
     }
-    let mut seen: Vec<&str> = Vec::new();
-    for t in overs.iter().filter_map(|o| o.talker.as_deref()) {
-        if !seen.contains(&t) {
-            seen.push(t);
-            text.extend(t.chars().map(|c| if c.is_control() { ' ' } else { c }));
+    let mut seen: Vec<String> = Vec::new();
+    for base in overs
+        .iter()
+        .filter_map(|o| o.talker.as_deref().and_then(base_call))
+    {
+        if !seen.contains(&base) {
+            text.push_str(&base);
             text.push('\n');
+            seen.push(base);
         }
     }
     text
@@ -160,10 +165,22 @@ mod tests {
     }
 
     #[test]
-    fn checkins_list_each_call_once_with_control_characters_blanked() {
+    fn checkins_list_each_call_once_with_control_characters_dropped() {
         let overs = [over(Some("A\u{1b}B")), over(None), over(Some("A\u{1b}B"))];
-        assert_eq!(checkins_text(&overs, "m17"), "A B\n");
-        assert_eq!(checkins_text(&overs, "dstar"), "A B\n");
+        assert_eq!(checkins_text(&overs, "m17"), "AB\n");
+        assert_eq!(checkins_text(&overs, "dstar"), "AB\n");
+    }
+
+    #[test]
+    fn checkins_list_each_base_call_once() {
+        let overs = [
+            over(Some("KX0AAA  D")),
+            over(Some("KX0AAA E")),
+            over(Some("N0CALL-1")),
+            over(None),
+            over(Some("KX0AAA  D")),
+        ];
+        assert_eq!(checkins_text(&overs, "m17"), "KX0AAA\nN0CALL\n");
     }
 
     #[test]

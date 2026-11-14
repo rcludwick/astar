@@ -228,7 +228,7 @@ The count under the list reads like *4 favorites, 3 online*.
 Favorites are saved on this Mac and survive a restart. They are listed, with
 an *ECHO* tag, in **Settings → Favorites**, where you can rename them. Exporting
 your configuration (Settings → **Backup** → **Export…**, see
-[Saved configs](configs.md#export)) carries them with the **Node directory**
+[Audio configs](configs.md#export)) carries them with the **Node directory**
 section, and importing that file adds them to the favorites already on the
 other Mac. It never removes any.
 

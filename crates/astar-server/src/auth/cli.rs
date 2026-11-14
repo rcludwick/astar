@@ -184,7 +184,6 @@ pub fn node(config: &Path) -> Result<Node, String> {
 }
 
 /// Run an `admin` command and say what happened.
-#[must_use]
 pub fn run(args: &[String]) -> ExitCode {
     let (cmd, config) = match parse(args) {
         Ok(p) => p,

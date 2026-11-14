@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Recording — astar</title>
+<link rel="stylesheet" href="/nets/nets.css">
+</head>
+<body>
+<svg class="defs" aria-hidden="true" focusable="false">
+  <defs>
+    <linearGradient id="vg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" class="g-a"/><stop offset=".5" class="g-b"/><stop offset="1" class="g-c"/>
+    </linearGradient>
+    <symbol id="i-play" viewBox="0 0 20 20"><path d="M5.5 3.6v12.8a1.1 1.1 0 0 0 1.66.95l10.4-6.4a1.1 1.1 0 0 0 0-1.9L7.16 2.65A1.1 1.1 0 0 0 5.5 3.6z"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 20 20"><rect x="4" y="3" width="4" height="14" rx="1.5"/><rect x="12" y="3" width="4" height="14" rx="1.5"/></symbol>
+    <symbol id="i-expand" viewBox="0 0 16 16"><path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5 9 7M2.5 13.5 7 9"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 16 16"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4"/></symbol>
+    <symbol id="i-close" viewBox="0 0 14 14"><path d="M2 2l10 10M12 2 2 12"/></symbol>
+  </defs>
+</svg>
+<div class="ambient ambient-a" aria-hidden="true"></div>
+<div class="ambient ambient-b" aria-hidden="true"></div>
+<div class="ambient ambient-c" aria-hidden="true"></div>
+
+<main class="wrap" id="page" aria-busy="true">
+  <p class="banner" id="audio-error" role="alert" hidden>This browser can't play the recording. <a id="download" download>Download session.flac</a></p>
+  <p class="banner" id="err" role="alert" hidden></p>
+
+  <section class="missing" id="missing" hidden>
+    <h1>No such recording</h1>
+    <p>This session isn't here, or it's private.</p>
+    <p><a href="/nets/">All recordings</a></p>
+  </section>
+
+  <section class="card head" id="head" aria-label="Player" hidden>
+    <button class="orb" id="orb" type="button" aria-label="Play">
+      <span class="halo" aria-hidden="true"></span>
+      <svg class="ring" viewBox="0 0 84 84" aria-hidden="true"><circle class="track" cx="42" cy="42" r="40"/><circle class="prog" id="ring" cx="42" cy="42" r="40"/></svg>
+      <span class="core" aria-hidden="true"></span>
+      <svg class="icon i-play" aria-hidden="true"><use href="#i-play"/></svg>
+      <svg class="icon i-pause" aria-hidden="true"><use href="#i-pause"/></svg>
+    </button>
+    <div class="head-text">
+      <div class="elapsed"><span id="elapsed">0:00</span><small>of <span id="total">0:00</span></small></div>
+      <h1><bdi id="net"></bdi></h1>
+      <div class="sub" id="sub"></div>
+    </div>
+    <div class="side">
+      <div class="toggle" id="myside-box" hidden>
+        <span id="myside-label">My side</span>
+        <button class="sw" id="myside" type="button" role="switch" aria-checked="false" aria-labelledby="myside-label"></button>
+      </div>
+      <div class="acts">
+        <button class="act" id="replay-btn" type="button"><svg aria-hidden="true"><use href="#i-expand"/></svg>Replay</button>
+        <button class="act danger" id="delete-btn" type="button" hidden><svg aria-hidden="true"><use href="#i-trash"/></svg>Delete</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card convo" id="convo" aria-label="Overs" hidden></section>
+  <p class="note" id="still" hidden>Still recording — reload for more.</p>
+  <p class="back"><a href="/nets/">All recordings</a></p>
+</main>
+
+<div class="replay" id="replay" role="dialog" aria-modal="true" aria-labelledby="r-title" hidden>
+  <div class="ambient ambient-a" aria-hidden="true"></div>
+  <div class="ambient ambient-b" aria-hidden="true"></div>
+  <div class="ambient ambient-c" aria-hidden="true"></div>
+  <div class="r-in">
+    <div class="r-top">
+      <span class="brand" aria-hidden="true">ASTAR</span>
+      <span class="chip" id="r-chip"></span>
+      <span class="r-sub" id="r-sub"></span>
+      <span class="r-clock" id="r-clock" aria-label="Time on the air"></span>
+      <button class="r-close" id="r-close" type="button" aria-label="Close replay"><svg viewBox="0 0 14 14" aria-hidden="true"><use href="#i-close"/></svg></button>
+    </div>
+    <h2 class="r-title"><bdi id="r-title"></bdi></h2>
+    <div class="r-bar">
+      <button class="orb" id="r-orb" type="button" aria-label="Play">
+        <span class="halo" aria-hidden="true"></span>
+        <svg class="ring" viewBox="0 0 64 64" aria-hidden="true"><circle class="track" cx="32" cy="32" r="30"/><circle class="prog" id="r-ring" cx="32" cy="32" r="30"/></svg>
+        <span class="core" aria-hidden="true"></span>
+        <svg class="icon i-play" aria-hidden="true"><use href="#i-play"/></svg>
+        <svg class="icon i-pause" aria-hidden="true"><use href="#i-pause"/></svg>
+      </button>
+      <div class="tl" id="r-tl" aria-hidden="true"><i id="r-fill"></i></div>
+      <span id="r-total"></span>
+    </div>
+    <div class="card r-col" id="r-col" aria-label="Overs"></div>
+  </div>
+</div>
+
+<audio id="audio" preload="metadata"></audio>
+<script src="/nets/session.js"></script>
+</body>
+</html>

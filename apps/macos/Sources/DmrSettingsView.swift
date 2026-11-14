@@ -287,6 +287,13 @@
         .environmentObject(CallSession(station: NullStation()))
         .environmentObject(SettingsDisclosure())
         .environmentObject(ReflectorDirectory(storage: FileReflectorDirectoryStorage()))
+        .environmentObject(
+            AllStarDirectory(
+                storage: FileReflectorDirectoryStorage(
+                    feedFileName: "allstar.json", metadataFileName: "allstar-sync.json"
+                )
+            )
+        )
         .frame(width: 340)
         .padding()
     }

@@ -14,7 +14,7 @@
     /// A `Section` with a custom header rather than `Section(isExpanded:)`,
     /// because that initialiser is macOS 14+ and astar still runs on 13 — and
     /// one header on every OS means one look to keep right. Staying a real
-    /// `Section` matters: Saved configs' `.onMove` drag-to-reorder and the
+    /// `Section` matters: Audio configs' `.onMove` drag-to-reorder and the
     /// anchors' `ScrollViewProxy.scrollTo` both need the rows to be rows of
     /// the one `List`, which a `DisclosureGroup` wrapping them would not give.
     ///
@@ -24,7 +24,7 @@
         let id: SettingsSectionID
         @ViewBuilder let content: () -> Content
         /// Header controls that must stay reachable while the section is
-        /// folded — the "+" on Vocoders, Saved configs and Mic Profiles.
+        /// folded — the "+" on Vocoders, Audio configs and Mic Profiles.
         @ViewBuilder let accessory: () -> Accessory
 
         @EnvironmentObject private var disclosure: SettingsDisclosure

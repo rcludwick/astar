@@ -15,6 +15,11 @@
 //! Order of checks, for every request: parse → missing `Host` (400, answered
 //! by astar-http before routing) → `Host` allowlist (421) → path (404) →
 //! method (405) → route.
+//!
+//! The one exception to the closed list is `/nets/`, the net recordings,
+//! present only with `[netrec]`: answered right after the `Host` check by
+//! `astar_netarchive::Pages` (GET and HEAD only, its own policy), which
+//! shows a signed-out reader the public sessions alone (`nets_route`).
 
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -244,6 +249,9 @@ pub enum Route {
     /// A recording or the recordings tar, for a signed-in admin, with the
     /// request's `Range` header.
     Download(crate::recording::http::Download, Option<String>),
+    /// A `/nets/` answer (`[netrec]`), with the request's `Range` header.
+    /// It carries its own policy (`astar_netarchive::NETS_CSP`).
+    Nets(astar_netarchive::NetsReply, Option<String>),
 }
 
 /// `Host` as compared, and the allow-list check: astar-http's.
@@ -520,6 +528,7 @@ fn reply(decision: Route, recheck: Recheck, upgrade: Option<String>) -> Reply {
         Route::Download(d, range) => {
             crate::recording::http::stream_reply(&recheck.ctx.ctrl, d, range.as_deref())
         }
+        Route::Nets(r, range) => r.into_reply(range),
         Route::Mp3 => Reply::Stream {
             class: StreamClass::PerClientOnly,
             run: Box::new(move |conn| {
@@ -688,6 +697,9 @@ pub fn route_request(ctx: &PublicCtx, inc: &Incoming<'_>) -> Route {
         return misdirected();
     }
     let path = head.target.split('?').next().unwrap_or(&head.target);
+    if let Some(r) = nets_route(ctx, inc, path) {
+        return r;
+    }
     #[cfg(feature = "auth")]
     let signin = ctx
         .ctrl
@@ -720,6 +732,44 @@ pub fn route_request(ctx: &PublicCtx, inc: &Incoming<'_>) -> Route {
         };
     }
     route(ctx, &head.method, &head.target, host)
+}
+
+/// The net recordings (`[netrec]`), when `path` is one of theirs and the
+/// node has them: `None` otherwise, so without the table `/nets/` is the
+/// router's 404. Who is asking is the session's principal when sign-in is on
+/// here (`admin_on_public`), else anonymous, and only then do the pages
+/// offer a sign-in link. `anonymous_status` is about the
+/// listener page and is not consulted: what a signed-out reader may see of
+/// the recordings is each session's own `visibility`. The delete is not
+/// here; it is `/admin/nets/delete`, behind the gate.
+fn nets_route(ctx: &PublicCtx, inc: &Incoming<'_>, path: &str) -> Option<Route> {
+    if !astar_netarchive::Pages::is_nets_path(path) {
+        return None;
+    }
+    let pages = ctx.ctrl.nets()?;
+    // Sign-in counts here, and its `/admin/signin` exists here, only with
+    // `admin_on_public`; otherwise everyone is anonymous and the pages offer
+    // no sign-in link (it would 404 on this bind).
+    #[cfg(feature = "auth")]
+    let signin = ctx.ctrl.auth().filter(|svc| svc.settings.admin_on_public);
+    #[cfg(feature = "auth")]
+    let access = signin.map_or(astar_netarchive::Access::Anonymous, |svc| {
+        crate::access::nets_access(svc.principal(&auth_req(inc, path)).as_ref())
+    });
+    #[cfg(feature = "auth")]
+    let offer_sign_in = signin.is_some();
+    #[cfg(not(feature = "auth"))]
+    let (access, offer_sign_in) = (astar_netarchive::Access::Anonymous, false);
+    let req = astar_netarchive::NetsRequest {
+        method: &inc.head.method,
+        path,
+        access,
+        offer_sign_in,
+    };
+    Some(Route::Nets(
+        pages.handle(&req),
+        inc.head.header("Range").map(str::to_owned),
+    ))
 }
 
 /// The request as the sign-in code reads it.
@@ -1731,6 +1781,244 @@ mod tests {
                 })
                 .unwrap();
         }));
+    }
+
+    // ---- /nets/ on the public bind ------------------------------------------
+
+    use crate::test_support::{NETS_PRIVATE_NET, mount_nets_fixture};
+
+    /// A GET on the public bind, with an optional cookie.
+    fn nets_get(w: &Wire, path: &str, cookie: Option<&str>, tls: bool) -> String {
+        let cookie = cookie.map_or(String::new(), |c| format!("Cookie: {c}\r\n"));
+        serve_raw(
+            w,
+            &format!("GET {path} HTTP/1.1\r\nHost: node.example.test\r\n{cookie}\r\n"),
+            tls,
+        )
+    }
+
+    fn head_values(r: &str, name: &str) -> Vec<String> {
+        let head = r.split("\r\n\r\n").next().unwrap_or_default();
+        head.lines()
+            .filter_map(|l| l.split_once(':'))
+            .filter(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.trim().to_string())
+            .collect()
+    }
+
+    fn body_of(r: &str) -> &str {
+        r.split_once("\r\n\r\n").map_or("", |(_, b)| b)
+    }
+
+    #[test]
+    fn nets_are_off_without_a_netrec_table() {
+        let ctx = Arc::new(test_ctx(&["node.example.test"]));
+        let w = wire(&ctx);
+        for path in ["/nets/", "/nets", "/nets/index.json"] {
+            let r = nets_get(&w, path, None, false);
+            assert!(r.starts_with("HTTP/1.1 404"), "{path}: {r}");
+        }
+        // And on the control port of the same node.
+        let control = crate::server::bind_control(&ctx.ctrl, "127.0.0.1:0").unwrap();
+        let mut s = std::net::TcpStream::connect(control.local_addr()).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        s.write_all(b"GET /nets/ HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let mut out = String::new();
+        let _ = std::io::Read::read_to_string(&mut s, &mut out);
+        assert!(out.starts_with("HTTP/1.1 404"), "{out}");
+        control.stop();
+    }
+
+    #[test]
+    fn a_public_bind_without_sign_in_shows_public_sessions_only() {
+        let ctx = Arc::new(test_ctx(&["node.example.test"]));
+        let (_dir, f) = mount_nets_fixture(&ctx.ctrl, false);
+        let w = wire(&ctx);
+        let private = format!("/nets/{NETS_PRIVATE_NET}/{}/data.json", f.private_session);
+        let r = nets_get(&w, &private, None, false);
+        assert!(r.starts_with("HTTP/1.1 404"), "{r}");
+        let public = format!("/nets/{}/{}/data.json", f.public_net, f.public_session);
+        let r = nets_get(&w, &public, None, false);
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        assert!(
+            !body_of(&r).contains("/admin/nets/delete"),
+            "no delete for anonymous: {r}"
+        );
+        let r = nets_get(&w, "/nets/index.json", None, false);
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        assert!(!r.contains(&f.private_session), "{r}");
+        // anonymous_status = false is about the listener page, not /nets/.
+        let mut closed = test_ctx(&["node.example.test"]);
+        closed.anonymous_status = false;
+        let closed = Arc::new(closed);
+        let (_dir2, _f2) = mount_nets_fixture(&closed.ctrl, false);
+        let w = wire(&closed);
+        let r = nets_get(&w, &public, None, false);
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        let r = nets_get(&w, &private, None, false);
+        assert!(r.starts_with("HTTP/1.1 404"), "{r}");
+    }
+
+    #[test]
+    fn nets_carry_their_policy_and_the_listener_keeps_its_own() {
+        let ctx = Arc::new(test_ctx(&["node.example.test"]));
+        let (_dir, _f) = mount_nets_fixture(&ctx.ctrl, false);
+        let w = wire(&ctx);
+        for path in ["/nets/", "/nets/index.json", "/nets/list.js"] {
+            let r = nets_get(&w, path, None, true);
+            assert!(r.starts_with("HTTP/1.1 200"), "{path}: {r}");
+            assert_eq!(
+                head_values(&r, "Content-Security-Policy"),
+                vec![astar_netarchive::NETS_CSP.to_string()],
+                "{path}"
+            );
+            assert_eq!(head_values(&r, "X-Content-Type-Options"), vec!["nosniff"]);
+        }
+        for path in ["/", "/listener.js", "/public/status", "/style.css"] {
+            let r = nets_get(&w, path, None, true);
+            assert!(r.starts_with("HTTP/1.1 200"), "{path}: {r}");
+            assert_eq!(
+                head_values(&r, "Content-Security-Policy"),
+                vec![PUBLIC_CSP.to_string()],
+                "{path}"
+            );
+            assert_eq!(
+                head_values(&r, "Strict-Transport-Security"),
+                vec!["max-age=31536000"],
+                "{path}"
+            );
+        }
+    }
+
+    #[cfg(feature = "auth")]
+    #[test]
+    fn public_bind_hides_private_sessions() {
+        let rig = sign_in_rig(|_, _| {});
+        let (_dir, f) = mount_nets_fixture(&rig.ctx.ctrl, true);
+        let private = format!("/nets/{NETS_PRIVATE_NET}/{}", f.private_session);
+        let missing = format!("/nets/{NETS_PRIVATE_NET}/2001-01-01-0000");
+        for suffix in ["/data.json", "/session.flac", "/", ""] {
+            let hidden = nets_get(&rig.wire, &format!("{private}{suffix}"), None, true);
+            let absent = nets_get(&rig.wire, &format!("{missing}{suffix}"), None, true);
+            assert!(hidden.starts_with("HTTP/1.1 404"), "{suffix}: {hidden}");
+            assert_eq!(body_of(&hidden), body_of(&absent), "{suffix}");
+        }
+        let public = format!("/nets/{}/{}/data.json", f.public_net, f.public_session);
+        let r = nets_get(&rig.wire, &public, None, true);
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        let r = nets_get(&rig.wire, "/nets/index.json", None, true);
+        assert!(!r.contains(&f.private_session), "{r}");
+        assert!(r.contains("/admin/signin?next=/nets/"), "{r}");
+
+        let viewer = session(&rig.svc, "V1EW", crate::auth::store::Role::Viewer);
+        let r = nets_get(
+            &rig.wire,
+            &format!("{private}/data.json"),
+            Some(&viewer),
+            true,
+        );
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        assert!(
+            !body_of(&r).contains("/admin/nets/delete"),
+            "a viewer may not delete: {r}"
+        );
+        let admin = session(&rig.svc, "A1DM", crate::auth::store::Role::Admin);
+        let r = nets_get(
+            &rig.wire,
+            &format!("{private}/data.json"),
+            Some(&admin),
+            true,
+        );
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        assert!(body_of(&r).contains("/admin/nets/delete"), "{r}");
+        // A plain-HTTP request carrying the TLS cookie is not signed in.
+        let r = nets_get(
+            &rig.wire,
+            &format!("{private}/data.json"),
+            Some(&viewer),
+            false,
+        );
+        assert!(r.starts_with("HTTP/1.1 404"), "{r}");
+    }
+
+    /// With sign-in kept off the public bind (`admin_on_public = false`)
+    /// there is no `/admin/signin` here, so the pages must not point at one.
+    #[cfg(feature = "auth")]
+    #[test]
+    fn nets_offer_sign_in_only_where_the_bind_serves_it() {
+        let off = sign_in_rig(|s, _| s.admin_on_public = false);
+        let (_dir, f) = mount_nets_fixture(&off.ctx.ctrl, true);
+        let public = format!("/nets/{}/{}/data.json", f.public_net, f.public_session);
+        for path in ["/nets/index.json", public.as_str()] {
+            let r = nets_get(&off.wire, path, None, true);
+            assert!(r.starts_with("HTTP/1.1 200"), "{path}: {r}");
+            assert!(!r.contains("/admin/signin"), "{path}: {r}");
+        }
+        let r = nets_get(&off.wire, "/admin/signin", None, true);
+        assert!(!r.starts_with("HTTP/1.1 200"), "no sign-in here: {r}");
+
+        let on = sign_in_rig(|_, _| {});
+        let (_dir2, _f2) = mount_nets_fixture(&on.ctx.ctrl, true);
+        let r = nets_get(&on.wire, "/nets/index.json", None, true);
+        assert!(r.contains("/admin/signin?next=/nets/"), "{r}");
+        let r = nets_get(&on.wire, "/admin/signin?next=/nets/", None, true);
+        assert!(r.starts_with("HTTP/1.1 200"), "the link resolves: {r}");
+    }
+
+    #[cfg(feature = "auth")]
+    #[test]
+    fn nets_delete_is_admin_only_and_refuses_open_sessions() {
+        let rig = sign_in_rig(|_, _| {});
+        let (dir, f) = mount_nets_fixture(&rig.ctx.ctrl, true);
+        let body = serde_json::json!({ "net": NETS_PRIVATE_NET, "session": f.private_session })
+            .to_string();
+        let exists = || {
+            crate::test_support::nets_session_exists(
+                dir.path(),
+                NETS_PRIVATE_NET,
+                &f.private_session,
+            )
+        };
+        let viewer = session(&rig.svc, "V1EW", crate::auth::store::Role::Viewer);
+        let admin = session(&rig.svc, "A1DM", crate::auth::store::Role::Admin);
+
+        let r = post(&rig.wire, "/admin/nets/delete", None, &body);
+        assert!(r.starts_with("HTTP/1.1 401"), "anonymous: {r}");
+        let r = post(&rig.wire, "/admin/nets/delete", Some(&viewer), &body);
+        assert!(r.starts_with("HTTP/1.1 403"), "viewer: {r}");
+        let r = serve_raw(
+            &rig.wire,
+            &format!(
+                "POST /admin/nets/delete HTTP/1.1\r\nHost: node.example.test\r\nOrigin: https://evil.example\r\n\
+                 Content-Type: application/json\r\nCookie: {admin}\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+            true,
+        );
+        assert!(r.starts_with("HTTP/1.1 403"), "cross-origin: {r}");
+        let r = serve_raw(
+            &rig.wire,
+            &format!(
+                "POST /admin/nets/delete HTTP/1.1\r\nHost: node.example.test\r\nOrigin: https://node.example.test\r\n\
+                 Content-Type: text/plain\r\nCookie: {admin}\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+            true,
+        );
+        assert!(r.starts_with("HTTP/1.1 415"), "not JSON: {r}");
+        // Unprefixed, it is a page route, which takes no POST.
+        let r = post(&rig.wire, "/nets/delete", Some(&admin), &body);
+        assert!(r.starts_with("HTTP/1.1 405"), "{r}");
+        assert!(exists(), "nothing deleted yet");
+
+        let open =
+            serde_json::json!({ "net": NETS_PRIVATE_NET, "session": f.open_session }).to_string();
+        let r = post(&rig.wire, "/admin/nets/delete", Some(&admin), &open);
+        assert!(r.starts_with("HTTP/1.1 409"), "open: {r}");
+        let r = post(&rig.wire, "/admin/nets/delete", Some(&admin), &body);
+        assert!(r.starts_with("HTTP/1.1 200"), "{r}");
+        assert!(!exists(), "deleted");
     }
 
     #[cfg(feature = "auth")]

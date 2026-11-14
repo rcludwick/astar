@@ -21,6 +21,11 @@ include = [
     "IaxAuthPolicy",
     "IaxNodeConfig",
     "IaxCredentialResolver",
+    "IaxBleMachine",
+    "IaxBleEvent",
+    "IaxBleOutput",
+    "IaxBleConfig",
+    "IaxBleDevice",
     "IaxVocoderEnrol",
 ]
 

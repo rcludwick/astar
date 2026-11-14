@@ -41,6 +41,13 @@
 
         private weak var session: CallSession?
         private weak var serial: SerialController?
+        /// The Bluetooth PTT button. The AppDelegate owns it; a config whose PTT
+        /// hardware is the button attaches it, any other config detaches it.
+        private weak var bluetooth: BluetoothPTTController?
+        /// What is live on the PTT hardware, as a plan. Nil until `applyHardware`
+        /// first runs. `reconcilePTTHardware` compares against it, so a config
+        /// change behind `apply` touches live hardware only on a real change.
+        private var appliedPlan: PTTHardwarePlan?
         private let store: SetupStore
         private let audioStore: AudioSettingsStore = UserDefaultsAudioSettingsStore()
 
@@ -67,13 +74,32 @@
         /// serial profile. Now a fresh install lands on System Default, and an
         /// existing user who never set a ★ is left alone (see
         /// `SystemDefaultSetup.launchApplyID` for why that `nil` matters).
-        func attach(session: CallSession, serial: SerialController) {
+        ///
+        /// The Bluetooth controller is wired before the launch config applies,
+        /// so a launch onto a Bluetooth config attaches it. That creates a
+        /// Bluetooth central only if a unit is confirmed on this Mac.
+        func attach(
+            session: CallSession, serial: SerialController, bluetooth: BluetoothPTTController
+        ) {
             self.session = session
             self.serial = serial
+            self.bluetooth = bluetooth
             guard
                 let applyID = SystemDefaultSetup.launchApplyID(
                     storedDefault: defaultID, savedConfigIDs: store.all().map(\.id))
-            else { return }
+            else {
+                // No ★: the selection is left alone and SerialController
+                // reopens serial from its own saved flag. The button has no
+                // such path, so a selected config that names it attaches it
+                // here (`launchActions` only ever closes serial).
+                let selected = selectedSetup.map {
+                    PTTHardwarePlan.plan(for: $0, registry: registry)
+                }
+                let actions = PTTHardwareTransition.launchActions(selected: selected)
+                if !actions.isEmpty { appliedPlan = selected }
+                for action in actions { perform(action) }
+                return
+            }
             // A fresh install has no ★ yet — record where the launch config came
             // from so the star shows against System Default rather than nothing.
             if defaultID == nil { setDefault(applyID) }
@@ -132,16 +158,38 @@
             store.saveSelectedID(setup.id)
         }
 
-        /// Drive the live serial device from a config's hardware. A config with a
-        /// serial radio applies its own `serial` spec (falling back to the preset);
-        /// a non-serial config (headset / None) disables serial. Also called live
-        /// when the active config's hardware/serial is edited in its card.
+        /// Drive the live PTT hardware from a config. Each config has one PTT
+        /// device: the USB radio interface (serial), the Bluetooth PTT button,
+        /// or neither, never both. `PTTHardwarePlan.plan(for:)` decides, and it
+        /// looks at the Bluetooth spec first, so a config that names the button
+        /// never opens serial even if its stored profile is a serial one.
+        ///
+        /// `PTTHardwareTransition.actions(for:)` gives the order, which is
+        /// unit-tested: the device being switched away from shuts before the
+        /// other opens, so there is no instant with both live. Detaching the
+        /// button feeds Disable, which releases it if it was keyed. This is
+        /// also called live when the active config's hardware or serial line
+        /// is edited in its card.
         func applyHardware(_ setup: Setup) {
-            let profile = registry.resolve(id: setup.hardwareProfileID)
-            if profile.usesSerial {
-                serial?.applySerial(setup.serial ?? profile.serial ?? .uci150, enabled: true)
-            } else {
+            let plan = PTTHardwarePlan.plan(for: setup, registry: registry)
+            appliedPlan = plan
+            for action in PTTHardwareTransition.actions(for: plan) { perform(action) }
+        }
+
+        /// Run one step of a PTT hardware switch on the live controllers. The
+        /// order of the steps is `PTTHardwareTransition`'s; this only maps each
+        /// step onto the controller it names.
+        private func perform(_ action: PTTHardwareAction) {
+            switch action {
+            case .closeSerial:
                 serial?.applySerial(nil, enabled: false)
+            case .openSerial(let spec):
+                serial?.applySerial(spec, enabled: true)
+            case .attachBluetooth(let spec):
+                guard let session else { return }
+                bluetooth?.attach(session: session, spec: spec)
+            case .detachBluetooth:
+                bluetooth?.detach()
             }
         }
 
@@ -189,6 +237,9 @@
             if selectedID == id {
                 selectedID = nil
                 store.saveSelectedID(nil)
+                // Nothing is selected now. A button attached for this config
+                // must not stay attached; serial is left as it was.
+                reconcilePTTHardware(cause: .selectedConfigDeleted)
             }
             if defaultID == id { setDefault(nil) }
             refresh()
@@ -233,6 +284,50 @@
             refresh()
         }
 
+        /// The Quick settings PTT row. Saves the choice into the active config
+        /// at once, like a device change. It does not wait for "Save changes",
+        /// which is for the tuning controls. Then it applies the choice live.
+        ///
+        /// Choosing the Bluetooth button on a Mac where no unit is confirmed
+        /// yet starts its setup. That user action is what first lets astar
+        /// create a Bluetooth central, and so ask macOS for permission. This is
+        /// a no-op for System Default, which has no editable PTT hardware.
+        func setActivePTTHardware(_ choice: PTTHardwareChoice) {
+            guard
+                let saved = PTTHardwareEditor.setActive(
+                    choice, selectedID: selectedID, store: store)
+            else { return }
+            refresh()
+            applyHardware(saved)
+            if case .bluetooth = choice, bluetooth?.needsSetup == true {
+                bluetooth?.beginSetup()
+            }
+        }
+
+        /// Bring the live PTT hardware back in line after the configs changed
+        /// without going through `apply`: a rigs import (`reloadFromStore`), or
+        /// deleting the selected config, which leaves nothing selected.
+        ///
+        /// It only moves toward quiet. It detaches the button or shuts serial
+        /// when the selected config no longer names that device, and it may
+        /// attach a button the config names (the controller connects only to
+        /// a unit confirmed on this Mac, and never keys on connect). It NEVER
+        /// opens serial: opening a USB radio interface's tty asserts RTS, the
+        /// key line, so serial opens only on an explicit `apply` or
+        /// `setActivePTTHardware`. Deleting the selected config leaves serial
+        /// as it was, as before. `PTTHardwareTransition.reconcile` holds all of
+        /// this and is unit-tested; it also does nothing before the first
+        /// apply, or when the plan is unchanged.
+        private func reconcilePTTHardware(cause: PTTHardwareReconcileCause) {
+            guard session != nil else { return }
+            let target = PTTHardwarePlan.plan(
+                for: selectedSetup ?? SystemDefaultSetup.setup, registry: registry)
+            let step = PTTHardwareTransition.reconcile(
+                applied: appliedPlan, target: target, cause: cause)
+            appliedPlan = step.live
+            for action in step.actions { perform(action) }
+        }
+
         /// Reorder (drag in the Audio tab list).
         func move(from: Int, to: Int) {
             store.move(from: from, to: to)
@@ -271,6 +366,9 @@
             setups = [SystemDefaultSetup.setup] + store.all()
             selectedID = store.loadSelectedID()
             defaultID = store.loadDefaultID()
+            // An import can change which config is selected, or the selected
+            // config's PTT hardware, behind `apply`'s back.
+            reconcilePTTHardware(cause: .configsImported)
         }
     }
 #endif

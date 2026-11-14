@@ -1061,6 +1061,17 @@ pub struct RecordingCfg {
     pub frames: bool,
 }
 
+/// `[netrec]` — the net recordings pages under `/nets/`, read from the
+/// archive astar-netrec writes. Absent ⇒ off, and `/nets/` is a 404. The
+/// server only reads the archive, and deletes a session when an admin asks;
+/// it never creates the folder, so a missing one is an empty list.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetrecCfg {
+    /// The archive folder (astar-netrec's `archive`).
+    pub archive: PathBuf,
+}
+
 impl Default for RecordingCfg {
     fn default() -> Self {
         Self {
@@ -1600,6 +1611,8 @@ pub struct NodeFileConfig {
     /// `[packet_log]` — the received-packet debug log. Absent ⇒ no capture
     /// button and no logs to reach.
     pub packet_log: Option<PacketLogCfg>,
+    /// `[netrec]` — the net recordings pages. Absent ⇒ no `/nets/`.
+    pub netrec: Option<NetrecCfg>,
     /// Raw top-level `codec_policy` string (iax-31f7); absent ⇒ `None` ⇒
     /// `PreferSlin16`. Parsed eagerly into [`Self::codec_policy`] by
     /// [`NodeFileConfig::from_toml_str`]; see [`parse_codec_policy`].
@@ -1641,6 +1654,7 @@ impl std::fmt::Debug for NodeFileConfig {
             .field("stream", &self.stream)
             .field("recording", &self.recording)
             .field("packet_log", &self.packet_log)
+            .field("netrec", &self.netrec)
             .finish()
     }
 }
@@ -4411,6 +4425,21 @@ peer_connected = { enabled = true, destination = "to_air" }
         assert_eq!(r.max_age_days, 30);
         assert!(r.frames);
         assert!(parse_ok("").recording.is_none(), "absent stays absent");
+    }
+
+    // ---- [netrec] -------------------------------------------------------------
+
+    #[test]
+    fn netrec_table_parses_and_refuses_unknown_keys() {
+        let n = parse_ok("[netrec]\narchive = \"/srv/nets\"\n")
+            .netrec
+            .expect("[netrec] is present");
+        assert_eq!(n.archive, std::path::PathBuf::from("/srv/nets"));
+        assert!(parse_ok("").netrec.is_none(), "absent stays absent");
+        let e = parse_err("[netrec]\narchive = \"/srv/nets\"\nffmpeg = true\n");
+        assert!(e.contains("ffmpeg"), "{e}");
+        let e = parse_err("[netrec]\n");
+        assert!(e.contains("archive"), "{e}");
     }
 
     // ---- [packet_log] ---------------------------------------------------------

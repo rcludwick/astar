@@ -70,15 +70,19 @@ pub fn admit(svc: &AuthService, req: &Req<'_>, admin_path: &str, original: &str)
     }
     // Every key from the web carries a name in the audit, and so does
     // starting or stopping a packet capture, which records other people's
-    // voices. The console is curl and the CLI on the node itself, and is not
+    // voices, and deleting a net recording, which cannot be undone. The console is curl and the CLI on the node itself, and is not
     // a web key.
     if let Principal::User(u) = &p
         && req.method == "POST"
-        && matches!(admin_path, "/key" | "/unkey" | "/packet-logs/capture")
+        && matches!(
+            admin_path,
+            "/key" | "/unkey" | "/packet-logs/capture" | "/nets/delete"
+        )
     {
         let event = match admin_path {
             "/key" => "web_key",
             "/unkey" => "web_unkey",
+            "/nets/delete" => "web_nets_delete",
             _ => "web_packet_capture",
         };
         svc.audit(event, Some(&u.name), "", &req.ip());
@@ -127,11 +131,12 @@ pub fn encode_next(path: &str) -> String {
 }
 
 /// Whether `next` is a path the sign-in page may send a browser to: this
-/// origin's `/`, or a path under `/admin/`. Nothing with a scheme, a host,
-/// a backslash or a `//`.
+/// origin's `/`, or a path under `/admin/` or `/nets/`. Nothing with a
+/// scheme, a host, a backslash or a `//`. `assets/signin.js` applies the
+/// same rule.
 #[must_use]
 pub fn safe_next(next: &str) -> bool {
-    (next == "/" || next.starts_with("/admin/"))
+    (next == "/" || next.starts_with("/admin/") || next.starts_with("/nets/"))
         && !next.contains("//")
         && !next.contains('\\')
         && !next.contains("/../")
@@ -342,6 +347,49 @@ mod tests {
             status(&admit(&f.svc, &r, "/status", "/status")),
             200,
             "console"
+        );
+    }
+
+    #[test]
+    fn safe_next_accepts_nets_paths() {
+        for ok in ["/nets/", "/nets/a/b/"] {
+            assert!(safe_next(ok), "{ok}");
+        }
+        for bad in [
+            "/nets//evil.example",
+            "/nets/../admin/",
+            "/nets/\\x",
+            "/nets",
+            "/netsx/",
+            "/nets/ x",
+        ] {
+            assert!(!safe_next(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_web_nets_delete_names_the_admin_in_the_audit() {
+        let f = Fixture::new();
+        let admin = format!(
+            "{}={}",
+            session::SESSION_COOKIE_TLS,
+            f.svc.test_sign_in("A1DM", Role::Admin)
+        );
+        let mut r = req(Surface::Public, Some(&admin));
+        r.method = "POST";
+        assert_eq!(
+            status(&admit(&f.svc, &r, "/nets/delete", "/admin/nets/delete")),
+            200
+        );
+        let audit = f.svc.read(|d| {
+            d.audit
+                .iter()
+                .map(|e| (e.event.clone(), e.user.clone()))
+                .collect::<Vec<_>>()
+        });
+        assert!(
+            audit.contains(&("web_nets_delete".to_string(), Some("A1DM".to_string()))),
+            "{audit:?}"
         );
     }
 

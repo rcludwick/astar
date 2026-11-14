@@ -159,6 +159,7 @@ mod tests {
             dropped_frames: 0,
             overs,
             astar_version: "0.1.19-beta".to_owned(),
+            my_callsigns: Vec::new(),
         }
     }
 

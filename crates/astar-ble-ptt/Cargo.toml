@@ -1,0 +1,21 @@
+[package]
+name = "astar-ble-ptt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Pure Bluetooth LE push-to-talk button logic: the device table, decode, and the ButtonMachine that decides when a button may key"
+
+# Deliberately empty, and ci/guard-ble-ptt.sh fails the build if anything
+# appears here. This crate is the safety core of a wireless keying source; a
+# dependency would be code inside that argument which these tests do not cover.
+[dependencies]
+
+[dev-dependencies]
+proptest = "1"
+serde_json.workspace = true
+
+[lints]
+workspace = true

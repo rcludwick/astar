@@ -427,6 +427,11 @@ pub struct NodeSnapshot {
     /// An `[echolink]` section is present. `EchoLink` is dormant without
     /// one, so this is what tells "off" from "not logged in".
     pub echolink_enabled: bool,
+    /// `[netrec]` is set, so `/nets/` answers: the status page shows its
+    /// "Nets" link. Left out of the JSON when off, so a node without the
+    /// table sends exactly what it always did.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub nets: bool,
     /// The public listener (`[web]`): hostnames, certificate expiry and the
     /// last ACME or DNS error. `None` without a public page. Admin-only:
     /// the public status is a separate projection that never includes it.
@@ -632,6 +637,7 @@ mod tests {
             echolink: None,
             echolink_enabled: false,
             public: None,
+            nets: false,
         };
         assert_eq!(
             serde_json::to_string(&snap).unwrap(),
@@ -709,6 +715,7 @@ mod tests {
             echolink: None,
             echolink_enabled: false,
             public: None,
+            nets: false,
         };
         let j = serde_json::to_string(&snap).unwrap();
         assert!(j.contains("\"links\":[]"), "links field present: {j}");
@@ -835,6 +842,7 @@ mod tests {
             echolink: None,
             echolink_enabled: false,
             public: None,
+            nets: false,
         };
         let j = serde_json::to_string(&snap).unwrap();
         assert!(j.contains("\"listening\":true"));

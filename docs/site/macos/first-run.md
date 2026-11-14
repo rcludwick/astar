@@ -170,25 +170,107 @@ you — back off and let them finish.
 
 ## 4. Choose how you key up
 
-astar gives you four ways to transmit. Any of them can be your main one.
+astar gives you five ways to transmit. Any of them can be your main one, and
+they combine: astar stays on air while any of them holds, so letting go of one
+never cuts off another.
 
 * **The TX button** in the popover — press and hold.
 * **The Spacebar** — hold to talk. The astar window has to have keyboard focus;
   astar deliberately does not grab the Spacebar system-wide. If you are typing
   in a text field, Space types a space and does not key.
 * **VOX** — voice-activated. Turn on *VOX* in Quick settings. Two knobs:
-  **VOX** threshold (default −40 dB; drag toward −60 for more sensitivity) and
+  **VOX** threshold (default −50 dB; drag left, down to −58, for more
+  sensitivity) and
   **Hang Timeout** (default 500 ms — how long transmit stays up through the
-  natural gaps between words). Use **Test** to sample your room's noise floor
-  while you stay quiet; astar will tell you if your threshold sits too close to
-  it and suggest a safer one. A threshold below the noise floor means the room
-  keys your transmitter.
+  natural gaps between words). Press **Test** and the **Audio Level** bar
+  shows the same loudness VOX compares with the threshold: it turns green
+  when it reaches the orange mark, which is exactly when VOX would key. Stay
+  quiet for a moment first and set the threshold well above where the bar
+  sits; a threshold at your room's noise floor means the room keys your
+  transmitter. [How VOX hears you](#how-vox-hears-you) explains what the
+  number measures.
 * **A hardware PTT switch** on a USB radio interface — see
   [Hardware](hardware.md).
+* **A Bluetooth PTT button** — the button on an Inrico B02PTT speaker-mic.
+  Pick it in Quick settings → Station → **PTT**, then press it once to confirm
+  it is yours. See [Bluetooth PTT button](bluetooth-ptt.md).
+
+A config has one PTT device: a USB radio interface or the Bluetooth button,
+never both. The TX button, the Spacebar and VOX work with either.
+
+**The TX button and the Spacebar are also the stop.** Press either while
+something else holds the key — the Bluetooth button, the radio's PTT switch,
+VOX — and astar stops transmitting. Whatever was holding has to be released
+before it can key again. With VOX on, the TX button is replaced by the VOX indicator,
+which is not a button: press Space (with the astar window in front) or turn on
+**TX disabled — listening only** instead.
+
+### How VOX hears you
+
+VOX has to tell your voice from everything else the mic picks up: the fan, a
+keyboard click, a pop from a Bluetooth headset's radio link. It does that with
+two rules.
+
+**It listens to loudness, not to the loudest instant.** Every 10 ms or so the
+Mac hands astar a small batch of mic samples. The loudest single sample in a
+batch is its *peak*. A click lasts a few milliseconds but its peak can be as
+high as a spoken word's, so a VOX that went by peaks would key on a click.
+astar's VOX instead takes the average power of the last 50 ms of sound (its
+*RMS* loudness, in dB below full scale). A 5 ms click lands in that window as
+a tenth of its energy, about 10 dB quieter than its peak, and 50 ms later it is
+out of the window entirely. Your voice keeps the window full for as long as you
+talk.
+
+**The sound has to last.** The loudness has to stay at or above the threshold
+for 120 ms before VOX keys, and if it dips below in that time the count starts
+again. Together with the 50 ms window, that means any sound shorter than about
+70 ms can never key the radio, however loud it is, while even a short "yes"
+easily lasts long enough.
+
+Waiting 120 ms would normally cost you the start of your first word. It
+doesn't, because while VOX is on astar keeps the last quarter of a second of
+mic audio in a *pre-roll* buffer, and when VOX keys it sends that buffer first.
+The far end hears you from the beginning of the word; your transmission just
+starts a fraction of a second later than you began talking. The buffer belongs
+to the microphone, not to VOX, so while VOX is on every key-up sends it: press
+Space, the TX button, a radio's PTT switch or the Bluetooth button, and the
+quarter second before the press goes out first too. Turn VOX off and keying
+goes back to sending only what comes after the press.
+
+The bottom of the threshold slider is −58, not −60. astar's meters read −60
+for silence and anything quieter, so a threshold of −60 would be met by a
+silent room and VOX would key and never let go. A reading of −60 never counts
+as loud, whatever the threshold.
+
+**If you set a VOX threshold in astar 0.1.20-beta or earlier.** Those versions compared
+the threshold with the peak, and the same sound reads about 10 dB lower as RMS
+loudness (speech, and room noise, both peak about 10 dB above their average).
+So the first time a newer astar starts, it moves your saved threshold down by
+10 dB, once: −40 becomes −50, and anything that would land below −58 lands on
+−58. Thresholds inside saved configs and in imported
+`.astarconfig` files from older versions are converted the same way. If VOX
+now feels a little more or less eager than before, nudge the slider and press
+**Test** to check.
+
+**Transmit time-out.** However you key, astar stops transmitting after a set
+time on air: 2 minutes unless you change it. It is one clock for the whole
+over, so handing over from Space to the Bluetooth button does not restart it.
+Set it in Settings → **Transmit**, from 1 to 10 minutes; it cannot be turned
+off. It is one value for every config, and it travels in config exports. It is
+not the VOX **Hang Timeout** above: Hang Timeout is how long VOX waits after
+you stop talking, and the transmit time-out is how long you may stay on air.
+The setting's caption puts it in the app's words:
+
+> Stops transmitting after this long on air, whatever is keying: on-screen button, Space, serial, Bluetooth or VOX. Release, or stop talking, to transmit again.
+
+See [How keying is limited](../about/safety.md#how-keying-is-limited) for the
+whole set of rules.
 
 And one way to *not* transmit: **TX disabled — listening only** hard-mutes
-transmit no matter what else is set. It is the right setting for monitoring a
-net, and it pairs well with VOX while you are still tuning the threshold.
+transmit no matter what else is set, the Bluetooth button included. Turning it
+on mid-over stops every source at once, and turning it off again keys nothing
+until you press again. It is the right setting for monitoring a net, and it
+pairs well with VOX while you are still tuning the threshold.
 
 ## 5. Make a contact
 
@@ -208,13 +290,13 @@ Listen first, then key up and identify.
 ## Things worth knowing early
 
 **Where your settings live.** Preferences — devices, gains, VOX, favorites,
-saved configs — are in `~/Library/Preferences/com.aj7hr.astar.plist`. Your
+audio configs — are in `~/Library/Preferences/com.aj7hr.astar.plist`. Your
 portal password is not in there; it is in the login Keychain under
 `com.astar.app`, which is what you want.
 
 Settings can be exported to a file and imported back, in whole or in part, so
 a second Mac does not mean re-entering everything — see
-[Saved configs, backup and transfer](configs.md). Your portal password is never
+[Audio configs, backup and transfer](configs.md). Your portal password is never
 in an export; it stays in the Keychain, so the account is the one thing you
 enter again. There is still no "put my config on a network drive and sync it"
 option.
@@ -249,6 +331,11 @@ VOX give yourself a longer **Hang Timeout** than you would on USB.
 
 AirPods stem presses are not available to astar as a PTT button — macOS does not
 hand third-party apps those events. On AirPods, use **VOX**.
+
+A Bluetooth speaker-mic with its own PTT button is different: astar supports
+the **Inrico B02PTT**, whose button reaches astar over Bluetooth LE while its
+mic and speaker pair like any Bluetooth headset. See
+[Bluetooth PTT button](bluetooth-ptt.md).
 
 **Getting help.** Bugs and feature requests are welcome at
 [github.com/rcludwick/astar/issues](https://github.com/rcludwick/astar/issues).

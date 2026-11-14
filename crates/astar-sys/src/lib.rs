@@ -6,9 +6,11 @@
 //!
 //! # Contract
 //!
-//! - **Opaque handle.** A station is an `IaxStation*` (a `Box<Station>` behind a
-//!   raw pointer). The only cross-boundary heap object. Create with
-//!   [`iax_station_new`], free with [`iax_station_free`]. Using a handle after
+//! - **Opaque handles.** A station is an `IaxStation*` (a `Box<Station>` behind
+//!   a raw pointer). Create with [`iax_station_new`], free with
+//!   [`iax_station_free`]. The Bluetooth PTT button's state machine is the
+//!   only other cross-boundary heap object, an `IaxBleMachine*` from
+//!   [`iax_bleptt_new`], freed with [`iax_bleptt_free`]. Using a handle after
 //!   free, or freeing twice, is undefined behaviour (the same rule as C).
 //!
 //! - **Poll + snapshot, no callbacks.** The ABI never calls back into the
@@ -19,7 +21,7 @@
 //!
 //! - **Caller-allocated out-structs.** Every "get" fills a caller-provided
 //!   `#[repr(C)]` struct or buffer; the library allocates nothing the caller
-//!   must free except the opaque handle itself. Strings are written into
+//!   must free except the opaque handles themselves. Strings are written into
 //!   caller buffers (truncate-safe, NUL-terminated) or are `'static` and never
 //!   freed by C (see [`iax_error_text`]).
 //!
@@ -45,6 +47,8 @@
 //!   the one `AllStar` Web-Transceiver convenience. No `AllStar` policy is baked
 //!   into the ABI surface.
 
+mod ble_ptt;
 mod ffi;
 
+pub use ble_ptt::*;
 pub use ffi::*;

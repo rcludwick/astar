@@ -2313,6 +2313,7 @@ impl ConsoleSession {
             self.state.tx_level_db = -60.0;
             self.state.rx_level_db = -60.0;
             self.state.input_level_db = -60.0;
+            self.state.vox_level_db = -60.0;
             return Ok(());
         }
         #[cfg(feature = "echolink")]
@@ -2339,6 +2340,7 @@ impl ConsoleSession {
             self.state.tx_level_db = -60.0;
             self.state.rx_level_db = -60.0;
             self.state.input_level_db = -60.0;
+            self.state.vox_level_db = -60.0;
             return Ok(());
         }
         #[cfg(feature = "nxdn")]
@@ -2356,6 +2358,7 @@ impl ConsoleSession {
             self.state.tx_level_db = -60.0;
             self.state.rx_level_db = -60.0;
             self.state.input_level_db = -60.0;
+            self.state.vox_level_db = -60.0;
             return Ok(());
         }
         #[cfg(feature = "dmr")]
@@ -2373,6 +2376,7 @@ impl ConsoleSession {
             self.state.tx_level_db = -60.0;
             self.state.rx_level_db = -60.0;
             self.state.input_level_db = -60.0;
+            self.state.vox_level_db = -60.0;
             return Ok(());
         }
         #[cfg(feature = "dstar")]
@@ -2390,6 +2394,7 @@ impl ConsoleSession {
             self.state.tx_level_db = -60.0;
             self.state.rx_level_db = -60.0;
             self.state.input_level_db = -60.0;
+            self.state.vox_level_db = -60.0;
             return Ok(());
         }
         if let Some(id) = self.active.take() {
@@ -2496,6 +2501,7 @@ impl ConsoleSession {
             self.state.tx_level_db = -60.0;
             self.state.rx_level_db = -60.0;
             self.state.input_level_db = -60.0;
+            self.state.vox_level_db = -60.0;
         }
     }
 
@@ -2684,6 +2690,7 @@ impl ConsoleSession {
             self.state.tx_level_db = -60.0;
             self.state.rx_level_db = -60.0;
             self.state.input_level_db = -60.0;
+            self.state.vox_level_db = -60.0;
         }
     }
 
@@ -3299,6 +3306,7 @@ impl ConsoleSession {
             self.state.tx_level_db = -60.0;
             self.state.rx_level_db = -60.0;
             self.state.input_level_db = -60.0;
+            self.state.vox_level_db = -60.0;
         }
     }
 
@@ -3337,6 +3345,7 @@ impl ConsoleSession {
         st.tx_dbfs = self.state.tx_level_db;
         st.rx_dbfs = self.state.rx_level_db;
         st.input_dbfs = self.state.input_level_db;
+        st.vox_dbfs = self.state.vox_level_db;
         Some(st)
     }
 
@@ -3475,6 +3484,7 @@ impl ConsoleSession {
             self.state.rx_level_db = -60.0;
             self.state.tx_level_db = -60.0;
             self.state.input_level_db = -60.0;
+            self.state.vox_level_db = -60.0;
         }
     }
 
@@ -3639,6 +3649,7 @@ impl ConsoleSession {
             self.state.rx_level_db = -60.0;
             self.state.tx_level_db = -60.0;
             self.state.input_level_db = -60.0;
+            self.state.vox_level_db = -60.0;
         }
     }
 
@@ -3811,6 +3822,7 @@ impl ConsoleSession {
             self.state.rx_level_db = -60.0;
             self.state.tx_level_db = -60.0;
             self.state.input_level_db = -60.0;
+            self.state.vox_level_db = -60.0;
         }
     }
 
@@ -4606,6 +4618,10 @@ impl ConsoleSession {
                 .as_ref()
                 .and_then(|m| r.mic_input_dbfs(m))
                 .unwrap_or(-60.0);
+            self.state.vox_level_db = mic
+                .as_ref()
+                .and_then(|m| r.mic_vox_dbfs(m))
+                .unwrap_or(-60.0);
             self.state.rx_level_db = r.output_rx_dbfs(bus).unwrap_or(-60.0);
             // Which noise-reduction chain the metered mic is actually running.
             self.state.denoise_status = mic
@@ -4615,6 +4631,7 @@ impl ConsoleSession {
         } else {
             self.state.tx_level_db = -60.0;
             self.state.input_level_db = -60.0;
+            self.state.vox_level_db = -60.0;
             self.state.rx_level_db = -60.0;
             self.state.denoise_status = astar_audio::DenoiseStatus::default();
         }
@@ -4664,6 +4681,17 @@ impl ConsoleSession {
         self.state.rx_jb_enabled = jb.enabled;
         self.state.rx_jb_min_ms = jb.min_ms;
         self.state.rx_jb_max_ms = jb.max_ms;
+        // A speaker or mic whose stream stopped for good (the engine has
+        // already tried rebuilding it). Read off the one station router, so
+        // it covers IAX2 and the digital-voice routes alike.
+        let (speaker_stopped, mic_stopped) = self.manager.as_ref().map_or((None, None), |m| {
+            (
+                m.router().stopped_output().map(|d| d.name),
+                m.router().stopped_mic().map(|d| d.name),
+            )
+        });
+        self.state.speaker_stopped = speaker_stopped;
+        self.state.mic_stopped = mic_stopped;
         // Mirror the active call's negotiated codec into the flat field
         // (iax-3e53), like the levels/rtt above: `None` when idle or while
         // negotiation is still in flight.
@@ -5374,6 +5402,107 @@ mod tests {
         ) -> Result<Box<dyn astar_audio::StreamHandle>, AudioError> {
             unreachable!("not opened in this test")
         }
+    }
+
+    /// A stream handle whose "stopped for good" the test sets.
+    struct StoppableHandle(std::sync::Arc<std::sync::Mutex<Option<String>>>);
+    impl astar_audio::StreamHandle for StoppableHandle {
+        fn stop(self: Box<Self>) {}
+        fn pause(&self) -> Result<(), AudioError> {
+            Ok(())
+        }
+        fn resume(&self) -> Result<(), AudioError> {
+            Ok(())
+        }
+        fn failure(&self) -> Option<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    /// A headset's mic and speaker whose streams the test can stop: the
+    /// failure cells are handed out in open order.
+    struct StoppableBackend(std::sync::Arc<std::sync::Mutex<Vec<StoppableCell>>>);
+    type StoppableCell = std::sync::Arc<std::sync::Mutex<Option<String>>>;
+    impl StoppableBackend {
+        fn handle(&self) -> Box<dyn astar_audio::StreamHandle> {
+            let cell = StoppableCell::default();
+            self.0.lock().unwrap().push(std::sync::Arc::clone(&cell));
+            Box::new(StoppableHandle(cell))
+        }
+        fn headset(direction: Direction, id: &str) -> DeviceInfo {
+            DeviceInfo {
+                id: DeviceId::new(id.to_string()),
+                name: "B02PTT-6522".to_string(),
+                direction,
+                channels: 1,
+                native_sample_rates: vec![16_000],
+            }
+        }
+    }
+    impl AudioBackend for StoppableBackend {
+        fn devices(&self) -> Result<Vec<DeviceInfo>, AudioError> {
+            Ok(vec![
+                Self::headset(Direction::Input, "in:B02PTT-6522"),
+                Self::headset(Direction::Output, "out:B02PTT-6522"),
+            ])
+        }
+        fn default_input(&self) -> Option<DeviceInfo> {
+            None
+        }
+        fn default_output(&self) -> Option<DeviceInfo> {
+            None
+        }
+        fn open_input(
+            &self,
+            _d: &DeviceInfo,
+            _c: astar_audio::StreamConfig,
+            _s: Box<dyn astar_audio::InputSink>,
+            _overruns: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        ) -> Result<Box<dyn astar_audio::StreamHandle>, AudioError> {
+            Ok(self.handle())
+        }
+        fn open_output(
+            &self,
+            _d: &DeviceInfo,
+            _c: astar_audio::StreamConfig,
+            _s: Box<dyn astar_audio::OutputSource>,
+        ) -> Result<Box<dyn astar_audio::StreamHandle>, AudioError> {
+            Ok(self.handle())
+        }
+    }
+
+    #[test]
+    fn a_speaker_or_mic_that_stopped_for_good_is_named_in_the_snapshot() {
+        let cells = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let backend_cells = std::sync::Arc::clone(&cells);
+        let mut s = ConsoleSession::new();
+        let router = s
+            .ensure_engine(move || Box::new(StoppableBackend(backend_cells)))
+            .router_mut();
+        let (audio, tx, _mix) = router
+            .open_monitor_call(&OutputId::new("out:B02PTT-6522"), StreamConfig::default())
+            .expect("speaker opens");
+        router
+            .open_mic_lane(
+                &MicId::new("in:B02PTT-6522"),
+                tx,
+                std::sync::Arc::clone(&audio.preroll_lead),
+                StreamConfig::default(),
+            )
+            .expect("mic opens");
+
+        let snap = s.snapshot();
+        assert_eq!(snap.speaker_stopped, None);
+        assert_eq!(snap.mic_stopped, None);
+
+        // Speaker opened first, mic second.
+        *cells.lock().unwrap()[0].lock().unwrap() = Some("stream build failed: gone".into());
+        let snap = s.snapshot();
+        assert_eq!(snap.speaker_stopped, Some("B02PTT-6522".to_string()));
+        assert_eq!(snap.mic_stopped, None);
+
+        *cells.lock().unwrap()[1].lock().unwrap() = Some("stream build failed: gone".into());
+        assert_eq!(s.snapshot().mic_stopped, Some("B02PTT-6522".to_string()));
     }
 
     #[test]
@@ -6235,7 +6364,8 @@ mod tests {
         assert!(
             (st.rx_dbfs - snap.rx_level_db).abs() < 1e-6
                 && (st.tx_dbfs - snap.tx_level_db).abs() < 1e-6
-                && (st.input_dbfs - snap.input_level_db).abs() < 1e-6,
+                && (st.input_dbfs - snap.input_level_db).abs() < 1e-6
+                && (st.vox_dbfs - snap.vox_level_db).abs() < 1e-6,
             "dstar_state must report the SAME numbers the snapshot does, got {st:?}"
         );
         assert!(

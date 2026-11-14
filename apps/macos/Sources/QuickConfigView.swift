@@ -71,6 +71,7 @@
                         isOn: Binding(
                             get: { session.fullDuplex }, set: { session.setFullDuplex($0) })
                     )
+                    pttRow
                 }
 
                 // Input side: device on top, then rows following the TX
@@ -436,6 +437,57 @@
             }
         }
 
+        /// The active config's PTT hardware: one PTT device per config, so
+        /// serial and the button never key together. A choice saves straight
+        /// to the config and applies live through `setActivePTTHardware`,
+        /// like a device change — never through the "Save changes to …"
+        /// button, which is for the tuning controls.
+        @ViewBuilder
+        private var pttRow: some View {
+            let current = setups.selectedSetup
+            let editable = PTTHardwarePickerModel.isEditable(current)
+            let selection = PTTHardwarePickerModel.selection(for: current)
+            let caption = PTTHardwarePickerModel.caption(for: current)
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                label(PTTHardwarePickerModel.rowLabel)
+                VStack(alignment: .leading, spacing: 3) {
+                    PTTHardwarePicker(selection: selection, isEditable: editable) { choice in
+                        // Deferred past the pop-up's dismiss fade for the same
+                        // reason as `setupBinding`: opening serial for the
+                        // UCI150 or Custom serial blocks the main thread and
+                        // froze the fade mid-way.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + Self.applyDelay) {
+                            setups.setActivePTTHardware(choice)
+                        }
+                    }
+                    .accessibilityHint(caption ?? "")
+                    if let caption {
+                        Text(caption)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            // The picker's hint already says it to VoiceOver.
+                            .accessibilityHidden(true)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            if case .bluetooth = selection, editable {
+                BluetoothPTTQuickStatus(
+                    inputs: deviceMonitor.inputs, outputs: deviceMonitor.outputs,
+                    audioLocked: isInCall
+                ) { input, output in
+                    // Setting both pickers runs their own onChange, which is
+                    // the same path a hand pick takes: applyDevices selects
+                    // the devices, persists them and saves them to the config
+                    // through setActiveDevices.
+                    selectedOutput = output
+                    selectedInput = input
+                }
+                .padding(.leading, Self.labelWidth + 8)
+            }
+        }
+
         /// Choosing a Setup applies it (serial + devices). Creating/editing Setups is
         /// in the Settings pane — this control only *picks* an existing one.
         ///
@@ -589,11 +641,15 @@
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
                     sublabel("VOX")
-                    Slider(value: voxThresholdBinding, in: -60...0)
-                        .tint(.orange)
-                        .accessibilityLabel("VOX")
-                        .accessibilityValue(
-                            AccessibilityValueFormatter.decibels(Double(session.voxThresholdDBFS)))
+                    Slider(
+                        value: voxThresholdBinding,
+                        in: Double(
+                            VoxThreshold.range.lowerBound)...Double(VoxThreshold.range.upperBound)
+                    )
+                    .tint(.orange)
+                    .accessibilityLabel("VOX")
+                    .accessibilityValue(
+                        AccessibilityValueFormatter.decibels(Double(session.voxThresholdDBFS)))
                     Text("\(Int(session.voxThresholdDBFS)) dB")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
@@ -963,9 +1019,11 @@
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
                     .frame(width: labelWidth, alignment: .leading)
-                VoxLevelMeter(level: testing ? meters.inputDB : -60, threshold: threshold)
+                // The VOX loudness, not the peak: the bar crosses the orange
+                // mark exactly when VOX would key.
+                VoxLevelMeter(level: testing ? meters.voxDB : -60, threshold: threshold)
                     .frame(height: 7)
-                Text(testing ? "\(Int(meters.inputDB.rounded())) dB" : "—")
+                Text(testing ? "\(Int(meters.voxDB.rounded())) dB" : "—")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .frame(width: 48, alignment: .trailing)
@@ -978,13 +1036,15 @@
         let threshold: Float  // dBFS
 
         private func fraction(_ db: Float) -> CGFloat {
-            CGFloat(max(0, min(1, (db + 60) / 60)))
+            let floor = VoxGate.meterFloorDBFS
+            return CGFloat(max(0, min(1, (db - floor) / -floor)))
         }
 
         var body: some View {
             GeometryReader { geo in
                 let w = geo.size.width
-                let keyed = level >= threshold
+                // The gate's own rule: a floor reading never counts as loud.
+                let keyed = level > VoxGate.meterFloorDBFS && level >= threshold
                 ZStack(alignment: .leading) {
                     Capsule().fill(.quaternary)
                     Capsule()

@@ -89,3 +89,6 @@ docs/app/superpowers/
 
 # Subagent scratch worktrees (Claude Code). Real work lives in .worktrees/.
 .claude/worktrees/
+
+# Recordings-page preview screenshots (regenerate with just nets-shots)
+crates/astar-netarchive/.shots/

@@ -34,7 +34,8 @@
                     }
                     .padding(.horizontal, 14)
                     .callControlChrome(
-                        fill: capturing ? Color.orange.opacity(0.18) : Color.secondary.opacity(0.18))
+                        fill: capturing ? Color.orange.opacity(0.18) : Color.secondary.opacity(0.18)
+                    )
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut("r", modifiers: [.command, .shift])
