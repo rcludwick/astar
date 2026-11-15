@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 //! The run report: a table on stdout and `report.json` in the run directory
-//! (`target/nodebench/<run-id>/` by default), with enough environment to
+//! (`target/nodebench/<run-id>/` by default, `.nodebench/<run-id>/` when `target` is a symlink), with enough environment to
 //! reproduce the run. The process exits non-zero when any check failed.
 
 use std::fmt::Write as _;

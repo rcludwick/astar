@@ -125,6 +125,22 @@ Absent means `mode = "bridge"`.
 
 The topology can be re-wired live with `POST /bridge`.
 
+**Each member's audio is held back 40 ms before it is mixed.** The bridge
+mixes once every 20 ms. Packets from a linked node or a caller don't arrive
+exactly 20 ms apart: a few milliseconds early or late is normal on any
+network. So that a late packet still makes its turn in the mix, the bridge
+keeps a small cushion for each AllStarLink and IAX2 member, two packets deep,
+and plays them in the order the sender's timestamps give. Audio through the
+bridge arrives 40–60 ms later than it otherwise would, and a packet up to
+40 ms late is heard in its place, with no hiccup. If a member's packets keep
+arriving later than that, its cushion deepens one packet at a time, to at
+most 80 ms, and it shrinks back a packet after each transmission that had no
+late packet. Every transmission lines up afresh on its own first packet, so
+delay never builds up from one over to the next. A packet that never arrives is
+20 ms of silence in its place. There is nothing to configure. The parrot
+(`mode = "parrot"`) records each caller as their packets arrive, without the
+cushion.
+
 ## `[audio]` — device selection
 
 Optional; omit for system defaults.
@@ -523,6 +539,22 @@ playback_delay_ms = 3000
 silence_gap_ms    = 800
 vox_threshold_db  = -40.0
 ```
+
+In parrot mode the node records each caller's over and plays it back to that
+caller alone, then speaks a short signal report.
+
+* `vox_threshold_db` is the level, in dBFS, that counts as talking. A
+  caller that sends push-to-talk key signals is recorded while keyed
+  instead.
+* `silence_gap_ms` is how long the caller must be quiet before the over
+  counts as finished. A pause shorter than this, between words, stays in
+  the recording in its place.
+* `playback_delay_ms` is the wait between the end of the over and the
+  playback.
+
+After the report, a caller from the app or a plain IAX2 client is hung up.
+An AllStarLink node that linked to the parrot stays linked, so it can key
+up and talk again; it leaves when it unlinks.
 
 ## Secrets
 

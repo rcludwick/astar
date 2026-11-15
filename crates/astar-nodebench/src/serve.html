@@ -256,7 +256,7 @@ function renderList() {
   const el = $("#runs");
   const shown = runs.filter(r => filter === "all" || r.kind === filter || (filter === "run" && r.kind === "incomplete"));
   document.querySelectorAll(".filters button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.f === filter)));
-  if (!shown.length) { el.innerHTML = '<div class="empty" style="padding:30px 10px">No runs in target/nodebench yet.</div>'; return; }
+  if (!shown.length) { el.innerHTML = '<div class="empty" style="padding:30px 10px">No runs in this folder yet.</div>'; return; }
   el.innerHTML = shown.map(r => {
     const d = idToDate(r.id);
     const h = r.headline || {};

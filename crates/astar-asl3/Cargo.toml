@@ -13,7 +13,7 @@ serde_json.workspace = true
 ureq = "2"
 
 [dev-dependencies]
-astar-http = { path = "../astar-http", version = "0.1.21-beta", features = ["testing"] }
+astar-http = { path = "../astar-http", version = "0.1.22-beta", features = ["testing"] }
 
 [lints]
 workspace = true

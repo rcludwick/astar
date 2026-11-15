@@ -13,8 +13,8 @@ description = "astar-netarchive: the on-disk archive format of recorded nets (se
 fixture = []
 
 [dependencies]
-astar-http = { path = "../astar-http", version = "0.1.21-beta" }
-astar-record = { path = "../astar-record", version = "0.1.21-beta" }
+astar-http = { path = "../astar-http", version = "0.1.22-beta" }
+astar-record = { path = "../astar-record", version = "0.1.22-beta" }
 claxon = "=0.4.3"
 jiff = { workspace = true }
 serde = { workspace = true }
@@ -22,7 +22,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-astar-http = { path = "../astar-http", version = "0.1.21-beta", features = ["testing"] }
+astar-http = { path = "../astar-http", version = "0.1.22-beta", features = ["testing"] }
 
 [lints]
 workspace = true

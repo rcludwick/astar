@@ -36,6 +36,8 @@ harness/nodebench/rig.sh down
 | `hold.sh` | Hand gate: dials from one side, polls both sides once a second, and reports when the link drops |
 | `findings/` | Gate artifacts: logs, IAX full-frame pcaps, and summaries. No secrets. |
 | `captures/` | Live tshark ring buffer (gitignored) |
+| `crates/astar-nodebench/fixtures/link-test-phrase.wav` | The spoken test phrase (eSpeak NG, 8 kHz mono, 5.2 s) the speech-echo scenario (`parrot_echoes_speech`) sends; its README records how it was made and its licence. `astar_nodebench::speech::compare` lines an echo up against it. |
+| `<repo>/target/nodebench/` or `<repo>/.nodebench/` | Run output from `nodebench run`/`soak`, and what `nodebench serve` reads. `.nodebench/` (gitignored) is used when `<repo>/target` is a symlink, because the podman machine cannot follow a link to another volume to mount the run's `pcap/` folder. `--json-out` overrides. |
 
 ## Images
 
@@ -408,6 +410,298 @@ on the wire instead.
   - The ulaw node gets G711U both ways.
 - **Disconnect from the node side** (`ilink 1 1998`) is clean: both sides
   are empty within 3 s.
+
+## Speech echo (2026-11-13, `work/link-proof`)
+
+The tone scenarios prove audio crosses the link; speech is the harder test,
+because it starts and stops. It exercises keying, the unkey at the end of an
+over, and the first syllable. The bench sends one spoken phrase,
+`fixtures/link-test-phrase.wav` (5.18 s, 8 kHz), and
+`astar_nodebench::speech::compare` lines what comes back up against it: the
+offset, the correlation of the two loudness curves, the level difference,
+how much of the phrase's speech arrived (and of its first and last 200 ms),
+and any gaps, repeats or stalls.
+
+### `parrot_echoes_speech`
+
+astar-server runs with `[bridge] mode = "parrot"`, `[parrot]
+playback_delay_ms = 3000` and `silence_gap_ms = 800` (a server overlay). The
+node links to it with `ilink 3`; the bench keys the phrase into the node over
+USRP; astar-server records the over and plays it back down the link; the node
+transmits the echo on USRP. It runs once against the normal node and once
+against the ulaw-only node (a node overlay).
+
+The echo is measured in two places:
+
+- **On the link**, as astar-server sent it: the voice frames from 4570 to
+  4569 in the capture, mini frames included, decoded
+  (`pcap::voice_frames`). These are the strict checks, and they compare the
+  echo with **the over as astar-server received it** (the frames from 4569
+  to 4570), not with the phrase: the over arrives already shaped by
+  app_rpt's input path (a trimmed first and last frame, now and then a
+  20 ms stall or repeat under host load), and astar-server's job is to give
+  back exactly what it took in. Both are also compared with the phrase, as
+  notes.
+- **At the node's radio**, as the bench recorded it on USRP after the over
+  ended. The node repeats the over on its own transmitter while the bench
+  keys it (it is a full-duplex repeater), so only what it sends after the
+  over can be the echo. This copy has crossed app_rpt and the host relay
+  twice, and each crossing can stall, repeat or trim a frame of its own, so
+  here the echo must arrive mostly whole and at the right level; its
+  correlation and its gaps, repeats and stalls are notes.
+
+The timing checks use the wire: from the node's RADIO_UNKEY to
+astar-server's first echo frame. `app_rpt` keys a link with voice alone and
+never sends RADIO_KEY, so the parrot's PTT gate never latches and the take
+ends on VOX: the echo is due 800 ms (the gap) + 3000 ms (the delay) after
+the unkey.
+
+**Thresholds and the runs they come from.** Three runs on the arm64 Mac VM
+(`20261114T055655Z`, `055904Z`, `060120Z`, after fixes S1 and S3), each
+against the normal node (slin) and the ulaw node, so six echoes:
+
+| | Echo on the link, against the over | At the node's radio, against the phrase | Threshold |
+|---|---|---|---|
+| correlation | 1.000 in all six | 0.733–0.997 (note only) | link ≥ 0.95 |
+| level | −0.29 to −0.30 dB | −0.29 to −0.32 dB | link ±1 dB, radio ±3 dB |
+| speech present | 100 % in all six | 94.4–99.4 % | link ≥ 99 %, radio ≥ 90 % |
+| first / last 200 ms | 100 / 100 % in all six | 67–100 / 88 % | link ≥ 80 %, radio ≥ 60 % (4 of the 6 speech frames) |
+| gaps, repeats, stalls | none in all six | 20–60 ms in three of six (note only) | link: none |
+| echo after the unkey | 3783–3898 ms (wire) | 3975–4235 ms (bench clock, note only) | > 0, and 3800 ms −250/+500 |
+
+The over itself, against the phrase, measured correlation 0.748–1.000,
+98.9–99.4 % present, head 83–100 %, tail 88 %, with 20–40 ms stalls or
+repeats in three of six: that is app_rpt and the USRP path from the host,
+before astar-server sees it, and the echo on the link reproduces each one
+exactly. The first run of a pod on a loaded host (load average about 10)
+was the worst at the radio (94.4 %, a 40 ms gap and a 60 ms repeat), with
+its over already at correlation 0.748.
+
+**Full quick tier after all of it:** run `20261114T060554Z` (60 s holds,
+host load average 21–23 from other work on the Mac), 16 scenarios, **133 of
+136 checks pass**. In `parrot_echoes_speech` every echo check passed in both
+cells (echo against the over: correlation 1.000, 100 % present, level
+−0.3 dB; delay 3825 and 3769 ms), and its two failures are S2. The third
+failure was `audio_node_to_server`'s frame loss, 10 % (11 of 110 frames,
+longest gap 7) under that load; it passed three reruns straight after, so
+it is the host, not a finding.
+
+Before fix S3, the earlier runs (`052422Z`, `052626Z`, `052853Z`, compared
+with the phrase) had the echo on the link 97.2–99.4 % present, correlation
+0.853–0.999, and one 20 ms stall or 40 ms repeat in each ulaw echo that the
+over did not have.
+
+### Findings
+
+**S1. The parrot dropped the pauses inside a take (fixed, `2ed1dd9`).** In
+VOX mode the parrot recorded only the frames above its threshold, so the
+quiet frames between words were left out, and the echo came back with its
+pauses squeezed out: the 5.18 s phrase returned as 3.72 s (186 frames on the
+wire), correlation 0.28, 54 % present, "gap 2200 ms" at the end. A pause
+shorter than the silence gap is now kept in place; the trailing silence that
+ended the take is still dropped. Loopback test:
+`conference::tests::parrot_vox_take_keeps_the_pauses_between_words` (it
+failed first). After the fix the phrase returns at full length and timing.
+
+**S2. The parrot hung up the link after every echo (fixed, `803adb3`).**
+After replaying a take, the parrot queues its spoken signal report and then
+hangs the leg up (`Manager`, "signal report complete"); with `[announce]`
+off it hung up as soon as the replay had drained. On an AllStarLink link
+that meant astar-server sent `!!DISCONNECT!!` 7 ms after its last echo
+frame and the node dropped the link, so "link still up on both sides 5 s
+after the echo" failed in every run. Rob ruled (2026-11-14) that a node
+link stays up after its echo, so it can talk again, and every other caller
+is still hung up after its report. The leg's run-loop now publishes what
+`link_keying` already knew (`Call::is_app_rpt_peer`), and the report pump
+leaves such a leg linked. Loopback test:
+`an_app_rpt_node_link_stays_up_after_its_echo_and_echoes_again`
+(`crates/astar-iax/tests/parrot_loopback.rs`, failed first). The scenario
+now keys a second over on the same link and requires a second good echo.
+
+**S3. A frame that missed its bridge tick left a 20 ms hole in the take
+(fixed for the parrot, `90efb10`; for the bridge, see S6).** Each conference
+member's input was drained once per 20 ms tick with nothing held back
+(`Source::decode_into`, `crates/astar-audio/src/conference.rs`). When a
+member's packets arrive close to the tick edge, a frame 3 ms late misses its
+tick: that tick reads silence, and the late frame plays one tick later. The
+parrot recorded the silent tick, so in run `052853Z` (ulaw), where the
+node's over arrived paced within ±3.4 ms and compared clean (correlation
+1.000), the take astar-server replayed had a 20 ms stall at 220 ms; in
+`052626Z` it was a 40 ms repeat at 940 ms. The S1 fix made this more likely,
+because it began recording quiet ticks. A take now records only the frames
+the caller sent (in both the VOX and the PTT gate), so a missed tick adds
+nothing. Loopback test:
+`conference::tests::parrot_take_has_no_hole_where_a_frame_was_late` (it
+failed first, with `[9000, 0, 8000, 7000]`). Since then every echo on the
+link has matched its over exactly. Bridge mode read members the same way,
+and `speech_server_to_node` measured the same hole there (S6, fixed).
+
+**S4. The link log named the node when astar-server ended the link
+(fixed, `0abdc7c`).** When the parrot hung up (S2), astar-server sent
+`!!DISCONNECT!!` and the node answered with HANGUP inside the 250 ms
+grace, and the link log read `ended_by=them cause="peer hung up"`. Ruling
+(2026-11-14): a teardown astar-server started on the wire is `us`, with
+its own cause; only a HANGUP that arrives while astar-server had sent
+nothing toward ending the link is `them`. Tests:
+`a_peer_hangup_during_our_held_hangup_is_ours` and
+`a_peer_hangup_with_nothing_from_us_is_theirs`
+(`crates/astar-iax/tests/link_log.rs`).
+
+**S5. app_rpt's own parrot cannot echo over a link, so the design's second
+scenario (`node_parrot_echoes_speech`) does not exist.** The plan: put the
+stock node in parrot mode, have astar-server dial it, speak the phrase in
+from the IAX probe, and hear the echo back at the probe. What app_rpt
+(asl3-asterisk 22.10.1+asl3-3.10.5) actually does:
+
+- `parrot = 2` in rpt.conf leaves parrot mode off (`rpt stats` says
+  "Parrot Mode: DISABLED"): the value is read as a boolean, so it takes
+  `parrot = yes` (or `1`) to turn it on, and then it is always on.
+- Once on, it records whatever its own transmitter sends (the monitor
+  channel, in `duplex = 2`), link audio included, from when the transmitter
+  keys until `parrottime` ms after it unkeys.
+- It plays the recording back as telemetry (`PARROT`), and telemetry of that
+  kind joins the transmit-only conference (`RPT_TXCONF`): the playback goes
+  out the node's own radio and is never sent to its links. In app_rpt's
+  source, `rpt_telemetry.c` picks `RPT_CONF` only for ID, PLAYBACK,
+  TEST_TONE and GPS telemetry.
+- In the trial run (`20261114T050334Z`), the probe received nothing at all
+  after its over. The node did play a parrot file
+  (`/tmp/parrot_1999_0.slin`), but it was a recording of its own
+  link-connect telemetry, made before the over; after the over, no playback
+  came within 10 s.
+
+So astar-server can be shown to send speech *to* a stock node (the node
+transmits it), but not to hear the node's echo of it: app_rpt has no echo
+that returns over a link.
+
+**S6. The bridge put a 20–40 ms hole into its output (fixed, `f68a869`,
+`37de502`, `338d37a`; `iax-confjb`).** This is S3's cause seen in bridge mode, by
+`speech_server_to_node` (below): the probe's audio reaches astar-server
+whole (against the phrase: correlation 1.000, 100 % present, in every cell),
+but in about half the overs what the bridge sends the node has a 20 ms
+stall, a 40 ms repeat or a 40 ms gap that the input did not. The probe's
+path in from the host (podman's port forwarding) arrives with a few
+milliseconds of jitter, and the conference reads each member once per 20 ms
+tick with nothing held back, so a frame that misses its tick leaves a hole.
+A real AllStarLink client over the internet has far more jitter than this.
+
+The fix is a jitter cushion on each member's input
+(`crates/astar-audio/src/dejitter.rs`; the reasoning is in
+`docs/design/rx-jitter-buffer.md`). Frames that carry the sender's clock are
+held two ticks (40 ms) and played one per tick by their timestamps; a lost
+frame is one tick of silence in its place; a late one slips the schedule
+once and deepens the hold, to at most 80 ms; each talk spurt lines up
+afresh on its own first frame. Loopback test:
+`conference::tests::bridge_output_has_no_stall_repeat_or_gap_under_arrival_jitter`
+(frames 3–15 ms late, two pairs arriving together, one lost; it failed
+first, with a stall at the third frame). The rig then found two more causes,
+each fixed with a test that failed first:
+
+- **The mixing thread lost ticks under load** (`37de502`). A tick that woke
+  more than 20 ms late pushed the whole schedule back, so the bridge sent 49
+  frames that second and the member's input fell a frame further behind,
+  which the cushion then trimmed: run `20261114T085543Z` (host load 13) had
+  the bridge's transit time climb from 44 to 111 ms in one over and then a
+  60 ms gap. A late tick is now caught up; only a stall over 100 ms is given
+  up (`conference::tests::a_late_tick_is_caught_up_not_lost`).
+- **The link unkeyed before the over was out** (`338d37a`). When
+  astar-server dials the node, `sync_link_keying` keys the link while the
+  probe is keyed, and closed the link's TX on the probe's `RADIO_UNKEY`,
+  which follows its last voice frame at once, while the cushion still held
+  the last 40–60 ms of the over: run `094455Z` lost the last three frames
+  (tail 75 %, a 40 ms gap). A member that was keyed now counts as talking
+  while the bridge still holds audio of its over, for at most 200 ms after
+  its key was last seen; a source that never keyed keys nothing (`a4beb67`;
+  `a_link_stays_keyed_until_the_bridge_has_played_the_over`,
+  `voice_without_a_key_never_keys_a_link_or_opens_a_peer`,
+  `the_cushion_tail_after_an_unkey_is_bounded`). In the rig's pcaps the
+  NEWKEY node sends `RADIO_UNKEY` and never `RADIO_KEY`, so it never keyed
+  links through `sync_link_keying` before the cushion either.
+
+**Full quick tier after the rulings:** run `20261114T081239Z` (60 s holds,
+host load average 8–16), 17 scenarios, **215 of 218 checks pass**.
+`parrot_echoes_speech` passed whole, both overs in both cells. The three
+failures are all S6, in `speech_server_to_node`: the bridge's output to the
+ulaw node had a 20 ms stall (astar-server dialling) and, the node dialling,
+96.6 % present at correlation 0.948 against its input.
+
+**Full quick tier after the S6 fix:** run `20261114T103900Z` (60 s holds,
+host load average 3.5–4.4), 17 scenarios, **218 of 218 checks pass**.
+After the review fixes (the key tail bounded to 200 ms and only for a
+source that keyed, `a4beb67`): four runs of the speech and tone scenarios
+plus `monitor_link` (`20261114T111840Z`, `112537Z`, `113236Z`, `113933Z`,
+131 of 131 each; 16 bridge overs, last 200 ms on the link 100 % in all),
+then the full quick tier, run `20261114T114641Z`, **218 of 218**.
+
+### `parrot_echoes_speech`, second over (2026-11-14)
+
+With S2 fixed the link stays up, and the scenario keys the phrase a second
+time on it. Runs `20261114T073902Z` and `074747Z`, both nodes, passed
+whole: every second echo on the link matched its over exactly (correlation 1.000, 100 % present, edges 100 %), the delay was
+3791–3816 ms, and the link held 5 s after each echo, both overs. At the
+radio the second echoes measured 96.6–99.4 % present, edges 83–100 / 88 %,
+−0.3 to −0.5 dB. In the run before them (`072135Z`, host load average
+above 50 from other work on the Mac) one first echo's radio copy dropped to
+84.7 % present: the rig's own hops, since its over on the link already had
+repeats and its echo on the link matched that over exactly.
+
+### `speech_server_to_node` (2026-11-14)
+
+The other direction, which app_rpt's parrot cannot give (S5). astar-server
+runs its normal bridge. Four cells: the normal node and the ulaw-only node,
+each with astar-server dialling the node (`POST /link`) and with the node
+dialling astar-server (`ilink 3`). The IAX probe (node 1997) joins the
+bridge and speaks the phrase; the bench records the node's USRP output.
+
+- **On the link** (strict, the same thresholds as the parrot's): the voice
+  astar-server sent the node, against the probe's voice as it reached
+  astar-server, both from the capture. The probe's path in from the host
+  has jitter of its own, so the bridge is held to its input; both against
+  the phrase are notes. Slin16 on the wire (the links astar-server dials)
+  travels little-endian; 8 kHz slin, big-endian.
+- **At the node's radio**: it keys for the over, carries 90 % of the phrase
+  within 3 dB with four of each edge's six speech frames (the same radio
+  thresholds as the parrot's), sends an unkey packet after its last keyed
+  frame, and the link and the probe's call are still up 5 s later.
+
+Measured in runs `20261114T073902Z`, `074747Z` (radio and keying only: the
+link check there still misread slin16), `075743Z` and `080424Z`:
+
+| | Measured | Threshold |
+|---|---|---|
+| probe's voice reaching astar-server, against the phrase | correlation 1.000, 100 % present, every cell | (note) |
+| bridge output against its input, clean overs (4 of 8) | correlation 0.999–1.000, 99.4–100 % present, level −0.3 to −0.5 dB | as the parrot's link checks |
+| bridge output against its input, the other 4 | a 20 ms stall, a 40 ms repeat or gap; correlation 0.905–0.967, 96.6–98.9 % present | fails: S6 |
+| node keys up after the probe keyed | 55–155 ms | a keyed frame at all |
+| node's last keyed frame after the probe unkeyed | 3.3–4.0 s (2 s hang time, then the courtesy tone) | an unkey packet after it |
+| radio copy | 96.6–100 % present, head 50–100 %, tail 88–100 %, −0.3 to −0.8 dB | ≥ 90 %, edges ≥ 60 %, ±3 dB |
+| link and probe up 5 s after the over | every cell | held |
+
+The radio's head at 50 % came with an S6 gap at the very start of the
+bridge's output; the radio copy carries the bridge's holes as well as the
+node's.
+
+**After the S6 fix** (2026-11-14), five runs with 10 s holds
+(`20261114T100626Z`, `101253Z`, `101919Z`, `102546Z`, `103211Z`, host load
+average 4–6), each with all four cells, so 20 bridge overs. All 126 checks
+of the four audio scenarios passed in every run, the parrot's 20 echoes
+included:
+
+| | Measured, 20 overs | Before |
+|---|---|---|
+| bridge output against its input | correlation 0.999–1.000, 100 % present, first and last 200 ms 100 %, level −0.3 to −0.5 dB, **no gap, repeat or stall in any over** | a hole in 4 of 8 overs |
+| the bridge's transit time, probe frame in to node frame out (pcap, ulaw cells) | 43–64 ms | 1–31 ms |
+| node keys up after the probe keyed | 101–147 ms | 55–155 ms |
+| node's last keyed frame after the probe unkeyed | 3.4–3.7 s | 3.3–4.0 s |
+| radio copy | 97.7–100 % present, head 83–100 %, tail 100 %, −0.3 to −0.5 dB | 96.6–100 %, head 50–100 %, tail 88–100 % |
+
+The cushion's cost shows where expected: about 40 ms more transit through
+the bridge, and the tone scenarios' onset (key-up to first tone frame) moved
+up by about as much: `audio_node_to_server` 107–148 ms in these runs against
+58–91 ms in the earlier quick-tier runs (21 and 134 ms at the extremes), and
+`audio_server_to_node` 138–167 ms against 125–201 ms, where the node's own
+path dominates. Both stay far inside the 500 ms threshold, which is
+unchanged.
 
 ## Safety
 

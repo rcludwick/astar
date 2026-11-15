@@ -59,6 +59,9 @@ pub(crate) struct LinkKeying {
     /// Not a node-to-node link (a web-transceiver guest call): the far end
     /// is never treated as an `app_rpt` link peer.
     off: bool,
+    /// Where `app_rpt` is published for the call handle
+    /// (`Call::is_app_rpt_peer`), once it is known.
+    published: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl LinkKeying {
@@ -71,8 +74,27 @@ impl LinkKeying {
         }
     }
 
+    /// Publish "the far end is an `app_rpt` node" into `cell` as soon as it
+    /// is known, for the call handle to read.
+    pub(crate) fn publishing(
+        mut self,
+        cell: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.published = Some(cell);
+        self
+    }
+
     /// Observe an FSM event on this leg.
     pub(crate) fn observe(&mut self, ev: &AppEvent, now: Instant) {
+        self.observe_inner(ev, now);
+        if self.app_rpt
+            && let Some(cell) = &self.published
+        {
+            cell.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn observe_inner(&mut self, ev: &AppEvent, now: Instant) {
         if self.off {
             return;
         }

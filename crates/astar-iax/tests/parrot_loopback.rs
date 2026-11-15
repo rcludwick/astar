@@ -226,3 +226,111 @@ fn slin16_parrot_echoes_then_hangs_up() {
 
     let _ = raw.call.hangup(None);
 }
+
+/// The listener + `Manager` in `BridgeMode::Parrot`, and a slin16 caller
+/// dialled into it and adopted. Returns the manager (keep it alive), the
+/// listener, and the raw dial.
+fn parrot_with_caller(caller: &str) -> (Manager, IncomingCallListener, astar_iax::RawDial) {
+    let policy = IncomingCallPolicy {
+        decision: IncomingDecisionPolicy::AutoAccept,
+        auth: IncomingAuthPolicy::Off,
+        codec_policy: CodecPolicy::PreferSlin16,
+        ..IncomingCallPolicy::default()
+    };
+    let (listener, levents) = IncomingCallListener::builder()
+        .bind("127.0.0.1:0".parse().unwrap())
+        .policy(policy)
+        .start()
+        .expect("listener starts");
+    let addr: SocketAddr = listener.local_addr();
+    let mut mgr = Manager::with_policy(Box::new(NullBackend), CodecPolicy::PreferSlin16);
+    mgr.set_bridge_config(BridgeConfig {
+        mode: BridgeMode::Parrot,
+        mix_minus: true,
+        include_local_radio: false,
+        parrot: Some(astar_audio::ParrotTuning {
+            playback_delay_ticks: 2,
+            silence_gap_ticks: 2,
+            vox_threshold_db: -40.0,
+            max_record_ticks: 500,
+        }),
+    })
+    .expect("parrot bridge config applies");
+    let raw = dial_raw_with_policy(
+        addr,
+        caller,
+        "s",
+        "",
+        CallMode::Standard,
+        CodecPolicy::PreferSlin16,
+    )
+    .expect("dial");
+    let out = OutputId::new("out:s");
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while Instant::now() < deadline {
+        if let Ok(IncomingCallEvent::Answered { call, .. }) = levents.try_recv() {
+            mgr.adopt(call, &out).expect("adopt into parrot bridge");
+            return (mgr, listener, raw);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("the listener must surface the auto-answered leg");
+}
+
+/// One take: five loud frames at `level`, then pump until that echo comes
+/// back. Returns whether the caller saw a hangup by the end of `linger`
+/// after the echo.
+fn take_and_echo(
+    mgr: &mut Manager,
+    raw: &astar_iax::RawDial,
+    level: i16,
+    linger: Duration,
+) -> bool {
+    let loud: Vec<i16> = vec![level; 320];
+    for _ in 0..5 {
+        raw.tx_frames.send(loud.clone()).expect("tx frame sent");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut echoed_at = None;
+    let mut hung_up = false;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        mgr.poll_announcements();
+        while let Ok(frame) = raw.rx_frames.try_recv() {
+            if echoed_at.is_none() && frame.pcm.iter().any(|&s| (s - level).abs() <= 10) {
+                echoed_at = Some(Instant::now());
+            }
+        }
+        while let Ok(ev) = raw.events.try_recv() {
+            if let CallEvent::Hangup { .. } = ev {
+                hung_up = true;
+            }
+        }
+        if hung_up || echoed_at.is_some_and(|t| t.elapsed() >= linger) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(echoed_at.is_some(), "the take at {level} must echo back");
+    hung_up
+}
+
+/// An `AllStar` node that links to the parrot (an `app_rpt` peer: it opens with
+/// `!NEWKEY1!`) stays linked after its echo, so it can talk again; its second
+/// over echoes too.
+#[test]
+fn an_app_rpt_node_link_stays_up_after_its_echo_and_echoes_again() {
+    let (mut mgr, _listener, raw) = parrot_with_caller("1999");
+    raw.call.send_text("!NEWKEY1!").expect("NEWKEY sent");
+    std::thread::sleep(Duration::from_millis(200));
+    let linger = Duration::from_millis(1500);
+    assert!(
+        !take_and_echo(&mut mgr, &raw, 9000, linger),
+        "a node link must stay up after its first echo"
+    );
+    assert!(
+        !take_and_echo(&mut mgr, &raw, 7000, linger),
+        "and after its second"
+    );
+    let _ = raw.call.hangup(None);
+}

@@ -12,7 +12,87 @@ inline. All 228 issues (164 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (188)
+## Open items (189)
+
+### iax-linktot — Link keying through the bridge has no transmit time-out
+*P1 high · safety · labels: server, keying, allstar, cx:3*
+
+astar-server keys its transceive links on a member's behalf:
+`Manager::sync_link_keying` (every 50 ms from the node pump) calls
+`Manager::key`, which calls `Call::set_ptt(true)` and puts `RADIO_KEY` on
+the link, for as long as any non-link member's peer is keyed or a peer member
+is talking (plus, since iax-confjb, at most 200 ms while that member's
+cushion drains). Nothing bounds that time. The station's one transmit
+time-out (`Station::set_tx_timeout`, 1–10 min, never off) and its
+`ptt-watch` stop-and-latch cover the station's own PTT arbiter only: a member
+whose peer is stuck keyed (a client that sent `RADIO_KEY` and never
+`RADIO_UNKEY`, or a wedged peer member) holds every linked node's
+transmitter up indefinitely, and every radio on those nodes with it. Rob's
+standing rule is that transmit time-outs are never off.
+
+The fix: the same global time-out bounds how long the server holds any link
+keyed continuously. `sync_link_keying` tracks when each link was keyed; once
+a link has been keyed for the time-out it is unkeyed and its conference TX
+closed, and the keying it was following is latched off, the way the station's
+arbiter latches a timed-out PTT: the link does not key again until every
+source that was holding it has dropped its key (a fresh over). Log it and put
+it on the event stream like the station's own time-out, and test it with a
+fake clock (`sync_link_keying_at`). The poisoned-lock paths in the pump
+(`Station::sync_link_keying`'s session lock) should fail unkeyed too.
+
+
+### iax-parrotlink — DONE 2026-11-14: The parrot hung up a node that linked to it
+*P2 medium · bug/design · labels: server, parrot, allstar, cx:2*
+
+Rob decided (2026-11-14): in parrot mode an AllStarLink node link (an
+`app_rpt` peer, as `link_keying` identifies it) stays up after its echo and
+report, so it can talk again; every other caller is still hung up after its
+report. The run-loop publishes the peer kind (`Call::is_app_rpt_peer`) and
+the Manager's report pump skips the hangup for it. Loopback:
+`an_app_rpt_node_link_stays_up_after_its_echo_and_echoes_again`
+(`crates/astar-iax/tests/parrot_loopback.rs`); nodebench
+`parrot_echoes_speech` now holds the link 5 s after the echo and runs a
+second over on the same link (RIG.md, Speech echo, S2).
+
+### iax-confjb — DONE 2026-11-14: The conference bridge's inputs had no jitter cushion
+*P2 medium · bug · labels: server, audio, conference, cx:3*
+
+Done: each conference member's input has a jitter cushion
+(`crates/astar-audio/src/dejitter.rs`). Frames that carry the sender's clock
+are held two ticks (40 ms) and played one per tick by their timestamps; a
+lost frame is one tick of silence in its place; a late frame slips the
+schedule once and deepens the hold, to at most 80 ms; each talk spurt lines
+up afresh, so delay never carries across overs. The parrot reads its caller
+without it, and bare PCM members (local mic, M17, EchoLink, Discord) are
+read as before. The rig found two more causes, fixed with it: the mixing
+thread lost a tick whenever it woke over 20 ms late (it now catches up), and
+`sync_link_keying` closed a dialled link's TX on the source's `RADIO_UNKEY`
+while the cushion still held the over's last frames (a source that was keyed
+now counts as talking until the bridge has played them, for at most 200 ms
+after its key was last seen; a source that never keyed keys nothing). Commits `f68a869`, `37de502`,
+`338d37a`. The design note is in `docs/design/rx-jitter-buffer.md`.
+
+Tests (each failed first):
+`bridge_output_has_no_stall_repeat_or_gap_under_arrival_jitter`,
+`a_late_tick_is_caught_up_not_lost` (`crates/astar-audio/src/conference.rs`),
+`a_link_stays_keyed_until_the_bridge_has_played_the_over`
+(`crates/astar-iax/src/manager.rs`). nodebench `speech_server_to_node`:
+before, a 20–40 ms hole in 4 of 8 overs; after, 20 of 20 overs match the
+probe's input exactly (correlation 0.999–1.000, 100 % present). The cost is
+about 40 ms of transit through the bridge (43–64 ms, from 1–31 ms). RIG.md,
+Speech echo, S6.
+
+### iax-linklogdisc — DONE 2026-11-14: The link log blamed the node for a link astar-server ended
+*P3 low · bug · labels: server, logging, cx:1*
+
+Done: a leg that sends `!!DISCONNECT!!` records the end as ours, with its
+own cause, before the node's answering HANGUP arrives
+(`LinkLog::on_local_hangup`). Only a HANGUP that arrives while we had sent
+nothing toward ending the link is `them`. Tests:
+`a_peer_hangup_during_our_held_hangup_is_ours` and
+`a_peer_hangup_with_nothing_from_us_is_theirs` in
+`crates/astar-iax/tests/link_log.rs`. Found by nodebench (RIG.md, Speech
+echo, S4).
 
 ### iax-serenity013 — Move the Discord bridge off rustls 0.22 when serenity 0.13 ships
 *P2 medium · task · labels: security, deps, discord, server, cx:2*

@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 
 use astar_iax_core::VoiceFormat;
 use astar_iax_core::frame::{
-    Frame, OwnedFrame, OwnedFullFrame, Subclass, encode, is_media, parse_lenient,
+    Frame, FullFrame, OwnedFrame, OwnedFullFrame, Subclass, encode, is_media, parse_lenient,
 };
 use astar_iax_core::ie::Ies;
 use astar_iax_core::session::CodecPolicy;
@@ -57,12 +57,17 @@ use crate::transport::{LinkSocket, NetStack, OsNetStack};
 /// When the Listener demands a CALLTOKEN round-trip before proceeding with an
 /// inbound NEW (RFC 5456 §8.6 anti-spoof). Vendor-neutral default: `Never` in
 /// debug builds, `Always` in release.
+///
+/// The round is stateless and runs in the Listener itself (`calltoken.rs`):
+/// a token-less NEW is answered inline with a keyed-hash token and nothing is
+/// kept, and only a NEW echoing a fresh token for its own address and source
+/// call gets a leg, a call number and an offer to the app.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IncomingCallTokenPolicy {
     /// Never demand a CALLTOKEN (test/dev convenience).
     Never,
     /// Demand a CALLTOKEN only from sources not in a configured allowlist; this
-    /// MVP treats it as "demand" at the leg boundary (full allowlist is iax-b764).
+    /// MVP treats it as "demand" for every source (full allowlist is iax-b764).
     OpportunisticBackend,
     /// Always demand a CALLTOKEN round-trip.
     Always,
@@ -272,6 +277,31 @@ fn inline_reject(peer_call: u16, cause: &str) -> Option<Vec<u8>> {
     encode_inline(&frame)
 }
 
+/// Build an inline CALLTOKEN for a token-less NEW: no leg exists, so this is
+/// stateless like `chan_iax2`'s apathetic reply. The source call is the
+/// throwaway `1` it uses too (the caller's token NEW goes to dest call 0, and
+/// its real peer call comes from the ACCEPT or AUTHREQ), the timestamp echoes
+/// the NEW's, and `iseqno` 1 acknowledges the NEW.
+fn inline_calltoken(peer_call: u16, timestamp: u32, token: &[u8]) -> Option<Vec<u8>> {
+    let ies = Ies {
+        calltoken: Some(token),
+        ..Ies::empty()
+    };
+    let frame = OwnedFullFrame::with_ies(
+        1,
+        peer_call,
+        false,
+        timestamp,
+        0,
+        1,
+        FrameType::Iax,
+        Subclass::Iax(IaxCommand::CallToken),
+        &ies,
+    )
+    .ok()?;
+    encode_inline(&frame)
+}
+
 /// Build an inline INVAL for an unknown `dest_call` (R-6.9-02). `our_call=0`.
 fn inline_inval(peer_call: u16) -> Option<Vec<u8>> {
     let frame = OwnedFullFrame::with_ies(
@@ -340,6 +370,8 @@ struct LegSpawn {
     /// `AppEvent::RemotePtt` fires, mirroring `state`. Carried into
     /// `Call::new_inbound` alongside `rx_source`/`tx_sender`.
     remote_keyed: Arc<AtomicBool>,
+    /// Published once the far end shows itself as an `app_rpt` node.
+    app_rpt_peer: Arc<AtomicBool>,
 }
 
 /// Per-leg blocking loop. Owns the inbound `Fsm` + `Reliability`; receives
@@ -370,8 +402,27 @@ fn leg_run_loop(p: LegSpawn) {
         sample_rate,
         done_tx,
         remote_keyed,
+        app_rpt_peer,
     } = p;
 
+    // The link log (target `astar_iax::link`), naming the node the caller
+    // claims to be. Under a call-token policy `link starting` waits until the
+    // caller echoes the token (`ResetReliability` below), so a spoofed source
+    // writes nothing at info; dropping the log writes the end.
+    let claimed = offer
+        .calling_number
+        .as_deref()
+        .filter(|n| !n.is_empty())
+        .or(offer.username.as_deref())
+        .unwrap_or_default()
+        .to_string();
+    let mut link_log = crate::link_log::LinkLog::start(
+        crate::link_log::LinkDirection::Inbound,
+        peer_addr,
+        &claimed,
+        our_call.value(),
+        !policy.calltoken_required,
+    );
     let now = Instant::now();
     let mut fsm =
         Fsm::for_inbound(creds, our_call, peer_call, offer, now).with_inbound_policy(policy);
@@ -402,7 +453,7 @@ fn leg_run_loop(p: LegSpawn) {
     // iax-rxjb: this leg's receive-side media clock.
     let mut rx_clock = crate::rx_clock::RxTimestamps::default();
     // The far end's keying mode, app_rpt's rule (nodebench finding 7).
-    let mut keying = crate::link_keying::LinkKeying::default();
+    let mut keying = crate::link_keying::LinkKeying::default().publishing(app_rpt_peer);
     // Rate-adapting codec edge (iax-4348): resamples bus-rate PCM ↔ the
     // negotiated wire rate. `sample_rate == 8000` builds no resampler and the
     // edge is byte-identical to the pure encode/decode.
@@ -424,6 +475,7 @@ fn leg_run_loop(p: LegSpawn) {
             &mut rx_decode_warned,
             &mut rx_clock,
             &mut keying,
+            &mut link_log,
         );
         let actions = fsm.handle(Event::App(AppCommand::DriveInbound {
             now: Instant::now(),
@@ -485,6 +537,7 @@ fn leg_run_loop(p: LegSpawn) {
                 &mut rx_decode_warned,
                 &mut rx_clock,
                 &mut keying,
+                &mut link_log,
             );
             // iax-cnlink: the token-bearing NEW restarts the peer's numbering
             // at oseqno 0 (`chan_iax2` `resend_with_token`), which our counters
@@ -559,6 +612,7 @@ fn leg_run_loop(p: LegSpawn) {
             // the HANGUP (finding 3). While one is held, a later Shutdown
             // waits for it.
             let is_hangup = matches!(cmd, RuntimeCommand::App(AppCommand::Hangup { .. }));
+
             if let Some(p) = pending_hangup.as_mut()
                 && (is_hangup || matches!(cmd, RuntimeCommand::Shutdown))
             {
@@ -570,6 +624,7 @@ fn leg_run_loop(p: LegSpawn) {
                 && matches!(fsm.state(), SessionState::Active(_))
             {
                 let cause = cause.clone();
+                link_log.on_local_hangup(cause.as_deref());
                 let mut ctx = leg_ctx(
                     sock.as_ref(),
                     peer_addr,
@@ -583,6 +638,7 @@ fn leg_run_loop(p: LegSpawn) {
                     &mut rx_decode_warned,
                     &mut rx_clock,
                     &mut keying,
+                    &mut link_log,
                 );
                 let actions = fsm.handle(Event::App(AppCommand::SendText(
                     crate::link_keying::DISCONNECT.into(),
@@ -633,6 +689,7 @@ fn leg_run_loop(p: LegSpawn) {
                         &mut rx_decode_warned,
                         &mut rx_clock,
                         &mut keying,
+                        &mut link_log,
                     );
                     let actions = fsm.handle(Event::App(app));
                     if ctx.dispatch(
@@ -673,6 +730,7 @@ fn leg_run_loop(p: LegSpawn) {
                 &mut rx_decode_warned,
                 &mut rx_clock,
                 &mut keying,
+                &mut link_log,
             );
             let actions = fsm.handle(Event::App(AppCommand::Hangup {
                 cause: p.cause,
@@ -707,6 +765,7 @@ fn leg_run_loop(p: LegSpawn) {
                 &mut rx_decode_warned,
                 &mut rx_clock,
                 &mut keying,
+                &mut link_log,
             );
             let actions = fsm.handle(Event::App(app));
             if ctx.dispatch(
@@ -743,6 +802,7 @@ fn leg_run_loop(p: LegSpawn) {
                 &mut rx_decode_warned,
                 &mut rx_clock,
                 &mut keying,
+                &mut link_log,
             );
             let actions = fsm.handle(Event::Timer { kind, now });
             if ctx.dispatch(
@@ -755,6 +815,36 @@ fn leg_run_loop(p: LegSpawn) {
             }
         }
         if terminated {
+            break;
+        }
+
+        // Backstop: a leg whose FSM has failed is over. Every failure is meant
+        // to surface `Disconnected`, which is what ends this loop; if one ever
+        // does not, raise it here, through the same dispatch, rather than hold
+        // the thread and the call number until the listener stops.
+        if let SessionState::Failed(reason) = fsm.state() {
+            let reason = reason.clone();
+            let mut ctx = leg_ctx(
+                sock.as_ref(),
+                peer_addr,
+                &mut rel,
+                &mut timers,
+                &spk_tx,
+                &event_tx,
+                &state,
+                &remote_keyed,
+                &mut pending_answer_oseqno,
+                &mut rx_decode_warned,
+                &mut rx_clock,
+                &mut keying,
+                &mut link_log,
+            );
+            let actions = smallvec::smallvec![Action::AppEvent(AppEvent::Disconnected { reason })];
+            let _ = ctx.dispatch(
+                &mut edge,
+                actions,
+                fsm.negotiated_format().unwrap_or(VoiceFormat::G711U),
+            );
             break;
         }
 
@@ -775,6 +865,7 @@ fn leg_run_loop(p: LegSpawn) {
                 &mut rx_decode_warned,
                 &mut rx_clock,
                 &mut keying,
+                &mut link_log,
             );
             if ctx.answer_acked_if_released(&mut fsm, &mut edge) {
                 break;
@@ -805,6 +896,7 @@ fn leg_run_loop(p: LegSpawn) {
                 &mut rx_decode_warned,
                 &mut rx_clock,
                 &mut keying,
+                &mut link_log,
             );
             let actions = fsm.handle(Event::App(AppCommand::SendVoice {
                 format,
@@ -843,6 +935,7 @@ fn leg_run_loop(p: LegSpawn) {
                 &mut rx_decode_warned,
                 &mut rx_clock,
                 &mut keying,
+                &mut link_log,
             );
             let actions = fsm.handle(Event::DeliveryFailed { oseqno });
             if ctx.dispatch(
@@ -903,6 +996,8 @@ struct LegCtx<'a> {
     rx_clock: &'a mut crate::rx_clock::RxTimestamps,
     /// Whether received voice counts as the far end talking (finding 7).
     keying: &'a mut crate::link_keying::LinkKeying,
+    /// This leg's link log (target `astar_iax::link`).
+    link_log: &'a mut crate::link_log::LinkLog,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -919,6 +1014,7 @@ fn leg_ctx<'a>(
     rx_decode_warned: &'a mut bool,
     rx_clock: &'a mut crate::rx_clock::RxTimestamps,
     keying: &'a mut crate::link_keying::LinkKeying,
+    link_log: &'a mut crate::link_log::LinkLog,
 ) -> LegCtx<'a> {
     LegCtx {
         sock,
@@ -933,6 +1029,7 @@ fn leg_ctx<'a>(
         rx_decode_warned,
         rx_clock,
         keying,
+        link_log,
     }
 }
 
@@ -985,6 +1082,7 @@ impl LegCtx<'_> {
         for action in actions {
             match action {
                 Action::SendReliable(frame) => {
+                    self.link_log.on_send(&frame);
                     let is_answer = frame.frame_type == FrameType::Control
                         && frame.subclass
                             == Subclass::Control(astar_iax_core::subclass::ControlSubclass::Answer);
@@ -1012,9 +1110,13 @@ impl LegCtx<'_> {
                     // The only inbound reset is the accepted token NEW, which
                     // is the new call's first frame (iax-cnlink).
                     self.rel.restart_after_peer_new();
+                    // It also means the caller echoed our token: its source
+                    // address is real, so the link log starts in earnest.
+                    self.link_log.admit();
                 }
                 Action::AppEvent(ev) => {
                     self.keying.observe(&ev, now);
+                    self.link_log.on_app_event(&ev, negotiated);
                     match &ev {
                         AppEvent::Connected { .. } => {
                             self.state.store(STATE_ACTIVE, Ordering::Relaxed);
@@ -1160,6 +1262,8 @@ struct LegHandle {
     /// Live remote-PTT-key cell (iax-feab parrot mode), mirroring `state`.
     /// Carried into `Call::new_inbound`.
     remote_keyed: Arc<AtomicBool>,
+    /// The leg's `app_rpt` cell, handed to the `Call`.
+    app_rpt_peer: Arc<AtomicBool>,
     /// The packet log's id for this leg, whose tap lives in its [`LegEntry`].
     packet_call: PacketCallId,
 }
@@ -1186,9 +1290,10 @@ impl IncomingCall {
             tx_sender,
             sample_rate,
             remote_keyed,
+            app_rpt_peer,
             packet_call,
         } = handle;
-        let call = Call::new_inbound(
+        let mut call = Call::new_inbound(
             cmd_tx,
             waker,
             join,
@@ -1205,6 +1310,7 @@ impl IncomingCall {
             remote_keyed,
             Some(packet_call),
         );
+        call.set_app_rpt_cell(app_rpt_peer);
         (call, event_rx)
     }
 
@@ -1488,6 +1594,8 @@ fn listener_run_loop(
     cmd_rx: mpsc::Receiver<ListenerCommand>,
 ) {
     let mut allocator = CallNoAllocator::new();
+    // Stateless CALLTOKENs: the key is made here and never leaves this thread.
+    let tokens = crate::calltoken::CallTokens::new();
     // dest_call (our_call) -> leg entry.
     let mut by_local_call: HashMap<CallNo, LegEntry> = HashMap::new();
     // (peer_addr, peer's source_call) -> our_call, for NEW-retransmit dedupe.
@@ -1534,6 +1642,7 @@ fn listener_run_loop(
             demux_one(
                 &sock,
                 &policy,
+                &tokens,
                 &mut allocator,
                 &mut by_local_call,
                 &mut by_peer,
@@ -1567,10 +1676,11 @@ fn resolve_credential(policy: &IncomingCallPolicy, username: &str) -> Option<Arc
 
 /// Demux a single datagram. Inline INVAL/POKE/REJECT; NEW spawns a leg;
 /// in-call datagrams are forwarded to the pinned leg.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn demux_one(
     sock: &Arc<dyn LinkSocket>,
     policy: &IncomingCallPolicy,
+    tokens: &crate::calltoken::CallTokens,
     allocator: &mut CallNoAllocator,
     by_local_call: &mut HashMap<CallNo, LegEntry>,
     by_peer: &mut HashMap<(SocketAddr, u16), CallNo>,
@@ -1681,6 +1791,9 @@ fn demux_one(
         return; // peer source_call 0 on a NEW is malformed; drop.
     };
 
+    if !calltoken_admits(sock, policy, tokens, &f, src) {
+        return;
+    }
     // Parse + validate the offer.
     let offer = match IncomingOffer::from_new_ies(&f.ies) {
         Ok(o) => o,
@@ -1722,6 +1835,55 @@ fn demux_one(
             allocator.free(our_call);
         }
     }
+}
+
+/// The CALLTOKEN gate for a NEW: `true` lets it on to get a leg.
+///
+/// The round is held here, statelessly: until a NEW echoes a token we
+/// issued to its address and call number, the source may be forged, so it
+/// gets no leg, no call number, no thread and no offer, only an inline reply
+/// (CALLTOKEN for a token-less NEW, REJECT for a bad or stale token), and
+/// nothing at info in the log.
+fn calltoken_admits(
+    sock: &Arc<dyn LinkSocket>,
+    policy: &IncomingCallPolicy,
+    tokens: &crate::calltoken::CallTokens,
+    f: &FullFrame<'_>,
+    src: SocketAddr,
+) -> bool {
+    if !matches!(
+        policy.calltoken,
+        IncomingCallTokenPolicy::Always | IncomingCallTokenPolicy::OpportunisticBackend
+    ) {
+        return true;
+    }
+    let reply = match f.ies.calltoken.filter(|t| !t.is_empty()) {
+        // No token yet, or a retransmit whose CALLTOKEN was lost: issue one,
+        // as `chan_iax2` answers every token-less NEW.
+        None => inline_calltoken(
+            f.source_call,
+            f.timestamp,
+            &tokens.issue(src, f.source_call),
+        ),
+        Some(token) => match tokens.check(src, f.source_call, token) {
+            crate::calltoken::TokenCheck::Valid => return true,
+            // `chan_iax2` REJECTs a NEW whose token fails. At debug: the
+            // source is unverified, so it must not reach info.
+            check => {
+                tracing::debug!(
+                    target: "astar_iax::listener",
+                    peer = %src,
+                    ?check,
+                    "refusing a NEW with a bad call token"
+                );
+                inline_reject(f.source_call, "Call Token Invalid")
+            }
+        },
+    };
+    if let Some(b) = reply {
+        let _ = sock.send_to(&b, src);
+    }
+    false
 }
 
 /// Map 16 entropy bytes onto a printable CALLTOKEN (iax-cnlink).
@@ -1806,6 +1968,9 @@ fn spawn_leg(
     event_tx: &mpsc::Sender<IncomingCallEvent>,
 ) -> Result<LegEntry, ()> {
     let mut lowered = policy.lower();
+    // The listener ran the CALLTOKEN round before this leg existed (a leg is
+    // spawned only for a NEW with a valid token), so the leg's FSM never does.
+    lowered.calltoken_required = false;
     // Optional auth challenges iff we hold a (non-empty) credential for the
     // offered username (iax-99cd). `Required` already lowers to
     // `auth_required = true`; `Off` never challenges. For `Optional`, a
@@ -1863,6 +2028,7 @@ fn spawn_leg(
     let format_bits = Arc::new(AtomicU32::new(0));
     // iax-feab: shared remote-PTT-key cell (parrot mode's per-leg key gate).
     let remote_keyed = Arc::new(AtomicBool::new(false));
+    let app_rpt_peer = Arc::new(AtomicBool::new(false));
 
     let spawn = LegSpawn {
         sock: Arc::clone(sock),
@@ -1888,6 +2054,7 @@ fn spawn_leg(
         sample_rate: policy.codec_policy.max_sample_rate(),
         done_tx: done_tx.clone(),
         remote_keyed: Arc::clone(&remote_keyed),
+        app_rpt_peer: Arc::clone(&app_rpt_peer),
     };
     let Ok(join) = thread::Builder::new()
         .name(format!("iax-leg-{our_call}"))
@@ -1928,6 +2095,7 @@ fn spawn_leg(
         tx_sender: mic_tx,
         sample_rate: policy.codec_policy.max_sample_rate(),
         remote_keyed,
+        app_rpt_peer,
         packet_call: packet_tap.id(),
     };
 

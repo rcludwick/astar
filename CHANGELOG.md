@@ -13,6 +13,52 @@ pre-release to the patch number, which sorts wrongly: `0.1.10beta` is newer
 than `0.1.9beta` and a string comparison says the opposite. Shipped versions
 are left as they were spelled.
 
+## 0.1.22-beta — 2026-11-14
+
+A release for the node. astar-server now holds a link to an AllStarLink node
+the way a stock node does, passes speech through without damaging it, and
+keeps a record of every link, so a drop is no longer a mystery.
+
+### Added
+
+- **A link log on the node.** astar-server writes one line when a link
+  starts, when the codec is agreed, when the link is up and when it ends. The
+  last line says who hung up (us, them or a time-out), the reason given, and
+  how long the link lasted. A link that ends within ten seconds of coming up
+  also gets a warning line, because that is what a node "dropping off" looks
+  like. See
+  [Reading the link log](https://rcludwick.github.io/astar/server/#reading-the-link-log).
+
+### Changed
+
+- **The parrot keeps a linked AllStar node connected.** In parrot mode
+  astar-server used to hang up after every echo, which suits someone calling
+  in for a signal report but made a linked node drop a few seconds after each
+  over. A node that links in now stays linked and can talk again. Other
+  callers are still hung up after their report.
+
+### Fixed
+
+- **Unfinished calls no longer lock everyone out of the node.** A caller that
+  started a call and never finished the opening handshake held one of the
+  node's call slots until the server was restarted. On a node open to the
+  internet, stray packets could fill every slot, after which every real node
+  was turned away as busy. Such a call now ends by itself, and the node no
+  longer sets anything up for a caller until that caller has proved its
+  address by returning a signed token, the way Asterisk does it. The node
+  also used to accept a token it had never issued; it now checks them.
+
+- **Speech passes through the node's bridge undamaged.** The bridge read each
+  member's audio once every 20 ms with no slack, so a packet a few
+  milliseconds late missed its turn and about half the overs picked up a
+  20 ms stall or a 40 ms repeat. Each member now has a small buffer that
+  absorbs late packets. It adds about 40 to 60 ms of delay.
+
+- **The parrot plays back what you said, pauses included.** When a node keyed
+  by voice level, the parrot dropped the quiet between words, so a five-second
+  over came back as under four seconds with the words run together. A late
+  packet could also leave a hole in the recording. Both are fixed.
+
 ## 0.1.21-beta — 2026-11-13
 
 Bluetooth headsets that work for a whole call, a push-to-talk button you can

@@ -12,14 +12,18 @@ description = "High-level idiomatic Rust API for the IAX2 protocol."
 workspace = true
 
 [dependencies]
-astar-iax-core = { path = "../astar-iax-core", version = "0.1.21-beta" }
-astar-audio = { path = "../astar-audio", version = "0.1.21-beta", default-features = false }
-astar-codec = { path = "../astar-codec", version = "0.1.21-beta", features = ["gsm"] }
-astar-record = { path = "../astar-record", version = "0.1.21-beta", default-features = false }
-astar-wireguard = { path = "../astar-wireguard", version = "0.1.21-beta" }
+astar-iax-core = { path = "../astar-iax-core", version = "0.1.22-beta" }
+astar-audio = { path = "../astar-audio", version = "0.1.22-beta", default-features = false }
+astar-codec = { path = "../astar-codec", version = "0.1.22-beta", features = ["gsm"] }
+astar-record = { path = "../astar-record", version = "0.1.22-beta", default-features = false }
+astar-wireguard = { path = "../astar-wireguard", version = "0.1.22-beta" }
+# Stateless CALLTOKENs (src/calltoken.rs). Both are already in the tree
+# through boringtun and astar-dmr; no new crate.
+hmac = "0.12"
 mio.workspace = true
 rand.workspace = true
 serde = { workspace = true, optional = true }
+sha2.workspace = true
 smallvec.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
@@ -43,6 +47,8 @@ test-support = []
 [dev-dependencies]
 base64.workspace = true
 serde_json.workspace = true
+# The link-log tests read what the engine logs (tests/link_log.rs).
+tracing-subscriber.workspace = true
 # Unit tests reach for the hardware-free `NullBackend` (manager.rs); the
 # feature only turns on for test builds, mirroring astar-audio's own
 # self-dependency in its Cargo.toml.

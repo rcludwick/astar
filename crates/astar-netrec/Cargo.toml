@@ -31,13 +31,13 @@ release = ["codec2-static", "dstar-soft-ambe"]
 [dependencies]
 # `default-features = false` on every crate that reaches astar-audio: the
 # recorder has no sound device, so cpal stays out.
-astar-audio = { path = "../astar-audio", version = "0.1.21-beta", default-features = false, features = ["pull-backend"] }
-astar-console = { path = "../astar-console", version = "0.1.21-beta", default-features = false, features = ["m17", "dstar"] }
-astar-http = { path = "../astar-http", version = "0.1.21-beta" }
-astar-iax = { path = "../astar-iax", version = "0.1.21-beta", default-features = false }
-astar-record = { path = "../astar-record", version = "0.1.21-beta" }
-astar-netarchive = { path = "../astar-netarchive", version = "0.1.21-beta" }
-astar-station = { path = "../astar-station", version = "0.1.21-beta", default-features = false, features = ["m17", "dstar"] }
+astar-audio = { path = "../astar-audio", version = "0.1.22-beta", default-features = false, features = ["pull-backend"] }
+astar-console = { path = "../astar-console", version = "0.1.22-beta", default-features = false, features = ["m17", "dstar"] }
+astar-http = { path = "../astar-http", version = "0.1.22-beta" }
+astar-iax = { path = "../astar-iax", version = "0.1.22-beta", default-features = false }
+astar-record = { path = "../astar-record", version = "0.1.22-beta" }
+astar-netarchive = { path = "../astar-netarchive", version = "0.1.22-beta" }
+astar-station = { path = "../astar-station", version = "0.1.22-beta", default-features = false, features = ["m17", "dstar"] }
 clap = { workspace = true }
 ctrlc = { version = "3", features = ["termination"] }
 jiff = { workspace = true }
@@ -56,11 +56,11 @@ tracing-subscriber = { workspace = true }
 # features, which would turn off the feature-off refusal tests in astar-codec
 # and astar-console. The D-Star tests here run under `--features release`
 # instead (`just soft-ambe-check`).
-astar-codec = { path = "../astar-codec", version = "0.1.21-beta", features = ["codec2-static"] }
-astar-dstar = { path = "../astar-dstar", version = "0.1.21-beta" }
-astar-m17 = { path = "../astar-m17", version = "0.1.21-beta" }
+astar-codec = { path = "../astar-codec", version = "0.1.22-beta", features = ["codec2-static"] }
+astar-dstar = { path = "../astar-dstar", version = "0.1.22-beta" }
+astar-m17 = { path = "../astar-m17", version = "0.1.22-beta" }
 claxon = "=0.4.3"
-astar-netarchive = { path = "../astar-netarchive", version = "0.1.21-beta", features = ["fixture"] }
+astar-netarchive = { path = "../astar-netarchive", version = "0.1.22-beta", features = ["fixture"] }
 
 [lints]
 workspace = true

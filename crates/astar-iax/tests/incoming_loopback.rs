@@ -775,20 +775,39 @@ fn auth_optional_resolver_miss_admits_anonymously() {
     );
 }
 
-/// iax-7bdc: an app decision (answer) that lands DURING the calltoken
-/// handshake must be parked, not dropped. Live repro: the offer surfaces at
-/// leg spawn, and over the internet the token echo takes one RTT — the node's
-/// Auto policy answered before the token-bearing NEW arrived, the FSM's
-/// catch-all dropped the `AnswerIncoming`, and the leg sat in `AcceptSent` until
-/// its retries expired: the caller never got ANSWER (or the join greeting).
-/// On loopback the echo lands in the same run-loop pass, which is why every
-/// pre-existing test passed.
+/// A NEW offer from `allstar-public`, with or without an echoed token.
+fn offer_ies(token: Option<&[u8]>) -> Ies<'_> {
+    Ies {
+        username: Some("allstar-public"),
+        calltoken: Some(token.unwrap_or(b"")),
+        ..valid_new_ies()
+    }
+}
+
+/// iax-7bdc: an app decision (answer) that lands DURING the handshake must be
+/// parked, not dropped. Live repro: the offer surfaces at leg spawn, and over
+/// the internet the next round trip takes one RTT -- the node's Auto policy
+/// answered before it completed, the FSM's catch-all dropped the
+/// `AnswerIncoming`, and the leg sat until its retries expired: the caller
+/// never got ANSWER (or the join greeting).
+///
+/// The CALLTOKEN round now runs in the listener before any leg exists, so
+/// the offer surfaces only after it; the round still in flight when the app
+/// answers is the MD5 one (AUTHREQ, then AUTHREP).
 #[test]
-fn answer_during_calltoken_handshake_is_parked_not_dropped() {
+fn answer_during_the_auth_handshake_is_parked_not_dropped() {
+    use std::sync::Arc;
     let policy = IncomingCallPolicy {
         decision: IncomingDecisionPolicy::AppDecide,
-        auth: IncomingAuthPolicy::Off,
+        auth: IncomingAuthPolicy::Required,
         calltoken: IncomingCallTokenPolicy::Always,
+        credential_resolver: Some(Arc::new(|u: &str| {
+            if u == "allstar-public" {
+                "supersecret".to_string()
+            } else {
+                String::new()
+            }
+        })),
         ..IncomingCallPolicy::default()
     };
     let (listener, events) = IncomingCallListener::builder()
@@ -799,7 +818,7 @@ fn answer_during_calltoken_handshake_is_parked_not_dropped() {
     let listener_addr = listener.local_addr();
 
     let (peer, _peer_addr) = peer_socket();
-    peer.send_to(&new_datagram(valid_new_ies(), PEER_CALL), listener_addr)
+    peer.send_to(&new_datagram(offer_ies(None), PEER_CALL), listener_addr)
         .unwrap();
 
     // The CALLTOKEN challenge arrives. Do NOT ack it (a real caller responds
@@ -818,9 +837,30 @@ fn answer_during_calltoken_handshake_is_parked_not_dropped() {
         }
         tok.expect("CALLTOKEN challenge with a token IE")
     };
+    assert!(
+        events.recv_timeout(Duration::from_millis(200)).is_err(),
+        "no offer before the caller has echoed its token"
+    );
 
-    // The offer surfaced at spawn; the app answers it NOW — before the token
-    // echo. A real app cannot know the handshake state, so this must work.
+    // Echo the token in a fresh NEW (seqnos reset, dcallno 0): the leg is
+    // spawned, the offer surfaces, and the leg CHALLENGES.
+    peer.send_to(
+        &new_datagram(offer_ies(Some(&token)), PEER_CALL),
+        listener_addr,
+    )
+    .unwrap();
+    let authreq = recv_until(&peer, listener_addr, PEER_CALL, |f| {
+        f.subclass == Subclass::Iax(IaxCommand::AuthReq)
+    })
+    .expect("AUTHREQ after the token echo");
+    let Ok(Frame::Full(f)) = parse_lenient(&authreq) else {
+        panic!("AUTHREQ parses");
+    };
+    let challenge = f.ies.challenge.expect("a challenge").to_string();
+    let leg_call = f.source_call;
+
+    // The app answers NOW -- before the AUTHREP. A real app cannot know the
+    // handshake state, so this must work.
     let ev = events
         .recv_timeout(Duration::from_secs(2))
         .expect("IncomingCallEvent arrives");
@@ -830,13 +870,8 @@ fn answer_during_calltoken_handshake_is_parked_not_dropped() {
     };
     let (call, call_events) = incoming.answer().expect("answer");
 
-    // Now echo the token in a fresh NEW (seqnos reset, dcallno 0), as a real
-    // caller does one RTT later.
-    let ies = Ies {
-        calltoken: Some(&token),
-        ..valid_new_ies()
-    };
-    peer.send_to(&new_datagram(ies, PEER_CALL), listener_addr)
+    let md5 = astar_iax_core::session::auth::md5_response(&challenge, "supersecret");
+    peer.send_to(&authrep_datagram(&md5, PEER_CALL, leg_call), listener_addr)
         .unwrap();
 
     // ACCEPT then ANSWER must both arrive: the parked answer is replayed the
@@ -844,14 +879,14 @@ fn answer_during_calltoken_handshake_is_parked_not_dropped() {
     let accept = recv_until(&peer, listener_addr, PEER_CALL, |f| {
         f.subclass == Subclass::Iax(IaxCommand::Accept)
     });
-    assert!(accept.is_some(), "ACCEPT arrives after the token echo");
+    assert!(accept.is_some(), "ACCEPT arrives after the AUTHREP");
     let answer = recv_until(&peer, listener_addr, PEER_CALL, |f| {
         f.frame_type == FrameType::Control
             && f.subclass == Subclass::Control(astar_iax_core::subclass::ControlSubclass::Answer)
     });
     assert!(
         answer.is_some(),
-        "ANSWER must arrive even though answer() preceded the token echo"
+        "ANSWER must arrive even though answer() preceded the AUTHREP"
     );
 
     // And the unified call becomes fully Active (AnswerAcked → Answered).

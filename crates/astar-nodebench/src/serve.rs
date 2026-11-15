@@ -3,7 +3,7 @@
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 //! `nodebench serve`: a small page on 127.0.0.1 for browsing runs.
 //!
-//! It reads the run directories under `target/nodebench/` as they are on
+//! It reads the run directories under `target/nodebench/` (or `.nodebench/` when `target` is a symlink) as they are on
 //! disk (a soak in progress shows up live, because its summary is recomputed
 //! from `soak.jsonl` on every request) and serves:
 //!

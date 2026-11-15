@@ -119,3 +119,63 @@ A clean end-of-transmission does **not** produce underruns: the buffer covers
 the first ten missing slots with interpolations — which is what `rx_frames_lost`
 is for — and then declares the spurt over. Underruns mean something went wrong,
 which is what a health counter is supposed to mean.
+
+## The conference bridge has its own, smaller cushion (iax-confjb)
+
+astar-server's conference bridge does not play to a device. It mixes once
+every 20 ms tick on its own thread, and sends each member the sum of the
+others. Until 2026-11-14 it read each member's input with nothing held back,
+so a frame that arrived a few milliseconds after its tick edge missed it: the
+mix sent the other members silence for that tick and two frames' worth on the
+next, a 20 ms stall followed by a 40 ms repeat or gap. nodebench measured it
+in about half the overs of `speech_server_to_node` (RIG.md, Speech echo, S3
+and S6).
+
+The bridge does not reuse `jitterbuf.c`, for three reasons:
+
+* **Its clock is the tick, not a device callback.** It drains members once
+  per 20 ms, so the arrival times it could feed `put` are quantised to a
+  tick. The adaptive estimate would read 0 or 20 ms of jitter and nothing in
+  between.
+* **It shrinks by dropping voice.** `jitterbuf.c` throws a frame away to pull
+  an over-deep buffer back to its target. On a speaker that is a click; in a
+  bridge it is a 20 ms hole in what every other member hears, which is the
+  defect being fixed.
+* **The tail.** It interpolates up to ten frames (200 ms) before it calls a
+  spurt over, and the bridge's "is this member talking" decides who is sent
+  the mix.
+
+So `crates/astar-audio/src/dejitter.rs` is a fixed-depth queue keyed by the
+sender's timestamp. The first frame of a spurt is held two ticks (40 ms, the
+same slack `IAX_JITTER_CONFIG.target_extra` gives the receive side) and each
+later frame plays at the tick its timestamp puts it on, so a frame up to
+40 ms later than the spurt's first one still makes its tick, and the delay it
+adds is 40–60 ms. A frame that misses its tick anyway is a tick of silence;
+when it then arrives with nothing queued behind it, the schedule slips back
+a tick to play it and the hold deepens by one, to at most four ticks (80 ms),
+and relaxes a tick after a spurt with no late frame. A lost frame is one tick
+of silence in its place, never an invented waveform. Five empty ticks end the
+spurt, and the next frame anchors a new one, so delay never carries from one
+over to the next. Only frames with a sender clock go through it; bare PCM
+(the local mic, M17, EchoLink, Discord) is read as before. The parrot reads
+its caller without it: it records what the caller sent, and has no listener
+whose timing a cushion would protect.
+
+Two things outside the queue had to change with it, both found by the rig:
+
+* **The mixing thread catches up a late tick.** Under host load it woke
+  20–40 ms late now and then and then skipped a tick, so the bridge sent 49
+  frames that second and every member fell a frame further behind, which the
+  cushion then trimmed as a gap. A late tick is now followed by one that runs
+  at once; only a stall over 100 ms gives up the ticks it missed.
+* **Link keying waits for the audio.** `Manager::sync_link_keying` keys the
+  node links while a member's peer is keyed. A peer's `RADIO_UNKEY` follows
+  its last voice frame at once, and the cushion was still holding that
+  frame, so the link unkeyed and closed its TX on the over's last 40–60 ms.
+  A member that was keyed now counts as talking while the bridge still holds
+  audio of its over (`Conference::member_holds_audio`), for at most
+  `KEY_TAIL` (200 ms: the cushion's 140 ms worst-case drain plus one 50 ms
+  pump) after a pump last saw it keyed. The tail only extends a key that was
+  really there. A source whose voice passes without `RADIO_KEY` (a plain
+  IAX2 client, or an `app_rpt` node in NEWKEY mode, which keys by voice and
+  sends `RADIO_UNKEY` but never `RADIO_KEY`) keys nothing, as before.

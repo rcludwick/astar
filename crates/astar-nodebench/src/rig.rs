@@ -149,6 +149,45 @@ impl fmt::Debug for Secret {
     }
 }
 
+/// Where a run's output goes when `--json-out` does not say, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputDir {
+    /// The base folder; each run gets a `<run-id>/` directory under it.
+    pub path: PathBuf,
+    /// One line for the console saying why this folder was picked.
+    pub why: String,
+}
+
+/// The default base folder for run output: `<repo>/target/nodebench`, unless
+/// `<repo>/target` is a symlink, and then `<repo>/.nodebench` (git-ignored).
+///
+/// The run directory is also the hostPath the pod mounts for its captures.
+/// The podman machine on a Mac mounts the home directory and nothing else,
+/// so a `target` that links to another volume (`just link-builds`) is a path
+/// the machine cannot follow, and `podman kube play` fails with
+/// `mkdir …/target: file exists`. `.nodebench` sits in the checkout itself,
+/// which the machine can see. The test is "is it a symlink", not "where does
+/// it point", so a dangling link moves the output too.
+#[must_use]
+pub fn default_output_dir(repo_root: &Path) -> OutputDir {
+    let target = repo_root.join("target");
+    let linked = fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink());
+    if linked {
+        OutputDir {
+            path: repo_root.join(".nodebench"),
+            why: format!(
+                "{} is a symlink, which the podman machine may not be able to follow",
+                target.display()
+            ),
+        }
+    } else {
+        OutputDir {
+            path: target.join("nodebench"),
+            why: "the default, under target/".into(),
+        }
+    }
+}
+
 /// Default test-only AMI secret. Overridden by `NODEBENCH_AMI_SECRET`.
 pub const DEFAULT_AMI_SECRET: &str = "nodebench-loopback-only";
 
@@ -772,5 +811,52 @@ mod tests {
             connection: None,
         };
         assert!(matches!(p.run(&["version"]), Err(RigError::Spawn { .. })));
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("nb-outdir-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn output_dir_is_target_nodebench_when_target_is_a_folder() {
+        let repo = scratch("dir");
+        fs::create_dir(repo.join("target")).unwrap();
+        let out = default_output_dir(&repo);
+        assert_eq!(out.path, repo.join("target").join("nodebench"));
+        assert!(out.why.contains("target"), "{}", out.why);
+        fs::remove_dir_all(&repo).unwrap();
+    }
+
+    #[test]
+    fn output_dir_is_target_nodebench_when_there_is_no_target_yet() {
+        let repo = scratch("none");
+        let out = default_output_dir(&repo);
+        assert_eq!(out.path, repo.join("target").join("nodebench"));
+        fs::remove_dir_all(&repo).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_dir_moves_to_dot_nodebench_when_target_is_a_symlink() {
+        let repo = scratch("link");
+        let elsewhere = scratch("link-elsewhere");
+        std::os::unix::fs::symlink(&elsewhere, repo.join("target")).unwrap();
+        let out = default_output_dir(&repo);
+        assert_eq!(out.path, repo.join(".nodebench"));
+        assert!(out.why.contains("symlink"), "{}", out.why);
+        fs::remove_dir_all(&repo).unwrap();
+        fs::remove_dir_all(&elsewhere).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_dir_moves_even_when_the_symlink_dangles() {
+        let repo = scratch("dangle");
+        std::os::unix::fs::symlink(repo.join("nowhere"), repo.join("target")).unwrap();
+        assert_eq!(default_output_dir(&repo).path, repo.join(".nodebench"));
+        fs::remove_dir_all(&repo).unwrap();
     }
 }

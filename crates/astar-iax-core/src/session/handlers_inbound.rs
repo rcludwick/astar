@@ -482,13 +482,19 @@ impl Fsm {
                 kind: TimerKind::InboundTokenExpiry,
                 ..
             } => {
-                // Drop silently: no REJECT (no point alerting a scanner).
-                (
-                    SessionState::Failed(FailReason::Timeout {
-                        in_state: "CallTokenIssued",
-                    }),
-                    out,
-                )
+                // Drop silently on the wire: no REJECT (no point alerting a
+                // scanner). `Disconnected` is still owed to the runtime, as on
+                // every other failure here: it is the only thing that ends the
+                // leg, and without it the leg's thread and call number were
+                // held until the listener stopped -- a caller that never
+                // echoes the token (any spoofed source) leaked one of each.
+                let reason = FailReason::Timeout {
+                    in_state: "CallTokenIssued",
+                };
+                out.push(Action::AppEvent(AppEvent::Disconnected {
+                    reason: reason.clone(),
+                }));
+                (SessionState::Failed(reason), out)
             }
             event => {
                 let state = SessionState::CallTokenIssued(CallTokenIssuedData {
@@ -1434,6 +1440,19 @@ mod inbound_handler_tests {
                 in_state: "CallTokenIssued"
             })
         ));
+        // Silent on the wire, but not to the runtime: `Disconnected` is what
+        // ends the leg and frees its call number.
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                Action::AppEvent(AppEvent::Disconnected {
+                    reason: FailReason::Timeout {
+                        in_state: "CallTokenIssued"
+                    }
+                })
+            )),
+            "expiry must surface Disconnected: {actions:?}"
+        );
     }
 
     #[test]

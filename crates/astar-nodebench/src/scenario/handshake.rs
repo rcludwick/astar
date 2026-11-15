@@ -160,9 +160,17 @@ impl Scenario for CalltokenRetransmit {
         // The CALLTOKEN "was lost": the caller retransmits its NEW.
         let _ = send(&new_frame(None, true));
         let again = reply(&sock);
-        let reissued = again.as_ref().is_some_and(|r| {
-            r.cmd == Some(IaxCommand::CallToken) && r.token.as_deref() == Some(&token[..])
-        });
+        // A CALLTOKEN again, with a token that works: astar-server's tokens
+        // are stateless and carry the second they were issued in, as
+        // `chan_iax2`'s do, so a retransmit in a later second gets a fresh
+        // one. The caller echoes the newest.
+        let reissued_token = again
+            .as_ref()
+            .filter(|r| r.cmd == Some(IaxCommand::CallToken))
+            .and_then(|r| r.token.clone())
+            .filter(|t| !t.is_empty());
+        let reissued = reissued_token.is_some();
+        let token = reissued_token.unwrap_or(token);
         o.check(Check::expect(
             "token-less NEW retransmit gets CALLTOKEN again",
             reissued,

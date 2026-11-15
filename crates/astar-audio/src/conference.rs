@@ -20,8 +20,11 @@
 //!   speaker the sum of all members. Both default to absent (pure bridge).
 //!
 //! A starved member (no frame ready this tick) contributes silence and never
-//! blocks the others — the per-source jitter `residual` smooths a ≤20 ms gap,
-//! mirroring [`crate::Mixer`] / `SpeakerSource`.
+//! blocks the others. A member whose frames carry the sender's clock (IAX2
+//! voice) plays them out of its own jitter cushion ([`crate::dejitter`],
+//! iax-confjb): held 40 ms and played by timestamp, so a frame a few ms late
+//! still makes its tick. Bare PCM (the local mic, M17, `EchoLink`, tests) goes
+//! through the per-source `residual` as before.
 //!
 //! The mixing runs on a dedicated 20 ms-clocked thread owned by the
 //! [`Conference`]; [`Conference::start`] launches it and `Drop` joins it.
@@ -33,6 +36,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::dejitter::Dejitter;
 use crate::dtmf::DtmfDetector;
 use crate::router::frame_samples;
 
@@ -70,6 +74,8 @@ impl MemberId {
 struct Source<T: AsPcm> {
     rx: Receiver<T>,
     residual: VecDeque<f32>,
+    /// Jitter cushion for frames that carry the sender's clock (iax-confjb).
+    cushion: Dejitter,
 }
 
 /// What a conference source can pull PCM out of. Members carry
@@ -78,10 +84,18 @@ struct Source<T: AsPcm> {
 /// local mic lane sends bare `Vec<i16>`.
 trait AsPcm {
     fn pcm(&self) -> &[i16];
+    /// The sender's clock, when the frame carries one.
+    fn clock(&self) -> Option<crate::RxClock> {
+        None
+    }
+    fn into_pcm(self) -> Vec<i16>;
 }
 
 impl AsPcm for Vec<i16> {
     fn pcm(&self) -> &[i16] {
+        self
+    }
+    fn into_pcm(self) -> Vec<i16> {
         self
     }
 }
@@ -90,6 +104,12 @@ impl AsPcm for crate::RxFrame {
     fn pcm(&self) -> &[i16] {
         &self.pcm
     }
+    fn clock(&self) -> Option<crate::RxClock> {
+        self.clock
+    }
+    fn into_pcm(self) -> Vec<i16> {
+        self.pcm
+    }
 }
 
 impl<T: AsPcm> Source<T> {
@@ -97,6 +117,13 @@ impl<T: AsPcm> Source<T> {
         Self {
             rx,
             residual: VecDeque::new(),
+            cushion: Dejitter::default(),
+        }
+    }
+
+    fn push_pcm(&mut self, pcm: &[i16]) {
+        for &s in pcm {
+            self.residual.push_back(f32::from(s) / 32768.0);
         }
     }
 
@@ -106,13 +133,23 @@ impl<T: AsPcm> Source<T> {
     /// shared with [`crate::Mixer`]; the conference's only new behavior is how
     /// the resulting per-source buffers are summed (mix-minus). Returns the
     /// number of real (non-padding) samples produced.
-    fn decode_into(&mut self, buf: &mut [f32]) -> usize {
+    ///
+    /// With `cushioned`, a frame that carries the sender's clock and is one
+    /// tick long goes through the jitter cushion instead (iax-confjb), which
+    /// hands back at most one frame per tick, on the sender's schedule.
+    fn decode_into(&mut self, buf: &mut [f32], cushioned: bool) -> usize {
         // Drain whatever is waiting; Empty or Disconnected ends the loop and the
         // source contributes silence for the rest of the tick.
         while let Ok(frame) = self.rx.try_recv() {
-            for &s in frame.pcm() {
-                self.residual.push_back(f32::from(s) / 32768.0);
+            match frame.clock() {
+                Some(clock) if cushioned && frame.pcm().len() == buf.len() => {
+                    self.cushion.put(frame.into_pcm(), clock.ts_ms, clock.ms);
+                }
+                _ => self.push_pcm(frame.pcm()),
             }
+        }
+        if let Some(pcm) = self.cushion.tick() {
+            self.push_pcm(&pcm);
         }
         let real = buf.len().min(self.residual.len());
         for slot in buf.iter_mut().take(real) {
@@ -198,6 +235,9 @@ struct ParrotState {
     /// Consecutive sub-threshold ticks since voice activity ended (VOX mode);
     /// reaching `silence_gap_ticks` triggers replay.
     quiet_ticks: u32,
+    /// How many of those quiet ticks put a frame into the take (VOX mode):
+    /// the trailing silence dropped when the take ends.
+    quiet_recorded: usize,
     /// Countdown to replay start once triggered (`playback_delay_ticks`),
     /// `None` when no replay is pending.
     replay_in: Option<u32>,
@@ -210,7 +250,7 @@ struct ParrotState {
 impl Member {
     /// Advance this member's parrot state machine by one tick (iax-feab).
     /// `frame` is this tick's already-encoded i16 PCM (the member's own
-    /// audio); `level_db` is its dBFS peak (the VOX gate input). Returns the
+    /// audio), or `None` when none of it arrived this tick; `level_db` is its dBFS peak (the VOX gate input). Returns the
     /// completed [`crate::SignalReport`] on the first tick the replay has
     /// fully drained from `self.announce`, `None` otherwise.
     ///
@@ -227,7 +267,7 @@ impl Member {
         t: &ParrotTuning,
         keyed: bool,
         level_db: f32,
-        frame: Vec<i16>,
+        frame: Option<Vec<i16>>,
         sample_rate: u32,
     ) -> Option<crate::SignalReport> {
         let p = &mut self.parrot;
@@ -242,9 +282,13 @@ impl Member {
             level_db > t.vox_threshold_db
         };
 
+        // The take is what the caller sent: a tick its frame missed (it
+        // arrived just after the tick and plays one tick later) adds nothing,
+        // rather than a hole of silence.
         if voice_now && p.pending_report.is_none() && p.replay_in.is_none() {
             p.quiet_ticks = 0;
-            p.recording.push(frame);
+            p.quiet_recorded = 0;
+            p.recording.extend(frame);
             if p.recording.len() as u32 >= t.max_record_ticks {
                 p.replay_in = Some(t.playback_delay_ticks);
             }
@@ -252,8 +296,18 @@ impl Member {
             if p.ptt_latched {
                 p.replay_in = Some(t.playback_delay_ticks);
             } else {
+                // A quiet frame inside a VOX take is a pause between words:
+                // keep it in place. If the quiet lasts the whole silence gap,
+                // the take is over, and the trailing silence is dropped.
+                if let Some(frame) = frame {
+                    p.recording.push(frame);
+                    p.quiet_recorded += 1;
+                }
                 p.quiet_ticks += 1;
                 if p.quiet_ticks >= t.silence_gap_ticks {
+                    let spoken = p.recording.len() - p.quiet_recorded;
+                    p.recording.truncate(spoken);
+                    p.quiet_recorded = 0;
                     p.replay_in = Some(t.playback_delay_ticks);
                 }
             }
@@ -400,13 +454,17 @@ impl Shared {
         //    note which members delivered audio at all this tick.
         let mut bufs: Vec<Vec<f32>> = vec![vec![0.0; n]; self.members.len()];
         let mut delivered = vec![false; self.members.len()];
+        // The parrot records what the caller sent, as it arrives (90efb10):
+        // it has no listener whose timing a cushion would protect, and its
+        // PTT gate would cut off the frames a cushion still held at the unkey.
+        let cushioned = self.parrot.is_none();
         for ((member, buf), got) in self
             .members
             .iter_mut()
             .zip(bufs.iter_mut())
             .zip(delivered.iter_mut())
         {
-            *got = member.src.decode_into(buf) > 0;
+            *got = member.src.decode_into(buf, cushioned) > 0;
         }
 
         // In-band DTMF (iax-8ca0): run each member's detector over this
@@ -443,7 +501,8 @@ impl Shared {
                     member.wake_if_set();
                 }
                 let keyed = member.key.load(Ordering::Relaxed);
-                let frame: Vec<i16> = bufs[i].iter().map(|&s| encode_sample_rounded(s)).collect();
+                let frame = delivered[i]
+                    .then(|| bufs[i].iter().map(|&s| encode_sample_rounded(s)).collect());
                 let level_db = frame_dbfs(&bufs[i]);
                 if let Some(report) = member.parrot_tick(
                     &tuning,
@@ -462,7 +521,7 @@ impl Shared {
         let mut mic_buf = vec![0.0_f32; n];
         let mut mic_delivered = false;
         let have_mic = if let Some(mic) = self.local_mic.as_mut() {
-            mic_delivered = mic.decode_into(&mut mic_buf) > 0;
+            mic_delivered = mic.decode_into(&mut mic_buf, false) > 0;
             true
         } else {
             false
@@ -595,6 +654,30 @@ fn sample_rate_of(frame_samples: usize) -> u32 {
     (frame_samples * 50) as u32
 }
 
+/// The longest a member's jitter cushion can still hold audio after the
+/// member's last frame arrived (iax-confjb): 140 ms. Whatever keys other
+/// legs on a member's behalf may wait this long for its over to play out.
+pub const MAX_CUSHION_DRAIN: Duration = crate::dejitter::MAX_DRAIN;
+
+/// How far behind its schedule the mixing thread may fall and still catch up
+/// (100 ms, five ticks). Past this it resynchronises on the present.
+const MAX_CATCH_UP: Duration = Duration::from_millis(100);
+
+/// When the tick after one due at `due` should run, given that it is `now`.
+///
+/// The schedule advances one [`TICK`] per tick whatever time the tick
+/// actually ran, so a tick that woke late is followed by one that runs at
+/// once: the bridge keeps 50 ticks a second, and no member's input falls a
+/// frame behind (iax-confjb, S6 under host load). Only a stall longer than
+/// [`MAX_CATCH_UP`] gives up the ticks it missed, rather than bursting them.
+fn next_tick_after(due: Instant, now: Instant) -> Instant {
+    if now > due + MAX_CATCH_UP {
+        now + TICK
+    } else {
+        due + TICK
+    }
+}
+
 /// A mix-minus conference bridge owning all members and a dedicated 20 ms
 /// mixing thread. Add members as calls join ([`Conference::add_member`]) and
 /// remove them as calls leave ([`Conference::remove_member`]); the thread feeds
@@ -652,12 +735,7 @@ impl Conference {
                     if now < next {
                         std::thread::sleep(next - now);
                     }
-                    next += TICK;
-                    // Recover from a long stall so we don't spin catching up.
-                    let now = Instant::now();
-                    if next < now {
-                        next = now + TICK;
-                    }
+                    next = next_tick_after(next, Instant::now());
                     if let Ok(mut s) = shared.lock() {
                         s.tick();
                     }
@@ -717,8 +795,14 @@ impl Conference {
     /// maps `LinkMode::relays_onward()` / `is_transmit_capable()` here:
     /// `Transceive` = (true, true); `Monitor` = (true, false); `LocalMonitor` =
     /// (false, false). Live-settable; a no-op if `id` already left.
+    ///
+    /// Works on a poisoned lock too: the node pump closes link TX through
+    /// this, and closing must not fail because the mixing thread died.
     pub fn set_member_relay(&self, id: MemberId, contributes: bool, receives: bool) {
-        let mut s = self.shared.lock().expect("conference mutex poisoned");
+        let mut s = self
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(member) = s.members.iter_mut().find(|m| m.id == id) {
             member.contributes = contributes;
             member.receives = receives;
@@ -787,6 +871,27 @@ impl Conference {
             .map_or(0, |m| m.announce.len())
     }
 
+    /// Whether a member's jitter cushion still holds audio it received and
+    /// has not yet played (iax-confjb). The bridge plays a member's frames
+    /// 40-60 ms after they arrive, so its PTT can drop while the end of its
+    /// over is still to come; whatever keys other legs on its behalf
+    /// (`Manager::sync_link_keying`) waits for this to clear. `false` if `id`
+    /// isn't a current member.
+    ///
+    /// A poisoned lock (the mixing thread panicked) reads as `false`: the node
+    /// pump calls this every pass, and on any internal failure the safe
+    /// direction for keying is unkeyed.
+    #[must_use]
+    pub fn member_holds_audio(&self, id: MemberId) -> bool {
+        let Ok(s) = self.shared.lock() else {
+            return false;
+        };
+        s.members
+            .iter()
+            .find(|m| m.id == id)
+            .is_some_and(|m| m.src.cushion.holds_audio())
+    }
+
     /// Remove a member (hangup / leave). The mix thread stops summing it next
     /// tick. No-op if `id` isn't a current member. Mutex-guarded, mirroring
     /// [`crate::Mixer::remove_call`].
@@ -797,7 +902,8 @@ impl Conference {
 
     /// Detach a member and return its RX `Receiver` so the caller can re-home it
     /// (the conference→handset live switch, iax-647d). The per-member jitter
-    /// residual is dropped (≤20 ms glitch on a mode change). `None` if `id` isn't
+    /// residual and cushion are dropped (a glitch of up to the cushion's
+    /// depth, 40-80 ms, on a mode change). `None` if `id` isn't
     /// a current member. The member's TX `Sender` is dropped with the slot.
     #[must_use]
     pub fn take_member(&self, id: MemberId) -> Option<Receiver<crate::RxFrame>> {
@@ -824,6 +930,16 @@ impl Conference {
     #[cfg(test)]
     fn tick_for_test(&self) {
         self.shared.lock().expect("conference mutex").tick();
+    }
+
+    /// Run one mixing tick now, for deterministic tests in crates that build
+    /// a [`Conference`] with [`Conference::new`] (which starts no thread).
+    /// Never call it on a started conference.
+    #[doc(hidden)]
+    pub fn tick_once(&self) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.tick();
+        }
     }
 }
 
@@ -1283,6 +1399,78 @@ mod tests {
     }
 
     #[test]
+    fn parrot_vox_take_keeps_the_pauses_between_words() {
+        // A spoken over has quiet frames between its words. In VOX mode a
+        // pause shorter than the silence gap is part of the take: the replay
+        // must carry it in place, or the echo comes back with its pauses
+        // squeezed out (seen against a stock ASL3 node in nodebench's
+        // `parrot_echoes_speech`). Trailing silence that ended the take is
+        // not replayed.
+        let t = ParrotTuning {
+            playback_delay_ticks: 1,
+            silence_gap_ticks: 4,
+            vox_threshold_db: -40.0,
+            max_record_ticks: 500,
+        };
+        let conf = parrot_conf(t);
+        let (rx_tx, rx) = channel();
+        let (tx_tx, tx_rx) = channel();
+        let _m = conf.add_member(rx, tx_tx);
+        let over = [9000, 9000, 0, 0, 7000, 7000, 7000, 0, 5000];
+        for level in over {
+            rx_tx.send(frame(level).into()).unwrap();
+            conf.tick_for_test();
+        }
+        for _ in 0..30 {
+            conf.tick_for_test(); // gap + delay + replay + slack
+        }
+        let replay: Vec<i16> = std::iter::from_fn(|| tx_rx.try_recv().ok())
+            .map(|f| f[0])
+            .collect();
+        assert_eq!(replay, over, "the take replays whole, pauses included");
+    }
+
+    #[test]
+    fn parrot_take_has_no_hole_where_a_frame_was_late() {
+        // A frame that arrives just after its tick plays one tick later:
+        // that tick delivers nothing, the next delivers two frames. The take
+        // records what the caller sent, so the replay has no 20 ms of
+        // silence where the bridge's tick and the network disagreed (seen
+        // against a stock ASL3 node in nodebench's `parrot_echoes_speech`).
+        for keyed in [false, true] {
+            let t = ParrotTuning {
+                playback_delay_ticks: 1,
+                silence_gap_ticks: 4,
+                vox_threshold_db: -40.0,
+                max_record_ticks: 500,
+            };
+            let conf = parrot_conf(t);
+            let key = Arc::new(AtomicBool::new(false));
+            let (rx_tx, rx) = channel();
+            let (tx_tx, tx_rx) = channel();
+            let _m = conf.add_member_keyed(rx, tx_tx, Arc::clone(&key));
+            if keyed {
+                key.store(true, Ordering::Relaxed); // latches the PTT gate
+            }
+            rx_tx.send(frame(9000).into()).unwrap();
+            conf.tick_for_test();
+            conf.tick_for_test(); // the next frame is late
+            rx_tx.send(frame(8000).into()).unwrap();
+            rx_tx.send(frame(7000).into()).unwrap();
+            conf.tick_for_test();
+            conf.tick_for_test();
+            key.store(false, Ordering::Relaxed);
+            for _ in 0..30 {
+                conf.tick_for_test();
+            }
+            let replay: Vec<i16> = std::iter::from_fn(|| tx_rx.try_recv().ok())
+                .map(|f| f[0])
+                .collect();
+            assert_eq!(replay, [9000, 8000, 7000], "keyed: {keyed}");
+        }
+    }
+
+    #[test]
     fn parrot_ptt_gate_wins_over_vox_once_latched() {
         let t = ParrotTuning {
             playback_delay_ticks: 1,
@@ -1511,6 +1699,263 @@ mod tests {
             conf.drain_dtmf_digits(),
             [] as [(crate::conference::MemberId, char); 0]
         );
+    }
+
+    /// A member's over, as the network delivered it: frame `k` carries the
+    /// sender's timestamp `20 k` ms and level `100 (k + 1)`, and arrives at
+    /// `arrive(k)` ms. The bridge ticks at `20 t + 10` ms (the tick edge sits
+    /// mid-frame, so a frame 3-9 ms late makes its tick and one 11-15 ms
+    /// late misses it). Returns what the other member was sent each tick:
+    /// `(tick time, Some(frame index) | Some(-1) for silence | None)`.
+    fn bridge_jittered_over(
+        conf: &Conference,
+        a_in: &Sender<crate::RxFrame>,
+        b_out: &Receiver<Vec<i16>>,
+        frames: &[(i64, i64)],
+        ticks: std::ops::Range<i64>,
+    ) -> Vec<(i64, Option<i64>)> {
+        let mut arrivals = frames.to_vec();
+        arrivals.sort_unstable();
+        let mut next = 0;
+        let mut heard = Vec::new();
+        for t in ticks {
+            let now = 20 * t + 10;
+            while next < arrivals.len() && arrivals[next].0 <= now {
+                let (_, k) = arrivals[next];
+                let level = i16::try_from(100 * (k % 300 + 1)).unwrap();
+                a_in.send(crate::RxFrame::timed(frame(level), 20 * k, 20))
+                    .unwrap();
+                next += 1;
+            }
+            conf.tick_for_test();
+            let got: Vec<Vec<i16>> = b_out.try_iter().collect();
+            assert!(got.len() <= 1, "one frame per tick at most");
+            let idx = got.first().map(|f| {
+                if f[0] == 0 {
+                    -1
+                } else {
+                    // The mix re-quantizes 100 (k + 1) to a level a hair under it.
+                    (i64::from(f[0]) + 50) / 100 - 1
+                }
+            });
+            heard.push((now, idx));
+        }
+        heard
+    }
+
+    #[test]
+    fn bridge_output_has_no_stall_repeat_or_gap_under_arrival_jitter() {
+        // nodebench `speech_server_to_node`, S6 (iax-confjb): a member's
+        // frames arrive a few ms late, now and then two together, and one is
+        // lost. What the other member is sent must be the over in order, one
+        // frame per tick, with one frame of silence where the lost frame
+        // was: no stall, repeat or gap of the bridge's own making.
+        const N: i64 = 60;
+        const LOST: i64 = 31;
+        let conf = Conference::new(ConferenceConfig::default());
+        let (a_in, _a_out, _a) = join(&conf);
+        let (_b_in, b_out, _b) = join(&conf);
+        let late = [3, 8, 15, 4, 12, 6, 15, 3, 11, 9, 14, 5, 13, 7, 10];
+        let frames: Vec<(i64, i64)> = (0..N)
+            .filter(|&k| k != LOST)
+            .map(|k| {
+                let at = match k {
+                    // 22 ms late, arriving together with frame 21.
+                    20 | 21 => 20 * 21 + 2,
+                    // 18 ms late, together with 45.
+                    44 | 45 => 20 * 45,
+                    _ => 20 * k + late[usize::try_from(k).unwrap() % late.len()],
+                };
+                (at, k)
+            })
+            .collect();
+        let heard = bridge_jittered_over(&conf, &a_in, &b_out, &frames, 0..N + 20);
+        let sent: Vec<&(i64, Option<i64>)> = heard.iter().filter(|(_, f)| f.is_some()).collect();
+        let first = heard
+            .iter()
+            .position(|(_, f)| *f == Some(0))
+            .expect("the over was bridged");
+        let last = heard
+            .iter()
+            .rposition(|(_, f)| *f == Some(N - 1))
+            .expect("the over's last frame was bridged");
+        let over: Vec<i64> = heard[first..=last]
+            .iter()
+            .map(|(_, f)| f.unwrap_or(-2))
+            .collect();
+        let want: Vec<i64> = (0..N).map(|k| if k == LOST { -1 } else { k }).collect();
+        assert_eq!(over, want, "the over, tick by tick ({sent:?})");
+        // Latency: frame 0 was due at 0 ms and arrived at 3 ms. The cushion
+        // holds two frames (40 ms), and the tick edge adds under 20 ms.
+        let delay = heard[first].0 - frames[0].0;
+        assert!(
+            (40..60).contains(&delay),
+            "added delay {delay} ms, want 40-60"
+        );
+    }
+
+    #[test]
+    fn each_over_starts_on_a_fresh_cushion() {
+        // Over 1 has its sender's path step 62 ms slower halfway through:
+        // one frame misses its tick, the schedule slips once and the cushion
+        // deepens a tick. Over 2 (clean) starts on that deeper hold; over 3
+        // is back on the base hold. The delay never carries further.
+        let conf = Conference::new(ConferenceConfig::default());
+        let (a_in, _a_out, _a) = join(&conf);
+        let (_b_in, b_out, _b) = join(&conf);
+        let mut frames: Vec<(i64, i64)> = (0..20)
+            .map(|k| (20 * k + if k < 10 { 5 } else { 62 }, k))
+            .collect();
+        frames.extend((100..120).chain(200..220).map(|k| (20 * k + 5, k)));
+        let heard = bridge_jittered_over(&conf, &a_in, &b_out, &frames, 0..240);
+        let delay = |k: i64| {
+            let at = heard
+                .iter()
+                .find(|(_, f)| *f == Some(k))
+                .unwrap_or_else(|| panic!("frame {k} bridged"))
+                .0;
+            at - (20 * k + 5)
+        };
+        assert!((40..60).contains(&delay(0)), "over 1: {}", delay(0));
+        assert!((60..80).contains(&delay(100)), "over 2: {}", delay(100));
+        assert!((40..60).contains(&delay(200)), "over 3: {}", delay(200));
+        // Every frame of every over was bridged, and between the overs B was
+        // sent nothing once the hangover ran out.
+        for k in (0..20).chain(100..120).chain(200..220) {
+            delay(k);
+        }
+        let between = heard
+            .iter()
+            .filter(|(at, f)| (1000..1900).contains(at) && f.is_some())
+            .count();
+        assert_eq!(between, 0, "B's TX closed between the overs");
+    }
+
+    #[test]
+    fn a_late_member_never_holds_up_the_others() {
+        // A and C talk at once; A's frames 10-19 are held up 200 ms and then
+        // arrive in a burst. B hears C's over without a break, on C's own
+        // schedule, whatever A's cushion is doing.
+        let conf = Conference::new(ConferenceConfig::default());
+        let (a_in, _a_out, _a) = join(&conf);
+        let (_b_in, b_out, _b) = join(&conf);
+        let (c_in, _c_out, _c) = join(&conf);
+        let mut heard = Vec::new();
+        for t in 0..40_i64 {
+            let now = 20 * t + 10;
+            for k in 0..30_i64 {
+                let a_at = 20 * k + 4 + if (10..20).contains(&k) { 200 } else { 0 };
+                if (now - 20..now).contains(&a_at) {
+                    a_in.send(crate::RxFrame::timed(frame(1000), 20 * k, 20))
+                        .unwrap();
+                }
+                if (now - 20..now).contains(&(20 * k + 4)) {
+                    c_in.send(crate::RxFrame::timed(frame(3000), 20 * k, 20))
+                        .unwrap();
+                }
+            }
+            conf.tick_for_test();
+            heard.push(b_out.try_iter().next().map(|f| f[0]));
+        }
+        // C's first frame arrived at 4 ms and plays at the third tick (50 ms);
+        // its last plays 29 ticks later. B hears C at every one of them.
+        let c_only = first_sample(&[encode_sample(level_norm(3000))]);
+        for (t, got) in heard.iter().enumerate().take(32).skip(2) {
+            let got = got.unwrap_or_else(|| panic!("tick {t}: B was sent nothing"));
+            assert!(
+                f32::from(got) / 32768.0 >= c_only - 1e-3,
+                "tick {t}: B hears at least C, got {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn parrot_take_of_timestamped_frames_is_whole_at_the_unkey() {
+        // The parrot reads its caller with no cushion: under the PTT gate,
+        // every frame that arrived while keyed is in the take, the last one
+        // included.
+        let t = ParrotTuning {
+            playback_delay_ticks: 1,
+            silence_gap_ticks: 4,
+            vox_threshold_db: -40.0,
+            max_record_ticks: 500,
+        };
+        let conf = parrot_conf(t);
+        let key = Arc::new(AtomicBool::new(false));
+        let (rx_tx, rx) = channel();
+        let (tx_tx, tx_rx) = channel();
+        let _m = conf.add_member_keyed(rx, tx_tx, Arc::clone(&key));
+        key.store(true, Ordering::Relaxed);
+        for k in 0..5_i16 {
+            rx_tx
+                .send(crate::RxFrame::timed(
+                    frame(1000 * (k + 1)),
+                    20 * i64::from(k),
+                    20,
+                ))
+                .unwrap();
+            conf.tick_for_test();
+        }
+        key.store(false, Ordering::Relaxed);
+        for _ in 0..30 {
+            conf.tick_for_test();
+        }
+        let replay: Vec<i16> = std::iter::from_fn(|| tx_rx.try_recv().ok())
+            .map(|f| f[0])
+            .collect();
+        assert_eq!(replay, [1000, 2000, 3000, 4000, 5000]);
+    }
+
+    #[test]
+    fn a_late_tick_is_caught_up_not_lost() {
+        // nodebench, S6 under host load: a tick that woke 18-23 ms late used
+        // to push the whole schedule back a tick, so the bridge sent 49
+        // frames in that second and every member's input fell 20 ms further
+        // behind. A late tick is caught up; only a long stall is abandoned.
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        // On time: the next tick is one TICK on.
+        assert_eq!(next_tick_after(ms(20), ms(21)), ms(40));
+        // 23 ms late: the next tick is still due at 40, so it runs at once.
+        assert_eq!(next_tick_after(ms(20), ms(43)), ms(40));
+        // 90 ms late: still within the catch-up window.
+        assert_eq!(next_tick_after(ms(20), ms(110)), ms(40));
+        // A stall past the window resynchronises on now.
+        assert_eq!(next_tick_after(ms(20), ms(500)), ms(520));
+    }
+
+    #[test]
+    fn a_poisoned_conference_reads_as_holding_nothing_and_still_closes_tx() {
+        // The node pump asks every 50 ms whether a member's cushion still
+        // holds audio, and closes or opens link TX. If the mixing thread ever
+        // panicked holding the lock, those calls must not panic the pump too
+        // (links would stay keyed in their last state): the safe answer is
+        // "nothing held", and closing a member's TX must still work.
+        let conf = Conference::new(ConferenceConfig::default());
+        let (a_in, _a_out, a) = join(&conf);
+        for k in 0..3 {
+            a_in.send(crate::RxFrame::timed(frame(4000), 20 * k, 20))
+                .unwrap();
+        }
+        conf.tick_for_test();
+        assert!(conf.member_holds_audio(a));
+        let shared = Arc::clone(&conf.shared);
+        let _ = std::thread::spawn(move || {
+            let _guard = shared.lock().unwrap();
+            panic!("the mixing thread dies holding the lock");
+        })
+        .join();
+        assert!(conf.shared.is_poisoned());
+        assert!(
+            !conf.member_holds_audio(a),
+            "poisoned reads as nothing held"
+        );
+        conf.set_member_relay(a, true, false);
+        let s = conf
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(!s.members[0].receives, "TX closed despite the poison");
     }
 
     #[test]

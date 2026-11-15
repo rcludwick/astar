@@ -42,6 +42,7 @@
 mod announce;
 pub mod characterize;
 pub mod conference;
+mod dejitter;
 pub mod denoise;
 pub mod device;
 pub mod dtmf;

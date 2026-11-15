@@ -108,6 +108,15 @@ struct ConnectionIdentity {
     name: String,
 }
 
+/// How long after a source's key was last seen its cushioned audio may still
+/// hold the links keyed (iax-confjb). The bridge plays a member's frames up
+/// to [`astar_audio::conference::MAX_CUSHION_DRAIN`] (140 ms) after they
+/// arrive, and the pump that notices the key fall runs every 50 ms, so the
+/// last frames of an over are out within 190 ms of the last pump that saw the
+/// key up; 200 ms rounds that up. The tail only ever extends a key that was
+/// really there: voice from a source that never keyed keys nothing.
+const KEY_TAIL: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// One pooled connection: the canonical [`Call`] handle (dialed OR adopted),
 /// its event stream, and the routing facts the `Manager` owns.
 struct Connection {
@@ -148,6 +157,10 @@ struct Connection {
     /// in the mix-minus [`Conference`], `None` for handset / monitor-bus calls.
     /// Removed on `remove`/`hangup` so the mix thread stops summing it.
     member: Option<MemberId>,
+    /// The last [`Manager::sync_link_keying`] pass that saw this call's peer
+    /// keyed (iax-confjb). Its cushioned audio may hold the links keyed for
+    /// [`KEY_TAIL`] after that, and never when it was never keyed.
+    key_seen_at: Option<std::time::Instant>,
 }
 
 /// Secret-free snapshot of the whole pool. The single read surface for
@@ -826,17 +839,13 @@ impl Manager {
     /// a link that relays onward (`Transceive` or `Monitor`, not `LocalMonitor`)
     /// whose far end is keyed, and another peer member that is talking. The conference is touched only for a member whose state
     /// changed.
-    fn sync_peer_receive(&mut self) {
+    fn sync_peer_receive(&mut self, now: std::time::Instant) {
         if self.peer_members.is_empty() {
             return;
         }
         let other_keyed = self.calls.iter().any(|(id, conn)| {
             let counts = self.links.get(id).is_none_or(|l| l.mode.relays_onward());
-            counts
-                && conn
-                    .call
-                    .remote_keyed_handle()
-                    .load(std::sync::atomic::Ordering::Relaxed)
+            counts && self.source_talking(conn, now)
         });
         let keyed_peers = self.peer_members.values().filter(|p| p.keyed).count();
         let Some(conf) = self.conference.as_ref() else {
@@ -1182,6 +1191,7 @@ impl Manager {
                 tx_sender,
                 preroll_lead,
                 member: None,
+                key_seen_at: None,
             },
         );
         // iax-6a3f: in conference/bridge mode a dialed call must JOIN the mix,
@@ -1295,6 +1305,7 @@ impl Manager {
                 // prepends the onset frames ahead of the live stream).
                 preroll_lead: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 member,
+                key_seen_at: None,
             },
         );
         Ok(id)
@@ -1960,6 +1971,11 @@ impl Manager {
         // up once the speech has fully drained. If the FSM can't resolve the
         // announcement (e.g. TTS disabled), hang up anyway: the report is
         // best-effort, never a reason to leave the leg parked.
+        //
+        // Except an AllStarLink node link (an app_rpt peer): it stays up after
+        // its report, so the node can talk again (Rob, 2026-11-14; nodebench
+        // `parrot_echoes_speech`, RIG.md S2). A node that links to a parrot
+        // expects the link to stay, as with any node it links to.
         let reports = self
             .conference
             .as_ref()
@@ -1973,13 +1989,19 @@ impl Manager {
                 .calls
                 .get(&call)
                 .and_then(|c| c.call.snapshot().negotiated_format);
+            let node_link = self
+                .calls
+                .get(&call)
+                .is_some_and(|c| c.call.is_app_rpt_peer());
             let req = crate::announce::AnnounceRequest {
                 phrase: crate::announce::Phrase::Text(astar_audio::render_report(&report, codec)),
                 destination: crate::announce::Destination::ToAir,
                 policy: crate::announce::AnnouncePolicy::Seize,
                 priority: 6,
             };
-            match self.announce_to_member(call, req, std::time::Duration::from_secs(1)) {
+            let spoken = self.announce_to_member(call, req, std::time::Duration::from_secs(1));
+            match spoken {
+                _ if node_link => {}
                 Ok(()) => self.parrot_pending_hangup.push((call, member)),
                 Err(_) => {
                     let _ = self.hangup(call, Some("signal report complete".into()));
@@ -2290,20 +2312,32 @@ impl Manager {
     /// Returns the number of links whose keyed state changed; peer members are
     /// not counted.
     pub fn sync_link_keying(&mut self) -> usize {
-        self.sync_peer_receive();
+        self.sync_link_keying_at(std::time::Instant::now())
+    }
+
+    /// [`Manager::sync_link_keying`] at a given time (tests drive the clock).
+    fn sync_link_keying_at(&mut self, now: std::time::Instant) -> usize {
+        for conn in self.calls.values_mut() {
+            if conn
+                .call
+                .remote_keyed_handle()
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                conn.key_seen_at = Some(now);
+            }
+        }
+        self.sync_peer_receive(now);
         if self.links.is_empty() {
             return 0;
         }
         // Sources are pooled calls that are NOT links: conference members
         // (handsets, inbound node legs) whose peer has signalled PTT — and
         // peer members that are talking.
-        let any_source_keyed = self.calls.iter().any(|(id, conn)| {
-            !self.links.contains_key(id)
-                && conn
-                    .call
-                    .remote_keyed_handle()
-                    .load(std::sync::atomic::Ordering::Relaxed)
-        }) || self.peer_members.values().any(|p| p.keyed);
+        let any_source_keyed = self
+            .calls
+            .iter()
+            .any(|(id, conn)| !self.links.contains_key(id) && self.source_talking(conn, now))
+            || self.peer_members.values().any(|p| p.keyed);
         let targets: Vec<CallId> = self
             .links
             .values()
@@ -2335,6 +2369,34 @@ impl Manager {
             self.set_link_tx_enabled(call, any_source_keyed);
         }
         changed
+    }
+
+    /// Whether a call counts as talking for the keying of other legs: its
+    /// peer is keyed, or it was keyed within [`KEY_TAIL`] and the conference
+    /// still holds audio of its over that it has not played yet
+    /// (iax-confjb). The bridge plays a member 40-60 ms behind its arrival,
+    /// and the peer's `RADIO_UNKEY` follows its last voice frame at once, so
+    /// going by the key alone cut the over's end off. The tail only extends a
+    /// key that was really there: a source that never keyed (its voice passes
+    /// unkeyed, as a plain IAX2 client's or a NEWKEY `app_rpt` node's does)
+    /// counts exactly as it did before the cushion.
+    fn source_talking(&self, conn: &Connection, now: std::time::Instant) -> bool {
+        if conn
+            .call
+            .remote_keyed_handle()
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return true;
+        }
+        let in_tail = conn
+            .key_seen_at
+            .is_some_and(|t| now.saturating_duration_since(t) < KEY_TAIL);
+        in_tail
+            && conn.member.is_some_and(|m| {
+                self.conference
+                    .as_ref()
+                    .is_some_and(|c| c.member_holds_audio(m))
+            })
     }
 
     /// Enable/disable a link member's conference TX (iax-5b8e). Transmit-only:
@@ -5083,6 +5145,152 @@ mod link_layer_tests {
             .store(false, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(mgr.sync_link_keying(), 1);
         assert!(!mgr.calls[&link].call.snapshot().keyed);
+    }
+
+    /// A bridge-mode manager whose conference is built but NOT started, so a
+    /// test drives its ticks itself ([`Conference::tick_once`]); a source leg
+    /// with its RX injector; a transceive link; and a peer member.
+    fn keying_rig() -> (
+        Manager,
+        CallId,
+        std::sync::mpsc::Sender<astar_audio::RxFrame>,
+        CallId,
+        astar_audio::MemberId,
+    ) {
+        let mut mgr = test_manager();
+        mgr.set_bridge_config(BridgeConfig {
+            mode: BridgeMode::Bridge,
+            mix_minus: true,
+            include_local_radio: false,
+            parrot: None,
+        })
+        .unwrap();
+        mgr.conference = Some(Conference::new(ConferenceConfig {
+            sample_rate: mgr.config.sample_rate,
+            ..ConferenceConfig::default()
+        }));
+        let (source_call, source_rx, _source_tx) =
+            test_support::fake_inbound_call_wired(CallId(1), "1001");
+        let source = mgr.adopt(source_call, &OutputId::new("out:s")).unwrap();
+        let link = mgr
+            .adopt(
+                test_support::fake_inbound_call(CallId(2), "55553"),
+                &OutputId::new("out:s"),
+            )
+            .unwrap();
+        mgr.route(link, &MicId::new("in:a")).unwrap();
+        mgr.add_link(link, "55553", LinkMode::Transceive).unwrap();
+        let peer = mgr.add_peer_member().expect("a peer member").id;
+        (mgr, source, source_rx, link, peer)
+    }
+
+    fn voice(k: i64) -> astar_audio::RxFrame {
+        astar_audio::RxFrame::timed(vec![4000; 160], 20 * k, 20)
+    }
+
+    fn holds(mgr: &Manager, call: CallId) -> bool {
+        let member = mgr.calls[&call].member.expect("a conference member");
+        mgr.conference
+            .as_ref()
+            .expect("conference")
+            .member_holds_audio(member)
+    }
+
+    #[test]
+    fn a_link_stays_keyed_until_the_bridge_has_played_the_over() {
+        // iax-confjb: the bridge holds each member's audio back 40-60 ms. The
+        // source's RADIO_UNKEY follows its last voice frame at once, so a
+        // link that unkeyed on it lost the over's last frames (nodebench
+        // `speech_server_to_node`, a 40 ms gap at the end). The link follows
+        // the source's audio: keyed until the bridge has played what it
+        // still holds of the over.
+        let (mut mgr, source, source_rx, link, _peer) = keying_rig();
+        let t0 = std::time::Instant::now();
+        let keyed = mgr.calls[&source].call.remote_keyed_handle();
+        keyed.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(mgr.sync_link_keying_at(t0), 1);
+
+        // The last frames of the over, then the unkey.
+        for k in 0..4 {
+            source_rx.send(voice(k)).unwrap();
+        }
+        let conf = mgr.conference.as_ref().expect("conference");
+        conf.tick_once();
+        assert!(holds(&mgr, source));
+        keyed.store(false, std::sync::atomic::Ordering::Relaxed);
+        let t1 = t0 + std::time::Duration::from_millis(20);
+        assert_eq!(mgr.sync_link_keying_at(t1), 0, "still playing the over");
+        assert!(mgr.calls[&link].call.snapshot().keyed);
+
+        let mut ticks = 0;
+        while holds(&mgr, source) {
+            mgr.conference.as_ref().expect("conference").tick_once();
+            ticks += 1;
+            assert!(ticks < 20, "the bridge played them");
+        }
+        assert_eq!(
+            mgr.sync_link_keying_at(t1),
+            1,
+            "unkeys once the over is out"
+        );
+        assert!(!mgr.calls[&link].call.snapshot().keyed);
+    }
+
+    #[test]
+    fn voice_without_a_key_never_keys_a_link_or_opens_a_peer() {
+        // The cushion may extend a key that really happened; it may never
+        // make one. A source whose voice passes without RADIO_KEY (a plain
+        // IAX2 client, astar's own client, an app_rpt node in NEWKEY mode,
+        // which keys by voice and never sends RADIO_KEY) streaming for as
+        // long as it likes keys nothing, exactly as before the cushion.
+        let (mut mgr, source, source_rx, link, peer) = keying_rig();
+        let t0 = std::time::Instant::now();
+        for k in 0..100_i64 {
+            source_rx.send(voice(k)).unwrap();
+            mgr.conference.as_ref().expect("conference").tick_once();
+            let now = t0 + std::time::Duration::from_millis(20 * k.unsigned_abs());
+            assert_eq!(mgr.sync_link_keying_at(now), 0, "frame {k}");
+            assert!(!mgr.calls[&link].call.snapshot().keyed, "frame {k}");
+            assert!(
+                !mgr.peer_members[&peer].open,
+                "frame {k}: peer stays closed"
+            );
+        }
+        assert!(holds(&mgr, source), "the cushion held audio all along");
+    }
+
+    #[test]
+    fn the_cushion_tail_after_an_unkey_is_bounded() {
+        // A keyed source unkeys but its voice keeps coming (a stuck stream,
+        // or a peer whose voice passes regardless of key). The link stays
+        // keyed while the cushion drains, but never longer than
+        // KEY_TAIL after the key was last seen.
+        let (mut mgr, source, source_rx, link, _peer) = keying_rig();
+        let t0 = std::time::Instant::now();
+        let keyed = mgr.calls[&source].call.remote_keyed_handle();
+        keyed.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(mgr.sync_link_keying_at(t0), 1);
+        keyed.store(false, std::sync::atomic::Ordering::Relaxed);
+        let mut unkeyed_at = None;
+        for k in 0..50_i64 {
+            source_rx.send(voice(k)).unwrap();
+            mgr.conference.as_ref().expect("conference").tick_once();
+            let since = std::time::Duration::from_millis(20 * k.unsigned_abs());
+            mgr.sync_link_keying_at(t0 + since);
+            if unkeyed_at.is_none() && !mgr.calls[&link].call.snapshot().keyed {
+                unkeyed_at = Some(since);
+            }
+            assert!(holds(&mgr, source) || k < 3, "frame {k}: still streaming");
+        }
+        let unkeyed_at = unkeyed_at.expect("the link unkeyed while voice kept coming");
+        assert!(
+            unkeyed_at > std::time::Duration::ZERO,
+            "the tail held it a while"
+        );
+        assert!(
+            unkeyed_at <= KEY_TAIL,
+            "unkeyed {unkeyed_at:?} after, tail {KEY_TAIL:?}"
+        );
     }
 
     #[test]

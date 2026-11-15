@@ -21,6 +21,7 @@ mod keepalive;
 mod links;
 mod register;
 mod smoke;
+mod speech_echo;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -294,6 +295,8 @@ pub fn registry() -> Vec<Box<dyn Scenario>> {
         Box::new(codecs::AuthVariants),
         Box::new(audio_paths::AudioNodeToServer),
         Box::new(audio_paths::AudioServerToNode),
+        Box::new(speech_echo::ParrotEchoesSpeech),
+        Box::new(speech_echo::SpeechServerToNode),
         Box::new(keepalive::KeepaliveExchange),
         Box::new(dtmf::DtmfLinkCommand),
         Box::new(handshake::CalltokenRetransmit),

@@ -111,6 +111,9 @@ pub(crate) fn spawn_call_runtime(
     // AppEvent::RemotePtt fires (parrot mode's per-leg key gate).
     let remote_keyed = Arc::new(AtomicBool::new(false));
     let remote_keyed_for_loop = Arc::clone(&remote_keyed);
+    // Whether the far end is an app_rpt node, published by the run-loop.
+    let app_rpt_peer = Arc::new(AtomicBool::new(false));
+    let app_rpt_peer_for_loop = Arc::clone(&app_rpt_peer);
 
     let waker_for_caller = Arc::clone(&p.waker);
     let SpawnParams {
@@ -163,11 +166,12 @@ pub(crate) fn spawn_call_runtime(
                 format_bits_for_loop,
                 sample_rate,
                 remote_keyed_for_loop,
+                app_rpt_peer_for_loop,
                 packet_tap,
             );
         })?;
 
-    let call = if pooled {
+    let mut call = if pooled {
         Call::new_pooled(
             cmd_tx,
             waker_for_caller,
@@ -195,6 +199,7 @@ pub(crate) fn spawn_call_runtime(
             remote_keyed,
         )
     };
+    call.set_app_rpt_cell(app_rpt_peer);
     Ok((call, event_rx))
 }
 
@@ -367,11 +372,22 @@ fn run_loop(
     format_bits: Arc<AtomicU32>,
     sample_rate: u32,
     remote_keyed: Arc<AtomicBool>,
+    app_rpt_peer: Arc<AtomicBool>,
     mut packet_tap: Option<CallPacketTap>,
 ) {
     use mio::{Events, Token};
 
     const SOCK: Token = Token(0);
+
+    // The link log (target `astar_iax::link`): `link starting` now, the rest
+    // as the call goes; dropping it on any return writes `link ended`.
+    let mut link_log = crate::link_log::LinkLog::start(
+        crate::link_log::LinkDirection::Outbound,
+        peer,
+        &dest,
+        our_call.value(),
+        true,
+    );
 
     let Ok(mut sock) = net.bind("0.0.0.0:0".parse().unwrap()) else {
         return;
@@ -427,7 +443,7 @@ fn run_loop(
     let mut keying = if is_web_transceiver {
         crate::link_keying::LinkKeying::off()
     } else {
-        crate::link_keying::LinkKeying::default()
+        crate::link_keying::LinkKeying::default().publishing(app_rpt_peer)
     };
 
     // Kick the call.
@@ -450,6 +466,7 @@ fn run_loop(
         &mut edge,
         &mut rx_clock,
         &mut keying,
+        &mut link_log,
     ) {
         return;
     }
@@ -522,6 +539,7 @@ fn run_loop(
                 && keying.is_app_rpt()
                 && matches!(fsm.state(), SessionState::Active(_))
             {
+                link_log.on_local_hangup(cause.as_deref());
                 let actions = fsm.handle(Event::App(AppCommand::SendText(
                     crate::link_keying::DISCONNECT.into(),
                 )));
@@ -540,6 +558,7 @@ fn run_loop(
                     &mut edge,
                     &mut rx_clock,
                     &mut keying,
+                    &mut link_log,
                 ) {
                     return;
                 }
@@ -568,6 +587,7 @@ fn run_loop(
                         &mut edge,
                         &mut rx_clock,
                         &mut keying,
+                        &mut link_log,
                     ) {
                         return;
                     }
@@ -592,6 +612,7 @@ fn run_loop(
                         &mut edge,
                         &mut rx_clock,
                         &mut keying,
+                        &mut link_log,
                     );
                     return;
                 }
@@ -623,6 +644,7 @@ fn run_loop(
                 &mut edge,
                 &mut rx_clock,
                 &mut keying,
+                &mut link_log,
             );
             if terminated || p.then_shutdown {
                 return;
@@ -685,6 +707,7 @@ fn run_loop(
                                 &mut edge,
                                 &mut rx_clock,
                                 &mut keying,
+                                &mut link_log,
                             ) {
                                 return;
                             }
@@ -721,6 +744,7 @@ fn run_loop(
                                 &mut edge,
                                 &mut rx_clock,
                                 &mut keying,
+                                &mut link_log,
                             ) {
                                 return;
                             }
@@ -760,6 +784,7 @@ fn run_loop(
                 &mut edge,
                 &mut rx_clock,
                 &mut keying,
+                &mut link_log,
             ) {
                 return;
             }
@@ -838,6 +863,7 @@ fn run_loop(
                 &mut edge,
                 &mut rx_clock,
                 &mut keying,
+                &mut link_log,
             ) {
                 return;
             }
@@ -866,6 +892,7 @@ fn run_loop(
                 &mut edge,
                 &mut rx_clock,
                 &mut keying,
+                &mut link_log,
             ) {
                 return;
             }
@@ -933,12 +960,14 @@ fn dispatch_actions(
     edge: &mut crate::codec_edge::EdgeAudio,
     rx_clock: &mut crate::rx_clock::RxTimestamps,
     keying: &mut crate::link_keying::LinkKeying,
+    link_log: &mut crate::link_log::LinkLog,
 ) -> bool {
     let now = Instant::now();
     let mut terminated = false;
     for action in actions {
         match action {
             Action::SendReliable(frame) => {
+                link_log.on_send(&frame);
                 let bytes = rel.enqueue(frame, now);
                 let _ = sock.send(&bytes);
                 tracer.record(crate::trace::Direction::Out, &bytes);
@@ -961,6 +990,7 @@ fn dispatch_actions(
             }
             Action::AppEvent(ev) => {
                 keying.observe(&ev, now);
+                link_log.on_app_event(&ev, negotiated_format);
                 // Keystone: publish coarse connection-state for Call::snapshot.
                 match &ev {
                     AppEvent::Connected { .. } => {

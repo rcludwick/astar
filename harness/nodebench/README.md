@@ -68,7 +68,7 @@ failed, and 2 when the rig would not come up or the arguments were wrong.
 | `--reuse` | Use a pod that is already up: no `kube play` and no teardown. |
 | `--replace` | Recreate the pod if one exists. Without it, `run` refuses. |
 | `--hold-secs N` | The window for every "link holds" check (default 60). |
-| `--json-out DIR` | Base directory for runs (default `target/nodebench`). |
+| `--json-out DIR` | Base directory for runs (default `target/nodebench`, or `.nodebench` when `target` is a symlink; see below). |
 | `--var KEY=VALUE` | Set a `@KEY@` placeholder in the kube file, e.g. `--var CODECS=ulaw` or `--var USRP_HOST=10.0.2.2`. |
 | `--rig-dir DIR` | Where `pod.yaml` and `nat.yaml` live (default this directory). |
 | `--connection NAME` | podman connection. Defaults to `$CONTAINER_CONNECTION`. |
@@ -104,6 +104,9 @@ The status column is from the full end-to-end run on 2026-10-12 (run
 scenarios, 100 of 100 checks pass, after the fixes for every RIG.md finding.
 A **FAIL** in a later run is a real astar-server bug until shown otherwise.
 
+`parrot_echoes_speech` and `speech_server_to_node` were added on 2026-11-13
+and 14 (`work/link-proof`); RIG.md "Speech echo" has their runs.
+
 | id | What it checks | Status |
 |---|---|---|
 | `rig_ready` | app_rpt loaded 1999, AMI logs in, astar-server is listening | PASS |
@@ -117,6 +120,8 @@ A **FAIL** in a later run is a real astar-server bug until shown otherwise.
 | `auth_variants` | astar-server `auth = off/optional/required` against anonymous, right and wrong secrets; a "refused" cell needs the node's NEW and a REJECT/HANGUP on the wire | PASS, 6 of 6 |
 | `audio_node_to_server` | USRP 1 kHz into the node, heard by an IAX probe on astar-server's bridge: frequency, level, SNR (median per 20 ms frame, dropouts counted), onset, loss | PASS |
 | `audio_server_to_node` | the probe sends 700 Hz into the bridge, recorded from the node's USRP | PASS (finding 6 fixed) |
+| `parrot_echoes_speech` | astar-server in parrot mode; the node keys the spoken test phrase in over USRP, twice on the same link. Each echo astar-server puts on the link (decoded from the capture) must match the over it received: whole, first and last 200 ms, correlation, level, no gaps/repeats/stalls. The echo at the node's radio must carry 90 % of the phrase at the right level. Each echo starts 800 + 3000 ms after the node's UNKEY, and the link is still up 5 s after each. Normal and ulaw-only node. | PASS (S1, S2 and S3 fixed; RIG.md, Speech echo) |
+| `speech_server_to_node` | the other way: the IAX probe speaks the phrase into astar-server's bridge, and the node transmits it. The bridge's output on the link must match the probe's audio as it reached astar-server; the node keys for the over, carries 90 % of the phrase at the right level, unkeys after it, and the link and probe are still up 5 s later. Normal and ulaw-only node, astar-server dialling and the node dialling. | PASS (S6 fixed: the bridge's inputs have a 40 ms jitter cushion; RIG.md, Speech echo) |
 | `keepalive_exchange` | PING/PONG, LAGRQ/LAGRP and app_rpt TEXT keepalives are each answered (pcap) | PASS |
 | `dtmf_link_command` | `[dtmf]` on: the probe sends `*11999#` and the server drops 1999 | PASS (the doubled `#` went with finding 4; the drop takes 0.1 s since finding 3) |
 | `calltoken_retransmit` | raw IAX2 from the host: a NEW retransmitted without its token gets CALLTOKEN again, not REJECT, and the token NEW is accepted | PASS (fixed `ca622a2`) |
@@ -128,7 +133,17 @@ node with no address, and that would query AllStar DNS.
 ## Reading a report
 
 Each run gets a directory, `target/nodebench/<run-id>/`, where the run id is
-a UTC timestamp such as `20261011T212733Z`:
+a UTC timestamp such as `20261011T212733Z`. The first line a run prints names
+the folder it chose and why.
+
+**When `target` is a symlink, runs go to `.nodebench/` instead.** The pod
+mounts the run directory's `pcap/` folder for its captures, and on a Mac the
+podman machine can only see the home directory. If `target` links to another
+volume (as `just link-builds` makes it), `podman kube play` fails with
+`failed to create volume "captures": mkdir …/target: file exists`. So when
+`<repo>/target` is a symlink, the default is `<repo>/.nodebench/<run-id>/`,
+which is git-ignored. `nodebench serve` reads from the same default, and
+`--json-out DIR` (or `--runs DIR` for `serve`) still overrides it.
 
 | Path | What |
 |---|---|
@@ -217,7 +232,7 @@ The job's steps:
 1. A preflight that fails with a pointer here when podman cannot nest.
 2. `rig.sh build`.
 3. `nodebench run --replace --var USRP_HOST=10.0.2.2`.
-4. Upload `target/nodebench/` as `nodebench-report`.
+4. Upload `target/nodebench/` as `nodebench-report` (CI's `target` is a real folder, so the default stays there).
 5. `rig.sh down`.
 
 **It cannot run on the IONOS runner today.** As of 2026-10-11, the

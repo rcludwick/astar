@@ -117,6 +117,102 @@ carries on with safe defaults rather than exiting — a daemon under
     `POST /key` cannot reach it. What the monitor hears is still relayed to
     the node's AllStar and EchoLink members, and their radios transmit it.
 
+## Reading the link log
+
+Every AllStarLink link the node makes or answers writes a short story to its
+log: one line when the call starts, one when the codec is agreed, one when the
+link comes up, and one when it ends. The log is the server's standard output,
+so it goes wherever your service manager puts that. In the usual container,
+named `iaxnode`, read it with:
+
+```bash
+podman logs --since 1h iaxnode | grep astar_iax::link
+```
+
+If the container hands its output to journald (`--log-driver journald`), the
+same lines are in the journal, and they survive a container restart:
+
+```bash
+journalctl CONTAINER_NAME=iaxnode --since today | grep astar_iax::link
+```
+
+Every line carries the same four fields first, so you can follow one link
+through the log even while several are up at once:
+
+| Field | Means |
+|---|---|
+| `direction` | `in` when the far node called this one, `out` when this node dialled it. |
+| `peer` | The far end's IP address and UDP port. |
+| `node` | The node number the caller claims to be (`in`), or the number this node dialled (`out`). `?` when a caller sent neither a number nor a username. The caller chooses this text, so the log keeps at most 64 characters of it and writes any control character or space in it as `?`. |
+| `call` | This node's own call number for the link, which tells apart two links from one address. |
+
+Here is one link from start to finish, a far node calling in and then hanging
+up after about two and a half seconds (the timestamps are shortened):
+
+```text
+02:58:55.053Z  INFO astar_iax::link: link starting direction=in peer=203.0.113.7:4569 node=1999 call=1
+02:58:55.053Z  INFO astar_iax::link: link codec settled direction=in peer=203.0.113.7:4569 node=1999 call=1 codec=ulaw
+02:58:55.054Z  INFO astar_iax::link: link up direction=in peer=203.0.113.7:4569 node=1999 call=1 setup_ms=0
+02:58:57.512Z  INFO astar_iax::link: link ended direction=in peer=203.0.113.7:4569 node=1999 call=1 ended_by=them cause="Normal Clearing" duration_s=2.5 was_up=true
+02:58:57.512Z  WARN astar_iax::link: short link: it ended less than 10 s after coming up direction=in peer=203.0.113.7:4569 node=1999 call=1 ended_by=them duration_s=2.5
+```
+
+Taking the lines one at a time:
+
+* **`link starting`** is written the moment this node dials out. For a call
+  that arrives, it is written once the caller has proved its address is real.
+  The node answers a caller's first request with a *call token*, a value the
+  caller has to send back with its next request, and only a caller at the
+  address it claims ever sees the token. The node counts the token's age in
+  whole seconds and accepts it up to ten, so a token is good for between ten
+  and eleven seconds after it was sent, and only from that address and that
+  call. Until it comes back the node
+  keeps nothing for the caller at all, so a scanner or a forged address
+  costs it nothing and writes nothing in the log. A request carrying a token
+  that is wrong or too old is refused at once. If the node is set not to ask
+  for tokens, `link starting` is written as soon as the call arrives.
+  A call refused for a bad request or an unknown user has its own line
+  instead: `rejecting inbound call`, on the target `astar_iax::listener`,
+  with the `cause` it was refused for.
+* **`link codec settled`** names the voice codec both ends agreed on, in the
+  spelling Asterisk uses: `ulaw`, `alaw`, `gsm`, `slin` or `slin16`.
+* **`link up`** means the call was answered and audio can flow. `setup_ms` is
+  how long that took after `link starting`; on a link this node dials, it
+  includes the network round trip and any authentication.
+* **`link ended`** says how the link finished:
+    * `ended_by` is `us` when this node hung up (an operator, a DTMF or Discord
+      command, a reject, or the server shutting down), `them` when the far end
+      sent a hangup or a reject, and `timeout` when the far end stopped
+      answering and this node gave up on it.
+    * `cause` is the cause text from the hangup or reject, when there was one,
+      such as `"Normal Clearing"`. Otherwise it describes what the node saw:
+      `"peer timed out (in Active)"` for a far end that went silent while the
+      link was up, `"hung up locally"` for our own hangup with no reason given.
+      Like `node`, a cause sent by the far end is cut to 64 characters, with
+      control characters written as `?`.
+    * A hangup counts as ours from the moment this node starts it on the
+      wire. When this node hangs up on an AllStar node, it first sends
+      `!!DISCONNECT!!` and waits a quarter of a second before the hangup
+      itself. The far node usually hangs up during that wait, in answer, and
+      the line still says `us`, with our cause. Only a hangup that arrives
+      while this node had sent nothing toward ending the link says `them`.
+    * `duration_s` is how long the link was up, in seconds. For a call that
+      never came up it counts from `link starting` instead, and `was_up` is
+      `false`.
+* **`short link`** is a warning written alongside `link ended` when a link
+  that came up lasted less than ten seconds. A healthy link stays up for
+  minutes or hours, so this is the line to search for when a far node reports
+  that its link to yours keeps dropping:
+
+    ```bash
+    podman logs iaxnode | grep 'short link'
+    ```
+
+    The `link ended` line just above it says who ended the link and why.
+
+The log never holds the node secret, a password or a call token. It writes
+nothing per audio packet, so a link that stays up for a day costs four lines.
+
 ## Working on it
 
 The crate is `crates/astar-server`, about 6,400 lines of Rust. Where things

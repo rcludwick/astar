@@ -47,6 +47,8 @@ apps/gui/.shots/
 /.cache/
 
 # ── harness / tooling scratch ────────────────────────────────────────────────
+# nodebench run output when target/ is a symlink the podman machine cannot follow
+/.nodebench/
 harness/asterisk_parity/captures/*.pcap
 harness/asterisk_parity/captures/*.pcapng
 deploy/out/

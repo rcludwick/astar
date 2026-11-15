@@ -24,6 +24,8 @@
 //! * [`soak`] holds a link for hours and logs every drop (and plays the
 //!   nat topology).
 //! * [`serve`] is the results page on 127.0.0.1:8740.
+//! * [`speech`] is the committed test phrase and the comparison that says
+//!   whether it came back through a link whole.
 //!
 //! Nothing in `cargo test` needs a container; everything that touches the rig
 //! runs from the `nodebench` binary.
@@ -38,4 +40,5 @@ pub mod scenario;
 pub mod serve;
 pub mod server;
 pub mod soak;
+pub mod speech;
 pub mod time;

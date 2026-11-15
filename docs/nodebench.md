@@ -48,7 +48,8 @@ ever showed that.
   - It drives astar-server through its control HTTP API and SSE.
   - It puts audio on both sides: USRP into the node, and a third IAX2 peer
     (`astar-iax`) on astar-server's bridge.
-  - It reads the wire from the tshark sidecar, as decoded IAX2 full frames.
+  - It reads the wire from the tshark sidecar, as decoded IAX2 full frames,
+    and, for the speech echo, one direction's voice frames decoded to audio.
 
 Scenarios are plain Rust, one per file in `src/scenario/`. Each returns
 named checks, and each check passes, fails or skips with a reason. A failure
@@ -59,7 +60,7 @@ README "Adding a scenario".
 
 | Tier | Command | Status |
 |---|---|---|
-| Quick | `just nodebench` (`nodebench run`) | Built: 15 scenarios. Every finding below is fixed (2026-10-12, `work/iax-fixes`). |
+| Quick | `just nodebench` (`nodebench run`) | Built: 17 scenarios. Findings 1–8 are fixed (2026-10-12, `work/iax-fixes`), and so are the speech findings S1–S4 and S6 (2026-11-14, `work/link-proof`). |
 | Soak | `nodebench soak --hours N [--topology loopback\|nat] [--udp-timeout S]` | Built alongside this page (W5). The `nat` topology runs on podman `--internal` networks. |
 | Results page | `nodebench serve`, on http://127.0.0.1:8740 | Built alongside this page (W5) |
 | Release | `just nodebench-release`: urfd/xlxd, mrefd, YSF/NXDN reflectors, DMR masters, each built from pinned upstream source | Designed, not built |
@@ -87,6 +88,25 @@ RIG.md. The node behaves as stock app_rpt does.
 
 `docs/BACKLOG.md` `iax-cnlink` has the reasoning about which of these could
 be Rob's drop.
+
+## The speech echo (2026-11-13)
+
+`parrot_echoes_speech` sends a spoken phrase through a node link into
+astar-server's parrot, twice on one link, and compares each echo with it, on
+the link and at the node's radio; the echo on the link must match the over
+astar-server received. `speech_server_to_node` sends the phrase the other
+way, from an IAX2 probe on astar-server's bridge to the node's radio.
+RIG.md "Speech echo" has the thresholds, the measured runs and the
+evidence.
+
+| # | Finding | Status |
+|---|---|---|
+| S1 | The parrot's VOX take left out the quiet frames between words, so a 5.18 s phrase came back as 3.72 s with its pauses squeezed out | Fixed (`2ed1dd9`) |
+| S2 | The parrot hung up the link after every echo (`!!DISCONNECT!!` 7 ms after the last echo frame), so a node that linked to it was dropped | Fixed (`803adb3`, Rob's ruling): an AllStarLink node link stays up after its echo; other callers are still hung up after their report |
+| S3 | A conference member's input had no jitter cushion: a frame a few ms late missed its 20 ms tick, and the parrot recorded the silent tick, so the echo got a 20 ms stall or a 40 ms repeat the over did not have | Fixed for the parrot (`90efb10`: a take records only frames the caller sent); for the bridge, S6 |
+| S4 | When astar-server ended a link with `!!DISCONNECT!!` and the node hung up inside the grace, the link log said `ended_by=them` | Fixed (`0abdc7c`): it says `us` |
+| S5 | app_rpt's own parrot plays only to its own transmitter, never to its links, so there can be no "node parrot" echo scenario; `parrot = 2` does not even turn it on (it takes `parrot = yes`) | Not an astar-server issue; the scenario was dropped |
+| S6 | The bridge's output to a node had a 20 ms stall or a 40 ms repeat or gap the probe's input did not, in about half the overs (`speech_server_to_node`). Same cause as S3: the conference read each member once per tick with no cushion | Fixed (`f68a869`, `37de502`, `338d37a`): a 40 ms per-member jitter cushion played by the sender's timestamps, a mixing thread that catches up a late tick, and link keying that waits for the cushion to drain. 20 of 20 overs clean since |
 
 ## Safety, in one paragraph
 

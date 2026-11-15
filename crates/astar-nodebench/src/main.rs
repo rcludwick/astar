@@ -16,7 +16,7 @@
 
 use std::io::IsTerminal;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -25,7 +25,7 @@ use clap::{Args, Parser, Subcommand};
 
 use astar_nodebench::node::NodeDriver;
 use astar_nodebench::report::{EnvInfo, Report, ScenarioResult};
-use astar_nodebench::rig::{Rig, RigConfig, RigError, Topology};
+use astar_nodebench::rig::{Rig, RigConfig, RigError, Topology, default_output_dir};
 use astar_nodebench::scenario::{self, Check, Ctx, Outcome, Probe, Tuning, wait_until};
 use astar_nodebench::server::ServerClient;
 use astar_nodebench::soak;
@@ -97,7 +97,7 @@ struct RunArgs {
     /// Recreate the pod if it already exists (default: refuse).
     #[arg(long)]
     replace: bool,
-    /// Base directory for run output [default: <repo>/target/nodebench].
+    /// Base directory for run output [default: <repo>/target/nodebench, or <repo>/.nodebench when target is a symlink].
     #[arg(long, value_name = "DIR")]
     json_out: Option<PathBuf>,
     /// Override the hold window of "holds" checks (the design says 60).
@@ -143,7 +143,7 @@ struct SoakArgs {
     /// Recreate the rig if it already exists.
     #[arg(long)]
     replace: bool,
-    /// Base directory for run output [default: <repo>/target/nodebench].
+    /// Base directory for run output [default: <repo>/target/nodebench, or <repo>/.nodebench when target is a symlink].
     #[arg(long, value_name = "DIR")]
     json_out: Option<PathBuf>,
 }
@@ -153,7 +153,7 @@ struct ServeArgs {
     /// Address for the page; loopback only.
     #[arg(long, default_value = "127.0.0.1:8740")]
     bind: std::net::SocketAddr,
-    /// Directory of run directories [default: <repo>/target/nodebench].
+    /// Directory of run directories [default: <repo>/target/nodebench, or <repo>/.nodebench when target is a symlink].
     #[arg(long, value_name = "DIR")]
     runs: Option<PathBuf>,
 }
@@ -183,11 +183,7 @@ fn main() -> ExitCode {
         Cmd::Run(a) => run(&a),
         Cmd::Soak(a) => soak_cmd(&a),
         Cmd::Serve(a) => {
-            let base = a.runs.clone().unwrap_or_else(|| {
-                RigConfig::default_repo_root()
-                    .join("target")
-                    .join("nodebench")
-            });
+            let base = output_base(a.runs.as_ref(), &RigConfig::default_repo_root());
             match astar_nodebench::serve::serve(a.bind, &base) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
@@ -275,6 +271,25 @@ fn run_scenarios(
     }
 }
 
+/// The base output folder: the flag when given, else the rig's default.
+/// Says which on stderr, so a run never leaves its results somewhere unnamed.
+fn output_base(flag: Option<&PathBuf>, repo_root: &Path) -> PathBuf {
+    if let Some(d) = flag {
+        eprintln!(
+            "nodebench: output folder {} (from the command line)",
+            d.display()
+        );
+        return d.clone();
+    }
+    let out = default_output_dir(repo_root);
+    eprintln!(
+        "nodebench: output folder {} ({})",
+        out.path.display(),
+        out.why
+    );
+    out.path
+}
+
 fn run(a: &RunArgs) -> ExitCode {
     let selected = match scenario::select(&a.scenarios) {
         Ok(s) => s,
@@ -287,10 +302,7 @@ fn run(a: &RunArgs) -> ExitCode {
     cfg.replace = a.replace;
     let started = unix_now();
     let id = run_id(started);
-    let base = a
-        .json_out
-        .clone()
-        .unwrap_or_else(|| cfg.repo_root.join("target").join("nodebench"));
+    let base = output_base(a.json_out.as_ref(), &cfg.repo_root);
     let run_dir = base.join(&id);
     // Captures land straight in the run directory (a hostPath; on the Mac
     // the podman VM mounts the home directory at the same path), unless the
@@ -443,10 +455,7 @@ fn soak_plan(a: &SoakArgs, cfg: &RigConfig) -> Result<soak::SoakOptions, String>
             return Err(format!("--hours must be positive, got {hours}"));
         }
         let id = run_id(unix_now());
-        let base = a
-            .json_out
-            .clone()
-            .unwrap_or_else(|| cfg.repo_root.join("target").join("nodebench"));
+        let base = output_base(a.json_out.as_ref(), &cfg.repo_root);
         (
             base.join(&id),
             id,

@@ -249,6 +249,9 @@ pub struct Call {
     /// [`Call::remote_keyed_handle`] so a parrot member's PTT gate reflects
     /// the peer's remote key state (not just local VOX).
     remote_keyed: Arc<AtomicBool>,
+    /// Set by the run-loop once the far end shows itself as an `app_rpt`
+    /// node (`!NEWKEY1!` or its link TEXT); see [`Call::is_app_rpt_peer`].
+    app_rpt_peer: Arc<AtomicBool>,
     /// The packet log's id for this call. `None` when no tap watches it (the
     /// non-pooled raw-dial path).
     #[allow(clippy::struct_field_names)]
@@ -288,6 +291,7 @@ impl Call {
             adopt_tx_sender: None,
             adopt_sample_rate: None,
             remote_keyed,
+            app_rpt_peer: Arc::new(AtomicBool::new(false)),
             packet_call: None,
         }
     }
@@ -333,6 +337,7 @@ impl Call {
             adopt_tx_sender: None,
             adopt_sample_rate: None,
             remote_keyed,
+            app_rpt_peer: Arc::new(AtomicBool::new(false)),
             packet_call,
         }
     }
@@ -390,6 +395,7 @@ impl Call {
             adopt_tx_sender: Some(tx_sender),
             adopt_sample_rate: Some(sample_rate),
             remote_keyed,
+            app_rpt_peer: Arc::new(AtomicBool::new(false)),
             packet_call,
         }
     }
@@ -554,6 +560,28 @@ impl Call {
             digit,
             now: std::time::Instant::now(),
         })
+    }
+
+    /// Whether the far end is an `AllStarLink` node (`app_rpt`): it opened
+    /// with `!NEWKEY1!` or sent `app_rpt`'s link TEXT. A plain IAX2 client or
+    /// an astar app is not.
+    #[must_use]
+    pub fn is_app_rpt_peer(&self) -> bool {
+        self.app_rpt_peer.load(Ordering::Relaxed)
+    }
+
+    /// The run-loop's `app_rpt` cell (see [`Self::is_app_rpt_peer`]).
+    pub(crate) fn set_app_rpt_cell(&mut self, cell: Arc<AtomicBool>) {
+        self.app_rpt_peer = cell;
+    }
+
+    /// Send a TEXT frame to the peer (an `app_rpt` link string such as
+    /// `!NEWKEY1!`, for example).
+    ///
+    /// # Errors
+    /// Returns [`IaxError`] if the runtime thread has exited.
+    pub fn send_text(&self, text: &str) -> Result<(), IaxError> {
+        self.send(AppCommand::SendText(text.to_string()))
     }
 
     /// Smoothed round-trip estimate from the keepalive PING/PONG (and
