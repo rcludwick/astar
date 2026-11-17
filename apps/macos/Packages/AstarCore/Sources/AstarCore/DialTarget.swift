@@ -15,6 +15,16 @@ public enum DialTarget: Equatable {
     /// A direct dial address — "host" or "host:port" (IP or hostname). The
     /// port defaults to 4569 downstream when omitted.
     case address(String)
+    /// A node reached at an explicit address — "node@host" or
+    /// "node@host:port". The address is where the call is sent; the node is
+    /// the Web Transceiver destination, carried as `CALLING_NUMBER`, which a
+    /// stock ASL3 `[allstar-public]` dialplan hands straight to `Rpt()`. A bare
+    /// `.address` has no node to send, so the node rejects it after the
+    /// greeting ("Cannot find specified system node"). This form is for a
+    /// node whose published address is unreachable from here — the usual
+    /// case being your own node on the LAN behind a router with no NAT
+    /// hairpin.
+    case nodeAtAddress(node: String, address: String)
 
     /// Classify the dial field's raw text. Whitespace is trimmed first; the
     /// associated value is always the trimmed string. Returns nil for empty
@@ -22,6 +32,18 @@ public enum DialTarget: Equatable {
     public static func parse(_ raw: String) -> DialTarget? {
         let text = raw.trimmingCharacters(in: .whitespaces)
         guard !text.isEmpty else { return nil }
+
+        // Node-at-address: exactly one `@`, a plain node number on the left
+        // (a destination, so no `*`/`#` command characters) and a valid
+        // address on the right.
+        if text.contains("@") {
+            let halves = text.split(separator: "@", omittingEmptySubsequences: false)
+            guard halves.count == 2, !halves[0].isEmpty,
+                halves[0].allSatisfy({ $0.isASCII && $0.isNumber }),
+                case .address(let address) = parse(String(halves[1]))
+            else { return nil }
+            return .nodeAtAddress(node: String(halves[0]), address: address)
+        }
 
         // Node path: only digits and the `*`/`#` command-dial characters, with
         // at least one digit ("*" alone is a prefix, not a dial).
