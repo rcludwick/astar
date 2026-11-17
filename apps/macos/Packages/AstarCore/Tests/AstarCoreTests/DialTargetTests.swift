@@ -49,6 +49,36 @@ final class DialTargetTests: XCTestCase {
         XCTAssertEqual(DialTarget.parse("12345:4569"), .address("12345:4569"))
     }
 
+    func testNodeAtAddressCarriesBothHalves() {
+        // node@host[:port]: the node is the WT destination, the address is
+        // where the call goes. A bare address cannot name a node, which is
+        // why stock ASL3 nodes hang up on it after the greeting.
+        XCTAssertEqual(
+            DialTarget.parse("55553@127.0.0.1:4569"),
+            .nodeAtAddress(node: "55553", address: "127.0.0.1:4569"))
+        XCTAssertEqual(
+            DialTarget.parse("55553@127.0.0.1"),
+            .nodeAtAddress(node: "55553", address: "127.0.0.1"))
+        XCTAssertEqual(
+            DialTarget.parse("2@localhost:14569"),
+            .nodeAtAddress(node: "2", address: "localhost:14569"))
+        XCTAssertEqual(
+            DialTarget.parse(" 55553@node.example-net.com "),
+            .nodeAtAddress(node: "55553", address: "node.example-net.com"))
+    }
+
+    func testMalformedNodeAtAddressParsesToNil() {
+        XCTAssertNil(DialTarget.parse("@127.0.0.1"), "node half required")
+        XCTAssertNil(DialTarget.parse("55553@"), "address half required")
+        XCTAssertNil(DialTarget.parse("55553@@127.0.0.1"), "exactly one @")
+        XCTAssertNil(DialTarget.parse("1@2@127.0.0.1"), "exactly one @")
+        XCTAssertNil(DialTarget.parse("*355553@127.0.0.1"), "a destination, not a command")
+        XCTAssertNil(DialTarget.parse("node@127.0.0.1"), "node half is digits only")
+        XCTAssertNil(DialTarget.parse("55553@12345"), "right half must be an address")
+        XCTAssertNil(DialTarget.parse("55553@host:0"), "address half is validated")
+        XCTAssertNil(DialTarget.parse("55553 @127.0.0.1"), "no inner whitespace")
+    }
+
     func testWhitespaceIsTrimmed() {
         XCTAssertEqual(DialTarget.parse("  55553  "), .node("55553"))
         XCTAssertEqual(DialTarget.parse(" example.com "), .address("example.com"))

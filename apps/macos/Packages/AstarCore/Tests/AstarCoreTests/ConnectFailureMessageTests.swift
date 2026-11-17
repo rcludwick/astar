@@ -35,6 +35,15 @@ final class ConnectFailureMessageTests: XCTestCase {
             "Couldn’t reach my-node.example.com.")
     }
 
+    /// A node@address dial that fails to resolve failed on the address half;
+    /// the node was never looked up, so name the address.
+    func testResolveCodeForNodeAtAddressDialNamesTheAddress() {
+        let error = StationError(code: -6, text: "address resolution failed")
+        XCTAssertEqual(
+            connectFailureMessage(for: error, node: "55553@my-node.example.com:4569"),
+            "Couldn’t reach my-node.example.com:4569.")
+    }
+
     /// IAX_ERR_PORTAL (-5): the portal token mint failed — point the user at
     /// their AllStarLink account, not at the node.
     func testPortalCodeMapsToAccountWording() {

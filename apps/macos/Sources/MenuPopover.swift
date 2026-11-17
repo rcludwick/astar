@@ -1339,10 +1339,10 @@
             default:
                 return
                     "A node number dials through the AllStarLink registrar. "
-                    + "An IP or hostname (with optional :port, default 4569) "
-                    + "dials that address directly — for a node that isn’t "
-                    + "reachable at its published address (e.g. your own "
-                    + "node on localhost)."
+                    + "node@address (an IP or hostname, with optional :port, "
+                    + "default 4569) dials that node at that address directly — "
+                    + "for a node that isn’t reachable at its published address "
+                    + "(e.g. your own node on the LAN or on localhost)."
             }
         }
 
@@ -2347,17 +2347,22 @@
             case .allstar, .hamlink:
                 // Smart dial routing (astar-427f): digits dial as a node through
                 // the registrar; a host/host:port dials that address directly,
-                // with the typed address doubling as the display/recents label
-                // (safe — the WT dial's calling_number is the user's own node,
-                // never this string). Unparseable text is unreachable via the
-                // button (disabled) but can arrive via onSubmit — refuse it the
-                // same way as empty input.
+                // and node@host[:port] dials that node at that address. The
+                // typed text doubles as the display/recents label. The WT
+                // dial's CALLING_NUMBER is the destination node selector, so
+                // a bare address sends the address itself there; only the
+                // node@ form names a node the far end can `Rpt()` into
+                // (`CallSession.connectAllStar` splits it). Unparseable text
+                // is unreachable via the button (disabled) but can arrive via
+                // onSubmit — refuse it the same way as empty input.
                 guard let target = DialTarget.parse(node) else { return }
                 switch target {
                 case .node(let value):
                     dispatchConnect(node: value, network: network, address: nil)
                 case .address(let value):
                     dispatchConnect(node: value, network: network, address: value)
+                case .nodeAtAddress(_, let address):
+                    dispatchConnect(node: trimmedNode, network: network, address: address)
                 }
             case .m17, .dstar, .ysf, .nxdn, .dmr:
                 // Every reflector network resolves its target engine-side
