@@ -721,3 +721,289 @@ fn session_page_names_its_keys_and_motion_rule() {
         "the not-found page is styled"
     );
 }
+
+/// The first image file of a session, as the log names it, percent-encoded.
+fn first_image(s: &Setup, net: &str, session: &str) -> Option<(String, PathBuf)> {
+    let e = s.pages.archive().find(net, session).unwrap();
+    let rows = read_rows(&e.dir).unwrap();
+    rows.iter().find_map(|r| match &r.kind {
+        LogKind::Image { file, .. } => {
+            Some((crate::view::encode(file), e.dir.join("images").join(file)))
+        }
+        _ => None,
+    })
+}
+
+/// Log a picture in `dir` and write its file, as the recorder would.
+fn log_image(dir: &Path, file: &str, talker: Option<&str>) {
+    std::fs::create_dir_all(dir.join("images")).unwrap();
+    std::fs::write(
+        dir.join("images").join(file),
+        b"\x89PNG\r\n\x1a\nnot really",
+    )
+    .unwrap();
+    crate::log::append_row(
+        dir,
+        &crate::model::LogRow {
+            t: "2026-11-06T02:00:30Z".into(),
+            kind: LogKind::Image {
+                start: "2026-11-06T02:00:20Z".into(),
+                offset_ms: 20_000,
+                mode: "PD120".into(),
+                talker: talker.map(str::to_owned),
+                file: file.to_owned(),
+                partial: false,
+            },
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn logged_image_is_served_as_png() {
+    let s = setup("image");
+    let server = serve(&s.pages);
+    let addr = server.local_addr();
+    let (name, path) = first_image(&s, &s.f.public_net, &s.f.public_session).unwrap();
+    let url = format!(
+        "/nets/{}/{}/images/{name}",
+        s.f.public_net, s.f.public_session
+    );
+    let (h, b) = fetch(addr, "GET", &url, "");
+    assert_eq!(status(&h), 200, "{h}");
+    assert!(h.contains("Content-Type: image/png\r\n"), "{h}");
+    assert!(h.contains("X-Content-Type-Options: nosniff\r\n"), "{h}");
+    let want = std::fs::read(path).unwrap();
+    assert!(want.starts_with(b"\x89PNG\r\n\x1a\n"));
+    assert_eq!(b, want);
+    // The same name under overs/ is not an over the log recorded.
+    let (h, _) = fetch(
+        addr,
+        "GET",
+        &format!(
+            "/nets/{}/{}/overs/{name}",
+            s.f.public_net, s.f.public_session
+        ),
+        "",
+    );
+    assert_eq!(status(&h), 404, "{h}");
+    server.stop();
+}
+
+#[test]
+fn unlogged_image_name_is_404() {
+    let s = setup("imagenolog");
+    let e = s
+        .pages
+        .archive()
+        .find(&s.f.public_net, &s.f.public_session)
+        .unwrap();
+    // A file on disk that no row names.
+    std::fs::write(e.dir.join("images").join("009 x.png"), b"png").unwrap();
+    let base = format!("/nets/{}/{}", s.f.public_net, s.f.public_session);
+    let missing = get(&s.pages, Access::Admin, "/nets/nope/nope/data.json");
+    for path in [
+        format!("{base}/images/009%20x.png"),
+        format!("{base}/images/..%2Fsession.json"),
+        format!("{base}/images/"),
+        format!("{base}/images/%2E%2E%2Fsession.flac"),
+    ] {
+        assert_eq!(get(&s.pages, Access::Admin, &path), missing, "{path}");
+    }
+    // An over's file is not an image.
+    let (over, _) = first_over(&s, &s.f.public_net, &s.f.public_session);
+    assert_eq!(
+        get(&s.pages, Access::Admin, &format!("{base}/images/{over}")),
+        missing
+    );
+}
+
+#[test]
+fn private_session_image_is_404_for_anonymous() {
+    let s = setup("imagepriv");
+    let e = s
+        .pages
+        .archive()
+        .find(THURSDAY, &s.f.private_session)
+        .unwrap();
+    log_image(&e.dir, "001 19-00-20 PD120 KX0AAA.png", Some("KX0AAA"));
+    let server = serve(&s.pages);
+    let addr = server.local_addr();
+    let name = "001%2019-00-20%20PD120%20KX0AAA.png";
+    let private = format!("/nets/{THURSDAY}/{}/images/{name}", s.f.private_session);
+    let missing = format!("/nets/nope/nope/images/{name}");
+    for method in ["GET", "HEAD"] {
+        let (ph, pb) = fetch(addr, method, &private, "");
+        let (mh, mb) = fetch(addr, method, &missing, "");
+        assert_eq!(status(&ph), 404, "{method}: {ph}");
+        assert_eq!((ph, pb), (mh, mb), "{method}");
+    }
+    // A signed-in viewer gets it.
+    let (h, _) = fetch(addr, "GET", &private, "X-Test-Access: viewer\r\n");
+    assert_eq!(status(&h), 200, "{h}");
+    assert!(h.contains("Content-Type: image/png\r\n"), "{h}");
+    server.stop();
+}
+
+#[test]
+fn hostile_talker_on_an_image_is_text() {
+    let s = setup("imagehostile");
+    let e = s
+        .pages
+        .archive()
+        .find(&s.f.public_net, &s.f.public_session)
+        .unwrap();
+    let raw = "<img src=x onerror=alert(1)>\u{202e}\"</script>";
+    log_image(&e.dir, "002 19-00-20 PD120 unknown.png", Some(raw));
+    let r = get(
+        &s.pages,
+        Access::Anonymous,
+        &format!("/nets/{}/{}/data.json", s.f.public_net, s.f.public_session),
+    );
+    assert_eq!(r.status, 200);
+    let text = String::from_utf8(r.body).unwrap();
+    // It travels as a JSON string: parsing gives back exactly the base.
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let img = v["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["type"] == "image" && i["seq"] == 3)
+        .unwrap();
+    let want = crate::callsign::split_call(raw).unwrap();
+    assert_eq!(img["call"], serde_json::Value::String(want.base));
+    assert!(want.suffix.is_some(), "the hostile text has a suffix too");
+    assert_eq!(img["suffix"], serde_json::json!(want.suffix));
+    // The page sets it as text: the alt is built from strings, never markup.
+    assert!(SESSION_JS.contains("\"image\""));
+    for sink in ["innerHTML", "outerHTML", "insertAdjacentHTML"] {
+        assert!(!SESSION_JS.contains(sink));
+    }
+    // An alt is read aloud or shown as plain text, never laid out, so the
+    // picture's carries no bidi isolates; the caption isolates with <bdi>.
+    let from = SESSION_JS.find("function picture(").unwrap();
+    let to = from + SESSION_JS[from..].find("function divider(").unwrap();
+    let picture = &SESSION_JS[from..to];
+    assert!(picture.contains("img.alt"));
+    for c in ['\u{2068}', '\u{2069}'] {
+        assert!(!picture.contains(c), "isolate {c:?} in the picture's alt");
+    }
+}
+
+#[test]
+fn private_video_refuses_anonymous() {
+    let s = setup("video404");
+    let e = s
+        .pages
+        .archive()
+        .find(THURSDAY, &s.f.private_session)
+        .unwrap();
+    std::fs::write(e.dir.join("video.mp4"), b"not really a video").unwrap();
+    let path = format!("/nets/{THURSDAY}/{}/video.mp4", s.f.private_session);
+    let r = get(&s.pages, Access::Anonymous, &path);
+    assert_eq!(r.status, 404);
+    assert_eq!(r.body, br#"{"error":"no such session"}"#);
+    let reply = handle(&s.pages, Access::Viewer, "GET", &path);
+    let NetsReply::File { mime, .. } = reply else {
+        panic!("{reply:?}")
+    };
+    assert_eq!(mime, "video/mp4");
+}
+
+#[test]
+fn public_video_is_served_with_ranges() {
+    let s = setup("video");
+    let e = s
+        .pages
+        .archive()
+        .find(&s.f.public_net, &s.f.public_session)
+        .unwrap();
+    let whole: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(e.dir.join("video.mp4"), &whole).unwrap();
+    let server = serve(&s.pages);
+    let addr = server.local_addr();
+    let path = format!("/nets/{}/{}/video.mp4", s.f.public_net, s.f.public_session);
+    let (h, b) = fetch(addr, "GET", &path, "Range: bytes=100-199\r\n");
+    assert_eq!(status(&h), 206, "{h}");
+    assert_eq!(b, &whole[100..200]);
+    assert!(h.contains("Content-Type: video/mp4\r\n"), "{h}");
+    let (h, b) = fetch(addr, "GET", &path, "");
+    assert_eq!(status(&h), 200, "{h}");
+    assert_eq!(b, whole);
+    // A session with no video says so with the session 404.
+    std::fs::remove_file(e.dir.join("video.mp4")).unwrap();
+    let (h, _) = fetch(addr, "GET", &path, "");
+    assert_eq!(status(&h), 404, "{h}");
+    server.stop();
+}
+
+#[test]
+fn data_json_names_the_video_only_when_there_is_one() {
+    let s = setup("videolink");
+    let e = s
+        .pages
+        .archive()
+        .find(&s.f.public_net, &s.f.public_session)
+        .unwrap();
+    let data = format!("/nets/{}/{}/data.json", s.f.public_net, s.f.public_session);
+    let video = |access| {
+        let r = get(&s.pages, access, &data);
+        assert_eq!(r.status, 200);
+        let v: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+        v.get("video").cloned()
+    };
+    assert_eq!(video(Access::Anonymous), None, "no video.mp4 yet");
+    // A part file is a render still going, not a video.
+    std::fs::write(e.dir.join("video.mp4.part"), b"half").unwrap();
+    assert_eq!(video(Access::Anonymous), None);
+    std::fs::write(e.dir.join("video.mp4"), b"not really a video").unwrap();
+    let want = serde_json::json!(format!(
+        "/nets/{}/{}/video.mp4",
+        s.f.public_net, s.f.public_session
+    ));
+    assert_eq!(video(Access::Anonymous), Some(want.clone()));
+    assert_eq!(video(Access::Admin), Some(want));
+    // A link named video.mp4 is not served, so it is not offered either.
+    std::fs::remove_file(e.dir.join("video.mp4")).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(e.dir.join("video.mp4.part"), e.dir.join("video.mp4")).unwrap();
+        assert_eq!(video(Access::Anonymous), None);
+    }
+}
+
+#[test]
+fn private_session_names_its_video_only_to_those_who_may_see_it() {
+    let s = setup("videopriv");
+    let e = s
+        .pages
+        .archive()
+        .find(THURSDAY, &s.f.private_session)
+        .unwrap();
+    std::fs::write(e.dir.join("video.mp4"), b"not really a video").unwrap();
+    let data = format!("/nets/{THURSDAY}/{}/data.json", s.f.private_session);
+    assert_eq!(get(&s.pages, Access::Anonymous, &data).status, 404);
+    let r = get(&s.pages, Access::Viewer, &data);
+    assert_eq!(r.status, 200);
+    let v: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+    assert_eq!(
+        v["video"],
+        serde_json::json!(format!(
+            "/nets/{THURSDAY}/{}/video.mp4",
+            s.f.private_session
+        ))
+    );
+}
+
+#[test]
+fn the_page_offers_the_video_as_a_link() {
+    // The header's Video button is an anchor to the URL data.json gives,
+    // hidden until there is one, set as an attribute and never as markup.
+    assert!(SESSION_HTML.contains(r#"id="video-btn""#));
+    let at = SESSION_HTML.find(r#"id="video-btn""#).unwrap();
+    let tag_start = SESSION_HTML[..at].rfind('<').unwrap();
+    let tag = &SESSION_HTML[tag_start..at + SESSION_HTML[at..].find('>').unwrap()];
+    assert!(tag.starts_with("<a "), "{tag}");
+    assert!(tag.contains(" hidden"), "{tag}");
+    assert!(SESSION_JS.contains("d.video"));
+}

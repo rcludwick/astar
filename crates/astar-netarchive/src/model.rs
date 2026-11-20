@@ -76,6 +76,23 @@ pub enum LogKind {
     Dropped {
         reason: String,
     },
+    /// A picture decoded from the session's audio, saved under `images/`.
+    /// Added after format 1 shipped; a reader that does not know it drops
+    /// the line, as it does any line it cannot parse.
+    Image {
+        /// RFC 3339: where the picture began.
+        start: String,
+        /// Into `session.flac`, where the picture began.
+        offset_ms: u64,
+        /// The SSTV mode's token, e.g. `PD120`.
+        mode: String,
+        talker: Option<String>,
+        /// The file's name under `images/`.
+        file: String,
+        /// Kept part way through: the signal stopped before the last line.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        partial: bool,
+    },
     Rejoined,
     Left,
     Error {
@@ -96,5 +113,32 @@ mod tests {
         let m: SessionMeta = serde_json::from_str(old).unwrap();
         assert_eq!(m.my_callsigns, Vec::<String>::new());
         assert_eq!(m.format, 1);
+    }
+
+    #[test]
+    fn image_row_round_trips_and_partial_is_omitted_when_false() {
+        let row = LogRow {
+            t: "2026-11-04T02:06:18Z".into(),
+            kind: LogKind::Image {
+                start: "2026-11-04T02:04:12Z".into(),
+                offset_ms: 552_000,
+                mode: "PD120".into(),
+                talker: Some("N0CALL".into()),
+                file: "001 19-04-12 PD120 N0CALL.png".into(),
+                partial: false,
+            },
+        };
+        let text = serde_json::to_string(&row).unwrap();
+        assert!(text.contains(r#""kind":"image""#), "{text}");
+        assert!(!text.contains("partial"), "{text}");
+        assert_eq!(serde_json::from_str::<LogRow>(&text).unwrap(), row);
+
+        let mut half = row.clone();
+        if let LogKind::Image { partial, .. } = &mut half.kind {
+            *partial = true;
+        }
+        let text = serde_json::to_string(&half).unwrap();
+        assert!(text.contains(r#""partial":true"#), "{text}");
+        assert_eq!(serde_json::from_str::<LogRow>(&text).unwrap(), half);
     }
 }

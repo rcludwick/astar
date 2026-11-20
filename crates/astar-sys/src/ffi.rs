@@ -3915,6 +3915,251 @@ pub unsafe extern "C" fn iax_station_packet_log_state_json(
     .unwrap_or(IAX_ERR_PANIC)
 }
 
+/// Turn SSTV decoding of heard audio on or off. `enabled` non-zero decodes
+/// pictures into PNG files in `dir` (created if missing), each with a line
+/// in `dir/pictures.jsonl`; `utc_offset_secs` is the operator's offset from
+/// UTC, for the time in file names. `enabled` zero stops decoding, and `dir`
+/// may then be NULL. Receive only: nothing here ever transmits.
+///
+/// Returns [`IAX_OK`]; [`IAX_ERR_NULL`] (NULL `st`, or NULL `dir` while
+/// enabling); [`IAX_ERR_UTF8`] (`dir` not UTF-8); [`IAX_ERR_RECORD`] (the
+/// folder cannot be made or the decoder cannot start, so decoding is off;
+/// [`iax_station_last_error`] says which); [`IAX_ERR_UNSUPPORTED`] (enabling
+/// in a build without the `sstv` feature, where turning it off is
+/// [`IAX_OK`]); or [`IAX_ERR_PANIC`].
+///
+/// NOTE: this makes the folder and may take a lock held by another change,
+/// so call it off any UI thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_sstv_configure(
+    st: *mut IaxStation,
+    enabled: c_int,
+    dir: *const c_char,
+    utc_offset_secs: i32,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(feature = "sstv")]
+        {
+            let cfg = if enabled == 0 {
+                None
+            } else {
+                let dir = match unsafe { req_str(dir) } {
+                    Ok(s) => s,
+                    Err(c) => return c,
+                };
+                Some(astar_station::SstvConfig {
+                    dir: std::path::PathBuf::from(dir),
+                    utc_offset_secs,
+                })
+            };
+            result_code(station, station.inner.sstv_configure(cfg))
+        }
+        #[cfg(not(feature = "sstv"))]
+        {
+            // Off is what a build without SSTV already is. On checks its
+            // folder as a real build would before saying it can't.
+            let _ = (station, utc_offset_secs);
+            if enabled == 0 {
+                return IAX_OK;
+            }
+            match unsafe { req_str(dir) } {
+                Ok(_) => IAX_ERR_UNSUPPORTED,
+                Err(c) => c,
+            }
+        }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Say what the station is connected to, so a picture that starts is filed
+/// under it: `network` (`"AllStar"`, `"M17"`, ...), `target` (the node or
+/// reflector) and `talker` (the callsign heard, or NULL when unknown).
+/// Cheap; call it whenever the link or the talker changes.
+///
+/// Returns [`IAX_OK`]; [`IAX_ERR_NULL`] (NULL `st`, `network` or `target`);
+/// [`IAX_ERR_UTF8`] (any string not UTF-8); or [`IAX_ERR_PANIC`]. Without
+/// the `sstv` feature it does nothing and returns [`IAX_OK`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_sstv_set_context(
+    st: *mut IaxStation,
+    network: *const c_char,
+    target: *const c_char,
+    talker: *const c_char,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let network = match unsafe { req_str(network) } {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        let target = match unsafe { req_str(target) } {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        let talker = if talker.is_null() {
+            None
+        } else {
+            match unsafe { req_str(talker) } {
+                Ok(s) => Some(s.to_owned()),
+                Err(c) => return c,
+            }
+        };
+        #[cfg(feature = "sstv")]
+        {
+            station.inner.sstv_set_context(astar_station::SstvContext {
+                network: network.to_owned(),
+                target: target.to_owned(),
+                talker,
+            });
+        }
+        #[cfg(not(feature = "sstv"))]
+        {
+            let _ = (station, network, target, talker);
+        }
+        IAX_OK
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Write the SSTV decoder's state as JSON into the caller buffer `buf` of
+/// `len` bytes (NUL-terminated, truncate-safe; returns the byte length the
+/// full JSON needs, excluding the NUL, so a `len == 0` call is a sizing
+/// query).
+///
+/// ```json
+/// {"enabled":true,"receiving":false,"seq":1,"mode":null,"width":0,"height":0,
+///  "lines":0,"expected_secs":null,"elapsed_secs":null,"started_ms":null,
+///  "talker":null,"last":null,"recent":[],"dropped":0,"error":null}
+/// ```
+///
+/// `last` and each entry of `recent` carry `seq`, `file`, `mode`, `network`,
+/// `target`, `talker`, `time_ms`, `partial` and `lost`. Paths and callsigns
+/// only; never a secret. Without the `sstv` feature it is the idle document
+/// with `enabled` false. Never waits on a change in progress. Returns
+/// [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_sstv_state_json(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let json = sstv_state_json(station);
+        unsafe { fill_buf(&json, buf, len) }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// The SSTV state document, or the idle one without the feature.
+fn sstv_state_json(station: &IaxStation) -> String {
+    #[cfg(feature = "sstv")]
+    {
+        serde_json::to_string(&station.inner.sstv_state()).unwrap_or_else(|_| "{}".to_owned())
+    }
+    #[cfg(not(feature = "sstv"))]
+    {
+        let _ = station;
+        SSTV_IDLE_JSON.to_owned()
+    }
+}
+
+/// The state document of a build without SSTV: the idle state, decoding
+/// off. A test holds it to the real idle state's keys and values.
+#[cfg(any(test, not(feature = "sstv")))]
+const SSTV_IDLE_JSON: &str = concat!(
+    r#"{"enabled":false,"receiving":false,"seq":0,"mode":null,"width":0,"height":0,"#,
+    r#""lines":0,"expected_secs":null,"elapsed_secs":null,"started_ms":null,"#,
+    r#""talker":null,"last":null,"recent":[],"dropped":0,"error":null}"#
+);
+
+/// Describes the picture [`iax_station_sstv_frame`] returned.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct IaxSstvFrameInfo {
+    /// The picture's number (`seq` in the state JSON).
+    pub seq: u64,
+    pub width: u32,
+    pub height: u32,
+    /// Rows heard: `height` for a whole picture, fewer for a partial one,
+    /// whose missing rows are black.
+    pub lines: u32,
+}
+
+/// Copy the pixels of the last finished SSTV picture into `buf` as RGBA
+/// (`width * height * 4` bytes, alpha 255, rows top to bottom) and describe
+/// it in `info` (may be NULL).
+///
+/// Returns the byte count the picture needs, so a `len == 0` call (with
+/// `buf` NULL) is a sizing query; `buf` is written only when `len` is
+/// enough. Returns `0` when there is no picture (decoding off, or none
+/// finished yet), with `info` zeroed. A new picture can finish between the
+/// sizing call and the fill: if the returned count exceeds `len`, size
+/// again. Returns [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_sstv_frame(
+    st: *mut IaxStation,
+    buf: *mut u8,
+    len: usize,
+    info: *mut IaxSstvFrameInfo,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(feature = "sstv")]
+        let frame = station.inner.sstv_frame();
+        #[cfg(not(feature = "sstv"))]
+        let frame: Option<()> = {
+            let _ = station;
+            None
+        };
+        #[cfg(feature = "sstv")]
+        {
+            let Some(f) = frame else {
+                if !info.is_null() {
+                    unsafe { *info = IaxSstvFrameInfo::default() };
+                }
+                return 0;
+            };
+            if !info.is_null() {
+                unsafe {
+                    *info = IaxSstvFrameInfo {
+                        seq: f.seq,
+                        width: f.width,
+                        height: f.height,
+                        lines: f.lines,
+                    };
+                }
+            }
+            if !buf.is_null() && len >= f.rgba.len() {
+                unsafe { std::ptr::copy_nonoverlapping(f.rgba.as_ptr(), buf, f.rgba.len()) };
+            }
+            c_int::try_from(f.rgba.len()).unwrap_or(c_int::MAX)
+        }
+        #[cfg(not(feature = "sstv"))]
+        {
+            let _ = (frame, buf, len);
+            if !info.is_null() {
+                unsafe { *info = IaxSstvFrameInfo::default() };
+            }
+            0
+        }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
 /// Set extra directories to search for a runtime `libcodec2`, ahead of the
 /// hard-coded system paths (iax-f2b8 Task 4/5). `dirs` is a single
 /// NUL-terminated string of `':'`-separated filesystem paths (e.g.
@@ -6164,6 +6409,189 @@ mod packet_log_tests {
         let rc = unsafe { iax_station_packet_log_state_json(st, small.as_mut_ptr(), small.len()) };
         assert_eq!(rc, needed, "a short buffer still reports the full length");
         assert_eq!(small[3], 0, "and is NUL-terminated");
+        unsafe { iax_station_free(st) };
+    }
+}
+
+#[cfg(test)]
+mod sstv_tests {
+    //! The SSTV entry points, against a real station that never connects.
+    use super::*;
+    use std::ptr;
+
+    fn station() -> *mut IaxStation {
+        let cfg = IaxConfig {
+            input: ptr::null(),
+            output: ptr::null(),
+            portal_user: ptr::null(),
+            portal_pass: ptr::null(),
+            portal_node: ptr::null(),
+            secret: ptr::null(),
+            codec_policy: ptr::null(),
+        };
+        let st = unsafe { iax_station_new(std::ptr::from_ref(&cfg)) };
+        assert!(!st.is_null());
+        st
+    }
+
+    #[test]
+    fn sstv_state_json_is_secret_free_and_reports_needed_length() {
+        let st = station();
+        let needed = unsafe { iax_station_sstv_state_json(st, ptr::null_mut(), 0) };
+        assert!(needed > 0);
+        let mut buf = vec![0 as c_char; usize::try_from(needed).unwrap() + 1];
+        let rc = unsafe { iax_station_sstv_state_json(st, buf.as_mut_ptr(), buf.len()) };
+        assert_eq!(rc, needed);
+        let text = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().unwrap();
+        let json: serde_json::Value = serde_json::from_str(text).expect("valid json");
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "dropped",
+                "elapsed_secs",
+                "enabled",
+                "error",
+                "expected_secs",
+                "height",
+                "last",
+                "lines",
+                "mode",
+                "receiving",
+                "recent",
+                "seq",
+                "started_ms",
+                "talker",
+                "width"
+            ]
+        );
+        assert_eq!(json["enabled"], false);
+        let mut small = [0 as c_char; 4];
+        let rc = unsafe { iax_station_sstv_state_json(st, small.as_mut_ptr(), small.len()) };
+        assert_eq!(rc, needed, "a short buffer still reports the full length");
+        assert_eq!(small[3], 0, "and is NUL-terminated");
+        unsafe { iax_station_free(st) };
+    }
+
+    #[test]
+    fn sstv_frame_with_nothing_live_is_zero() {
+        let st = station();
+        let mut info = IaxSstvFrameInfo {
+            seq: 9,
+            width: 9,
+            height: 9,
+            lines: 9,
+        };
+        let rc = unsafe { iax_station_sstv_frame(st, ptr::null_mut(), 0, &raw mut info) };
+        assert_eq!(rc, 0);
+        assert_eq!(info, IaxSstvFrameInfo::default());
+        assert_eq!(
+            unsafe { iax_station_sstv_frame(st, ptr::null_mut(), 0, ptr::null_mut()) },
+            0
+        );
+        unsafe { iax_station_free(st) };
+    }
+
+    #[cfg(feature = "sstv")]
+    #[test]
+    fn sstv_frame_sizes_then_fills_the_last_picture() {
+        let st = station();
+        // Three by two pixels, every byte numbered so a copy is checkable.
+        let rgba: Vec<u8> = (0..24u8).collect();
+        unsafe { &*st }
+            .inner
+            .sstv_set_frame_for_test(astar_station::SstvFrame {
+                seq: 7,
+                width: 3,
+                height: 2,
+                lines: 1,
+                rgba: rgba.clone(),
+            });
+        let mut info = IaxSstvFrameInfo::default();
+        let needed = unsafe { iax_station_sstv_frame(st, ptr::null_mut(), 0, &raw mut info) };
+        assert_eq!(needed, 24);
+        assert_eq!(
+            info,
+            IaxSstvFrameInfo {
+                seq: 7,
+                width: 3,
+                height: 2,
+                lines: 1,
+            }
+        );
+        // Too short: the size again, and nothing written.
+        let mut short = vec![0xAAu8; 23];
+        let rc =
+            unsafe { iax_station_sstv_frame(st, short.as_mut_ptr(), short.len(), ptr::null_mut()) };
+        assert_eq!(rc, 24);
+        assert!(short.iter().all(|&b| b == 0xAA));
+        let mut buf = vec![0u8; 24];
+        let rc =
+            unsafe { iax_station_sstv_frame(st, buf.as_mut_ptr(), buf.len(), ptr::null_mut()) };
+        assert_eq!(rc, 24);
+        assert_eq!(buf, rgba);
+        unsafe { iax_station_free(st) };
+    }
+
+    /// The document a build without SSTV hands out has exactly the keys
+    /// and idle values of the real one, so a client parses either.
+    #[cfg(feature = "sstv")]
+    #[test]
+    fn sstv_idle_json_matches_the_real_idle_state() {
+        let idle: serde_json::Value = serde_json::from_str(SSTV_IDLE_JSON).expect("valid json");
+        let real = serde_json::to_value(astar_station::SstvState::default()).unwrap();
+        assert_eq!(idle, real);
+    }
+
+    #[cfg(not(feature = "sstv"))]
+    #[test]
+    fn sstv_off_succeeds_without_the_feature_and_on_is_unsupported() {
+        let st = station();
+        assert_eq!(
+            unsafe { iax_station_sstv_configure(st, 0, ptr::null(), 0) },
+            IAX_OK
+        );
+        let c = c"/tmp";
+        assert_eq!(
+            unsafe { iax_station_sstv_configure(st, 1, c.as_ptr(), 0) },
+            IAX_ERR_UNSUPPORTED
+        );
+        unsafe { iax_station_free(st) };
+    }
+
+    #[test]
+    fn sstv_null_station_is_err_null() {
+        let c = c"x";
+        unsafe {
+            assert_eq!(
+                iax_station_sstv_configure(ptr::null_mut(), 0, ptr::null(), 0),
+                IAX_ERR_NULL
+            );
+            assert_eq!(
+                iax_station_sstv_set_context(ptr::null_mut(), c.as_ptr(), c.as_ptr(), ptr::null()),
+                IAX_ERR_NULL
+            );
+            assert_eq!(
+                iax_station_sstv_state_json(ptr::null_mut(), ptr::null_mut(), 0),
+                IAX_ERR_NULL
+            );
+            assert_eq!(
+                iax_station_sstv_frame(ptr::null_mut(), ptr::null_mut(), 0, ptr::null_mut()),
+                IAX_ERR_NULL
+            );
+        }
+        let st = station();
+        // Enabling needs a folder.
+        assert_eq!(
+            unsafe { iax_station_sstv_configure(st, 1, ptr::null(), 0) },
+            IAX_ERR_NULL
+        );
         unsafe { iax_station_free(st) };
     }
 }

@@ -1332,6 +1332,23 @@ typedef struct {
   const char *also_bind_udp;
 } IaxWireguardConfig;
 
+/**
+ * Describes the picture [`iax_station_sstv_frame`] returned.
+ */
+typedef struct {
+  /**
+   * The picture's number (`seq` in the state JSON).
+   */
+  uint64_t seq;
+  uint32_t width;
+  uint32_t height;
+  /**
+   * Rows heard: `height` for a whole picture, fewer for a partial one,
+   * whose missing rows are black.
+   */
+  uint32_t lines;
+} IaxSstvFrameInfo;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -2334,6 +2351,77 @@ int iax_station_packet_log_call_ended(IaxStation *st);
  * [`IAX_ERR_PANIC`].
  */
 int iax_station_packet_log_state_json(IaxStation *st, char *buf, uintptr_t len);
+
+/**
+ * Turn SSTV decoding of heard audio on or off. `enabled` non-zero decodes
+ * pictures into PNG files in `dir` (created if missing), each with a line
+ * in `dir/pictures.jsonl`; `utc_offset_secs` is the operator's offset from
+ * UTC, for the time in file names. `enabled` zero stops decoding, and `dir`
+ * may then be NULL. Receive only: nothing here ever transmits.
+ *
+ * Returns [`IAX_OK`]; [`IAX_ERR_NULL`] (NULL `st`, or NULL `dir` while
+ * enabling); [`IAX_ERR_UTF8`] (`dir` not UTF-8); [`IAX_ERR_RECORD`] (the
+ * folder cannot be made or the decoder cannot start, so decoding is off;
+ * [`iax_station_last_error`] says which); [`IAX_ERR_UNSUPPORTED`] (enabling
+ * in a build without the `sstv` feature, where turning it off is
+ * [`IAX_OK`]); or [`IAX_ERR_PANIC`].
+ *
+ * NOTE: this makes the folder and may take a lock held by another change,
+ * so call it off any UI thread.
+ */
+int iax_station_sstv_configure(IaxStation *st,
+                               int enabled,
+                               const char *dir,
+                               int32_t utc_offset_secs);
+
+/**
+ * Say what the station is connected to, so a picture that starts is filed
+ * under it: `network` (`"AllStar"`, `"M17"`, ...), `target` (the node or
+ * reflector) and `talker` (the callsign heard, or NULL when unknown).
+ * Cheap; call it whenever the link or the talker changes.
+ *
+ * Returns [`IAX_OK`]; [`IAX_ERR_NULL`] (NULL `st`, `network` or `target`);
+ * [`IAX_ERR_UTF8`] (any string not UTF-8); or [`IAX_ERR_PANIC`]. Without
+ * the `sstv` feature it does nothing and returns [`IAX_OK`].
+ */
+int iax_station_sstv_set_context(IaxStation *st,
+                                 const char *network,
+                                 const char *target,
+                                 const char *talker);
+
+/**
+ * Write the SSTV decoder's state as JSON into the caller buffer `buf` of
+ * `len` bytes (NUL-terminated, truncate-safe; returns the byte length the
+ * full JSON needs, excluding the NUL, so a `len == 0` call is a sizing
+ * query).
+ *
+ * ```json
+ * {"enabled":true,"receiving":false,"seq":1,"mode":null,"width":0,"height":0,
+ *  "lines":0,"expected_secs":null,"elapsed_secs":null,"started_ms":null,
+ *  "talker":null,"last":null,"recent":[],"dropped":0,"error":null}
+ * ```
+ *
+ * `last` and each entry of `recent` carry `seq`, `file`, `mode`, `network`,
+ * `target`, `talker`, `time_ms`, `partial` and `lost`. Paths and callsigns
+ * only; never a secret. Without the `sstv` feature it is the idle document
+ * with `enabled` false. Never waits on a change in progress. Returns
+ * [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
+ */
+int iax_station_sstv_state_json(IaxStation *st, char *buf, uintptr_t len);
+
+/**
+ * Copy the pixels of the last finished SSTV picture into `buf` as RGBA
+ * (`width * height * 4` bytes, alpha 255, rows top to bottom) and describe
+ * it in `info` (may be NULL).
+ *
+ * Returns the byte count the picture needs, so a `len == 0` call (with
+ * `buf` NULL) is a sizing query; `buf` is written only when `len` is
+ * enough. Returns `0` when there is no picture (decoding off, or none
+ * finished yet), with `info` zeroed. A new picture can finish between the
+ * sizing call and the fill: if the returned count exceeds `len`, size
+ * again. Returns [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
+ */
+int iax_station_sstv_frame(IaxStation *st, uint8_t *buf, uintptr_t len, IaxSstvFrameInfo *info);
 
 /**
  * Set extra directories to search for a runtime `libcodec2`, ahead of the

@@ -103,6 +103,31 @@ final class StationTests: XCTestCase {
         }
     }
 
+    // MARK: SSTV
+
+    func testSstvStateDecodesIdle() throws {
+        let st = try Station()
+        let state = try st.sstvState()
+        XCTAssertFalse(state.enabled)
+        XCTAssertFalse(state.receiving)
+        XCTAssertNil(state.last)
+        XCTAssertTrue(state.recent.isEmpty)
+        let json = Data(
+            #"{"enabled":true,"receiving":true,"seq":2,"mode":"PD120","width":640,"height":496,"lines":10,"expected_secs":126.5,"elapsed_secs":3.0,"started_ms":1000,"talker":"N0CALL","last":{"seq":1,"file":"/x/a.png","mode":"Robot 36","network":"AllStar","target":"2000","talker":null,"time_ms":5,"partial":false,"lost":false},"recent":[],"dropped":0,"error":null}"#
+                .utf8)
+        let decoded = try JSONDecoder().decode(SstvState.self, from: json)
+        XCTAssertEqual(decoded.expectedSecs, 126.5)
+        XCTAssertEqual(decoded.last?.timeMS, 5)
+        XCTAssertEqual(decoded.width, 640)
+    }
+
+    func testSstvFrameIsNilWhenIdle() throws {
+        let st = try Station()
+        XCTAssertNil(try st.sstvFrame())
+        try st.sstvSetContext(network: "AllStar", target: "2000", talker: nil)
+        try st.sstvSetContext(network: "AllStar", target: "2000", talker: "N0CALL")
+    }
+
     // MARK: Packet log
 
     func testPacketLogStateDecodes() throws {

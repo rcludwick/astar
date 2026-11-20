@@ -10,19 +10,22 @@ description = "astar-netarchive: the on-disk archive format of recorded nets (se
 
 [features]
 # A synthetic archive, for tests and previews.
-fixture = []
+fixture = ["dep:png"]
 
 [dependencies]
-astar-http = { path = "../astar-http", version = "0.1.22-beta" }
-astar-record = { path = "../astar-record", version = "0.1.22-beta" }
+astar-http = { path = "../astar-http", version = "0.1.23-beta" }
+astar-record = { path = "../astar-record", version = "0.1.23-beta" }
 claxon = "=0.4.3"
 jiff = { workspace = true }
+png = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-astar-http = { path = "../astar-http", version = "0.1.22-beta", features = ["testing"] }
+astar-http = { path = "../astar-http", version = "0.1.23-beta", features = ["testing"] }
+# The tests build on the synthetic archive, so `cargo test -p` works alone.
+astar-netarchive = { path = ".", features = ["fixture"] }
 
 [lints]
 workspace = true

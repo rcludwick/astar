@@ -1225,6 +1225,89 @@ public struct PacketLogState: Decodable, Equatable, Sendable {
     }
 }
 
+/// One SSTV picture that came in, from ``SstvState``.
+public struct SstvPictureRow: Decodable, Equatable, Sendable {
+    /// The picture's number in ``SstvState/seq``'s count.
+    public let seq: UInt64
+    /// The PNG's full path; `nil` when the picture was lost or could not be written.
+    public let file: String?
+    /// The mode's display name, such as `"PD120"` or `"Robot 36"`.
+    public let mode: String
+    public let network: String
+    public let target: String
+    public let talker: String?
+    /// Unix milliseconds when the picture started.
+    public let timeMS: UInt64
+    /// The signal ended before the last row; the rows heard were kept.
+    public let partial: Bool
+    /// Nothing worth keeping arrived.
+    public let lost: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case seq, file, mode, network, target, talker
+        case timeMS = "time_ms"
+        case partial, lost
+    }
+}
+
+/// What the SSTV decoder is doing, from ``Station/sstvState()``.
+public struct SstvState: Decodable, Equatable, Sendable {
+    /// Decoding is on.
+    public let enabled: Bool
+    /// A picture is airing now.
+    public let receiving: Bool
+    /// Pictures started so far; a change means a new picture.
+    public let seq: UInt64
+    /// The airing picture's mode.
+    public let mode: String?
+    public let width: Int
+    public let height: Int
+    /// Rows of the airing picture whose audio has arrived.
+    public let lines: Int
+    /// How long the airing picture takes, in seconds.
+    public let expectedSecs: Double?
+    /// How long it has been airing, in seconds.
+    public let elapsedSecs: Double?
+    public let startedMS: UInt64?
+    public let talker: String?
+    /// The picture that ended last, kept or lost.
+    public let last: SstvPictureRow?
+    /// Pictures received, newest first.
+    public let recent: [SstvPictureRow]
+    /// Audio chunks the decoder could not keep up with.
+    public let dropped: UInt64
+    /// Why the last picture could not be saved, or the folder not made.
+    public let error: String?
+
+    enum CodingKeys: String, CodingKey {
+        case enabled, receiving, seq, mode, width, height, lines
+        case expectedSecs = "expected_secs"
+        case elapsedSecs = "elapsed_secs"
+        case startedMS = "started_ms"
+        case talker, last, recent, dropped, error
+    }
+}
+
+/// The pixels of the last finished SSTV picture, from ``Station/sstvFrame()``.
+public struct SstvFrame: Equatable, Sendable {
+    /// The picture's ``SstvPictureRow/seq``.
+    public let seq: UInt64
+    public let width: Int
+    public let height: Int
+    /// Rows heard: `height` for a whole picture, fewer for a partial one.
+    public let lines: Int
+    /// `width * height * 4` bytes of RGBA, rows top to bottom.
+    public let rgba: Data
+
+    public init(seq: UInt64, width: Int, height: Int, lines: Int, rgba: Data) {
+        self.seq = seq
+        self.width = width
+        self.height = height
+        self.lines = lines
+        self.rgba = rgba
+    }
+}
+
 // MARK: - Error
 
 /// Thrown when an `iax_station_*` call returns a negative code.
@@ -3086,6 +3169,92 @@ public final class Station {
             throw StationError(code: -1, text: "undecodable packet log state json", detail: "")
         }
         return state
+    }
+
+    /// Turn SSTV decoding of heard audio on or off. Enabled, pictures are
+    /// saved as PNG in `directory` (created if missing); `utcOffsetSeconds`
+    /// puts local time in the file names. Receive only.
+    ///
+    /// Throws `IAX_ERR_RECORD` when the folder cannot be made (the error's
+    /// `detail` says why; decoding is then off). Call it off the main thread.
+    public func sstvConfigure(
+        enabled: Bool, directory: String, utcOffsetSeconds: Int32
+    ) throws {
+        try directory.withCString { dirPtr in
+            _ = try check(
+                iax_station_sstv_configure(handle, enabled ? 1 : 0, dirPtr, utcOffsetSeconds))
+        }
+    }
+
+    /// Say what the station is connected to, so a picture that starts is filed
+    /// under it. Cheap; call it when the link or the talker changes.
+    public func sstvSetContext(network: String, target: String, talker: String?) throws {
+        try network.withCString { netPtr in
+            try target.withCString { targetPtr in
+                if let talker {
+                    try talker.withCString { talkerPtr in
+                        _ = try check(
+                            iax_station_sstv_set_context(handle, netPtr, targetPtr, talkerPtr))
+                    }
+                } else {
+                    _ = try check(iax_station_sstv_set_context(handle, netPtr, targetPtr, nil))
+                }
+            }
+        }
+    }
+
+    /// The SSTV decoder's state. Cheap, and never waits on a change in progress.
+    public func sstvState() throws -> SstvState {
+        let needed = iax_station_sstv_state_json(handle, nil, 0)
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
+        var buf = [CChar](repeating: 0, count: Int(needed) + 1)
+        var rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+            iax_station_sstv_state_json(handle, ptr.baseAddress, UInt(ptr.count))
+        }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
+        // The state can grow between the sizing call and the fill (a picture
+        // lands), so grow once and fill again, as ``recordState()`` does.
+        if rc > Int32(buf.count - 1) {
+            buf = [CChar](repeating: 0, count: Int(rc) + 1)
+            rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+                iax_station_sstv_state_json(handle, ptr.baseAddress, UInt(ptr.count))
+            }
+            if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
+        }
+        let json = String(cString: buf)
+        guard let data = json.data(using: .utf8),
+            let state = try? JSONDecoder().decode(SstvState.self, from: data)
+        else {
+            throw StationError(code: -1, text: "undecodable sstv state json", detail: "")
+        }
+        return state
+    }
+
+    /// The pixels of the last finished SSTV picture, or `nil` when there is
+    /// none (decoding off, or no picture has ended yet).
+    public func sstvFrame() throws -> SstvFrame? {
+        var info = IaxSstvFrameInfo()
+        var needed = iax_station_sstv_frame(handle, nil, 0, &info)
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
+        // A newer, larger picture can finish between sizing and filling, so
+        // grow once and fill again.
+        for attempt in 0..<2 {
+            if needed == 0 { return nil }
+            var bytes = [UInt8](repeating: 0, count: Int(needed))
+            let rc = bytes.withUnsafeMutableBufferPointer { ptr -> Int32 in
+                iax_station_sstv_frame(handle, ptr.baseAddress, UInt(ptr.count), &info)
+            }
+            if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
+            if rc == 0 { return nil }
+            if Int(rc) <= bytes.count {
+                return SstvFrame(
+                    seq: info.seq, width: Int(info.width), height: Int(info.height),
+                    lines: Int(info.lines), rgba: Data(bytes.prefix(Int(rc))))
+            }
+            needed = rc
+            if attempt == 1 { break }
+        }
+        throw StationError(code: -1, text: "sstv picture kept changing size", detail: "")
     }
 
     /// Disconnect the live D-Star session, if any (iax-4c8e). Idempotent — a

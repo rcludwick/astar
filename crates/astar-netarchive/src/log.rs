@@ -3,8 +3,8 @@
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 //! `log.jsonl` (append-only) and `session.json` (replaced atomically).
 
-use std::fs::{File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::fs::OpenOptions;
+use std::io::{self, Write};
 use std::path::Path;
 
 use crate::model::{LogRow, SessionMeta};
@@ -12,54 +12,15 @@ use crate::model::{LogRow, SessionMeta};
 pub const LOG_FILE: &str = "log.jsonl";
 pub const META_FILE: &str = "session.json";
 
-fn not_regular(path: &Path) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidInput,
-        format!("{} is not a regular file", path.display()),
-    )
-}
-
-fn drop_torn_tail(f: &mut File) -> io::Result<()> {
-    let mut bytes = Vec::new();
-    f.seek(SeekFrom::Start(0))?;
-    f.read_to_end(&mut bytes)?;
-    if bytes.last().is_some_and(|&b| b != b'\n') {
-        let keep = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
-        f.set_len(keep as u64)?;
-    }
-    Ok(())
-}
-
 /// Appends one row and syncs it. A log that is not a regular file (a
-/// symlink, a folder, a FIFO) is refused, never followed.
+/// symlink, a folder, a FIFO) is refused, never followed, and a torn last
+/// line is trimmed first ([`astar_record::jsonl::append_line`]).
 ///
 /// # Errors
 /// I/O errors; `InvalidInput` when the log is not a regular file.
 pub fn append_row(session_dir: &Path, row: &LogRow) -> io::Result<()> {
-    let mut line = serde_json::to_string(row).map_err(io::Error::other)?;
-    line.push('\n');
-    let path = session_dir.join(LOG_FILE);
-    match std::fs::symlink_metadata(&path) {
-        Ok(m) if !m.file_type().is_file() => return Err(not_regular(&path)),
-        Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e),
-    }
-    let mut f = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&path)?;
-    if !f.metadata()?.file_type().is_file()
-        || !std::fs::symlink_metadata(&path)?.file_type().is_file()
-    {
-        return Err(not_regular(&path));
-    }
-    drop_torn_tail(&mut f)?;
-    f.seek(SeekFrom::End(0))?;
-    f.write_all(line.as_bytes())?;
-    f.sync_data()
+    let line = serde_json::to_vec(row).map_err(io::Error::other)?;
+    astar_record::jsonl::append_line(&session_dir.join(LOG_FILE), &line)
 }
 
 /// Every row, oldest first. A missing log is empty; a line that does not

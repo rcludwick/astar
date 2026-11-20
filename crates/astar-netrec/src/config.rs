@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use astar_netarchive::net_dir_name;
+use astar_secrets::Secret;
 use astar_station::{DstarVocoder, VocoderTrust};
 use serde::Deserialize;
 
@@ -150,10 +151,113 @@ pub struct NetCfg {
     pub my_callsigns: Vec<String>,
     /// Render video, on unless switched off (read now, used in a later stage).
     pub video: bool,
-    /// Stream live to `YouTube` (later stage).
+    /// Stream live to `YouTube` while recording (public nets only).
     pub youtube_live: bool,
+    /// Stream live to Twitch while recording (public nets only).
+    pub twitch_live: bool,
     /// Upload to `YouTube` afterwards (later stage).
     pub youtube_upload: bool,
+}
+
+/// `[video]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoCfg {
+    /// The ffmpeg program: a name looked up on `PATH`, or a path.
+    pub ffmpeg: PathBuf,
+}
+
+impl Default for VideoCfg {
+    fn default() -> Self {
+        Self {
+            ffmpeg: PathBuf::from("ffmpeg"),
+        }
+    }
+}
+
+/// `[live]`: where live streams are sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveCfg {
+    /// `YouTube`'s ingest URL, without the stream key.
+    pub youtube_ingest: String,
+    /// Twitch's ingest URL, without the stream key.
+    pub twitch_ingest: String,
+}
+
+impl Default for LiveCfg {
+    fn default() -> Self {
+        Self {
+            youtube_ingest: DEFAULT_YOUTUBE_INGEST.to_string(),
+            twitch_ingest: DEFAULT_TWITCH_INGEST.to_string(),
+        }
+    }
+}
+
+const DEFAULT_YOUTUBE_INGEST: &str = "rtmps://a.rtmps.youtube.com/live2";
+const DEFAULT_TWITCH_INGEST: &str = "rtmps://ingest.global-contribute.live-video.net/app";
+
+/// The stream keys, each present or not. A key is a secret: `Debug` shows
+/// `Secret(***)`, and nothing here formats the value.
+#[derive(Debug, Clone, Default)]
+pub struct StreamKeys {
+    /// The `YouTube` stream key.
+    pub youtube: Option<Secret>,
+    /// The Twitch stream key.
+    pub twitch: Option<Secret>,
+}
+
+/// The credentials file's name, beside `netrec.toml`.
+pub const CREDENTIALS_FILE: &str = "credentials.toml";
+pub(crate) const YOUTUBE_KEY_NAME: &str = "youtube_stream_key";
+pub(crate) const TWITCH_KEY_NAME: &str = "twitch_stream_key";
+pub(crate) const YOUTUBE_KEY_ENV: &str = "ASTAR_NETREC_YOUTUBE_STREAM_KEY";
+pub(crate) const TWITCH_KEY_ENV: &str = "ASTAR_NETREC_TWITCH_STREAM_KEY";
+
+/// Read the stream keys: `credentials.toml` beside `config_path`, then the
+/// environment, where a non-empty variable wins over the file.
+///
+/// # Errors
+/// [`ConfigError::Invalid`] when the file cannot be read, does not parse, or
+/// is readable by group or others. The text never holds a key.
+pub fn load_stream_keys(config_path: &Path) -> Result<StreamKeys, ConfigError> {
+    stream_keys_with(config_path, |name| std::env::var(name).ok())
+}
+
+fn stream_keys_with(
+    config_path: &Path,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<StreamKeys, ConfigError> {
+    let file = config_path.with_file_name(CREDENTIALS_FILE);
+    let entries =
+        astar_secrets::load_private_with(&file, "astar-netrec", &format!("in {CREDENTIALS_FILE}"))
+            .map_err(invalid)?
+            .unwrap_or_default();
+    let pick = |name: &str, var: &str| {
+        env(var)
+            .filter(|v| !v.is_empty())
+            .or_else(|| {
+                entries
+                    .iter()
+                    .find(|(k, _)| k == name)
+                    .map(|(_, v)| v.clone())
+            })
+            .filter(|v| !v.is_empty())
+            .map(Secret::new)
+    };
+    Ok(StreamKeys {
+        youtube: pick(YOUTUBE_KEY_NAME, YOUTUBE_KEY_ENV),
+        twitch: pick(TWITCH_KEY_NAME, TWITCH_KEY_ENV),
+    })
+}
+
+/// An ingest URL must be `rtmps://`, or plain `rtmp://` to a loopback host
+/// (a local listener), with no `user@` part and only the application in its
+/// path: [`astar_netvideo::IngestUrl::parse`], the parser the publisher
+/// itself uses. Its errors name the scheme and host at most, never the path,
+/// because the path can carry a pasted stream key.
+fn check_ingest(what: &str, url: &str) -> Result<(), ConfigError> {
+    astar_netvideo::IngestUrl::parse(url)
+        .map(|_| ())
+        .map_err(|e| invalid(format!("[live] {what}: {e}")))
 }
 
 /// The whole file.
@@ -165,6 +269,10 @@ pub struct Config {
     pub vocoder: VocoderCfg,
     /// `[web]`.
     pub web: WebCfg,
+    /// `[video]`.
+    pub video: VideoCfg,
+    /// `[live]`.
+    pub live: LiveCfg,
     /// Every `[[net]]`.
     pub nets: Vec<NetCfg>,
 }
@@ -179,6 +287,10 @@ struct RawConfig {
     web: RawWeb,
     #[serde(default)]
     vocoder: RawVocoder,
+    #[serde(default)]
+    video: RawVideo,
+    #[serde(default)]
+    live: RawLive,
     #[serde(default, rename = "net")]
     nets: Vec<RawNet>,
 }
@@ -222,6 +334,19 @@ impl Default for RawWeb {
 
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
+struct RawVideo {
+    ffmpeg: Option<PathBuf>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawLive {
+    youtube_ingest: Option<String>,
+    twitch_ingest: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct RawVocoder {
     dstar: Option<String>,
     #[serde(default)]
@@ -249,6 +374,8 @@ struct RawNet {
     video: bool,
     #[serde(default)]
     youtube_live: bool,
+    #[serde(default)]
+    twitch_live: bool,
     #[serde(default)]
     youtube_upload: bool,
 }
@@ -408,6 +535,7 @@ fn convert_net(r: RawNet, my_callsigns: &[String]) -> Result<NetCfg, ConfigError
         my_callsigns: my_callsigns.to_vec(),
         video: r.video,
         youtube_live: r.youtube_live,
+        twitch_live: r.twitch_live,
         youtube_upload: r.youtube_upload,
     })
 }
@@ -454,6 +582,22 @@ pub fn from_toml_str(s: &str) -> Result<Config, ConfigError> {
             local: raw.web.local,
             bind: raw.web.bind,
         },
+        video: VideoCfg {
+            ffmpeg: raw
+                .video
+                .ffmpeg
+                .unwrap_or_else(|| VideoCfg::default().ffmpeg),
+        },
+        live: LiveCfg {
+            youtube_ingest: raw
+                .live
+                .youtube_ingest
+                .unwrap_or_else(|| DEFAULT_YOUTUBE_INGEST.to_string()),
+            twitch_ingest: raw
+                .live
+                .twitch_ingest
+                .unwrap_or_else(|| DEFAULT_TWITCH_INGEST.to_string()),
+        },
         nets,
     })
 }
@@ -489,6 +633,17 @@ dstar = "dongle"
 # D-Star net on "dongle" needs one here.
 trusted_serials = []
 
+# [video]
+# The ffmpeg program used to render video: a name on PATH, or a full path.
+# ffmpeg = "ffmpeg"
+
+# [live]
+# Where live streams go, without the stream key. Keys come from credentials.toml
+# beside this file (youtube_stream_key, twitch_stream_key; mode 0600) or from
+# ASTAR_NETREC_YOUTUBE_STREAM_KEY / ASTAR_NETREC_TWITCH_STREAM_KEY.
+# youtube_ingest = "rtmps://a.rtmps.youtube.com/live2"
+# twitch_ingest = "rtmps://ingest.global-contribute.live-video.net/app"
+
 # One [[net]] table per scheduled net. Uncomment and edit.
 #
 # [[net]]
@@ -502,7 +657,77 @@ trusted_serials = []
 # tz = "America/Denver"
 # visibility = "private"       # or "public"
 # my_side = false
+# youtube_live = false         # live visibility = "public" nets only
+# twitch_live = false
 "#;
+
+/// What `astar-netrec render` reads from the config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderCfg {
+    /// `[video] ffmpeg`.
+    pub ffmpeg: PathBuf,
+    /// `[recorder] my_callsigns`, "my side" for a session that names none,
+    /// as the daemon counts them.
+    pub my_callsigns: Vec<String>,
+}
+
+impl Default for RenderCfg {
+    fn default() -> Self {
+        Self {
+            ffmpeg: VideoCfg::default().ffmpeg,
+            my_callsigns: Vec::new(),
+        }
+    }
+}
+
+/// Just `[video] ffmpeg` and `[recorder] my_callsigns`, for `astar-netrec
+/// render`: a re-render needs nothing else from the config, so a config that
+/// names no nets, or none at all, still works. A missing file gives the
+/// defaults (`ffmpeg`, looked for on `PATH`, and no callsigns).
+///
+/// # Errors
+/// [`ConfigError::Io`] when the file exists but cannot be read;
+/// [`ConfigError::Parse`] when it is not TOML, `[video] ffmpeg` is not a
+/// string, or `[recorder] my_callsigns` is not a list of strings.
+pub fn render_only(path: &Path) -> Result<RenderCfg, ConfigError> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RenderCfg::default());
+        }
+        Err(source) => {
+            return Err(ConfigError::Io {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let table: toml::Table =
+        toml::from_str(&text).map_err(|e| ConfigError::Parse(e.to_string()))?;
+    let ffmpeg = match table.get("video").and_then(|v| v.get("ffmpeg")) {
+        None => VideoCfg::default().ffmpeg,
+        Some(toml::Value::String(s)) => PathBuf::from(s),
+        Some(_) => {
+            return Err(ConfigError::Parse(
+                "[video] ffmpeg must be a string: a program name or a path".to_owned(),
+            ));
+        }
+    };
+    let not_calls =
+        || ConfigError::Parse("[recorder] my_callsigns must be a list of callsigns".to_owned());
+    let my_callsigns = match table.get("recorder").and_then(|r| r.get("my_callsigns")) {
+        None => Vec::new(),
+        Some(toml::Value::Array(calls)) => calls
+            .iter()
+            .map(|c| c.as_str().map(str::to_owned).ok_or_else(not_calls))
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err(not_calls()),
+    };
+    Ok(RenderCfg {
+        ffmpeg,
+        my_callsigns,
+    })
+}
 
 /// Load the config at `path`; if there is no file, write a commented
 /// template there (mode 0644) and load that.
@@ -542,11 +767,50 @@ pub fn load_or_bootstrap(path: &Path) -> Result<Config, ConfigError> {
 /// module outside `A` to `Z`, an empty callsign, a suffix that is not one
 /// uppercase letter or digit, a callsign that cannot log in on a net's network,
 /// a net name unfit for a folder, two nets sharing a name or a folder,
-/// overlapping windows, a private net with a `YouTube` switch on, `my_side`
+/// overlapping windows, a private net with a live or upload switch on, a non-`rtmps://` ingest URL or one with a key in its path, `my_side`
 /// with no `my_callsigns`, a software D-Star net in a build without the
 /// vocoder, or `max_age_days` outside 1 to 3650.
 pub fn validate(cfg: &Config, now: jiff::Timestamp) -> Result<Vec<String>, ConfigError> {
-    let warnings = validate_recorder(&cfg.recorder)?;
+    validate_inner(cfg, now, None)
+}
+
+/// [`validate`], plus a warning for each live switch that has no stream key
+/// in `keys`.
+///
+/// # Errors
+/// As [`validate`].
+pub fn validate_with_keys(
+    cfg: &Config,
+    now: jiff::Timestamp,
+    keys: &StreamKeys,
+) -> Result<Vec<String>, ConfigError> {
+    validate_inner(cfg, now, Some(keys))
+}
+
+fn validate_inner(
+    cfg: &Config,
+    now: jiff::Timestamp,
+    keys: Option<&StreamKeys>,
+) -> Result<Vec<String>, ConfigError> {
+    let mut warnings = validate_recorder(&cfg.recorder)?;
+    check_ingest("youtube_ingest", &cfg.live.youtube_ingest)?;
+    check_ingest("twitch_ingest", &cfg.live.twitch_ingest)?;
+    if let Some(keys) = keys {
+        for n in &cfg.nets {
+            if n.youtube_live && keys.youtube.is_none() {
+                warnings.push(format!(
+                    "net {:?}: youtube_live is on but no YouTube stream key is set ({CREDENTIALS_FILE} or {YOUTUBE_KEY_ENV})",
+                    n.name
+                ));
+            }
+            if n.twitch_live && keys.twitch.is_none() {
+                warnings.push(format!(
+                    "net {:?}: twitch_live is on but no Twitch stream key is set ({CREDENTIALS_FILE} or {TWITCH_KEY_ENV})",
+                    n.name
+                ));
+            }
+        }
+    }
     if cfg.web.local && !cfg.web.bind.ip().is_loopback() {
         return Err(invalid(format!(
             "[web] bind must be a loopback address (127.0.0.1 or ::1): {}",
@@ -686,9 +950,10 @@ fn validate_net(cfg: &Config, n: &NetCfg) -> Result<(), ConfigError> {
     if let Err(e) = login_callsign(n.target.network(), &r.callsign, r.callsign_suffix) {
         return Err(invalid(format!("net {:?}: {e}", n.name)));
     }
-    if n.visibility == Visibility::Private && (n.youtube_live || n.youtube_upload) {
+    if n.visibility == Visibility::Private && (n.youtube_live || n.twitch_live || n.youtube_upload)
+    {
         return Err(invalid(format!(
-            "net {:?}: youtube_live and youtube_upload need visibility = \"public\"",
+            "net {:?}: youtube_live, twitch_live and youtube_upload need visibility = \"public\"",
             n.name
         )));
     }
@@ -854,6 +1119,176 @@ youtube_upload = false
             .unwrap_err()
             .to_string();
         assert!(e.contains("Tuesday M17 net"), "{e}");
+    }
+
+    #[test]
+    fn private_net_with_twitch_live_is_refused() {
+        let s = SPEC
+            .replace("\"public\"", "\"private\"")
+            .replace("youtube_live = false", "twitch_live = true");
+        let e = validate(&from_toml_str(&s).unwrap(), jiff::Timestamp::now())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("Tuesday M17 net"), "{e}");
+        assert!(
+            e.contains("youtube_live, twitch_live and youtube_upload need visibility = \"public\""),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn twitch_live_is_off_by_default() {
+        assert!(!from_toml_str(SPEC).unwrap().nets[0].twitch_live);
+    }
+
+    #[test]
+    fn video_and_live_sections_have_defaults() {
+        let c = from_toml_str(SPEC).unwrap();
+        assert_eq!(c.video.ffmpeg, Path::new("ffmpeg"));
+        assert_eq!(c.live.youtube_ingest, "rtmps://a.rtmps.youtube.com/live2");
+        assert_eq!(
+            c.live.twitch_ingest,
+            "rtmps://ingest.global-contribute.live-video.net/app"
+        );
+        let s = format!("{SPEC}\n[video]\nffmpeg = \"/opt/ff/ffmpeg\"\n");
+        assert_eq!(
+            from_toml_str(&s).unwrap().video.ffmpeg,
+            Path::new("/opt/ff/ffmpeg")
+        );
+    }
+
+    #[test]
+    fn plain_rtmp_to_a_remote_host_is_refused() {
+        let s = format!("{SPEC}\n[live]\nyoutube_ingest = \"rtmp://a.rtmp.youtube.com/live2\"\n");
+        let e = validate(&from_toml_str(&s).unwrap(), jiff::Timestamp::now()).unwrap_err();
+        assert!(matches!(e, ConfigError::Invalid(_)));
+        assert!(e.to_string().contains("rtmps"), "{e}");
+    }
+
+    #[test]
+    fn ingest_host_is_parsed_not_prefix_matched() {
+        for ok in [
+            "rtmp://[::1]/app",
+            "rtmp://LOCALHOST:1935/x",
+            "rtmp://127.0.0.1:19350/app",
+            "rtmp://[::1]:1935/x",
+            "rtmps://a.rtmp.youtube.com/live2",
+        ] {
+            check_ingest("t", ok).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+        for bad in [
+            "rtmp://localhost:x@evil.example/app",
+            "rtmp://127.0.0.1.evil.com/",
+            "rtmp://localhost.evil.com/",
+            "rtmp://user@127.0.0.1/app",
+            "rtmp://[2001:db8::1]/app",
+            "rtmp://localhost#@evil/",
+            "rtmp://[::1]evil.com/",
+            "rtmp://[::1]:abc/",
+            "rtmp://[::1/",
+            "rtmp://localhost:99a/",
+            "rtmps://a.rtmps.youtube.com/live2/KEY",
+            "rtmps://a.rtmps.youtube.com/live2?key=KEY",
+            "rtmps://a.rtmps.youtube.com",
+        ] {
+            assert!(check_ingest("t", bad).is_err(), "{bad} must be refused");
+        }
+    }
+
+    #[test]
+    fn ingest_error_never_shows_the_path() {
+        let e = check_ingest("t", "rtmp://evil.example/live2/SENTINELKEY123").unwrap_err();
+        assert!(!e.to_string().contains("SENTINEL"), "{e}");
+        assert!(e.to_string().contains("evil.example"), "{e}");
+        let e = check_ingest("t", "rtmp://u:SENTINELKEY123@evil.example/app").unwrap_err();
+        assert!(!e.to_string().contains("SENTINEL"), "{e}");
+        for k in ["SENTINELKEY123", "live2/SENTINELKEY123://x"] {
+            let e = check_ingest("t", k).unwrap_err();
+            assert!(!e.to_string().contains("SENTINEL"), "{e}");
+        }
+    }
+
+    #[test]
+    fn plain_rtmp_to_loopback_is_allowed() {
+        let s = format!("{SPEC}\n[live]\ntwitch_ingest = \"rtmp://127.0.0.1:19350/app\"\n");
+        validate(&from_toml_str(&s).unwrap(), jiff::Timestamp::now()).unwrap();
+    }
+
+    fn keys_dir(name: &str, mode: u32, body: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("netrec-keys-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(CREDENTIALS_FILE);
+        std::fs::write(&file, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let _ = mode;
+        dir.join("netrec.toml")
+    }
+
+    const KEYS_BODY: &str =
+        "youtube_stream_key = \"file-yt-abc123\"\ntwitch_stream_key = \"file-tw-abc123\"\n";
+
+    #[test]
+    fn keys_come_from_the_file_and_env_wins() {
+        let cfg = keys_dir("env", 0o600, KEYS_BODY);
+        let env = |n: &str| (n == YOUTUBE_KEY_ENV).then(|| "env-yt".to_string());
+        let k = stream_keys_with(&cfg, env).unwrap();
+        assert_eq!(k.youtube.unwrap().expose(), "env-yt");
+        assert_eq!(k.twitch.unwrap().expose(), "file-tw-abc123");
+        // An empty variable does not hide the file's key.
+        let k = stream_keys_with(&cfg, |_| Some(String::new())).unwrap();
+        assert_eq!(k.youtube.unwrap().expose(), "file-yt-abc123");
+        let _ = std::fs::remove_dir_all(cfg.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_world_readable_credentials_file_is_refused_without_its_value() {
+        let cfg = keys_dir("mode", 0o644, "youtube_stream_key = \"abc123\"\n");
+        let err = stream_keys_with(&cfg, |_| None).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid(_)));
+        assert!(!err.to_string().contains("abc123"), "{err}");
+        let _ = std::fs::remove_dir_all(cfg.parent().unwrap());
+    }
+
+    #[test]
+    fn an_unparseable_credentials_file_names_itself_not_the_settings_page() {
+        let cfg = keys_dir("bad", 0o600, "youtube_stream_key = \"abc123\nx = \n");
+        let err = stream_keys_with(&cfg, |_| None).unwrap_err().to_string();
+        assert!(err.contains("again in credentials.toml"), "{err}");
+        assert!(!err.contains("settings page"), "{err}");
+        assert!(!err.contains("abc123"), "{err}");
+        let _ = std::fs::remove_dir_all(cfg.parent().unwrap());
+    }
+
+    #[test]
+    fn missing_key_is_a_warning() {
+        let s = SPEC.replace("youtube_live = false", "youtube_live = true");
+        let c = from_toml_str(&s).unwrap();
+        let w = validate_with_keys(&c, jiff::Timestamp::now(), &StreamKeys::default()).unwrap();
+        assert!(
+            w.contains(&"net \"Tuesday M17 net\": youtube_live is on but no YouTube stream key is set (credentials.toml or ASTAR_NETREC_YOUTUBE_STREAM_KEY)".to_string()),
+            "{w:?}"
+        );
+        let keys = StreamKeys {
+            youtube: Some(Secret::new("k".into())),
+            twitch: None,
+        };
+        let w = validate_with_keys(&c, jiff::Timestamp::now(), &keys).unwrap();
+        assert!(!w.iter().any(|m| m.contains("stream key")), "{w:?}");
+    }
+
+    #[test]
+    fn the_template_parses() {
+        let c = from_toml_str(TEMPLATE).unwrap();
+        assert!(TEMPLATE.contains("# [video]") && TEMPLATE.contains("# [live]"));
+        assert!(TEMPLATE.contains("twitch_live = false"));
+        assert_eq!(c.video, VideoCfg::default());
+        assert_eq!(c.live, LiveCfg::default());
     }
 
     #[test]
@@ -1111,5 +1546,53 @@ youtube_upload = false
         assert_eq!(parse_duration("1h").unwrap().as_secs(), 3600);
         assert!(parse_duration("x").is_err());
         assert!(parse_duration("").is_err());
+    }
+
+    #[test]
+    fn render_only_reads_just_the_ffmpeg() {
+        let dir = std::env::temp_dir().join(format!("netrec-vff-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("netrec.toml");
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(render_only(&p).unwrap().ffmpeg, Path::new("ffmpeg"));
+        // No nets, no recorder: still fine, since nothing else is read.
+        std::fs::write(&p, "[video]\nffmpeg = \"/opt/ff/bin/ffmpeg\"\n").unwrap();
+        assert_eq!(
+            render_only(&p).unwrap().ffmpeg,
+            Path::new("/opt/ff/bin/ffmpeg")
+        );
+        std::fs::write(&p, "[recorder]\nroot = \"/x\"\n").unwrap();
+        assert_eq!(render_only(&p).unwrap().ffmpeg, Path::new("ffmpeg"));
+        std::fs::write(&p, "[video]\nffmpeg = 3\n").unwrap();
+        assert!(matches!(render_only(&p), Err(ConfigError::Parse(_))));
+        std::fs::write(&p, "not toml [").unwrap();
+        assert!(matches!(render_only(&p), Err(ConfigError::Parse(_))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_only_reads_my_callsigns() {
+        let dir = std::env::temp_dir().join(format!("netrec-ronly-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("netrec.toml");
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(render_only(&p).unwrap(), RenderCfg::default());
+        std::fs::write(
+            &p,
+            "[recorder]\nmy_callsigns = [\"N0CALL\", \"KX0AAA\"]\n[video]\nffmpeg = \"/opt/ff\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            render_only(&p).unwrap(),
+            RenderCfg {
+                ffmpeg: PathBuf::from("/opt/ff"),
+                my_callsigns: vec!["N0CALL".to_owned(), "KX0AAA".to_owned()],
+            }
+        );
+        std::fs::write(&p, "[recorder]\nmy_callsigns = \"N0CALL\"\n").unwrap();
+        assert!(matches!(render_only(&p), Err(ConfigError::Parse(_))));
+        std::fs::write(&p, "[recorder]\nmy_callsigns = [3]\n").unwrap();
+        assert!(matches!(render_only(&p), Err(ConfigError::Parse(_))));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

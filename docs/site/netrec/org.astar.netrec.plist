@@ -6,6 +6,14 @@
   Replace YOU with your user name (launchd does not expand "~"), then:
 
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.astar.netrec.plist
+
+  Videos and live streams need ffmpeg (`brew install ffmpeg`). launchd's PATH
+  leaves out Homebrew, so the recorder also looks in /opt/homebrew/bin,
+  /usr/local/bin and /usr/bin; for a copy anywhere else, set [video] ffmpeg
+  to its full path in netrec.toml. `astar-netrec check` says which it uses.
+
+  Stream keys go in credentials.toml next to netrec.toml (chmod 600), never
+  in this file: anyone on the Mac can read it.
 -->
 <plist version="1.0">
 <dict>

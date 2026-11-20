@@ -404,6 +404,63 @@ final class FakeStation: StationDriving {
         defer { onPacketLogConfigure?() }
         if let packetLogConfigureError { throw packetLogConfigureError }
     }
+    // MARK: - SSTV
+
+    struct SstvConfigureCall: Equatable {
+        var enabled: Bool
+        var directory: String
+        var utcOffsetSeconds: Int32
+    }
+    struct SstvContextCall: Equatable {
+        var network: String
+        var target: String
+        var talker: String?
+    }
+    private let sstvLock = NSLock()
+    private var _sstvConfigureCalls: [SstvConfigureCall] = []
+    /// Every `sstvConfigure` asked for; read from any thread (the launch
+    /// configure runs on the session's SSTV queue).
+    var sstvConfigureCalls: [SstvConfigureCall] {
+        sstvLock.lock()
+        defer { sstvLock.unlock() }
+        return _sstvConfigureCalls
+    }
+    /// When set, `sstvConfigure` throws.
+    var sstvConfigureError: Error?
+    private(set) var sstvContextCalls: [SstvContextCall] = []
+    /// What `sstvState()` reports.
+    var sstvStateValue: SstvState = try! SstvState.make()
+    private(set) var sstvStateReads = 0
+    /// What `sstvFrame()` reports.
+    var sstvFrameValue: SstvFrame?
+    private(set) var sstvFrameReads = 0
+    func sstvConfigure(enabled: Bool, directory: String, utcOffsetSeconds: Int32) throws {
+        sstvLock.lock()
+        _sstvConfigureCalls.append(
+            SstvConfigureCall(
+                enabled: enabled, directory: directory, utcOffsetSeconds: utcOffsetSeconds))
+        let error = sstvConfigureError
+        sstvLock.unlock()
+        if let error { throw error }
+    }
+    /// When set, `sstvSetContext` throws (after recording the call).
+    var sstvContextError: Error?
+    /// When set, `sstvFrame` throws (after counting the read).
+    var sstvFrameError: Error?
+    func sstvSetContext(network: String, target: String, talker: String?) throws {
+        sstvContextCalls.append(SstvContextCall(network: network, target: target, talker: talker))
+        if let sstvContextError { throw sstvContextError }
+    }
+    func sstvState() throws -> SstvState {
+        sstvStateReads += 1
+        return sstvStateValue
+    }
+    func sstvFrame() throws -> SstvFrame? {
+        sstvFrameReads += 1
+        if let sstvFrameError { throw sstvFrameError }
+        return sstvFrameValue
+    }
+
     func packetLogState() throws -> PacketLogState {
         packetLogLock.lock()
         defer { packetLogLock.unlock() }
@@ -629,6 +686,12 @@ private struct ThrowingStation: StationDriving {
     ) throws { throw Boom() }
     func packetLogCallEnded() throws { throw Boom() }
     func packetLogState() throws -> PacketLogState { throw Boom() }
+    func sstvConfigure(enabled: Bool, directory: String, utcOffsetSeconds: Int32) throws {
+        throw Boom()
+    }
+    func sstvSetContext(network: String, target: String, talker: String?) throws { throw Boom() }
+    func sstvState() throws -> SstvState { throw Boom() }
+    func sstvFrame() throws -> SstvFrame? { throw Boom() }
     func recordState() throws -> RecordState { throw Boom() }
     func setCodecDirs(_ dirs: [String]) throws { throw Boom() }
     func setVocoderTrust(_ serials: [String]) throws { throw Boom() }

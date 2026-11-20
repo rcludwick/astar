@@ -719,7 +719,7 @@ public final class CallSession: ObservableObject {
     private let recordingStore: RecordingSettingsStore
     /// The clock behind the `recordState()` throttle (F25), injected so a
     /// test can step it.
-    private let now: () -> Date
+    let now: () -> Date
     /// Set when a dial to a DIFFERENT network succeeds while recording (F10)
     /// — see `applyRecordingRulesAfterDial` for the exact conditions:
     /// the network and label to start a new file with once that connection
@@ -771,6 +771,65 @@ public final class CallSession: ObservableObject {
     /// A runner that sends recording work to its own serial queue.
     static func backgroundRecordingWork() -> (@escaping () -> Void) -> Void {
         let queue = DispatchQueue(label: "astar.recording", qos: .userInitiated)
+        return { queue.async(execute: $0) }
+    }
+
+    // MARK: - SSTV state (the logic is in CallSession+Sstv.swift)
+
+    /// Whether to decode SSTV pictures, and where to save them. Saved through
+    /// the SSTV store on change, and handed to the engine off the main
+    /// thread.
+    @Published public var sstvSettings: SstvSettings {
+        didSet { sstvSettingsChanged(from: oldValue) }
+    }
+    /// The picture airing now, or the one that ended last, for the call
+    /// view's panel. `nil` until a picture starts while decoding is on.
+    @Published public internal(set) var sstvLive: SstvLive?
+    /// Why decoding could not start, or the last picture could not be saved.
+    @Published public internal(set) var sstvError: String?
+    /// The picture the operator closed the panel on; the next one reopens it.
+    @Published var sstvDismissedSeq: UInt64?
+    let sstvStore: SstvSettingsStore
+    /// Runs a blocking `sstvConfigure`: its own serial queue in the app, so
+    /// a decoder finishing its last picture never holds up a recording;
+    /// tests swap in an inline runner.
+    var runSstvWork: (@escaping () -> Void) -> Void
+    /// When `sstvState()` was last read; `nil` reads on the next poll.
+    var lastSstvStateRead: Date?
+    /// The finished picture whose pixels are already in `sstvLive`.
+    var sstvFetchedSeq: UInt64?
+    /// Pictures numbered at or below this ended before decoding (re)started,
+    /// so they are not news. `nil` until the first read sets it.
+    var sstvBaselineSeq: UInt64?
+    /// The connection last told to the engine, so it is told only changes.
+    var sstvPushedContext = SstvContext.none
+    /// Why the last `sstvConfigure` failed; cleared by one that succeeds.
+    var sstvConfigureFailure: String?
+    /// Counts configures, so only the latest one's answer is published.
+    var sstvConfigureToken = 0
+    /// Frame reads that threw for the picture now being fetched, so a
+    /// transient failure is retried but a broken one is given up on.
+    var sstvFrameFailures = 0
+    /// Stops the SSTV clock; `nil` while it is not running.
+    var sstvClockCancel: (() -> Void)?
+    /// Starts a repeating timer and returns what stops it: the main run
+    /// loop in the app; tests swap in a manual one.
+    var scheduleSstvClock: (TimeInterval, @escaping () -> Void) -> () -> Void =
+        CallSession.mainRunLoopRepeating
+
+    /// A repeating timer on the main run loop, in every mode, so it keeps
+    /// time while a menu tracks or the popover is closed.
+    static func mainRunLoopRepeating(
+        _ interval: TimeInterval, _ body: @escaping () -> Void
+    ) -> () -> Void {
+        let timer = Timer(timeInterval: interval, repeats: true) { _ in body() }
+        RunLoop.main.add(timer, forMode: .common)
+        return { timer.invalidate() }
+    }
+
+    /// A runner that sends SSTV work to its own serial queue.
+    static func backgroundSstvWork() -> (@escaping () -> Void) -> Void {
+        let queue = DispatchQueue(label: "astar.sstv", qos: .userInitiated)
         return { queue.async(execute: $0) }
     }
 
@@ -1204,11 +1263,16 @@ public final class CallSession: ObservableObject {
         echolinkPasswords: EchoLinkCredentialStore? = nil,
         userDefaults: UserDefaults = .standard,
         recordingStore: RecordingSettingsStore = UserDefaultsRecordingSettingsStore(),
+        sstvStore: SstvSettingsStore? = nil,
         now: @escaping () -> Date = Date.init
     ) {
         self.station = station
         self.recordingStore = recordingStore
         self.recordingSettings = recordingStore.load()
+        let sstvStore = sstvStore ?? UserDefaultsSstvSettingsStore(userDefaults)
+        self.sstvStore = sstvStore
+        self.sstvSettings = sstvStore.load()
+        self.runSstvWork = CallSession.backgroundSstvWork()
         self.now = now
         self.runRecordingWork = CallSession.backgroundRecordingWork()
         self.hasCredentials = hasCredentials
@@ -1254,6 +1318,8 @@ public final class CallSession: ObservableObject {
         // The station is built with the trust list in its config; the D-Star
         // vocoder choice is a setter, so hand it over here.
         try? station.setDStarVocoder(dstarVocoder)
+        // SSTV decoding starts at launch, on by default, off the main thread.
+        configureSstv()
     }
 
     /// Hand the station a new vocoder trust list (Settings → Vocoders added
@@ -1414,6 +1480,10 @@ public final class CallSession: ObservableObject {
         // credential save can never quietly forget the operator's sticks.
         try? station.setVocoderTrust(vocoderSerials)
         try? station.setDStarVocoder(dstarVocoder)
+        // And a new engine numbers its pictures from scratch with the
+        // decoder off: forget the old one's numbers and context, and
+        // configure this one.
+        resetSstvForNewEngine()
         if wasRunning { start() }
     }
 
@@ -1437,6 +1507,14 @@ public final class CallSession: ObservableObject {
     public func stop() {
         timer?.invalidate()
         timer = nil
+    }
+
+    /// Whether the UI poll loop is running.
+    var pollRunning: Bool { timer != nil }
+
+    deinit {
+        timer?.invalidate()
+        sstvClockCancel?()
     }
 
     /// Advance published state from one snapshot, then drain queued lifecycle
@@ -1701,6 +1779,7 @@ public final class CallSession: ObservableObject {
                 clearEchoLinkCall()
             }
             advanceRecording(status: snap.status)
+            advanceSstv(status: snap.status)
             lastPolledStatus = snap.status
             // "Receiving" = far end keyed (when the node reports it) OR live rx
             // audio activity (the reliable signal for most AllStar nodes). The
@@ -2883,6 +2962,8 @@ public final class CallSession: ObservableObject {
             bumpDialGeneration()
             // A hangup finishes the file, and nothing resumes one after it.
             endRecordingForHangup()
+            // Pictures from here on belong to no call.
+            pushSstvContext(.none)
             // Drop the no-answer latch BEFORE the hangup reaches the station: the
             // poll loop must never see hangup/idle with the latch still armed for a
             // user-initiated disconnect (that would misreport "didn't answer").

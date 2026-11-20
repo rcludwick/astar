@@ -540,6 +540,16 @@ pub struct ConsoleSession {
     /// and an engine built later gets heard/sent on its router. See
     /// [`Self::set_record_taps`].
     record_taps: RecordTaps,
+    /// The SSTV decoder's heard tap, held here like [`Self::record_taps`]
+    /// so an engine built later gets it on its router. Independent of the
+    /// recording: see [`Self::set_sstv_tap`].
+    sstv_tap: Option<Tap<PcmChunk>>,
+    /// "Hold shrink" for the receive jitter buffers: while `true`, no
+    /// received call sheds a frame to shrink its cushion. One cell for the
+    /// session's lifetime, put on every engine's router as it is built, so
+    /// whoever holds it (the SSTV decoder, while a picture airs) stores into
+    /// it directly. See [`Self::shrink_hold`].
+    shrink_hold: Arc<AtomicBool>,
     /// The one slot every `AllStar` call offers to, dialled or inbound. It
     /// lives as long as the session because the listener keeps the policy it
     /// started with, so the log is switched with `set` and never by swapping
@@ -548,6 +558,10 @@ pub struct ConsoleSession {
     /// The packet log's tap, held here so a link connected later picks it up.
     /// See [`Self::set_packet_tap`].
     packet_tap: Option<Tap<PacketEvent>>,
+    /// The SSTV decoder's packet slot, offered to by every `AllStar` call
+    /// beside [`Self::iax_packet_slot`]. Lives as long as the session for
+    /// the same reason. See [`Self::set_sstv_packet_tap`].
+    iax_sstv_packet_slot: PacketSlot,
 }
 
 /// The read-only recording taps a [`ConsoleSession`] installs: `heard` and
@@ -630,8 +644,11 @@ impl ConsoleSession {
             vocoder_trust: astar_codec::vocoder_trust::VocoderTrust::default(),
             dstar_vocoder: astar_codec::vocoder_choice::DstarVocoder::Dongle,
             record_taps: RecordTaps::default(),
+            sstv_tap: None,
+            shrink_hold: Arc::new(AtomicBool::new(false)),
             iax_packet_slot: PacketSlot::default(),
             packet_tap: None,
+            iax_sstv_packet_slot: PacketSlot::default(),
         }
     }
 
@@ -652,6 +669,50 @@ impl ConsoleSession {
             );
         }
         self.apply_frame_tap();
+    }
+
+    /// Install (or, with `None`, remove) the SSTV decoder's heard tap. It is
+    /// stored here, so it survives the engine being rebuilt; it goes onto
+    /// the router now when an engine exists. Recording never touches it,
+    /// and it never touches the recording.
+    pub fn set_sstv_tap(&mut self, tap: Option<Tap<PcmChunk>>) {
+        self.sstv_tap = tap;
+        if let Some(mgr) = self.manager.as_mut() {
+            mgr.router_mut()
+                .set_heard_tap(astar_audio::HeardConsumer::Sstv, self.sstv_tap.clone());
+        }
+    }
+
+    /// The receive path's "hold shrink" cell. Store `true` while an SSTV
+    /// picture is airing and every received call's jitter buffer keeps each
+    /// frame instead of shedding one to shrink an over-deep cushion; store
+    /// `false` when it ends. The audio thread only loads it, lock-free. The
+    /// same cell for the session's lifetime, engine rebuilds included.
+    #[must_use]
+    pub fn shrink_hold(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shrink_hold)
+    }
+
+    /// Install (or, with `None`, remove) the SSTV decoder's packet tap: every
+    /// `AllStar` call, dialled or inbound, live now or connected later, offers
+    /// its received voice packets to it, so the packets behind each picture
+    /// can be kept and the picture rebuilt from them. Only `AllStar` calls
+    /// feed it. The packet log never sees it, and it never sees the log's.
+    pub fn set_sstv_packet_tap(&mut self, tap: Option<Tap<PacketEvent>>) {
+        self.iax_sstv_packet_slot.set(tap);
+    }
+
+    /// Whether an SSTV packet tap is installed (waits for the slot's lock;
+    /// not for the receive thread).
+    #[must_use]
+    pub fn has_sstv_packet_tap(&self) -> bool {
+        self.iax_sstv_packet_slot.is_set()
+    }
+
+    /// The SSTV tap installed right now, as [`Self::set_sstv_tap`] left it.
+    #[must_use]
+    pub fn sstv_tap(&self) -> Option<&Tap<PcmChunk>> {
+        self.sstv_tap.as_ref()
     }
 
     /// Change only the codec-frame tap, leaving heard/sent exactly as they
@@ -1675,6 +1736,7 @@ impl ConsoleSession {
         // The listener keeps this policy for life, so the slot has to be in
         // it now: this is the only way the packet log reaches inbound calls.
         policy.packet_slot = self.iax_packet_slot.clone();
+        policy.sstv_packet_slot = self.iax_sstv_packet_slot.clone();
 
         let (listener, events) = IncomingCallListener::builder()
             .bind(bind)
@@ -4448,6 +4510,10 @@ impl ConsoleSession {
                 .as_mut()
                 .expect("just set")
                 .set_packet_slot(self.iax_packet_slot.clone());
+            self.manager
+                .as_mut()
+                .expect("just set")
+                .set_sstv_packet_slot(self.iax_sstv_packet_slot.clone());
             // Recording taps set before this engine existed (or before it was
             // rebuilt) go onto its router.
             if self.record_taps.heard.is_some() || self.record_taps.sent.is_some() {
@@ -4459,6 +4525,18 @@ impl ConsoleSession {
                         self.record_taps.heard.clone(),
                         self.record_taps.sent.clone(),
                     );
+            }
+            self.manager
+                .as_mut()
+                .expect("just set")
+                .router_mut()
+                .share_shrink_hold(Arc::clone(&self.shrink_hold));
+            if self.sstv_tap.is_some() {
+                self.manager
+                    .as_mut()
+                    .expect("just set")
+                    .router_mut()
+                    .set_heard_tap(astar_audio::HeardConsumer::Sstv, self.sstv_tap.clone());
             }
             // Replay any pending announce config pushed before the Manager existed.
             if let Some(cfg) = self.pending_announce.clone() {
@@ -8923,6 +9001,97 @@ mod tests {
         backend.push(160);
         assert_eq!(drained(&heard), 0, "heard cleared");
         assert_eq!(drained(&sent), 0, "sent cleared");
+    }
+
+    /// The SSTV tap is held on the session like the record taps: set
+    /// before any engine exists, it reaches the router the engine builds.
+    #[test]
+    fn sstv_tap_set_before_connect_reaches_the_router() {
+        let backend = StashBackend::default();
+        let (sstv_tap, sstv) = astar_record::tap::tap_channel(16);
+
+        let mut s = ConsoleSession::new();
+        s.set_sstv_tap(Some(sstv_tap));
+        assert!(s.sstv_tap().is_some());
+        let b = backend.clone();
+        let audio = s
+            .open_voice_route(None, None, move || Box::new(b))
+            .expect("route");
+        audio
+            .rx_frames
+            .send(astar_audio::RxFrame::from(vec![1_000_i16; 160]))
+            .unwrap();
+        backend.pull(160);
+        assert_eq!(drained(&sstv), 1, "SSTV hears the bus");
+
+        // Clearing it takes it off the live router.
+        s.set_sstv_tap(None);
+        assert!(s.sstv_tap().is_none());
+        audio
+            .rx_frames
+            .send(astar_audio::RxFrame::from(vec![1_000_i16; 160]))
+            .unwrap();
+        backend.pull(160);
+        assert_eq!(drained(&sstv), 0, "SSTV cleared");
+    }
+
+    /// The shrink hold is one cell for the session's lifetime: every engine
+    /// built, the first and a rebuilt one, reads it.
+    #[test]
+    fn the_shrink_hold_reaches_every_engine_the_session_builds() {
+        let mut s = ConsoleSession::new();
+        let hold = s.shrink_hold();
+        assert!(Arc::ptr_eq(&hold, &s.shrink_hold()), "one cell");
+        for _ in 0..2 {
+            let b = StashBackend::default();
+            let _audio = s
+                .open_voice_route(None, None, move || Box::new(b))
+                .expect("route");
+            let router = s.manager.as_ref().expect("engine").router();
+            assert!(Arc::ptr_eq(&router.shrink_hold(), &hold));
+            // Rebuild: drop the engine; the next route builds a new one.
+            drop(s.release_voice_route());
+            s.manager = None;
+        }
+    }
+
+    /// Starting and stopping a recording never disturbs SSTV, and the
+    /// reverse.
+    #[test]
+    fn record_taps_changes_leave_the_sstv_tap_alone() {
+        let backend = StashBackend::default();
+        let (sstv_tap, sstv) = astar_record::tap::tap_channel(16);
+        let (heard_tap, heard) = astar_record::tap::tap_channel(16);
+
+        let mut s = ConsoleSession::new();
+        s.set_sstv_tap(Some(sstv_tap));
+        let b = backend.clone();
+        let audio = s
+            .open_voice_route(None, None, move || Box::new(b))
+            .expect("route");
+        let received = || {
+            audio
+                .rx_frames
+                .send(astar_audio::RxFrame::from(vec![1_000_i16; 160]))
+                .unwrap();
+        };
+
+        s.set_record_taps(RecordTaps {
+            heard: Some(heard_tap),
+            ..RecordTaps::default()
+        });
+        received();
+        backend.pull(160);
+        assert_eq!(drained(&heard), 1, "the recorder hears");
+        assert_eq!(drained(&sstv), 1, "and so does SSTV");
+
+        s.set_record_taps(RecordTaps::default());
+        received();
+        backend.pull(160);
+        assert_eq!(drained(&heard), 0, "the recording stopped");
+        assert_eq!(drained(&sstv), 1, "SSTV still hears");
+        assert!(s.sstv_tap().is_some());
+        assert!(s.record_taps().heard.is_none());
     }
 
     // ---- packet log ----------------------------------------------------

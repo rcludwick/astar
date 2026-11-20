@@ -19,12 +19,16 @@
 #    astar_station re-exports under other names (DstarVocoder) stay allowed,
 #    and so does any of these words in a `//` comment.
 #
+# 4. crates/astar-netvideo, which draws the recorder's video, names none of the
+#    crates that can reach a radio or a network leg in its Cargo.toml.
+#
 # This is a text match on purpose, so rules 1 and 2 read comments too. A name
 # counts as a call when it stands alone before `(`, or as a path (`Station::name`).
 # A longer name that merely ends in one of these (m17_monitor_connect,
 # dstar_connect) is not a match.
 #
-# NETREC_DIR points the guard at another tree, for its own tests.
+# NETREC_DIR points the guard at another tree, for its own tests, and
+# NETVIDEO_TOML at another manifest for rule 4.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -101,6 +105,20 @@ hits=$(find "$dir" -name '*.rs' ! -path "$listen" -exec awk -v words="$holders" 
 ' {} +)
 if [ -n "$hits" ]; then
   echo "FAIL: only $listen may hold a station or a session:"
+  echo "$hits"
+  fail=1
+fi
+
+video_toml="${NETVIDEO_TOML:-crates/astar-netvideo/Cargo.toml}"
+radio_crates='astar-station|astar-console|astar-iax|astar-audio|astar-m17|astar-dstar'
+radio_crates+='|astar-echolink|astar-ptt|astar-serial-sys'
+if [ ! -f "$video_toml" ]; then
+  echo "FAIL: $video_toml is missing, so the guard cannot run"
+  exit 1
+fi
+hits=$(grep -nE "(^|[^A-Za-z0-9_-])($radio_crates)([^A-Za-z0-9_-]|\$)" "$video_toml" || true)
+if [ -n "$hits" ]; then
+  echo "FAIL: astar-netvideo must not depend on a crate that can reach a radio:"
   echo "$hits"
   fail=1
 fi

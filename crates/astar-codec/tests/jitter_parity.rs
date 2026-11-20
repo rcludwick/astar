@@ -125,6 +125,7 @@ impl Driver {
             resync_threshold: b.parse().unwrap_or(0),
             max_contig_interp: c.parse().unwrap_or(0),
             target_extra: d.parse().unwrap_or(0),
+            ..JitterConfig::default()
         };
         self.jb.set_config(cfg);
         out.push_str("config ok\n");

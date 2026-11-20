@@ -567,3 +567,258 @@ derive from `rcludwick/ambe`.
   fails if AMBE+2 source or the feature reappears.
 
 This is a summary of the public record, not legal advice.
+
+## 10. SSTV decoding via `slowrx` (MIT) — notices
+
+astar decodes slow-scan TV pictures with **`slowrx`** 0.9.0, a pure-Rust port
+by Jason Herald of Oona Räisänen's slowrx decoder, from crates.io. It is the
+one SSTV dependency of `crates/astar-sstv`, which every build that decodes
+pictures carries: today the macOS app's engine, where `astar-sys` turns on
+`astar-station`'s `sstv` feature. `astar-server` does not decode SSTV and
+leaves that feature off, so it does not link slowrx. It is MIT: no relink or
+source obligation on astar, only attribution, and there is no C library to
+link. Its port translates much of
+slowrx's C source, which is ISC-licensed, so slowrx's ISC notice is
+reproduced below its own, as the crate's `NOTICE.md` does.
+
+The version is pinned exactly (`=0.9.0` in the root `Cargo.toml`), and a bump
+is a fresh read of its licence, its `NOTICE.md` and its dependencies. The
+crate declares `unsafe_code = "deny"` and has no build script. Its one
+non-trivial dependency, `rustfft` 6 (with `num-complex`, `num-traits`,
+`num-integer`, `primal-check`, `strength_reduce` and `transpose`), is
+`MIT OR Apache-2.0`; so is `png` 0.18, which writes the saved pictures.
+Png's own dependencies are permissive too: `flate2`, `fdeflate`,
+`miniz_oxide` and `crc32fast` are MIT or Apache-2.0 (`miniz_oxide` also
+Zlib), `simd-adler32` is MIT, and `adler2` is 0BSD, MIT or Apache-2.0.
+
+astar only receives SSTV. The **`sstv`** crate (0.3.1, MIT), which can
+encode pictures, is a **dev-dependency of `astar-sstv` only**: it makes the
+test signals and never ships in any build. `ci/guard-sstv.sh` fails if any
+`Cargo.toml` names it anywhere but a `[dev-dependencies]` table.
+
+`slowrx` (from the crate's `LICENSE`):
+
+```
+MIT License
+
+Copyright (c) 2026 Jason Herald
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+slowrx, the C original (from the crate's `NOTICE.md`):
+
+```
+Copyright (c) 2007-2013, Oona Räisänen (OH2EIQ [at] sral.fi)
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+```
+
+## 11. Inter (OFL-1.1) — the net recorder's video text
+
+`astar-netvideo` draws the text on recorded-net video frames in **Inter 4.1**,
+four static weights (Regular, SemiBold, Bold, ExtraBold) compiled into the
+binary with `include_bytes!`. They live in `assets/fonts/`, unmodified; the
+source release, the path of each file inside it and each file's SHA-256 are in
+`assets/fonts/VENDORED.md`.
+
+Inter is licensed under the **SIL Open Font License 1.1**, which allows
+bundling, embedding and redistributing the font, in a program of any licence,
+provided the copyright notice and licence travel with it and the font is not
+sold on its own. The notice, `Copyright (c) 2016 The Inter Project Authors
+(https://github.com/rsms/inter)`, and the full licence text are in
+[`assets/fonts/OFL.txt`](assets/fonts/OFL.txt), which is Inter's own
+`LICENSE.txt` byte for byte, and which is what this section incorporates by
+reference. The font files are not modified, so the licence's Reserved Font
+Name clause is not in play. The licence applies to the font only, not to
+astar's AGPL code that embeds it.
+
+## 12. tiny-skia (BSD-3-Clause), ab_glyph (Apache-2.0), rml_rtmp (MIT) — the net recorder's video
+
+`astar-netvideo` draws frames with **`tiny-skia` 0.11.4**, an ordinary
+crates.io dependency, a Rust port of a subset of Skia. BSD-3-Clause is
+AGPL-compatible. It asks that binary distributions reproduce the copyright
+notices, the conditions and the disclaimer, and that the names of the
+copyright holders not be used to endorse a product. This section is that
+reproduction:
+
+```
+Copyright (c) 2011 Google Inc. All rights reserved.
+Copyright (c) 2020 Yevhenii Reizner All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+  * Redistributions of source code must retain the above copyright
+    notice, this list of conditions and the following disclaimer.
+
+  * Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in
+    the documentation and/or other materials provided with the
+    distribution.
+
+  * Neither the name of the copyright holder nor the names of its
+    contributors may be used to endorse or promote products derived
+    from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+`tiny-skia` depends on **`arrayref` 0.3.9**, which is **BSD-2-Clause**, also
+AGPL-compatible. Its binary-distribution condition is met by reproducing its
+notice here:
+
+```
+Copyright (c) 2015 David Roundy <roundyd@physics.oregonstate.edu>
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the
+   distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+**`ab_glyph` 0.2.32** and **`ab_glyph_rasterizer` 0.1.10** (by Alex Butler), the
+glyph outline reader and rasteriser behind the Inter text, are **Apache-2.0**.
+That licence is compatible with the AGPL-3.0, and its text ships in each
+crate's `LICENSE` file in its crates.io package. Neither carries a NOTICE file.
+
+**`rml_rtmp` 0.8.0** and **`rml_amf0` 0.3.0** (by Matthew Shapiro), the RTMP and
+AMF0 codecs of the net recorder's live-stream output, are **MIT**. Their
+crates.io packages carry no licence file, only the `license = "MIT"` field in
+`Cargo.toml` and the author name, so this is the standard MIT text with that
+author:
+
+```
+MIT License
+
+Copyright (c) Matthew Shapiro <me@mshapiro.net>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+The live stream's RTMPS leg uses **`rustls` 0.23** with **`ring`** and the
+**`webpki-roots`** certificate list, the same permissive set (MIT, Apache-2.0,
+ISC; the root data CDLA-Permissive-2.0) that section 6 records for
+astar-server's `public-tls`. `rml_rtmp`'s own dependencies (`bytes`,
+`byteorder`, `hmac`, `sha2`, `rand`, `thiserror`) are MIT or MIT/Apache-2.0.
+
+## 13. `subtle` (BSD-3-Clause) — constant-time comparison, in every build
+
+**`subtle` 2.6.1** (by Isis Agora Lovecruft and Henry de Valence; used by
+much of the RustCrypto family) gives constant-time equality. `astar-iax-core`
+uses it directly to compare IAX2 MD5 authentication answers and call tokens
+(`crates/astar-iax-core/src/session/auth.rs`), so a wrong one leaks no
+timing about which byte was wrong. Because `astar-iax-core` sits under every
+client and server, `subtle` is compiled into **every shipped binary**: the
+macOS app, `astar-server`, `astar-netrec` and the Windows/Linux client. It
+also arrives through `digest`, `rustls`, `curve25519-dalek`, `crypto-mac` and
+`universal-hash` where those are built in; it is the same crate and the same
+notice either way.
+
+BSD-3-Clause is AGPL-compatible. Its binary-distribution condition is met by
+reproducing the notice here:
+
+```
+Copyright (c) 2016-2017 Isis Agora Lovecruft, Henry de Valence. All rights reserved.
+Copyright (c) 2016-2024 Isis Agora Lovecruft. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+1. Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright
+notice, this list of conditions and the following disclaimer in the
+documentation and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED
+TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
+PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```

@@ -333,6 +333,19 @@
                             .mainCard()
                         }
 
+                        // An SSTV picture airing or just received. Outside
+                        // the in-call branch, so one that ends as the call
+                        // drops is still there to see.
+                        if session.sstvPanelVisible, let live = session.sstvLive {
+                            SstvPanelView(
+                                content: SstvPanelContent(live),
+                                onDismiss: session.dismissSstvPanel,
+                                onShowAll: navigation.showSstvGallery
+                            )
+                            .mainCard()
+                            .transition(.opacity)
+                        }
+
                         if let errorText {
                             Text(errorText)
                                 .font(.caption)
@@ -510,6 +523,7 @@
                         ReflectorSettingsView()
                         SpectrumSettingsView()
                         RecordingSettingsView()
+                        SstvSettingsView()
                         ConfigTransferView(directoryRevision: $directoryRevision)
                     }
                     .listStyle(.inset)

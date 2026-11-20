@@ -89,6 +89,17 @@ pub struct JitterConfig {
     /// Extra slack added on top of measured jitter when picking the target
     /// depth. Larger = more latency, fewer underruns.
     pub target_extra: i64,
+    /// Forget the delay history when a new talk spurt starts (the first
+    /// voice frame of the new spurt after the buffer has gone silent).
+    ///
+    /// `jitterbuf.c` keeps its history across spurts, so a short key-up
+    /// that arrives late inflates the next over's target; seconds later,
+    /// when those late delays age into the ignored top 3 %, the target
+    /// falls and the buffer sheds the excess one frame per 500 ms. With
+    /// this on, each over is measured on its own. Off by default, which is
+    /// `jitterbuf.c`'s behaviour (the parity traces pin it); astar's
+    /// receive path turns it on.
+    pub spurt_history_reset: bool,
 }
 
 impl Default for JitterConfig {
@@ -98,6 +109,7 @@ impl Default for JitterConfig {
             resync_threshold: 1000,
             max_contig_interp: 0,
             target_extra: TARGET_EXTRA_DEFAULT,
+            spurt_history_reset: false,
         }
     }
 }
@@ -198,6 +210,13 @@ pub struct JitterBuf<T> {
     /// simpler and gives us O(log n) lookup with O(n) shift on insert,
     /// which is fine for a ≤ few-dozen-element buffer.
     frames: VecDeque<Frame<T>>,
+
+    /// Set when the buffer leaves voice mode for silence; the next voice
+    /// frame from after the silence began starts a new talk spurt.
+    spurt_ended: bool,
+    /// While set, the shrink that throws away a frame in hand never fires.
+    /// See [`JitterBuf::set_shrink_hold`].
+    shrink_hold: bool,
 }
 
 impl<T> JitterBuf<T> {
@@ -213,6 +232,8 @@ impl<T> JitterBuf<T> {
             hist_minbuf: [0; HISTORY_MAXBUF_SZ],
             hist_maxbuf_valid: false,
             frames: VecDeque::new(),
+            spurt_ended: false,
+            shrink_hold: false,
         };
         jb.reset_internal();
         jb
@@ -241,6 +262,7 @@ impl<T> JitterBuf<T> {
 
     fn reset_internal(&mut self) {
         let saved = self.conf;
+        self.spurt_ended = false;
         self.info = JitterStats::default();
         self.history.fill(0);
         self.hist_ptr = 0;
@@ -253,6 +275,19 @@ impl<T> JitterBuf<T> {
         self.info.current = saved.target_extra;
         self.info.target = saved.target_extra;
         self.info.silence_begin_ts = -1;
+    }
+
+    /// Hold off (`true`) or allow (`false`) the shrink that throws a frame
+    /// away while frames keep arriving.
+    ///
+    /// Growth, normal playout and the shrinks that lose no audio (into a
+    /// gap, or during silence) carry on as usual. The receive path holds it
+    /// while an SSTV picture is airing: there a lost 20 ms shifts every
+    /// later line, and latency does not matter. Survives [`reset`].
+    ///
+    /// [`reset`]: JitterBuf::reset
+    pub fn set_shrink_hold(&mut self, hold: bool) {
+        self.shrink_hold = hold;
     }
 
     /// Snapshot of current counters/state.
@@ -352,6 +387,14 @@ impl<T> JitterBuf<T> {
             self.hist_maxbuf_valid = false;
         }
         Ok(())
+    }
+
+    /// Empty the delay history, so the next estimate comes from the delays
+    /// put after this. Keeps `last_delay`, so the discontinuity check still
+    /// compares a new spurt against the last delay seen.
+    fn forget_history(&mut self) {
+        self.hist_ptr = 0;
+        self.hist_maxbuf_valid = false;
     }
 
     fn history_calc_maxbuf(&mut self) {
@@ -486,7 +529,27 @@ impl<T> JitterBuf<T> {
     pub fn put(&mut self, frame: Frame<T>, now: i64) -> Result<(), JitterError> {
         self.info.frames_in += 1;
         if frame.frame_type == FrameType::Voice {
-            self.history_put(frame.ts, now)?;
+            // The first frame of a new talk spurt? A straggler from the old
+            // one (ts before the silence began) does not count.
+            let new_spurt = self.spurt_ended
+                && frame.ts - self.info.resync_offset >= self.info.silence_begin_ts;
+            if new_spurt {
+                self.spurt_ended = false;
+            }
+            let forget = new_spurt && self.conf.spurt_history_reset;
+            if forget {
+                self.forget_history();
+            }
+            let put = self.history_put(frame.ts, now);
+            if forget {
+                // `next` schedules a silent buffer against the target, so
+                // it must come from this spurt now, not from the history
+                // just forgotten: a stale, deeper target would hold the
+                // first frame back, then snap to the new one and leave the
+                // frames behind it overdue.
+                self.update_target();
+            }
+            put?;
         }
         let _was_head = self.queue_put(frame);
         Ok(())
@@ -502,15 +565,7 @@ impl<T> JitterBuf<T> {
             return GetResult::Empty;
         }
 
-        self.history_get();
-
-        // target = jitter + min + target_extra, clamped by max_jitterbuf.
-        self.info.target = self.info.jitter + self.info.min + self.conf.target_extra;
-        if self.conf.max_jitterbuf != 0
-            && (self.info.target - self.info.min) > self.conf.max_jitterbuf
-        {
-            self.info.target = self.info.min + self.conf.max_jitterbuf;
-        }
+        self.update_target();
         let diff = self.info.target - self.info.current;
 
         // C: `if (!silence_begin_ts)` — only literal zero is voice mode.
@@ -521,6 +576,18 @@ impl<T> JitterBuf<T> {
             self.get_voice(now, interpl, diff)
         } else {
             self.get_silent(now, interpl, diff)
+        }
+    }
+
+    /// Re-estimate jitter from the history and set the target from it:
+    /// `jitter + min + target_extra`, clamped by `max_jitterbuf`.
+    fn update_target(&mut self) {
+        self.history_get();
+        self.info.target = self.info.jitter + self.info.min + self.conf.target_extra;
+        if self.conf.max_jitterbuf != 0
+            && (self.info.target - self.info.min) > self.conf.max_jitterbuf
+        {
+            self.info.target = self.info.min + self.conf.max_jitterbuf;
         }
     }
 
@@ -541,7 +608,7 @@ impl<T> JitterBuf<T> {
             if self.conf.max_contig_interp != 0
                 && self.info.cnt_contig_interp >= self.conf.max_contig_interp
             {
-                self.info.silence_begin_ts = self.info.next_voice_ts - self.info.current;
+                self.enter_silence(self.info.next_voice_ts - self.info.current);
             }
             return GetResult::Interpolate;
         }
@@ -553,7 +620,7 @@ impl<T> JitterBuf<T> {
         if let Some(f) = frame {
             if f.frame_type != FrameType::Voice {
                 if f.frame_type == FrameType::Silence {
-                    self.info.silence_begin_ts = f.ts;
+                    self.enter_silence(f.ts);
                     self.info.cnt_contig_interp = 0;
                 }
                 self.info.frames_out += 1;
@@ -587,7 +654,13 @@ impl<T> JitterBuf<T> {
             // it and play the next one in its slot. This is `jitterbuf.c`'s
             // own branch (`iax-9c62`); without it a stream that never pauses
             // can only ever deepen.
-            if diff < -self.conf.target_extra && self.info.last_adjustment + 500 < now {
+            //
+            // Never while the hold is on (an SSTV picture airing): there a
+            // lost frame costs far more than the extra latency.
+            if !self.shrink_hold
+                && diff < -self.conf.target_extra
+                && self.info.last_adjustment + 500 < now
+            {
                 self.info.last_adjustment = now;
                 self.info.cnt_contig_interp = 0;
                 self.info.current -= f.ms;
@@ -627,9 +700,15 @@ impl<T> JitterBuf<T> {
         if self.conf.max_contig_interp != 0
             && self.info.cnt_contig_interp >= self.conf.max_contig_interp
         {
-            self.info.silence_begin_ts = self.info.next_voice_ts - self.info.current;
+            self.enter_silence(self.info.next_voice_ts - self.info.current);
         }
         GetResult::Interpolate
+    }
+
+    /// Leave voice mode: the talk spurt is over as of sender time `ts`.
+    fn enter_silence(&mut self, ts: i64) {
+        self.info.silence_begin_ts = ts;
+        self.spurt_ended = true;
     }
 
     fn get_silent(&mut self, now: i64, interpl: i64, diff: i64) -> GetResult<T> {
@@ -953,6 +1032,135 @@ mod tests {
             "the buffer grew to {deepest} frames ({} ms)",
             deepest * 20
         );
+    }
+
+    /// astar's receive-path settings: Asterisk's numbers, with or without
+    /// the per-spurt history reset.
+    fn rx_config(spurt_history_reset: bool) -> JitterConfig {
+        JitterConfig {
+            max_jitterbuf: 200,
+            resync_threshold: 1000,
+            max_contig_interp: 10,
+            target_extra: 40,
+            spurt_history_reset,
+        }
+    }
+
+    /// Drive `jb` like the mixer does (a pull every 10 ms, draining
+    /// whatever is due), with an 8-frame key-up that arrives `late` ms late,
+    /// a 4 s gap, then 3,000 frames (60 s) on time. `hold` is asked before
+    /// each pull with the playout clock. Returns the frames shed to shrink
+    /// during the second spurt.
+    fn key_up_then_over(jb: &mut JitterBuf<Vec<u8>>, late: i64, hold: &dyn Fn(i64) -> bool) -> i64 {
+        const KEY_UP: i64 = 8;
+        const GAP: i64 = 200; // frames: 4 s
+        const OVER: i64 = 3_000;
+        let ts = |k: i64| {
+            if k < KEY_UP {
+                1_000 + k * 20
+            } else {
+                1_000 + (k + GAP) * 20
+            }
+        };
+        let arrival = |k: i64| {
+            if k < KEY_UP {
+                ts(k) + 30 + late
+            } else {
+                ts(k) + 30
+            }
+        };
+        let total = KEY_UP + OVER;
+        let mut next_put = 0_i64;
+        let mut dropped_before_over = None;
+        let end = arrival(total - 1) + 2_000;
+        for now in (0..end).step_by(10) {
+            while next_put < total && arrival(next_put) <= now {
+                if next_put == KEY_UP {
+                    dropped_before_over = Some(jb.info().frames_dropped);
+                }
+                jb.put(voice(ts(next_put), 0), now).unwrap();
+                next_put += 1;
+            }
+            jb.set_shrink_hold(hold(now));
+            loop {
+                match jb.next() {
+                    Some(due) if due <= now => {}
+                    _ => break,
+                }
+                match jb.get(now, 20) {
+                    GetResult::Ok(_) | GetResult::Interpolate | GetResult::Drop(_) => {}
+                    GetResult::Empty | GetResult::NoFrame => break,
+                }
+            }
+        }
+        jb.info().frames_dropped - dropped_before_over.expect("the over was sent")
+    }
+
+    /// The scenario is a real one: `jitterbuf.c`'s history, kept across
+    /// spurts, sheds frames from an on-time over after a late key-up.
+    #[test]
+    fn a_late_key_up_sheds_frames_from_the_next_over_without_the_reset() {
+        let mut jb = JitterBuf::new(rx_config(false));
+        let shed = key_up_then_over(&mut jb, 160, &|_| false);
+        assert!(shed > 0, "the late key-up should inflate the target");
+    }
+
+    #[test]
+    fn a_late_key_up_is_forgotten_when_the_next_spurt_starts() {
+        for late in [60, 120, 160, 200] {
+            let mut jb = JitterBuf::new(rx_config(true));
+            let shed = key_up_then_over(&mut jb, late, &|_| false);
+            assert_eq!(
+                shed, 0,
+                "key-up {late} ms late: an on-time over shed {shed} frames"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shrink_hold_keeps_every_frame_and_releasing_it_resumes_shedding() {
+        // Held throughout: the over-deep cushion sheds nothing.
+        let mut jb = JitterBuf::new(rx_config(false));
+        let shed = key_up_then_over(&mut jb, 160, &|_| true);
+        assert_eq!(shed, 0, "held, yet {shed} frames shed");
+        // Released 2 s into the over, before the target falls (~5 s in):
+        // the existing behaviour comes back.
+        let mut jb = JitterBuf::new(rx_config(false));
+        let over_starts = 1_000 + 208 * 20 + 30;
+        let shed = key_up_then_over(&mut jb, 160, &|now| now < over_starts + 2_000);
+        assert!(shed > 0, "released, the cushion should shrink again");
+    }
+
+    /// A fast sender that never pauses: the hold stops the frame-dropping
+    /// shrink outright, and the buffer is allowed to stay deep.
+    #[test]
+    fn the_shrink_hold_stops_a_fast_sender_shedding() {
+        let mut jb: JitterBuf<Vec<u8>> = JitterBuf::new(JitterConfig {
+            max_jitterbuf: 200,
+            max_contig_interp: 10,
+            ..JitterConfig::default()
+        });
+        jb.set_shrink_hold(true);
+        let frames = 1_500_i64;
+        let arrival = |i: i64| i * 198 / 10 + 30;
+        let mut next_put = 0_i64;
+        for now in (0..frames * 20 + 1_000).step_by(20) {
+            while next_put < frames && arrival(next_put) <= now {
+                jb.put(voice(next_put * 20 + 20, 0), now).unwrap();
+                next_put += 1;
+            }
+            loop {
+                match jb.next() {
+                    Some(due) if due <= now => {}
+                    _ => break,
+                }
+                match jb.get(now, 20) {
+                    GetResult::Drop(_) => {}
+                    _ => break,
+                }
+            }
+        }
+        assert_eq!(jb.info().frames_dropped, 0);
     }
 
     #[test]

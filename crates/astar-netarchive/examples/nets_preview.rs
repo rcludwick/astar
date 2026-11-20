@@ -47,6 +47,9 @@ fn main() {
         .archive()
         .find(&fixture.public_net, &fixture.public_session)
         .expect("the public session");
+    // A stand-in `video.mp4`, so the header shows its Video button. Not a
+    // playable file: the shots only need the button.
+    std::fs::write(entry.dir.join("video.mp4"), b"stand-in").expect("video.mp4");
     // The page's `data-seq` and `#t=` are the view's own `Item::Over` seq and
     // offsets, so ask the view rather than counting log rows.
     let view = session_view(pages.archive(), &entry, Access::Admin, &opts_for_view());

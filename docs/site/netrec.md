@@ -17,6 +17,13 @@ file of the whole evening, one small file for every **over** (an over is one
 person's turn at the microphone, from the moment they key up to the moment
 they let go), and a log of who talked when.
 
+Two things can come out of that recording besides the audio. After each net
+it can draw the whole evening as a **video**, `video.mp4`, ready to upload to
+YouTube (see [Video of each net](#video-of-each-net)). And while a public net
+is on the air it can **stream it live** to YouTube, Twitch or both (see
+[Going live on YouTube](#going-live-on-youtube)). Both use `ffmpeg`, a free
+program you install separately.
+
 ## It never transmits
 
 `astar-netrec` is **receive-only**. It has no microphone, no sound device
@@ -141,6 +148,52 @@ It starts at login, restarts if it exits, and writes its log to
 `~/Library/Logs/astar-netrec.log`. A Mac that is asleep records nothing; see
 [Sleep](#when-the-machine-sleeps).
 
+### ffmpeg for a service
+
+Videos and live streams need `ffmpeg` (see [Installing
+ffmpeg](#installing-ffmpeg)). On Linux, `apt install ffmpeg` puts it in
+`/usr/bin`, which the systemd unit's `PATH` covers. On a Mac, the recorder
+looks in Homebrew's folders itself, so a launchd agent finds `brew install
+ffmpeg` without help. Anywhere else, set `[video] ffmpeg` to its full path.
+Run `check` with the service's config to see which one it will use.
+
+### Keys for a service
+
+A service needs the [stream keys](#going-live-on-youtube) too, if any net
+streams live, and there are two ways to give them.
+
+**`credentials.toml` beside the config** works for both services, as long as
+the file belongs to the user the service runs as and only that user can read
+it. For the systemd unit that is `/etc/astar/credentials.toml`, owned by
+`astar`:
+
+```bash
+sudo install -m 0600 -o astar -g astar credentials.toml /etc/astar/credentials.toml
+```
+
+For the launchd agent, it sits next to the `netrec.toml` named in the plist,
+owned by you, with `chmod 600`.
+
+**An environment file** is the other way on Linux. systemd reads it as root
+before it starts the program, so the file can belong to root and be readable
+by nobody else, not even the `astar` user. The unit already names one,
+`/etc/astar/netrec.env`, and carries on without it when it is not there:
+
+```bash
+sudo install -m 0600 /dev/null /etc/astar/netrec.env
+sudoedit /etc/astar/netrec.env
+```
+
+with lines like these (the values are placeholders):
+
+```text
+ASTAR_NETREC_YOUTUBE_STREAM_KEY=abcd-efgh-ijkl-mnop-qrst
+ASTAR_NETREC_TWITCH_STREAM_KEY=live_000000000_ExampleExampleExample
+```
+
+then `sudo systemctl restart astar-netrec`. Never put a key in the unit file
+or the plist themselves: anyone on the machine can read those.
+
 ## The commands
 
 Every command takes `--config <file>`, which defaults to `./netrec.toml`.
@@ -148,9 +201,11 @@ Every command takes `--config <file>`, which defaults to `./netrec.toml`.
 | Command | What it does |
 |---|---|
 | `run` | Runs the recorder: waits for each net on the schedule, records it, and starts the next wait. This is what the service runs. |
-| `check` | Validates the config and lists the next ten sessions. Writes the template if there is no file. |
-| `now <NET> [--for 30m]` | Records the net called `NET` (any capitalisation) right now, for the length given, ignoring the schedule. Use it to try a new net. `Ctrl-C` ends it early and the file is kept. |
-| `status` | Prints one line about the recorder using this config's `root`: `recording "Tuesday M17 net" since 19:00, linked`, `waiting for "Tuesday M17 net", joining Tue 2026-11-10 18:55`, `idle, nothing scheduled`, or `not running`. |
+| `check` | Validates the config and lists the next ten sessions. Before the list it says which `ffmpeg` it found (or why none) and which stream keys are set; see [What `check` prints](#what-check-prints). Writes the template if there is no file. |
+| `now <NET> [--for 30m]` | Records the net called `NET` (any capitalisation) right now, for the length given, ignoring the schedule. Use it to try a new net. It streams live if the net says so, but it makes no video; run `render` on the folder afterwards. `Ctrl-C` ends it early and the file is kept. |
+| `status` | Prints one line about the recorder using this config's `root`: `recording "Tuesday M17 net" since 19:00, linked`, `waiting for "Tuesday M17 net", joining Tue 2026-11-10 18:55`, `idle, nothing scheduled`, or `not running`. While a net streams live, the line ends with how each destination is doing; see [Both at once](#both-at-once). |
+| `render <SESSION>` | Draws (or draws again) a finished session's `video.mp4`. `SESSION` is the session's folder, the one holding `session.json`. See [Rendering by hand](#rendering-by-hand). |
+| `sstv <FILE> [--out <DIR>] [--codec <CODEC>] [--local <ADDR>]` | Decodes the SSTV pictures in a recording into PNG files. It reads no config and talks to no network. See [Decoding a recording by hand](#decoding-a-recording-by-hand). |
 
 `status` and `now` need the config to exist already; they never write a
 template, because a template's `root` would not be your real archive.
@@ -174,8 +229,10 @@ lock may not work on NFS, SMB or a container bind mount.
 
 ## The config file
 
-`netrec.toml` has four kinds of section: `[recorder]`, `[web]`, `[vocoder]`
-and one `[[net]]` for each net. An unknown key is an error rather than
+`netrec.toml` has six kinds of section: `[recorder]`, `[web]`, `[vocoder]`,
+`[video]`, `[live]` and one `[[net]]` for each net. `[video]` and `[live]`
+are optional and described under [Installing ffmpeg](#installing-ffmpeg) and
+[Changing where streams go](#changing-where-streams-go). An unknown key is an error rather than
 being ignored, so a typo shows up at once. Here is the template with every
 default written out:
 
@@ -245,8 +302,10 @@ check-in and the last goodnight are on the file.
 | `tz` | required | The time zone `when` is read in, such as `America/Denver`. |
 | `visibility` | `"private"` | `"private"` or `"public"`. Recorded in `session.json`. On `astar-server` a public session is listed for anyone and a private one only after sign-in; see [Net recordings](server/nets.md). |
 | `my_side` | `false` | Whether the session page opens with the "My side" switch on. |
-| `video` | `true` | Read now and used by a later release; it does nothing yet. |
-| `youtube_live`, `youtube_upload` | `false` | Read now and used by later releases; they do nothing yet. Both need `visibility = "public"`. |
+| `video` | `true` | Draw `video.mp4` after each session of this net. Needs `ffmpeg`; without it the net is still recorded. See [Video of each net](#video-of-each-net). |
+| `youtube_live` | `false` | Stream this net live to YouTube while it is recorded. Needs `visibility = "public"`, a YouTube stream key and `ffmpeg`. See [Going live on YouTube](#going-live-on-youtube). |
+| `twitch_live` | `false` | Stream this net live to Twitch while it is recorded. Same needs as `youtube_live`, with a Twitch key. See [Going live on Twitch](#going-live-on-twitch). |
+| `youtube_upload` | `false` | Read now and used by a later release; it does nothing yet. Needs `visibility = "public"`. |
 
 The config is also refused when two nets' windows overlap (counting the
 rolls), because one recorder can be in one place at a time. Move one net or
@@ -315,10 +374,14 @@ session, named for the local date and time the recorder joined:
       overs/
         001 19-00-12 N0CALL.flac
         002 19-01-40 KD0XYZ.flac
+      images/
+        001 19-04-12 PD120 N0CALL.png
       log.jsonl
       log.csv
       checkins.txt
       session.json
+      video.mp4
+      .video.lock
 ```
 
 | File | What it holds |
@@ -326,10 +389,13 @@ session, named for the local date and time the recorder joined:
 | `session.flac` | The whole session, start to finish, as one mono FLAC file. It runs on the wall clock: silence stays in, so a position in the file is a time of day. |
 | `peaks.json` | How loud each over is along its length: 48 loudness values per over, however long it ran, which the page draws as the bars of each bubble. Written when the session closes. A session without one still shows; its bars are flat. |
 | `overs/NNN HH-MM-SS CALL.flac` | One file per over: its number, the local time it started, and who the network said was talking, as the **base call** (`unknown` when it did not say). A talker the network reports as `KX0AAA E` or `KX0AAA-1` is filed as `KX0AAA`. Each ends with about a second of tail so it does not stop on the last syllable. |
-| `log.jsonl` | One JSON line for each event: `joined`, `over`, `dropped`, `rejoined`, `left`, `error`. It is written as things happen, so it survives a crash. |
+| `images/NNN HH-MM-SS MODE CALL.png` | One file per SSTV picture heard: its number, the local time it began, its mode, and the talker's base call. See [SSTV pictures](#sstv-pictures). The folder is made at the start of every session and stays empty when nobody sent a picture. If it can't be made, the log gets an `error` row, that session keeps no pictures, and the recording carries on. |
+| `log.jsonl` | One JSON line for each event: `joined`, `over`, `image`, `dropped`, `rejoined`, `left`, `error`. It is written as things happen, so it survives a crash. |
 | `log.csv` | The overs as a spreadsheet: `start,end,duration_s,talker,file`. Written when the session closes, or rebuilt from `log.jsonl` after a crash. |
 | `checkins.txt` | Each base call heard, once, in the order it first spoke: `KX0AAA E` and `KX0AAA` are one entry. Written and rebuilt like `log.csv`. |
 | `session.json` | The session's facts: the version of this file's layout (`format`, 1 for now), net, network, target, window start and end, `visibility`, `my_side`, `my_callsigns`, `sample_rate`, when it started and ended, **how** it ended (`window`, `stopped`, `crashed` or `error`), how many times it rejoined, how many frames were dropped, and how many overs there were. |
+| `video.mp4` | The session as a 1080p video, drawn after it ends; see [Video of each net](#video-of-each-net). Only there when `video` is on and `ffmpeg` was found. While it is being drawn the file is called `video.mp4.part`. |
+| `.video.lock` | An empty file that stops two renders of one session running at once. It is held the same way as `.netrec.lock`, so it stays behind and that is normal. |
 
 Two files live in `root` itself: `.netrec-state.json`, which `status` reads,
 and `.netrec.lock`, described [above](#one-recorder-at-a-time).
@@ -371,6 +437,11 @@ told it to.
 The recorder refuses to start a session, and stops a running one cleanly,
 with an `error` row in the log, once the volume holding `root` has less
 than 500 MB free. What was recorded is kept.
+
+Videos give way first. A session's video is drawn only if 2 GB more than
+that is free, 2.5 GB in all, when its turn comes. Otherwise the render is
+skipped with one line in the log, and the audio is untouched. You can draw it
+later with [`astar-netrec render`](#rendering-by-hand) once there is room.
 
 ## The recordings page
 
@@ -467,6 +538,481 @@ acts. It removes the whole session folder. A session that is still recording
 cannot be deleted: the page answers that it is still open. On this local page you
 are the admin; on `astar-server` only administrators see the button.
 
+## SSTV pictures
+
+SSTV, slow-scan television, is a still picture sent as sound: a minute or
+two of warbling tones, one line of the picture after another. Stations
+send them on nets now and then, and the ISS sends them during ARISS events.
+The recorder decodes every picture it hears and keeps it beside the audio.
+(The macOS app does the same during a call; see
+[SSTV pictures](macos/sstv.md), which also explains how the decoding works.)
+
+There is nothing to turn on. Every session listens for pictures the whole
+time it records, and never sends one: the recorder can't transmit at all,
+and there is no picture encoder in it.
+
+### Which nets can carry a picture
+
+Only a network that carries sound as sound. The two this release records,
+M17 and D-Star, both use **vocoders**: codecs that send measurements of a
+voice rather than the sound itself, so an SSTV picture sent over them
+arrives as noise. AllStarLink and EchoLink carry pictures well, and the
+recorder will find them there once it can record those nets (see
+[What is coming](#what-is-coming)). Until then, a picture in an M17 or
+D-Star session is rare, and the [command below](#decoding-a-recording-by-hand)
+is the way to pull pictures out of recordings made elsewhere.
+
+### What a picture leaves in the session
+
+A picture starts only on a proper **VIS header**, the short burst of tones
+that says which **mode** (which recipe of lines, size and timing) follows,
+so a whistle never becomes a picture. When it ends, three things happen:
+
+* The PNG lands in the session's `images/` folder, named by its number, the
+  local time it began, its mode and the talker's base call:
+  `001 19-04-12 PD120 N0CALL.png`. Pictures are numbered on their own,
+  separately from overs. A talker the network did not name reads `unknown`.
+* A row goes into `log.jsonl`:
+
+  ```json
+  {"t":"2026-11-04T02:06:18Z","kind":"image","start":"2026-11-04T02:04:12Z","offset_ms":552000,"mode":"PD120","talker":"N0CALL","file":"001 19-04-12 PD120 N0CALL.png"}
+  ```
+
+  `t` is when the picture was logged; `start` and `offset_ms` are where it
+  began, as a time of day and as a position in `session.flac`. `log.csv`
+  lists overs only, so pictures don't appear in it.
+* On the recordings page, the picture appears in the conversation at the
+  moment it began, as a bubble holding the picture, with the mode, the
+  talker and the time under it. It sits on the same side as that talker's
+  overs. Click it to open the picture full size in a new tab. The page
+  serves only pictures named in the session's log, as it does over files.
+
+A picture can stop part way, when the sender lets go or the link drops. Two
+seconds of silence in the middle of a picture counts as the end. If at
+least half its lines arrived, it is kept, with `"partial":true` in its log
+row and an amber **partial** tag on its bubble. With less than half, it is
+dropped. A picture still coming in when the session closes is handled the
+same way.
+
+If a picture can't be written (a full disk, say), the log gets an `error`
+row naming it, and the session carries on recording.
+
+### Decoding a recording by hand
+
+`astar-netrec sstv` decodes the pictures in a recording you already have:
+
+```sh
+astar-netrec sstv "tuesday-m17-net/2026-11-10 1855/session.flac"
+astar-netrec sstv contact.wav --out ~/Pictures/sstv
+```
+
+It reads three kinds of file, chosen by the name's ending:
+
+| File | What it reads |
+|---|---|
+| `.wav` | 16-bit PCM at any sample rate. Only the first channel is used, so for a stereo recording put the picture on the left. |
+| `.flac` | Any sample rate and bit depth, first channel only. A session's `session.flac` works. |
+| `.pcap` | A packet capture of an AllStarLink call: the `.pcap` the macOS app keeps beside each AllStarLink picture, or a [packet log](reference/packet-logs.md). The voice packets are sorted by their time stamps and decoded back into audio first, so packets that arrived out of order are put right and lost ones are known holes. |
+
+Each picture found is saved as a PNG named after the recording, a number
+and the mode, in the recording's own folder unless `--out` names another
+(created if missing):
+
+```text
+saved ./contact-001-Martin1.png (Martin 1, 256 lines)
+saved ./contact-002-Robot36.png (Robot 36, 240 lines)
+```
+
+Each line names the file with its folder in front. For `contact.wav` in
+the current folder that is `./`; for a recording elsewhere it is that
+recording's folder, and with `--out` it is the folder `--out` named.
+
+It never writes over a file. If `contact-001-Martin1.png` is already
+there, the command stops and says so; remove the old file, or pick another
+folder with `--out`.
+
+Two flags matter only for a `.pcap`:
+
+* **`--codec <ulaw|alaw|slin|slin16|gsm>`** names the call's codec. The
+  packets of a call mostly don't say which codec they carry; only the
+  occasional full frame does. Without the flag, the codec comes from the
+  `.jitter.jsonl` file beside a packet log, or else from the first full
+  frame in the capture. If neither has it, the command asks for `--codec`.
+  For a picture's `.pcap` from the macOS app, the `codec` field of that
+  picture's line in `pictures.jsonl` names it.
+* **`--local <address:port>`** names your own end of the call, such as
+  `192.0.2.20:4569`, so that anything you sent is left out. Without it, the
+  `.jitter.jsonl` beside a packet log names it.
+
+A recording that is cut short or damaged part way, such as a FLAC file
+copied while it was still being written, is read up to the damage. The
+pictures found before it are saved, a picture cut off by it is kept as
+partial if at least half of it arrived, and a warning says the rest of the
+file was unreadable.
+
+The command's exit status says how it went, for scripts:
+
+| Status | Means |
+|---|---|
+| 0 | At least one picture was saved. |
+| 2 | The file was read, and there was no picture in it. |
+| 1 | Something went wrong: the file can't be read, is in a format it doesn't take, needs `--codec`, is damaged before any picture was found, or a picture's file already exists. |
+
+## Video of each net
+
+A recording is good for listening, but most people find a net through a
+video site, and a video wants something to look at. So after each net ends,
+the recorder draws the whole session as a video, `video.mp4`, in the
+session's folder. Here is one moment of it:
+
+![A frame of a net video: the talker panel on the left with N0CALL talking, the conversation of overs on the right](images/netrec-frame-a.png)
+
+The frame has the same pieces as the [recordings page](#the-recordings-page),
+laid out for a screen rather than a browser:
+
+* **Along the top**: the network, the reflector and module, the net's name,
+  and the time of day the moment was heard.
+* **On the left, the talker panel.** A large disc pulses with the voice of
+  whoever is talking, with their callsign under it and how long they have
+  been talking. Between overs it shows who was heard last. The ring around
+  the disc fills as the net goes on, so it shows how far through the evening
+  you are.
+* **On the right, the conversation.** Each over is a bubble with its talker,
+  the time it started, its length and its loudness bars, exactly as the page
+  draws them. The bubble on the air glows, and older ones scroll up and away.
+  If the net has `my_side = true`, the stations in `my_callsigns` sit on the
+  right, as with the page's [My side](#my-side) switch on.
+* **Along the bottom**: the position in the video and its length, and how
+  many stations have checked in so far.
+
+The sound is the whole of `session.flac`, so the video is exactly as long as
+the recording, pre-roll and post-roll included.
+
+The file itself is what YouTube asks for: 1920 × 1080 at 30 frames a second,
+H.264 video and AAC stereo sound at 48 kHz, with the index at the front so a
+player can start before the whole file has arrived.
+
+### Turning it on
+
+It is already on. `video = true` is the default for every `[[net]]`, so the
+only thing to add is `ffmpeg` (see [Installing ffmpeg](#installing-ffmpeg)).
+To leave one net out, set `video = false` in its `[[net]]`. Without `ffmpeg`
+the recorder logs one warning at start-up, "no videos or live streams will be
+made", and records exactly as before.
+
+### When it is drawn
+
+A session's video is drawn right after the session closes at the end of its
+window. Three kinds of session are not drawn on their own: one cut short
+because the recorder was stopped, one that ended in an error, and one
+recorded with `now`. Any of them can be drawn by hand.
+
+Drawing takes a while: every frame of the evening has to be made and
+compressed. It runs faster than the net itself did, and much faster where
+nothing changes between frames, but a long net still takes minutes. It runs
+on a thread of its own, one session at a time in the order they finished, so
+it never holds up a recording. To leave room for the next net, it lets
+`ffmpeg` use only two processor cores.
+
+While it runs, the file is called `video.mp4.part`; it gets its real name
+only when it is complete, so a `video.mp4` is never half a video. If the
+recorder stops part way, the `.part` file is removed, and one left by a crash
+is removed at the next start. The session is not queued again; draw it by
+hand.
+
+The disk rule comes first: a video is drawn only when 2.5 GB is free (see
+[When the disk fills](#when-the-disk-fills)).
+
+### Rendering by hand
+
+`astar-netrec render` draws one session's video now, or draws it again:
+
+```bash
+astar-netrec --config /etc/astar/netrec.toml render "/var/lib/astar/netrec/tuesday-m17-net/2026-11-10 1855"
+```
+
+When it is done it prints one line:
+
+```text
+wrote /var/lib/astar/netrec/tuesday-m17-net/2026-11-10 1855/video.mp4 (162000 frames, 41210 reused, 5400.0 s)
+```
+
+"Reused" counts the frames that were identical to the one before, which
+`ffmpeg` gets for almost nothing; a quiet net reuses a lot.
+
+From the config it reads only `[video] ffmpeg` and `[recorder]
+my_callsigns`, so it works even while the rest of the file has something
+`check` would refuse. It can run while the recorder runs. It refuses a
+session that is still recording, and a session whose video another render is
+already drawing. `Ctrl-C` stops it and leaves no `.part` file behind. An
+existing `video.mp4` is replaced only once the new one is complete.
+
+### Watching it
+
+The recordings page serves the video at the session's own address plus
+`video.mp4`, such as
+`http://127.0.0.1:8050/nets/tuesday-m17-net/2026-11-10%201855/video.mp4`,
+with the same rules as the session: a private session's video needs sign-in
+on `astar-server`. The browser can seek in it without downloading the whole
+file. Once a session has a video, its page shows a **Video** button next to
+Replay at the top, which opens the video in a new tab; a session with no
+video yet shows no button.
+
+## Installing ffmpeg
+
+`ffmpeg` is the program that turns the frames and sound into H.264 and AAC.
+astar does not ship it; you install your system's copy. It must have the
+`libx264` encoder, which the usual packages do.
+
+On Debian or Ubuntu:
+
+```bash
+sudo apt install ffmpeg
+```
+
+Debian 13 ships ffmpeg 7.1, built with `libx264`. On a Mac, with Homebrew:
+
+```bash
+brew install ffmpeg
+```
+
+The recorder looks for a program called `ffmpeg` on the `PATH`, then in
+`/opt/homebrew/bin`, `/usr/local/bin` and `/usr/bin`. The extra folders
+matter for a launchd service: launchd gives a program a short `PATH` that
+leaves out Homebrew's folder, so without them a Mac service would not find
+the copy you just installed. If yours lives somewhere else, name it in the
+config:
+
+```toml
+[video]
+ffmpeg = "/opt/ffmpeg/bin/ffmpeg"
+```
+
+The value is either a bare program name, looked for as above, or a full
+path. A relative path such as `bin/ffmpeg` is refused, because it would
+depend on which folder the recorder happened to start in.
+
+### What `check` prints
+
+`check` tries the `ffmpeg` it would use, asks for its version and its list of
+encoders, and prints what it found above the list of sessions:
+
+```text
+ffmpeg: /usr/bin/ffmpeg 7.1.1
+live: YouTube key set, Twitch key missing
+```
+
+When something is wrong, the first line says what and how to fix it, such as
+`ffmpeg: ffmpeg was not found at ffmpeg: install it (...)`, or that the copy it
+found has no `libx264` encoder. A missing `ffmpeg` is not an error for
+`check`: a recorder without one still records. The second line is about
+[live streaming](#going-live-on-youtube), and says only whether each key is
+there, never any part of it.
+
+## Going live on YouTube
+
+A recorded net is good for the people who missed it. A live stream is for the
+people who want to follow along as it happens without a radio: they open
+your channel and see the same frame as the video, with the net's audio, a
+little behind the air.
+
+It only ever happens for a **public** net. `check` refuses a config that
+switches live streaming on for a private one, and the recorder refuses it a
+second time when the session starts, so a private net can never end up on
+YouTube by mistake.
+
+### On YouTube's side
+
+YouTube has to be told once that your channel will stream, and you need a
+**stream key**: the password-like string that tells YouTube which channel a
+stream belongs to. Anyone who has it can stream to your channel.
+
+1. **Turn on live streaming for the channel.** The first time, YouTube asks
+   you to verify the channel and can take up to 24 hours before streaming
+   works.
+2. **Make a stream key that lasts.** In YouTube Studio, choose **Create →
+   Go live**, then **Stream**. Under **Stream settings**, create a new
+   stream key and pick the **reusable** kind, so the same key works every
+   week. Copy it.
+3. **Let YouTube start and stop the broadcast for you.** In the same
+   settings, turn on **Auto-start** and **Auto-stop**. With them on, YouTube
+   puts the stream on air as soon as video arrives and ends it when the
+   video stops, so nobody has to press anything in Studio on net night.
+4. **Choose who can watch.** The default visibility (public, unlisted or
+   private) is set there too, and each week's broadcast uses it.
+
+### On the recorder's side
+
+Put the key in a file called `credentials.toml` next to `netrec.toml`, and
+make it readable by its owner alone:
+
+```toml
+youtube_stream_key = "abcd-efgh-ijkl-mnop-qrst"
+```
+
+```bash
+chmod 600 credentials.toml
+```
+
+That example key is made up; yours comes from Studio. The recorder refuses
+to read a `credentials.toml` that anyone else on the machine could read:
+`run` and `now` log why and record without streaming, and `check` fails with
+the `chmod` command to run. Instead of the file, you can set the environment
+variable `ASTAR_NETREC_YOUTUBE_STREAM_KEY`; when both are set, the variable
+wins. The [service sections](#keys-for-a-service) show how to give a service
+its key.
+
+Then switch it on for the net, which must be public:
+
+```toml
+[[net]]
+name = "Tuesday M17 net"
+# ...
+visibility = "public"
+youtube_live = true
+```
+
+Run `check`. It should print `live: YouTube key set`. A net with
+`youtube_live = true` and no key draws a warning, and is recorded without
+the stream.
+
+### What viewers see
+
+The stream starts when the recorder joins, at the start of the pre-roll,
+not when the net starts. Until somebody talks, the talker panel says
+"waiting for the first over", and the top corner shows a red **LIVE** tag. From
+then on the frame follows the net as it happens, the same way the video
+does. The one difference is the ring around the disc: in a live stream
+nobody knows how long the evening will be, so between overs it rests empty.
+
+The stream ends when the recorder leaves, at the end of the post-roll. With
+Auto-stop on, YouTube then ends the broadcast and, depending on your channel
+settings, keeps it as a video.
+
+Two things YouTube may mention in Studio, and why:
+
+* **Missing stream metadata.** The recorder sends the video and sound, but
+  not the small "metadata" message some encoders send first to describe the
+  stream. YouTube works out the same facts from the video itself, so the
+  warning is harmless.
+* **No SSTV pictures.** A picture sent during the net is saved and shows on
+  the recordings page, but the stream and the video do not draw it yet.
+
+## Going live on Twitch
+
+Twitch works the same way with its own key. In Twitch's **Creator Dashboard**,
+open **Settings → Stream**; the **Primary Stream key** is the one to copy.
+Put it in `credentials.toml` beside the YouTube one (or in
+`ASTAR_NETREC_TWITCH_STREAM_KEY`):
+
+```toml
+twitch_stream_key = "live_000000000_ExampleExampleExample"
+```
+
+and switch it on for the public net:
+
+```toml
+twitch_live = true
+```
+
+Twitch is the stricter of the two about what it accepts, and its limits set
+the encoder's settings for both: a steady 4500 kbps of video, and a
+**keyframe** (a complete picture, which a viewer joining part way needs
+before anything else can be shown) every 2 seconds.
+
+## Both at once
+
+With `youtube_live` and `twitch_live` both on, the recorder draws and
+compresses the stream **once**, and sends the same stream to both. Each
+destination has its own connection, and they never wait on each other:
+
+* If one drops, the other carries on. The one that dropped connects again
+  after 1 second, then 2, then 4, and so on up to 30 seconds between tries,
+  until it is back. A destination that stays up for a minute starts the
+  waits from 1 second again next time.
+* A destination whose connection is too slow to keep up skips ahead to the
+  next keyframe rather than falling further and further behind.
+
+`status` shows how each one is doing at the end of its line:
+
+```text
+recording "Tuesday M17 net" since 18:55, linked · live 1080p30: YouTube live, Twitch retrying
+```
+
+Each destination is `connecting`, `live`, `retrying` (waiting to try again)
+or `off`. `1080p30` is the picture the stream is being made at.
+
+### When the machine cannot keep up
+
+Drawing 30 frames a second and compressing them in real time is hard work
+for a small server. If the stream falls more than 2 seconds behind the net,
+the recorder jumps it forward to half a second behind, so viewers miss a
+moment rather than drifting ever later. If that has to happen three times
+within a minute, the machine is not keeping up, and the recorder restarts the
+stream one step down:
+
+| Step | Picture | Video bitrate |
+|---|---|---|
+| 1 | 1080p, 30 frames a second | 4500 kbps |
+| 2 | 1080p, 15 frames a second | 4500 kbps |
+| 3 | 720p, 15 frames a second | 2500 kbps |
+
+Fewer frames go first, because a net's picture changes slowly and 15 frames a
+second still looks smooth; a smaller picture comes second. It never steps
+back up during a session; the next session starts at the top again. The
+restart is invisible to YouTube and Twitch: the connections stay open and
+the stream carries on. The same happens if `ffmpeg` itself exits: it is
+started again after 1 second, then 2, up to 30, and the stream picks up where
+it left off.
+
+The recording itself never waits for any of this. The stream reads a copy of
+the sound, and if it ever falls badly behind, it is the stream that misses
+pieces, never the recording.
+
+## Keeping the keys secret
+
+A stream key is as good as the password to your channel's live stream, so
+the recorder treats it like one:
+
+* **It is never in `netrec.toml`.** Only in `credentials.toml`, which must be
+  readable by its owner alone, or in the environment. That way the config
+  can be shared, backed up or pasted into a question without giving the key
+  away.
+* **It is never written down.** Not in the log, not in an error, not in
+  `session.json`, not in the state file `status` reads. `check` says only
+  "set" or "missing".
+* **It never reaches `ffmpeg`.** Programs' command lines can be read by
+  every user on the machine (`ps` shows them), so the key is not passed to
+  `ffmpeg` at all. `ffmpeg` only compresses; the recorder itself makes the
+  connections to YouTube and Twitch and hands over the key there. A child
+  program also inherits its parent's environment, so the recorder removes
+  every `ASTAR_NETREC_` variable before it starts `ffmpeg`: a key you set in
+  the environment stays with the recorder alone.
+* **It only travels encrypted.** The key is sent as part of the stream's
+  address when the connection opens. Over plain RTMP that address crosses
+  the internet as readable text, so anyone on the path could copy the key.
+  The recorder therefore speaks only **RTMPS**, RTMP inside TLS, the same
+  encryption as `https://`, and checks the server's certificate before it
+  sends anything.
+
+### Changing where streams go
+
+The `[live]` section names the address each stream is sent to, without the
+key. The defaults are YouTube's and Twitch's own:
+
+```toml
+[live]
+youtube_ingest = "rtmps://a.rtmps.youtube.com/live2"
+twitch_ingest = "rtmps://ingest.global-contribute.live-video.net/app"
+```
+
+You can point either one at another `rtmps://` server, such as a nearer
+Twitch ingest. The address must start with `rtmps://`; plain `rtmp://` is
+accepted only to this machine itself (`127.0.0.1`, `localhost` or `[::1]`),
+which is only useful for testing with a local server. `check` also refuses
+an address that carries anything after the application name, such as a key
+pasted onto the end, and its error never repeats that part.
+
 ## Retention
 
 The recorder keeps the archive inside the limits you set, and it is the only
@@ -477,8 +1023,9 @@ thing that ever deletes anything:
    deleted until it fits.
 
 It runs at start-up, after every session closes, and once an hour while it
-is idle. Four kinds of folder are never deleted: a session that is still
-recording, a session that has not finished, a session whose `session.json`
+is idle. Five kinds of folder are never deleted: a session that is still
+recording, a session whose video is being drawn or waiting to be, a session
+that has not finished, a session whose `session.json`
 cannot be read, and anything that is not a plain folder holding a
 `session.json` directly below a plain net folder. (Symbolic links are never
 followed, so a link planted in the archive cannot point deletion somewhere
@@ -556,5 +1103,9 @@ them either do nothing or are refused:
   EchoLink login. Until then they are refused as "not yet supported".
 * **Looking up a reflector by name**, so `reflector = "M17-XYZ"` replaces
   `host` and `port`.
-* **Video**, and **YouTube**: live streaming and upload (`video`,
-  `youtube_live`, `youtube_upload`).
+* **Uploading each video to YouTube** after the net (`youtube_upload`).
+* **A go-live button** on `astar-server`'s recordings page, so a stream can
+  be started and stopped from a browser rather than the config.
+* **SSTV pictures in the video and the live stream.** Today they are saved
+  and shown on the recordings page, but neither the video nor the stream
+  draws them.

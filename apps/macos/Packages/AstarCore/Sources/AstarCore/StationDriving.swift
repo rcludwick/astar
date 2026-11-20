@@ -175,6 +175,23 @@ public protocol StationDriving {
     /// The packet log's state. Cheap, and never waits on a change in progress.
     func packetLogState() throws -> PacketLogState
 
+    // MARK: SSTV
+
+    /// Turn SSTV decoding of heard audio on or off, saving pictures as PNG in
+    /// `directory`. Mirrors `Station.sstvConfigure(enabled:directory:
+    /// utcOffsetSeconds:)` 1:1. Starts or stops the decoder thread; call it
+    /// off the main thread. Receive only: nothing here can send a picture.
+    func sstvConfigure(enabled: Bool, directory: String, utcOffsetSeconds: Int32) throws
+    /// Say what the station is connected to, so a picture that starts is
+    /// filed under it. Cheap.
+    func sstvSetContext(network: String, target: String, talker: String?) throws
+    /// The decoder's state. Crosses the ABI with JSON, so the session reads
+    /// it at most twice a second. Reading it also lets the engine release
+    /// a jitter-buffer hold whose picture never said it ended.
+    func sstvState() throws -> SstvState
+    /// The last finished picture's pixels, or `nil` when none has finished.
+    func sstvFrame() throws -> SstvFrame?
+
     // MARK: System Fusion
 
     /// Link to a YSFReflector and decode the audio on it, mutually exclusive

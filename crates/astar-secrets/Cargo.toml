@@ -1,0 +1,20 @@
+[package]
+name = "astar-secrets"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "astar-secrets: the private credentials file (mode 0600, atomic writes) and the in-memory secret store shared by astar-server and astar-netrec."
+
+[dependencies]
+# The credentials file is edited in place, so a header, the other entries and
+# any hand edit survive a write. Same version astar-server already uses.
+toml_edit = "0.25"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

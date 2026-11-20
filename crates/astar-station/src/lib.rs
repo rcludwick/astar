@@ -39,6 +39,10 @@ mod config;
 mod error;
 mod event;
 mod ptt_arbiter;
+#[cfg(feature = "sstv")]
+mod sstv;
+#[cfg(feature = "sstv")]
+mod sstv_packets;
 mod station;
 
 /// The D-Star vocoder choice (astar-dstar-perens): the dongle by default, or
@@ -67,6 +71,11 @@ pub use station::{
 // The recording surface: what `Station::record_start` takes and
 // `record_state` returns, so a consumer needs no direct `astar-record` dep.
 pub use astar_record::{Layout, RecordState};
+// SSTV pictures: what `Station::sstv_*` take and return.
+#[cfg(feature = "sstv")]
+pub use sstv::{
+    SSTV_INDEX_FILE, SSTV_RECENT_MAX, SstvConfig, SstvContext, SstvFrame, SstvPictureRow, SstvState,
+};
 // The packet log's surface, for the same reason.
 pub use astar_record::packet_log::{
     DEFAULT_PACKET_LOG_BYTES, DeleteRefused, MIN_PACKET_LOG_BYTES, PacketLogConfig, PacketLogEnd,

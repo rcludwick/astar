@@ -18,10 +18,10 @@ pub mod web;
 
 pub use callsign::{Call, base_call, split_call};
 pub use index::{Access, Archive, SessionEntry, is_public, slug};
-pub use layout::{net_dir_name, over_file_name, session_dir_name};
+pub use layout::{image_file_name, net_dir_name, over_file_name, session_dir_name};
 pub use log::{LOG_FILE, META_FILE, append_row, read_meta, read_rows, write_meta};
 pub use model::{Ended, LogKind, LogRow, META_FORMAT, SessionMeta};
-pub use peaks::{PEAK_BINS, PEAKS_FILE, Peaks, compute_peaks, read_peaks, write_peaks};
+pub use peaks::{PEAK_BINS, PEAKS_FILE, Peaks, compute_peaks, peak_bins, read_peaks, write_peaks};
 pub use retain::{
     DeleteRefusal, MIN_FREE_BYTES, RetainPolicy, RetainReport, delete_session, free_bytes,
     recover_unfinished, retain,
@@ -29,6 +29,6 @@ pub use retain::{
 pub use summary::{OverRec, carries_callsigns, overs_from_rows, write_checkins, write_log_csv};
 pub use view::{
     AudioSrc, Item, ListView, NetView, SHORT_OVER_MS, SessionCard, SessionView, ViewOpts,
-    list_view, session_view,
+    list_view, network_label, session_view,
 };
 pub use web::{NETS_CSP, NetsReply, NetsRequest, Pages};

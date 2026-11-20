@@ -138,6 +138,9 @@ pub struct IncomingCallPolicy {
     pub codec_policy: CodecPolicy,
     /// The packet log's slot, shared with every leg. Empty logs nothing.
     pub packet_slot: PacketSlot,
+    /// The SSTV decoder's packet slot, shared with every leg, so the
+    /// packets behind each picture can be kept. Empty keeps nothing.
+    pub sstv_packet_slot: PacketSlot,
 }
 
 impl std::fmt::Debug for IncomingCallPolicy {
@@ -167,6 +170,7 @@ impl std::fmt::Debug for IncomingCallPolicy {
             )
             .field("codec_policy", &self.codec_policy)
             .field("packet_slot", &format_args!("<slot>"))
+            .field("sstv_packet_slot", &format_args!("<slot>"))
             .finish()
     }
 }
@@ -188,6 +192,7 @@ impl Default for IncomingCallPolicy {
             credential_resolver: None,
             codec_policy: CodecPolicy::default(),
             packet_slot: PacketSlot::default(),
+            sstv_packet_slot: PacketSlot::default(),
         }
     }
 }
@@ -2080,7 +2085,8 @@ fn spawn_leg(
                 .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0))),
             peer: peer_addr,
         },
-    );
+    )
+    .with_sstv(policy.sstv_packet_slot.clone());
 
     let handle = LegHandle {
         cmd_tx,

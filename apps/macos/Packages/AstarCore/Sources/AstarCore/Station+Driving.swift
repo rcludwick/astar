@@ -90,6 +90,32 @@ extension RecordState {
     }
 }
 
+extension SstvState {
+    /// Build a state from its fields, through the engine's JSON as
+    /// `RecordState.make` does: the binding gives it no public memberwise
+    /// init. `last` is one picture row in the engine's own keys.
+    static func make(
+        enabled: Bool = true, receiving: Bool = false, seq: UInt64 = 0, mode: String? = nil,
+        width: Int = 0, height: Int = 0, lines: Int = 0, expectedSecs: Double? = nil,
+        elapsedSecs: Double? = nil, startedMS: UInt64? = nil, talker: String? = nil,
+        last: [String: Any]? = nil, error: String? = nil
+    ) throws -> SstvState {
+        var object: [String: Any] = [
+            "enabled": enabled, "receiving": receiving, "seq": seq, "width": width,
+            "height": height, "lines": lines, "recent": last.map { [$0] } ?? [], "dropped": 0,
+        ]
+        if let mode { object["mode"] = mode }
+        if let expectedSecs { object["expected_secs"] = expectedSecs }
+        if let elapsedSecs { object["elapsed_secs"] = elapsedSecs }
+        if let startedMS { object["started_ms"] = startedMS }
+        if let talker { object["talker"] = talker }
+        if let last { object["last"] = last }
+        if let error { object["error"] = error }
+        let data = try JSONSerialization.data(withJSONObject: object)
+        return try JSONDecoder().decode(SstvState.self, from: data)
+    }
+}
+
 /// Errors from the fallback `NullStation` (no real engine available).
 public enum NullStationError: Error { case noEngine }
 
@@ -153,6 +179,13 @@ public struct NullStation: StationDriving {
     public func packetLogState() throws -> PacketLogState {
         PacketLogState(capturing: false, openCalls: 0, usedBytes: 0, dropped: 0, error: nil)
     }
+    /// No engine, so nothing to decode. Quiet rather than an error: SSTV
+    /// is configured by itself at launch, not by a press.
+    public func sstvConfigure(enabled: Bool, directory: String, utcOffsetSeconds: Int32) throws {}
+    public func sstvSetContext(network: String, target: String, talker: String?) throws {}
+    /// Off, as a real station is before decoding starts.
+    public func sstvState() throws -> SstvState { try SstvState.make(enabled: false) }
+    public func sstvFrame() throws -> SstvFrame? { nil }
     public func connectYSF(host: String, callsign: String, options: String?) throws {
         throw NullStationError.noEngine
     }

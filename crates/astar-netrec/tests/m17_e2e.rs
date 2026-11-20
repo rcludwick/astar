@@ -411,6 +411,7 @@ fn m17_drop_and_rejoin() {
             LogKind::Joined => "joined",
             LogKind::Over { .. } => "over",
             LogKind::Dropped { .. } => "dropped",
+            LogKind::Image { .. } => "image",
             LogKind::Rejoined => "rejoined",
             LogKind::Left => "left",
             LogKind::Error { .. } => "error",

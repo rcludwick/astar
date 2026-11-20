@@ -48,11 +48,18 @@ use astar_codec::jitter::{Frame, FrameType, GetResult, JitterBuf, JitterConfig};
 /// [`RxJitterConfig`] moves the first two of those (`target_extra` and
 /// `max_jitterbuf`); the resync threshold and the interpolation cap are not
 /// knobs — they are what makes the port behave like the thing it is a port of.
+///
+/// One departure from `jitterbuf.c`: the delay history is forgotten at the
+/// start of each talk spurt (`spurt_history_reset`). Kept across spurts, a
+/// short key-up that arrived late inflated the next over's target, and
+/// seconds into that over the buffer shed the excess one frame at a time —
+/// six frames out of a received SSTV picture on 2026-11-11.
 pub const IAX_JITTER_CONFIG: JitterConfig = JitterConfig {
     max_jitterbuf: 200,
     resync_threshold: 1000,
     max_contig_interp: 10,
     target_extra: 40,
+    spurt_history_reset: true,
 };
 
 /// Frame duration assumed when we have not yet seen one (20 ms = one IAX2
@@ -498,8 +505,9 @@ impl Lane {
 
     /// Pull everything the jitter buffer says is due by `now`, up to `need`
     /// samples of residual. No-op on a lane with no sender clock.
-    fn pull(&mut self, need: usize, now: i64) {
+    fn pull(&mut self, need: usize, now: i64, shrink_hold: bool) {
         let Some(jb) = self.jb.as_mut() else { return };
+        jb.buf.set_shrink_hold(shrink_hold);
         let now = now - jb.now_base;
         // A callback asking for `need` samples legitimately pulls frames that
         // fell due up to its own length ago; only what is older than that
@@ -567,6 +575,9 @@ pub struct Mixer {
     /// Cumulative device callbacks that got nothing to play while a
     /// jitter-buffered lane was still mid-talk-spurt (iax-rxjb).
     underruns: Arc<AtomicU64>,
+    /// "Hold shrink": while set, no lane's jitter buffer throws a frame
+    /// away to shrink its cushion. See [`Mixer::with_shrink_hold`].
+    shrink_hold: Arc<AtomicBool>,
 }
 
 impl Default for Mixer {
@@ -577,6 +588,7 @@ impl Default for Mixer {
             clock: MixerClock::default(),
             settings: Arc::new(RxJitterSettings::default()),
             underruns: Arc::new(AtomicU64::new(0)),
+            shrink_hold: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -600,6 +612,30 @@ impl Mixer {
     pub fn with_settings(mut self, settings: Arc<RxJitterSettings>) -> Self {
         self.settings = settings;
         self
+    }
+
+    /// Share a "hold shrink" cell with the control side. While it reads
+    /// `true`, every lane's jitter buffer keeps each frame it holds instead
+    /// of dropping one to shrink an over-deep cushion; growth and normal
+    /// playout are unchanged. Read once per [`Mixer::read`], lock-free.
+    /// Set while an SSTV picture is airing, where a lost 20 ms frame shifts
+    /// every later line of the picture.
+    #[must_use]
+    pub fn with_shrink_hold(mut self, hold: Arc<AtomicBool>) -> Self {
+        self.shrink_hold = hold;
+        self
+    }
+
+    /// Replace the shared "hold shrink" cell on a live mixer (see
+    /// [`Mixer::with_shrink_hold`]).
+    pub fn set_shrink_hold_cell(&mut self, hold: Arc<AtomicBool>) {
+        self.shrink_hold = hold;
+    }
+
+    /// The "hold shrink" cell this mixer reads.
+    #[must_use]
+    pub fn shrink_hold(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shrink_hold)
     }
 
     /// Cumulative RX underruns on this bus: device callbacks that got no audio
@@ -697,6 +733,7 @@ impl Mixer {
         // nothing would re-read them until somebody set the config again.
         let generation = self.settings.generation();
         let cfg = self.settings.get();
+        let shrink_hold = self.shrink_hold.load(Ordering::Relaxed);
         for slot in out.iter_mut() {
             *slot = 0.0;
         }
@@ -714,7 +751,7 @@ impl Mixer {
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 }
             }
-            lane.pull(out.len(), now);
+            lane.pull(out.len(), now, shrink_hold);
             voice_lane |= lane.starving(now);
             let n = out.len().min(lane.residual.len());
             for slot in out.iter_mut().take(n) {

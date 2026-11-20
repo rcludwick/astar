@@ -406,4 +406,37 @@ final class ConfigArchiveTests: XCTestCase {
             profileStore: UserDefaultsMicProfileStore(defaults), defaults: defaults)
         XCTAssertFalse(UserDefaultsRecordingSettingsStore(defaults).load().debugMode)
     }
+
+    func testSstvKeysAreNotExported() {
+        var sources = sampleSources()
+        sources.defaults["sstv.enabled"] = false
+        sources.defaults["sstv.folder"] = "/Users/me/SSTV"
+        let archive = ConfigArchive.make(sections: Set(ConfigSection.allCases), from: sources)
+        let keys = Set(
+            (archive.settings ?? [:]).keys.map { $0 } + (archive.interface ?? [:]).keys.map { $0 })
+        XCTAssertFalse(keys.contains { $0.hasPrefix("sstv.") })
+    }
+
+    func testSstvKeysAreRefusedOnImport() {
+        for key in ["sstv.enabled", "sstv.folder"] {
+            XCTAssertFalse(ConfigArchive.isImportable(key: key), key)
+        }
+
+        let suite = "astar.tests.archive.sstv.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var archive = ConfigArchive.make(sections: [.settings], from: sampleSources())
+        archive.settings = (archive.settings ?? [:]).merging([
+            "sstv.folder": .string("/tmp/planted")
+        ]) { $1 }
+        ConfigTransfer.apply(
+            archive,
+            session: CallSession(
+                station: NullStation(), userDefaults: defaults),
+            setupStore: UserDefaultsSetupStore(defaults),
+            profileStore: UserDefaultsMicProfileStore(defaults), defaults: defaults)
+        XCTAssertNil(defaults.object(forKey: "sstv.folder"), "a file cannot plant a folder")
+        XCTAssertEqual(
+            UserDefaultsSstvSettingsStore(defaults).load().folder, SstvSettings.defaultFolder)
+    }
 }

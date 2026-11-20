@@ -13,6 +13,72 @@ pre-release to the patch number, which sorts wrongly: `0.1.10beta` is newer
 than `0.1.9beta` and a string comparison says the opposite. Shipped versions
 are left as they were spelled.
 
+## 0.1.23-beta — 2026-11-19
+
+Pictures and video. astar now catches SSTV pictures sent over the air and
+keeps them, and the net recorder turns each net into a video it can also
+stream live.
+
+### Added
+
+- **SSTV pictures in the macOS app.** When someone sends a slow-scan TV
+  picture on an AllStarLink or EchoLink call, astar decodes it and saves it.
+  A panel shows "Receiving Scottie 2 · 0:48 of 1:11" while it comes in, then
+  the finished picture. **Settings → SSTV** turns it on or off and picks the
+  folder (`~/Pictures/astar SSTV` by default), and a gallery window shows
+  every picture received. PD, Robot, Martin, Scottie and Wraase modes are
+  decoded. astar never sends a picture. M17 and D-Star can't carry one,
+  because their voice codecs rebuild speech, not tones. See
+  [SSTV pictures](https://rcludwick.github.io/astar/macos/sstv/).
+
+- **Pictures come out clean even when the link drops audio.** Before
+  decoding, astar finds every line's sync pulse and puts the line back where
+  it belongs, so dropped frames, stuffed silence and a sender's slow clock no
+  longer tear or slant the picture. Lines that were lost are rebuilt from
+  their neighbours. On a picture sent over AllStarLink, astar also keeps the
+  raw packets beside the PNG and rebuilds the audio from them in the sender's
+  own timestamp order; whichever decode is better is the one kept.
+
+- **The net recorder saves pictures too.** A picture heard during a recorded
+  net is saved in the session's `images/` folder and appears in the
+  conversation on the recordings page, at the moment it arrived.
+  `astar-netrec sstv <file>` decodes pictures from any WAV, FLAC or packet
+  capture.
+
+- **Each recorded net becomes a video.** After a net ends, `astar-netrec`
+  draws the whole evening as `video.mp4`: 1080p30 with sound, ready for
+  YouTube. The frame shows who is talking and for how long, beside the
+  conversation as the recordings page draws it, and the recordings page
+  links it. It needs an installed `ffmpeg`. Renders run one at a time and
+  never starve the next net. See
+  [Video of each net](https://rcludwick.github.io/astar/netrec/#video-of-each-net).
+
+- **Public nets can stream live to YouTube and Twitch.** Switch on
+  `youtube_live` or `twitch_live` for a public net and it streams while it is
+  recorded, each destination reconnecting on its own if it drops. When the
+  machine can't keep up, the stream steps down to 15 frames a second, then to
+  720p, and the recording itself never waits on it. Off by default and
+  refused on a private net. Stream keys live in `credentials.toml` or the
+  environment, and never appear in a log, an error, the state file, or
+  `ffmpeg`'s command line or environment. See
+  [Going live on YouTube](https://rcludwick.github.io/astar/netrec/#going-live-on-youtube).
+
+### Fixed
+
+- **SSTV pictures heard on the WA7ABU net on 2026-11-18.**
+  - Two pictures carried a wide band of wrong colour where the sender went
+    quiet and came back half a line out of step; the decoder now finds the
+    new step.
+  - A short dropout left a coloured bar across a line; it is now rebuilt.
+  - Coloured dashes where a single frame was lost are mostly gone.
+  - A picture the sender abandoned after a few lines is no longer saved as a
+    black rectangle.
+
+### Not yet
+
+SSTV pictures are not drawn in the video or the live stream, and upload to
+YouTube and a go-live button on the page come later.
+
 ## 0.1.22-beta — 2026-11-14
 
 A release for the node. astar-server now holds a link to an AllStarLink node

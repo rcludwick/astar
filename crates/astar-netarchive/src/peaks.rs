@@ -43,7 +43,7 @@ pub fn compute_peaks(session_dir: &Path, overs: &[OverRec]) -> Peaks {
     if real_dir {
         for over in overs {
             if let Ok(Some((file, _))) = open_regular(&dir.join(&over.file)) {
-                out.insert(over.file.clone(), bins_of(&decode_peaks(file)));
+                out.insert(over.file.clone(), peak_bins(&decode_peaks(file)));
             }
         }
     }
@@ -78,7 +78,11 @@ fn decode_peaks(file: std::fs::File) -> Vec<u16> {
     frames
 }
 
-fn bins_of(frames: &[u16]) -> Vec<u8> {
+/// [`PEAK_BINS`] bars, 0..=100, from per-frame absolute peaks (0..=32768):
+/// the mapping `peaks.json` is written with, shared so the video's bubbles
+/// draw the same waveform the page does.
+#[must_use]
+pub fn peak_bins(frames: &[u16]) -> Vec<u8> {
     let mut max = vec![0u32; PEAK_BINS];
     let n = frames.len().max(1);
     for (i, &f) in frames.iter().enumerate() {

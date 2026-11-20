@@ -3,7 +3,7 @@
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 //
 // One recorded session: the head card with the orb, the conversation of
-// overs, and the full-screen replay. The audio is session.flac, read with
+// overs and pictures, and the full-screen replay. The audio is session.flac, read with
 // byte ranges by the browser; seeking sets currentTime and never fetches
 // the whole file.
 //
@@ -147,6 +147,41 @@
     return { node: k, kind: "k", spans: [], filled: -1 };
   }
 
+  // A picture decoded off the air: a framed bubble on the same side as its
+  // sender's overs. It is not an over, so it never joins st.overs, the
+  // playing highlight or a run of key-ups. The link opens it full size.
+  function picture(it, mine) {
+    const row = el("div", mine ? "row me" : "row");
+    const fig = el("figure", "pic");
+    // Plain text: an alt is never laid out, so it needs no bidi isolates.
+    const who = it.call ? it.call + (it.suffix ? " " + it.suffix : "") : "an unknown station";
+    const a = el("a");
+    a.href = it.file_url;
+    a.target = "_blank";
+    a.rel = "noopener";
+    const img = el("img");
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.alt = "SSTV picture, " + it.mode + ", from " + who + (it.partial ? " (partial)" : "");
+    img.src = it.file_url;
+    a.append(img);
+    const cap = el("figcaption");
+    cap.append(el("span", "mode", it.mode), el("span", "sep", "·"));
+    if (it.call) {
+      const call = el("span", "pcall");
+      call.append(el("bdi", "base", it.call));
+      if (it.suffix) call.append(el("bdi", "sfx", it.suffix));
+      cap.append(call);
+    } else {
+      cap.append(el("span", "unknown", "Unknown station"));
+    }
+    cap.append(el("span", "sep", "·"), el("span", "at", it.clock));
+    if (it.partial) cap.append(el("span", "partial", "partial"));
+    fig.append(a, cap);
+    row.append(fig);
+    return row;
+  }
+
   function divider(it) {
     const d = el("p", "div");
     const t = el("span", "dt");
@@ -190,6 +225,9 @@
           box.append(row);
           o.els[which] = entry;
         }
+      } else if (it.type === "image") {
+        keyups = null;
+        box.append(picture(it, mine({ base: it.call })));
       } else {
         keyups = null;
         box.append(divider(it));
@@ -202,7 +240,7 @@
     box.replaceChildren();
     for (const o of st.overs) o.els[0] = null;
     build(box, 0);
-    if (st.overs.length === 0) {
+    if (!st.data.items.some((it) => it.type !== "event")) {
       box.append(el("p", "note", "Nothing was heard in this session."));
     }
     paintStates(true);
@@ -549,6 +587,12 @@
       const saved = store("nets.myside." + d.net_slug);
       st.mySide = saved === null ? d.my_side : saved === "1";
       $("myside").setAttribute("aria-checked", st.mySide ? "true" : "false");
+    }
+
+    if (d.video) {
+      const v = $("video-btn");
+      v.setAttribute("href", d.video);
+      v.hidden = false;
     }
 
     if (d.can_delete && d.delete_url) {

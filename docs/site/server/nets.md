@@ -86,3 +86,8 @@ Audio is played from each session's `session.flac` with byte ranges, so the
 browser fetches only the part it needs. Sessions recorded before the recorder
 wrote `my_callsigns` into `session.json` show everyone on the left; the server
 has no copy of the recorder's config to fall back on.
+
+When the recorder drew a [video of the net](../netrec.md#video-of-each-net),
+the server serves it too, at the session's address plus `video.mp4`, with the
+same rules: anyone for a public session, signed-in users for a private one.
+The session page then shows a **Video** button beside Replay that opens it.

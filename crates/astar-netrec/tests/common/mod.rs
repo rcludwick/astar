@@ -64,6 +64,7 @@ pub fn net(target: Target) -> NetCfg {
         my_callsigns: Vec::new(),
         video: false,
         youtube_live: false,
+        twitch_live: false,
         youtube_upload: false,
     }
 }

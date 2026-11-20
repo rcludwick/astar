@@ -27,6 +27,23 @@ pub fn over_file_name(seq: u32, local_start: &jiff::Zoned, talker: Option<&str>)
     format!("{seq:03} {} {who}.flac", local_start.strftime("%H-%M-%S"))
 }
 
+/// `001 19-04-12 PD120 N0CALL.png`: a picture under `images/`, named like an
+/// over with the SSTV mode before the talker.
+#[must_use]
+pub fn image_file_name(
+    seq: u32,
+    local_start: &jiff::Zoned,
+    mode_token: &str,
+    talker: Option<&str>,
+) -> String {
+    let who = key_component(&talker.and_then(base_call).unwrap_or_default());
+    format!(
+        "{seq:03} {} {} {who}.png",
+        local_start.strftime("%H-%M-%S"),
+        key_component(mode_token)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,6 +67,27 @@ mod tests {
         assert_eq!(
             over_file_name(7, &t, Some("-1")),
             "007 19-00-12 unknown.flac"
+        );
+    }
+
+    #[test]
+    fn image_file_name_sanitises_the_talker() {
+        let t = at("2026-11-03T19:04:12-07:00[America/Denver]");
+        assert_eq!(
+            image_file_name(1, &t, "PD120", Some("N0CALL")),
+            "001 19-04-12 PD120 N0CALL.png"
+        );
+        assert_eq!(
+            image_file_name(12, &t, "Robot36", Some("KX0AAA  D")),
+            "012 19-04-12 Robot36 KX0AAA.png"
+        );
+        assert_eq!(
+            image_file_name(1, &t, "PD120", None),
+            "001 19-04-12 PD120 unknown.png"
+        );
+        assert_eq!(
+            image_file_name(1, &t, "../PD 120", Some("../../etc/x")),
+            "001 19-04-12 ___PD_120 ______ETC_X.png"
         );
     }
 

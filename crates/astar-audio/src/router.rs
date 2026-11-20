@@ -158,10 +158,40 @@ struct OutSlot {
     /// RX/output compression strength cell (f32 bits, 0.0..=1.0) shared with
     /// the bus.
     rx_compress_level: Arc<AtomicU32>,
-    /// The bus's heard-audio recording tap; [`AudioRouter::set_record_taps`]
-    /// fills it. Inert on the injected-source path, which has no `OutputBus`.
-    heard: TapSlot<PcmChunk>,
+    /// The bus's heard-audio tap slots, one per [`HeardConsumer`];
+    /// [`AudioRouter::set_heard_tap`] fills them. Inert on the
+    /// injected-source path, which has no `OutputBus`.
+    heard: HeardSlots,
 }
+
+/// Who listens to the heard audio of an output bus. Each consumer has its
+/// own tap slot on every bus, so a slow or full one never costs another its
+/// audio, and each keeps its own drop and contention counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HeardConsumer {
+    /// The recorder: [`AudioRouter::set_record_taps`]'s `heard`.
+    Record,
+    /// The SSTV picture decoder.
+    Sstv,
+}
+
+impl HeardConsumer {
+    /// How many consumers there are (the length of a bus's slot array).
+    pub const COUNT: usize = 2;
+    /// Every consumer, in slot order.
+    pub const ALL: [Self; Self::COUNT] = [Self::Record, Self::Sstv];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Record => 0,
+            Self::Sstv => 1,
+        }
+    }
+}
+
+/// One heard-audio tap slot per [`HeardConsumer`], indexed by
+/// [`HeardConsumer::index`].
+type HeardSlots = [TapSlot<PcmChunk>; HeardConsumer::COUNT];
 
 /// Owns the audio backend + the open streams. Phase 2: N mic lanes / N output
 /// buses. A mic opens at most once (mics are 1:1, never shared); an output
@@ -233,8 +263,12 @@ pub struct AudioRouter {
     /// Live RX jitter-buffer configuration (iax-rxjb), shared with every bus
     /// this router opens so a change reaches a call in progress.
     rx_jitter: Arc<RxJitterSettings>,
-    /// The recording taps, kept so a bus or lane opened later gets them too.
-    heard_tap: Option<Tap<PcmChunk>>,
+    /// "Hold shrink" (see [`Mixer::with_shrink_hold`]), shared with every
+    /// bus this router opens. [`AudioRouter::share_shrink_hold`] replaces it.
+    shrink_hold: Arc<AtomicBool>,
+    /// The heard taps (one per [`HeardConsumer`]) and the sent tap, kept so
+    /// a bus or lane opened later gets them too.
+    heard_taps: [Option<Tap<PcmChunk>>; HeardConsumer::COUNT],
     sent_tap: Option<Tap<PcmChunk>>,
 }
 
@@ -248,7 +282,8 @@ impl AudioRouter {
             mics: HashMap::new(),
             outputs: HashMap::new(),
             rx_jitter: Arc::new(RxJitterSettings::default()),
-            heard_tap: None,
+            shrink_hold: Arc::new(AtomicBool::new(false)),
+            heard_taps: [None, None],
             sent_tap: None,
         }
     }
@@ -260,15 +295,26 @@ impl AudioRouter {
     /// frame a mic lane hands to a call. Reaches every open bus and lane, and
     /// every one opened after this. The audio thread never waits on them: a
     /// full tap drops and counts, a busy slot is skipped.
+    ///
+    /// `heard` is the [`HeardConsumer::Record`] slot; the other heard
+    /// consumers are left exactly as they are.
     pub fn set_record_taps(&mut self, heard: Option<Tap<PcmChunk>>, sent: Option<Tap<PcmChunk>>) {
-        for slot in self.outputs.values() {
-            slot.heard.set(heard.clone());
-        }
+        self.set_heard_tap(HeardConsumer::Record, heard);
         for slot in self.mics.values() {
             slot.sent.set(sent.clone());
         }
-        self.heard_tap = heard;
         self.sent_tap = sent;
+    }
+
+    /// Install (or, with `None`, remove) one consumer's heard tap: a copy of
+    /// the final audio of every output bus carrying a call. Reaches every
+    /// open bus and every one opened after this, and leaves the other
+    /// consumers' taps alone. The audio thread never waits on it.
+    pub fn set_heard_tap(&mut self, who: HeardConsumer, tap: Option<Tap<PcmChunk>>) {
+        for slot in self.outputs.values() {
+            slot.heard[who.index()].set(tap.clone());
+        }
+        self.heard_taps[who.index()] = tap;
     }
 
     /// The contention counters of every open bus's heard slot and every open
@@ -278,7 +324,7 @@ impl AudioRouter {
     pub fn record_contended_counters(&self) -> Vec<Arc<AtomicU64>> {
         self.outputs
             .values()
-            .map(|s| s.heard.contended_counter())
+            .map(|s| s.heard[HeardConsumer::Record.index()].contended_counter())
             .chain(self.mics.values().map(|s| s.sent.contended_counter()))
             .collect()
     }
@@ -288,6 +334,26 @@ impl AudioRouter {
     /// in progress on the next device callback.
     pub fn set_rx_jitter(&self, cfg: RxJitterConfig) {
         self.rx_jitter.set(cfg);
+    }
+
+    /// Read "hold shrink" from `hold` on every open bus and every bus
+    /// opened after this. While it reads `true`, no received call's jitter
+    /// buffer throws a frame away to shrink its cushion (an SSTV picture is
+    /// airing). The owner keeps `hold` across engine rebuilds and stores
+    /// into it directly; the audio thread only ever loads it.
+    pub fn share_shrink_hold(&mut self, hold: Arc<AtomicBool>) {
+        for slot in self.outputs.values() {
+            if let Ok(mut m) = slot.mixer.lock() {
+                m.set_shrink_hold_cell(Arc::clone(&hold));
+            }
+        }
+        self.shrink_hold = hold;
+    }
+
+    /// The "hold shrink" cell every bus of this router reads.
+    #[must_use]
+    pub fn shrink_hold(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shrink_hold)
     }
 
     /// The RX jitter-buffer configuration the router is actually using —
@@ -689,7 +755,9 @@ impl AudioRouter {
         }
         let out_dev = self.resolve(out.as_str(), Direction::Output)?;
         let mixer = Arc::new(Mutex::new(
-            Mixer::new().with_settings(Arc::clone(&self.rx_jitter)),
+            Mixer::new()
+                .with_settings(Arc::clone(&self.rx_jitter))
+                .with_shrink_hold(Arc::clone(&self.shrink_hold)),
         ));
         let bus = OutputBus::new(Arc::clone(&mixer), config.sample_rate);
         let rx_peak = bus.rx_peak();
@@ -697,8 +765,10 @@ impl AudioRouter {
         let rx_spectrum = bus.rx_spectrum();
         let rx_compress = bus.rx_compress();
         let rx_compress_level = bus.rx_compress_level();
-        let heard = bus.record_tap();
-        heard.set(self.heard_tap.clone());
+        let heard: HeardSlots = HeardConsumer::ALL.map(|who| bus.heard_tap(who));
+        for (slot, tap) in heard.iter().zip(&self.heard_taps) {
+            slot.set(tap.clone());
+        }
         let handle = self.backend.open_output(&out_dev, config, Box::new(bus))?;
         self.outputs.insert(
             out.clone(),
@@ -856,7 +926,7 @@ impl AudioRouter {
                 rx_spectrum: Arc::new(Mutex::new(SpectrumAnalyzer::new(config.sample_rate))),
                 rx_compress: Arc::new(AtomicBool::new(false)),
                 rx_compress_level: Arc::new(AtomicU32::new(DEFAULT_COMPRESS_LEVEL.to_bits())),
-                heard: TapSlot::default(),
+                heard: Default::default(),
             },
         );
         Ok(())
@@ -1309,9 +1379,14 @@ pub struct OutputBus {
     /// Sample rate this bus's `comp` is tuned for (needed to re-tune on a
     /// live level change), and the rate of every heard-tap chunk.
     sample_rate: u32,
-    /// Heard-audio recording tap: a copy of exactly what the device got,
-    /// offered at the end of `read`. Built only while a tap is installed.
-    heard: TapSlot<PcmChunk>,
+    /// Heard-audio taps, one per [`HeardConsumer`]: a copy of exactly what
+    /// the device got, offered at the end of `read`. Built only while some
+    /// slot has a tap, and at most once per `read`.
+    heard: HeardSlots,
+    /// How many heard chunks `read` has built, so a test can pin "at most
+    /// one per read, none without a tap".
+    #[cfg(test)]
+    chunks_built: usize,
 }
 
 impl OutputBus {
@@ -1333,14 +1408,23 @@ impl OutputBus {
                 CompressorParams::for_level(DEFAULT_COMPRESS_LEVEL),
             ),
             sample_rate,
-            heard: TapSlot::default(),
+            heard: Default::default(),
+            #[cfg(test)]
+            chunks_built: 0,
         }
     }
 
-    /// The bus's heard-audio recording tap slot (shared; the router keeps it).
+    /// The bus's heard-audio recording tap slot (shared; the router keeps
+    /// it): the [`HeardConsumer::Record`] slot.
     #[must_use]
     pub fn record_tap(&self) -> TapSlot<PcmChunk> {
-        self.heard.clone()
+        self.heard_tap(HeardConsumer::Record)
+    }
+
+    /// One consumer's heard-audio tap slot (shared; the router keeps it).
+    #[must_use]
+    pub fn heard_tap(&self, who: HeardConsumer) -> TapSlot<PcmChunk> {
+        self.heard[who.index()].clone()
     }
 
     /// Shared RX-peak cell for per-bus metering (f32 bits in an `AtomicU32`).
@@ -1432,11 +1516,32 @@ impl OutputSource for OutputBus {
         // heard tap, so an idle bus offering would interleave a second
         // stream into the receive lane. Never waits; nothing is built unless
         // a tap is installed.
+        //
+        // Each consumer (recorder, SSTV) has its own slot, so a full or busy
+        // one only drops its own copy. The chunk is built once; the last
+        // slot that wants it takes it, and only the ones before that get a
+        // clone, so a lone recorder costs exactly what it did before.
         if calls > 0 && n > 0 {
-            self.heard.offer_with(|| PcmChunk {
-                rate: self.sample_rate,
-                samples: out[..n].iter().map(|&s| quantise_sample(s)).collect(),
-            });
+            let wanted = self.heard.each_ref().map(TapSlot::has_tap);
+            let mut left = wanted.iter().filter(|&&w| w).count();
+            if left > 0 {
+                #[cfg(test)]
+                {
+                    self.chunks_built += 1;
+                }
+                let mut chunk = Some(PcmChunk {
+                    rate: self.sample_rate,
+                    samples: out[..n].iter().map(|&s| quantise_sample(s)).collect(),
+                });
+                for (slot, _) in self.heard.iter().zip(wanted).filter(|(_, w)| *w) {
+                    left -= 1;
+                    if left == 0 {
+                        slot.try_offer_from(|_| chunk.take());
+                    } else {
+                        slot.try_offer_from(|_| chunk.clone());
+                    }
+                }
+            }
         }
         if let Ok(mut sa) = self.rx_spectrum.lock() {
             sa.push(out);
@@ -2158,6 +2263,35 @@ mod tests {
             router.bus_call_count(&out),
             2,
             "both calls mix to the one bus"
+        );
+    }
+
+    #[test]
+    fn a_shared_shrink_hold_reaches_open_and_later_buses() {
+        let mut router = AudioRouter::new(Box::new(NullBackend::new()));
+        let out = OutputId::new("out:test");
+        let bus_cell =
+            |router: &AudioRouter| router.outputs[&out].mixer.lock().unwrap().shrink_hold();
+        let (_tx, rx) = channel::<RxFrame>();
+        let id = router
+            .add_rx_to_bus(&out, rx, StreamConfig::default())
+            .expect("open");
+        let hold = Arc::new(AtomicBool::new(false));
+        router.share_shrink_hold(Arc::clone(&hold));
+        assert!(
+            Arc::ptr_eq(&bus_cell(&router), &hold),
+            "the open bus reads it"
+        );
+        // Close the bus and open it again: the new mixer reads it too.
+        router.remove_from_bus(&out, id);
+        assert!(router.close_output(&out).is_some());
+        let (_tx2, rx2) = channel::<RxFrame>();
+        router
+            .add_rx_to_bus(&out, rx2, StreamConfig::default())
+            .expect("reopen");
+        assert!(
+            Arc::ptr_eq(&bus_cell(&router), &hold),
+            "a later bus reads it"
         );
     }
 
@@ -3782,6 +3916,174 @@ mod tests {
             seen.push((tapped, baseline));
         }
         panic!("tapped max not under 20 ms and 3x the baseline max: (tapped, baseline) = {seen:?}");
+    }
+
+    /// A bus carrying a call with `frames` frames of distinct audio queued.
+    fn busy_bus(frames: usize) -> (OutputBus, std::sync::mpsc::Sender<RxFrame>) {
+        let mixer = Arc::new(Mutex::new(Mixer::new()));
+        let (tx, rx) = channel::<RxFrame>();
+        mixer.lock().unwrap().add_call(rx);
+        for k in 0..frames {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let frame: Vec<i16> = (0..160)
+                .map(|i| ((k * 160 + i) % 900) as i16 - 450)
+                .collect();
+            tx.send(RxFrame::from(frame)).unwrap();
+        }
+        (OutputBus::new(mixer, 8_000), tx)
+    }
+
+    #[test]
+    fn heard_taps_fan_out_to_record_and_sstv() {
+        let (mut bus, _call) = busy_bus(5);
+        let (record_tap, record) = astar_record::tap::tap_channel(16);
+        let (sstv_tap, sstv) = astar_record::tap::tap_channel(16);
+        bus.heard_tap(HeardConsumer::Record).set(Some(record_tap));
+        bus.heard_tap(HeardConsumer::Sstv).set(Some(sstv_tap));
+        let mut fed = Vec::new();
+        for _ in 0..5 {
+            let mut out = [0.0_f32; 160];
+            let n = crate::OutputSource::read(&mut bus, &mut out);
+            assert_eq!(n, 160);
+            fed.push(quantised(&out[..n]));
+        }
+        let record = drain(&record);
+        let sstv = drain(&sstv);
+        assert_eq!(record.len(), 5);
+        assert_eq!(record, sstv, "both consumers hear the same chunks");
+        assert_eq!(
+            record.iter().map(|c| c.samples.clone()).collect::<Vec<_>>(),
+            fed,
+            "and they are what the device was fed"
+        );
+        assert_eq!(
+            bus.chunks_built, 5,
+            "one chunk built per read, not per slot"
+        );
+    }
+
+    #[test]
+    fn no_sstv_tap_builds_nothing_extra() {
+        let (mut bus, _call) = busy_bus(8);
+        let mut out = [0.0_f32; 160];
+        // No tap at all: nothing is built.
+        for _ in 0..3 {
+            crate::OutputSource::read(&mut bus, &mut out);
+        }
+        assert_eq!(bus.chunks_built, 0, "no tap, no chunk");
+        // Only the recorder: one chunk per read, and it is the recorder's.
+        let (record_tap, record) = astar_record::tap::tap_channel(16);
+        bus.record_tap().set(Some(record_tap));
+        for _ in 0..5 {
+            crate::OutputSource::read(&mut bus, &mut out);
+        }
+        assert_eq!(bus.chunks_built, 5, "one chunk per read");
+        assert_eq!(drain(&record).len(), 5);
+        assert!(!bus.heard_tap(HeardConsumer::Sstv).is_set());
+    }
+
+    #[test]
+    fn a_full_sstv_tap_never_delays_or_starves_the_record_tap() {
+        use std::time::{Duration, Instant};
+        const CALLS: usize = 1_000;
+        // Same shape as `a_full_tap_never_delays_the_audio_thread`: the
+        // untapped and tapped reads interleave so both see the same noise,
+        // a few attempts absorb one preemption, and a worker keeps a tap
+        // that blocks outright from hanging CI.
+        const ATTEMPTS: usize = 3;
+        const HANG_LIMIT: Duration = Duration::from_secs(30);
+        fn timed(bus: &mut OutputBus, out: &mut [f32]) -> Duration {
+            let t = Instant::now();
+            crate::OutputSource::read(bus, out);
+            t.elapsed()
+        }
+        let mut seen = Vec::new();
+        for _ in 0..ATTEMPTS {
+            let (done_tx, done_rx) = channel();
+            std::thread::spawn(move || {
+                let (mut plain, plain_call) = busy_bus(0);
+                let (mut tapped_bus, tapped_call) = busy_bus(0);
+                // SSTV: capacity 1 and never drained, so it is full after
+                // the first chunk.
+                let (sstv_tap, _never_drained) = astar_record::tap::tap_channel(1);
+                let sstv_dropped = sstv_tap.dropped_counter();
+                tapped_bus
+                    .heard_tap(HeardConsumer::Sstv)
+                    .set(Some(sstv_tap));
+                // The recorder: drained after every read.
+                let (record_tap, record) = astar_record::tap::tap_channel(4);
+                let record_dropped = record_tap.dropped_counter();
+                tapped_bus.record_tap().set(Some(record_tap));
+                let mut out = [0.0_f32; 512];
+                let (mut baseline, mut tapped) = (Duration::ZERO, Duration::ZERO);
+                let mut recorded = 0_usize;
+                for _ in 0..CALLS {
+                    let _ = plain_call.send(RxFrame::from(vec![1_000_i16; 512]));
+                    let _ = tapped_call.send(RxFrame::from(vec![1_000_i16; 512]));
+                    baseline = baseline.max(timed(&mut plain, &mut out));
+                    tapped = tapped.max(timed(&mut tapped_bus, &mut out));
+                    recorded += std::iter::from_fn(|| record.try_recv().ok()).count();
+                }
+                let _ = done_tx.send((
+                    baseline,
+                    tapped,
+                    recorded,
+                    record_dropped.load(Ordering::Relaxed),
+                    sstv_dropped.load(Ordering::Relaxed),
+                ));
+            });
+            let (baseline, tapped, recorded, record_dropped, sstv_dropped) = done_rx
+                .recv_timeout(HANG_LIMIT)
+                .expect("the tapped reads finished (a tap blocked the audio thread)");
+            assert_eq!(recorded, CALLS, "every read reached the recorder");
+            assert_eq!(record_dropped, 0, "the recorder lost nothing");
+            assert_eq!(
+                sstv_dropped,
+                CALLS as u64 - 1,
+                "the full SSTV tap drops and counts"
+            );
+            if tapped < Duration::from_millis(20) && tapped < baseline * 3 {
+                return;
+            }
+            seen.push((tapped, baseline));
+        }
+        panic!("tapped max not under 20 ms and 3x the baseline max: (tapped, baseline) = {seen:?}");
+    }
+
+    #[test]
+    fn the_router_fans_heard_out_and_set_record_taps_leaves_sstv_alone() {
+        let (backend, controls) = test_support_router::NullBackend::with_controls();
+        let mut router = AudioRouter::new(Box::new(backend));
+        let (sstv_tap, sstv) = astar_record::tap::tap_channel(16);
+        // Set before the bus opens: the bus picks it up when it does.
+        router.set_heard_tap(HeardConsumer::Sstv, Some(sstv_tap));
+        let (call, _, _) = router
+            .open_monitor_call(&OutputId::new("out:test"), crate::StreamConfig::default())
+            .expect("bus opens");
+        let rx_audio = || {
+            call.rx_frames
+                .send(RxFrame::from(vec![1_000_i16; 160]))
+                .unwrap();
+        };
+        let (record_tap, record) = astar_record::tap::tap_channel(16);
+        router.set_record_taps(Some(record_tap), None);
+        rx_audio();
+        controls.pull_output(160);
+        assert_eq!(drain(&record).len(), 1, "the recorder hears");
+        assert_eq!(drain(&sstv).len(), 1, "SSTV hears");
+
+        // Stopping a recording leaves SSTV listening.
+        router.set_record_taps(None, None);
+        rx_audio();
+        controls.pull_output(160);
+        assert_eq!(drain(&record).len(), 0, "the recording stopped");
+        assert_eq!(drain(&sstv).len(), 1, "SSTV still hears");
+
+        // And clearing SSTV stops it.
+        router.set_heard_tap(HeardConsumer::Sstv, None);
+        rx_audio();
+        controls.pull_output(160);
+        assert_eq!(drain(&sstv).len(), 0, "SSTV cleared");
     }
 
     #[test]

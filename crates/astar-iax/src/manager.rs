@@ -335,6 +335,8 @@ pub struct Manager {
     /// The packet log's slot, shared with every call dialed from here on.
     /// Empty until the embedder installs one.
     packet_slot: PacketSlot,
+    /// The SSTV decoder's packet slot, shared the same way.
+    sstv_packet_slot: PacketSlot,
     /// The extra plain-UDP listener address from the WG config (`None` in UDP
     /// mode or when the config leaves it unset). Read by the embedder when it
     /// starts the inbound listener.
@@ -485,6 +487,7 @@ impl Manager {
             parrot_pending_hangup: Vec::new(),
             net: Arc::new(crate::transport::OsNetStack),
             packet_slot: PacketSlot::default(),
+            sstv_packet_slot: PacketSlot::default(),
             wg_also_bind_udp: None,
             wg: None,
         }
@@ -1043,6 +1046,11 @@ impl Manager {
         self.packet_slot = slot;
     }
 
+    /// Set the SSTV decoder's packet slot for calls dialed from now on.
+    pub fn set_sstv_packet_slot(&mut self, slot: PacketSlot) {
+        self.sstv_packet_slot = slot;
+    }
+
     /// One jitter reading per pooled call that has a tap. Every field is
     /// `None` for a conference member.
     #[must_use]
@@ -1084,6 +1092,7 @@ impl Manager {
                 peer,
             },
         )
+        .with_sstv(self.sstv_packet_slot.clone())
     }
 
     /// Dial a node into the pool, monitor-only (no mic until `route`). Opens /

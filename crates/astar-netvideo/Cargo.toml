@@ -1,0 +1,46 @@
+[package]
+name = "astar-netvideo"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "astar-netvideo: draws the net recorder's video frames (text in Inter, via tiny-skia)."
+
+[features]
+# `ffmpeg_for_tests`, and the publisher's loopback-only guard, for other
+# crates' tests.
+testing = []
+
+[dependencies]
+ab_glyph = "=0.2.32"
+astar-netarchive = { path = "../astar-netarchive", version = "0.1.23-beta" }
+astar-secrets = { path = "../astar-secrets", version = "0.1.23-beta" }
+bytes = { workspace = true }
+claxon = "=0.4.3"
+jiff = { workspace = true }
+# The live stream's RTMP codec: protocol only, the socket is ours (rtmp.rs).
+rml_rtmp = "=0.8.0"
+# RTMPS: ring only, the same set astar-http and astar-server use.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+serde = { workspace = true }
+tracing = { workspace = true }
+webpki-roots = "1"
+tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", "simd"] }
+
+[dev-dependencies]
+astar-netarchive = { path = "../astar-netarchive", version = "0.1.23-beta", features = ["fixture"] }
+astar-record = { path = "../astar-record", version = "0.1.23-beta" }
+png = "=0.18.1"
+# The loopback RTMPS test's self-signed certificate.
+rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "pem"] }
+serde_json = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# The live stream's audio FIFO (`mkfifo`) and its non-blocking open.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[lints]
+workspace = true

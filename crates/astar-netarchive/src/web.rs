@@ -1,7 +1,8 @@
 // astar — Copyright (c) 2026 Rob Ludwick.
 // SPDX-License-Identifier: AGPL-3.0-only
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
-//! The `/nets/` routes: the recordings pages, their JSON, and the audio.
+//! The `/nets/` routes: the recordings pages, their JSON, the audio and the
+//! pictures.
 //!
 //! Whoever mounts these decides who is asking ([`Access`]) and passes it in
 //! with every request. Every route that names a session looks it up with
@@ -11,8 +12,8 @@
 //! the archive's peaks and check-in counts, which are the same for everyone.
 //!
 //! A URL never becomes a path. Sessions are matched against the folders the
-//! scan found, and an over file is served only when its decoded name is one
-//! the session's own log recorded.
+//! scan found, and an over or picture file is served only when its decoded
+//! name is one the session's own log recorded.
 
 use std::path::{Path, PathBuf};
 
@@ -180,13 +181,15 @@ fn as_json(v: &impl serde::Serialize) -> Response {
     }
 }
 
-/// The MIME type of an archive audio file, by its extension.
-fn audio_mime(name: &str) -> &'static str {
+/// The MIME type of an archive file, by its extension.
+fn file_mime(name: &str) -> &'static str {
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
     match ext.as_deref() {
         Some("flac") => "audio/flac",
-        Some("m4a" | "mp4") => "audio/mp4",
+        Some("m4a") => "audio/mp4",
+        Some("mp4") => "video/mp4",
         Some("opus" | "ogg") => "audio/ogg",
+        Some("png") => "image/png",
         _ => "application/octet-stream",
     }
 }
@@ -198,7 +201,7 @@ fn file_reply(path: PathBuf) -> NetsReply {
     if !regular {
         return NetsReply::Response(no_such_session());
     }
-    let mime = audio_mime(&path.file_name().unwrap_or_default().to_string_lossy());
+    let mime = file_mime(&path.file_name().unwrap_or_default().to_string_lossy());
     NetsReply::File { path, mime }
 }
 
@@ -288,7 +291,7 @@ impl Pages {
                 let e = find(n, s).ok_or_else(no_such_session)?;
                 ok(as_json(&session_view(&self.archive, &e, access, opts)))
             }
-            [n, s, name @ ("session.flac" | "session.m4a")] => {
+            [n, s, name @ ("session.flac" | "session.m4a" | "video.mp4")] => {
                 let e = find(n, s).ok_or_else(no_such_session)?;
                 Ok(file_reply(e.dir.join(name)))
             }
@@ -296,6 +299,11 @@ impl Pages {
                 let e = find(n, s).ok_or_else(no_such_session)?;
                 let name = self.logged_over(&e, file).ok_or_else(no_such_session)?;
                 Ok(file_reply(e.dir.join("overs").join(name)))
+            }
+            [n, s, "images", file] => {
+                let e = find(n, s).ok_or_else(no_such_session)?;
+                let name = self.logged_image(&e, file).ok_or_else(no_such_session)?;
+                Ok(file_reply(e.dir.join("images").join(name)))
             }
             _ => Err(not_found_page()),
         }
@@ -309,6 +317,17 @@ impl Pages {
             .rows(e)
             .iter()
             .any(|r| matches!(&r.kind, LogKind::Over { file, .. } if *file == name))
+            .then_some(name)
+    }
+
+    /// The picture file `segment` (percent-encoded) names, when the
+    /// session's log recorded a picture with exactly that file name.
+    fn logged_image(&self, e: &SessionEntry, segment: &str) -> Option<String> {
+        let name = decode_segment(segment)?;
+        self.archive
+            .rows(e)
+            .iter()
+            .any(|r| matches!(&r.kind, LogKind::Image { file, .. } if *file == name))
             .then_some(name)
     }
 

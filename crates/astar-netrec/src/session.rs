@@ -8,17 +8,32 @@
 //! the file's length is the session's length. Frames that did arrive also go
 //! through [`OverSplitter`], which cuts them into overs, and each over is
 //! written to its own file under `overs/`.
+//!
+//! Every tick's frame, silence included, also goes to an SSTV decoder on its
+//! own thread. A picture it keeps is saved under `images/` and logged as an
+//! `image` row; nothing about SSTV can fail the session.
+//!
+//! A session that streams live also has a [`LiveTap`]: every tick's audio,
+//! and each over's start, late talker and end, go into it with a send that
+//! never waits. Like the SSTV decoder's tap, a live stream that falls
+//! behind or stops reading costs the stream, never a tick.
 
+use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use astar_netarchive::{
     Ended, LogKind, LogRow, META_FORMAT, MIN_FREE_BYTES, OverRec, SessionMeta, append_row,
-    compute_peaks, net_dir_name, over_file_name, session_dir_name, write_checkins, write_log_csv,
-    write_meta, write_peaks,
+    compute_peaks, image_file_name, net_dir_name, over_file_name, session_dir_name, write_checkins,
+    write_log_csv, write_meta, write_peaks,
 };
+use astar_netvideo::{LiveTap, TapMsg};
+use astar_record::tap::{PcmChunk, Tap, tap_channel};
 use astar_record::{FlacWriter, OverEvent, OverSplitter, SplitterConfig};
+use astar_sstv::{Outcome, Picture, SSTV_TAP_CAPACITY, Worker};
 
 use crate::config::{NetCfg, Target, Visibility};
 use crate::feed::Frame;
@@ -69,6 +84,268 @@ struct OpenOver {
     samples: u64,
 }
 
+/// A picture saved under `images/`, as its log row will carry it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImageRec {
+    /// RFC 3339: where the picture began.
+    start: String,
+    offset_ms: u64,
+    mode: String,
+    talker: Option<String>,
+    file: String,
+    partial: bool,
+}
+
+/// What the decoder thread hands back to the tick: a saved picture, or the
+/// message of one that could not be saved.
+type ImageMsg = Result<ImageRec, String>;
+
+/// What the ticks tell the decoder thread about the session's timeline.
+#[derive(Default)]
+struct Timeline {
+    /// Who was talking from which sample of the session on: one entry per
+    /// change, oldest first. The decoder can run seconds behind the ticks,
+    /// so a picture looks its talker up by where it began rather than taking
+    /// whoever is talking when the decoder gets there.
+    talkers: VecDeque<(u64, Option<String>)>,
+    /// Audio the decoder never heard, because it fell behind and the tap
+    /// was full: `(decoder sample, session samples dropped before it)`, one
+    /// entry per gap, oldest first. Without these a picture after a gap
+    /// would be placed early by everything dropped before it.
+    gaps: VecDeque<(u64, u64)>,
+}
+
+/// Talker changes and gaps remembered: far more than the decoder ever lags
+/// by.
+const TIMELINE_HISTORY: usize = 256;
+
+impl Timeline {
+    fn talker_at(&self, sample: u64) -> Option<String> {
+        self.talkers
+            .iter()
+            .rev()
+            .find(|(from, _)| *from <= sample)
+            .and_then(|(_, t)| t.clone())
+    }
+
+    /// The session sample the decoder's `decoded`th sample was.
+    fn session_sample(&self, decoded: u64) -> u64 {
+        let dropped = self
+            .gaps
+            .iter()
+            .rev()
+            .find(|(at, _)| *at <= decoded)
+            .map_or(0, |(_, d)| *d);
+        decoded + dropped
+    }
+}
+
+type SharedTimeline = Arc<Mutex<Timeline>>;
+
+fn lock_timeline(t: &SharedTimeline) -> std::sync::MutexGuard<'_, Timeline> {
+    t.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The session's SSTV decoder.
+struct SessionSstv {
+    tap: Tap<PcmChunk>,
+    /// `None` once stopped.
+    worker: Option<Worker>,
+    images: Receiver<ImageMsg>,
+    timeline: SharedTimeline,
+    /// The talker last put in the timeline, so a tick locks it only on a
+    /// change.
+    last_talker: Option<String>,
+    /// Session samples the decoder has not heard, all told.
+    dropped: u64,
+    /// Wait for room in the tap instead of dropping a frame (tests).
+    lossless: bool,
+    /// Drop this many more ticks as if the tap were full (tests).
+    #[cfg(test)]
+    drop_next: u32,
+}
+
+/// The decoder thread's side: it numbers and saves the pictures it keeps.
+struct ImageSink {
+    images_dir: PathBuf,
+    /// The session's start: sample 0 of what the decoder hears.
+    start: jiff::Zoned,
+    timeline: SharedTimeline,
+    out: mpsc::Sender<ImageMsg>,
+    /// Pictures saved so far; they have their own numbers, apart from overs.
+    saved: u32,
+    /// The picture in flight: its talker, found when it began.
+    pending: Option<(u64, Option<String>)>,
+}
+
+impl ImageSink {
+    fn outcome(&mut self, outcome: Outcome) {
+        match outcome {
+            Outcome::Started { seq, at_sample, .. } => {
+                let t = lock_timeline(&self.timeline);
+                self.pending = Some((seq, t.talker_at(t.session_sample(at_sample))));
+            }
+            Outcome::Finished { seq, picture, rate } => self.keep(seq, &picture, rate),
+            Outcome::Abandoned { seq, picture, rate } => {
+                if picture.worth_keeping() {
+                    self.keep(seq, &picture, rate);
+                } else {
+                    self.pending = None;
+                }
+            }
+            Outcome::Rejected { .. } => self.pending = None,
+        }
+    }
+
+    fn keep(&mut self, seq: u64, picture: &Picture, rate: u32) {
+        let talker = match self.pending.take() {
+            Some((s, talker)) if s == seq => talker,
+            _ => None,
+        };
+        let at = lock_timeline(&self.timeline).session_sample(picture.at_sample);
+        let offset_ms = at * 1000 / u64::from(rate.max(1));
+        let start = self
+            .start
+            .checked_add(jiff::SignedDuration::from_millis(
+                i64::try_from(offset_ms).unwrap_or(i64::MAX),
+            ))
+            .unwrap_or_else(|_| self.start.clone());
+        let mode = picture.mode.token();
+        let file = image_file_name(self.saved + 1, &start, mode, talker.as_deref());
+        let msg = match picture.write_png(&self.images_dir.join(&file)) {
+            Ok(()) => {
+                self.saved += 1;
+                Ok(ImageRec {
+                    start: start.timestamp().to_string(),
+                    offset_ms,
+                    mode: mode.to_owned(),
+                    talker,
+                    file,
+                    partial: picture.partial,
+                })
+            }
+            Err(e) => Err(format!("sstv: cannot save {file}: {e}")),
+        };
+        let _ = self.out.send(msg);
+    }
+}
+
+impl SessionSstv {
+    /// Start the decoder for the session in `dir`, which began at `now`. A
+    /// decoder that cannot start costs the session its pictures, never its
+    /// recording: it gets an `Error` row and the session carries on. So does
+    /// an `images/` folder that cannot be made.
+    fn start(dir: &Path, now: &jiff::Zoned) -> Option<Self> {
+        let images = dir.join("images");
+        let started = fs::create_dir(&images)
+            .map_err(|e| format!("sstv: cannot make images/: {e}"))
+            .and_then(|()| {
+                Self::spawn(images, now.clone())
+                    .map_err(|e| format!("sstv: the decoder did not start: {e}"))
+            });
+        match started {
+            Ok(s) => Some(s),
+            Err(message) => {
+                let _ = append_row(
+                    dir,
+                    &LogRow {
+                        t: now.timestamp().to_string(),
+                        kind: LogKind::Error { message },
+                    },
+                );
+                None
+            }
+        }
+    }
+
+    /// Start the decoder thread for a session that began at `start`.
+    fn spawn(images_dir: PathBuf, start: jiff::Zoned) -> std::io::Result<Self> {
+        let (tap, rx) = tap_channel(SSTV_TAP_CAPACITY);
+        let (out, images) = mpsc::channel();
+        let timeline = SharedTimeline::default();
+        let mut sink = ImageSink {
+            images_dir,
+            start,
+            timeline: Arc::clone(&timeline),
+            out,
+            saved: 0,
+            pending: None,
+        };
+        let worker = Worker::spawn(rx, Box::new(move |o| sink.outcome(o)))?;
+        Ok(Self {
+            tap,
+            worker: Some(worker),
+            images,
+            timeline,
+            last_talker: None,
+            dropped: 0,
+            lossless: false,
+            #[cfg(test)]
+            drop_next: 0,
+        })
+    }
+
+    /// Hand the decoder one tick, which starts at session sample `at`: its
+    /// audio and who is talking.
+    fn offer(&mut self, at: u64, rate: u32, samples: &[i16], talker: Option<&str>) {
+        if self.last_talker.as_deref() != talker {
+            self.last_talker = talker.map(str::to_owned);
+            let mut t = lock_timeline(&self.timeline);
+            if t.talkers.len() == TIMELINE_HISTORY {
+                t.talkers.pop_front();
+            }
+            t.talkers.push_back((at, self.last_talker.clone()));
+        }
+        let chunk = PcmChunk {
+            rate,
+            samples: samples.to_vec(),
+        };
+        #[cfg(test)]
+        if self.drop_next > 0 {
+            self.drop_next -= 1;
+            self.note_dropped(at, samples.len());
+            return;
+        }
+        let taken = if self.lossless {
+            // Bounded, so a decoder thread that has gone away cannot hang
+            // the tick.
+            let give_up = Instant::now() + Duration::from_secs(10);
+            loop {
+                if self.tap.offer(chunk.clone()) {
+                    break true;
+                }
+                if Instant::now() >= give_up {
+                    break false;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        } else {
+            self.tap.offer(chunk)
+        };
+        if !taken {
+            self.note_dropped(at, samples.len());
+        }
+    }
+
+    /// The decoder missed the `len` samples from session sample `at`: the
+    /// sample it hears next is `at + len` of the session.
+    fn note_dropped(&mut self, at: u64, len: usize) {
+        let decoded = at - self.dropped;
+        self.dropped += len as u64;
+        let mut t = lock_timeline(&self.timeline);
+        match t.gaps.back_mut() {
+            // One more tick of the same gap.
+            Some((from, d)) if *from == decoded => *d = self.dropped,
+            _ => {
+                if t.gaps.len() == TIMELINE_HISTORY {
+                    t.gaps.pop_front();
+                }
+                t.gaps.push_back((decoded, self.dropped));
+            }
+        }
+    }
+}
+
 /// The files of one session.
 pub struct SessionRecorder {
     dir: PathBuf,
@@ -89,6 +366,10 @@ pub struct SessionRecorder {
     free: FreeFn,
     /// Set once an unreadable free-space check has been logged.
     free_warned: bool,
+    /// The SSTV decoder; `None` when its thread could not start.
+    sstv: Option<SessionSstv>,
+    /// The live stream's tap, when the session streams live.
+    tap: Option<LiveTap>,
     /// Makes the next whole-session write fail.
     #[cfg(test)]
     pub(crate) fail_whole: bool,
@@ -199,6 +480,7 @@ impl SessionRecorder {
         };
         write_meta(&dir, &meta)?;
         let frame_samples = (rate / 50) as usize;
+        let sstv = SessionSstv::start(&dir, &now);
         Ok(Self {
             dir,
             meta,
@@ -215,6 +497,8 @@ impl SessionRecorder {
             root: root.to_owned(),
             free,
             free_warned: false,
+            sstv,
+            tap: None,
             #[cfg(test)]
             fail_whole: false,
         })
@@ -287,7 +571,23 @@ impl SessionRecorder {
         } else {
             whole
         };
+        if let Some(sstv) = &mut self.sstv {
+            sstv.offer(
+                self.ticks * self.frame_samples as u64,
+                self.rate,
+                &fixed,
+                talker,
+            );
+        }
+        if self.tap.is_some() {
+            let offset_ms = self.offset_ms();
+            self.send(TapMsg::Audio {
+                offset_ms,
+                samples: fixed.into_boxed_slice(),
+            });
+        }
         self.ticks += 1;
+        self.log_images(now);
         whole.and(overs.map_err(|e| SessionError::Over(std::io::Error::other(e.to_string()))))
     }
 
@@ -310,16 +610,21 @@ impl SessionRecorder {
         // the splitter is in its merge or tail window and the old talker's
         // tail must stay with the old over.
         let mut split = false;
+        let mut late = None;
         if frame.is_some()
             && let (Some(t), Some(o)) = (talker, self.open.as_mut())
         {
             match o.talker.as_deref() {
                 None if at.saturating_duration_since(o.started_at) <= LATE_TALKER => {
                     o.talker = Some(t.to_owned());
+                    late = Some((o.seq, t.to_owned()));
                 }
                 Some(cur) if cur != t => split = true,
                 _ => {}
             }
+        }
+        if let Some((seq, talker)) = late {
+            self.send(TapMsg::OverTalker { seq, talker });
         }
         if split {
             keep(self.end_over());
@@ -357,13 +662,19 @@ impl SessionRecorder {
         let name = over_file_name(seq, now, talker);
         let path = self.dir.join("overs").join(&name);
         let writer = FlacWriter::create_new(&path, self.rate, 1).map_err(io_err)?;
+        let offset_ms = self.offset_ms();
+        self.send(TapMsg::OverStart {
+            seq,
+            talker: talker.map(str::to_owned),
+            offset_ms,
+        });
         self.open = Some(OpenOver {
             seq,
             writer,
             path,
             name,
             start: now.clone(),
-            offset_ms: self.ticks * self.frame_samples as u64 * 1000 / u64::from(self.rate),
+            offset_ms,
             talker: talker.map(str::to_owned),
             started_at: at,
             samples: 0,
@@ -388,6 +699,10 @@ impl SessionRecorder {
             }
         }
         let duration_ms = o.samples * 1000 / u64::from(self.rate);
+        self.send(TapMsg::OverEnd {
+            seq: o.seq,
+            duration_ms,
+        });
         // end = start + duration, so the three fields always agree.
         let start = o.start.timestamp();
         let end = start
@@ -420,6 +735,86 @@ impl SessionRecorder {
         finished?;
         row?;
         Ok(())
+    }
+
+    /// Stream this session live through `tap`. Every tick from now on also
+    /// goes into it, with a send that never waits.
+    pub fn set_tap(&mut self, tap: LiveTap) {
+        self.tap = Some(tap);
+    }
+
+    /// The session's metadata as `session.json` holds it.
+    #[must_use]
+    pub fn meta(&self) -> &SessionMeta {
+        &self.meta
+    }
+
+    /// Where the current tick starts, in milliseconds into the session.
+    fn offset_ms(&self) -> u64 {
+        self.ticks * self.frame_samples as u64 * 1000 / u64::from(self.rate)
+    }
+
+    /// Offer `m` to the live tap, if any. Never waits: a full tap drops it.
+    fn send(&self, m: TapMsg) {
+        if let Some(tap) = &self.tap {
+            tap.send(m);
+        }
+    }
+
+    /// Append a row for each picture the decoder has saved (or failed to)
+    /// since the last call. A failed row append is dropped with a warning:
+    /// pictures never fail the session.
+    fn log_images(&self, now: &jiff::Zoned) {
+        let Some(sstv) = &self.sstv else { return };
+        for msg in sstv.images.try_iter() {
+            let kind = match msg {
+                Ok(i) => LogKind::Image {
+                    start: i.start,
+                    offset_ms: i.offset_ms,
+                    mode: i.mode,
+                    talker: i.talker,
+                    file: i.file,
+                    partial: i.partial,
+                },
+                Err(message) => LogKind::Error { message },
+            };
+            let row = LogRow {
+                t: now.timestamp().to_string(),
+                kind,
+            };
+            if let Err(e) = append_row(&self.dir, &row) {
+                tracing::warn!("an SSTV row of {} was not logged: {e}", self.meta.net);
+            }
+        }
+    }
+
+    /// Stop the decoder, which ends a picture in flight, and log what it
+    /// saved.
+    fn stop_sstv(&mut self, now: &jiff::Zoned) {
+        if let Some(worker) = self.sstv.as_mut().and_then(|s| s.worker.take()) {
+            worker.stop();
+        }
+        self.log_images(now);
+    }
+
+    /// Wait for the SSTV decoder to take each frame rather than drop one
+    /// when it falls behind. For tests, which tick far faster than real
+    /// time; only the `test-hooks` feature, which only tests turn on, has it.
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    pub fn set_sstv_lossless(&mut self, on: bool) {
+        if let Some(sstv) = self.sstv.as_mut() {
+            sstv.lossless = on;
+        }
+    }
+
+    /// Drop the next `ticks` ticks' audio before the SSTV decoder, as a full
+    /// tap would.
+    #[cfg(test)]
+    pub(crate) fn sstv_drop_next(&mut self, ticks: u32) {
+        if let Some(sstv) = self.sstv.as_mut() {
+            sstv.drop_next = ticks;
+        }
     }
 
     /// Log a joined, dropped, rejoined, left or error event.
@@ -474,6 +869,7 @@ impl SessionRecorder {
                 first = Some(e);
             }
         };
+        self.stop_sstv(now);
         let over = self.end_over();
         if let Err(e) = self.logged(over, now) {
             tracing::warn!("the last over of {} did not finish: {e}", self.meta.net);
@@ -550,6 +946,11 @@ fn rename_no_replace(from: &Path, to: &Path) -> bool {
     true
 }
 
+/// The test SSTV signal, shared with the end-to-end tests.
+#[cfg(test)]
+#[path = "../tests/common/sstv_signal.rs"]
+mod sstv_signal;
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -589,6 +990,7 @@ mod tests {
             my_callsigns: Vec::new(),
             video: false,
             youtube_live: false,
+            twitch_live: false,
             youtube_upload: false,
         }
     }
@@ -698,6 +1100,79 @@ mod tests {
         let dir = rig.dir();
         rig.close();
         assert_eq!(decode(&dir.join("session.flac")), (RATE, 500 * FRAME));
+    }
+
+    #[test]
+    fn the_live_tap_hears_every_tick_and_each_over() {
+        let root = temp("tap");
+        let mut rig = Rig::new(&root);
+        let (tap, rx) = astar_netvideo::live_tap(astar_netvideo::LIVE_TAP_CAPACITY);
+        rig.rec.as_mut().unwrap().set_tap(tap);
+        rig.run(10, false, None);
+        // An over that starts without a talker, then learns it.
+        rig.run(5, true, None);
+        rig.run(45, true, Some("KX0AAA"));
+        rig.run(100, false, None);
+        rig.close();
+        let mut msgs = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            msgs.push(m);
+        }
+        let audio: Vec<u64> = msgs
+            .iter()
+            .filter_map(|m| match m {
+                TapMsg::Audio { offset_ms, samples } => {
+                    assert_eq!(samples.len(), FRAME);
+                    Some(*offset_ms)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(audio, (0..160).map(|n| n * 20).collect::<Vec<u64>>());
+        let events: Vec<&TapMsg> = msgs
+            .iter()
+            .filter(|m| !matches!(m, TapMsg::Audio { .. }))
+            .collect();
+        assert_eq!(
+            events[..2],
+            [
+                &TapMsg::OverStart {
+                    seq: 1,
+                    talker: None,
+                    offset_ms: 200
+                },
+                &TapMsg::OverTalker {
+                    seq: 1,
+                    talker: "KX0AAA".into()
+                },
+            ]
+        );
+        assert!(
+            matches!(events[2], TapMsg::OverEnd { seq: 1, duration_ms } if *duration_ms >= 1_000),
+            "{events:?}"
+        );
+        assert_eq!(events.len(), 3, "{events:?}");
+        // The over starts on the tick whose audio follows it.
+        let start_at = msgs
+            .iter()
+            .position(|m| matches!(m, TapMsg::OverStart { .. }))
+            .unwrap();
+        assert_eq!(
+            msgs[start_at + 1],
+            TapMsg::Audio {
+                offset_ms: 200,
+                samples: msgs
+                    .iter()
+                    .find_map(|m| match m {
+                        TapMsg::Audio {
+                            offset_ms: 200,
+                            samples,
+                        } => Some(samples.clone()),
+                        _ => None,
+                    })
+                    .unwrap()
+            }
+        );
     }
 
     #[test]
@@ -1222,5 +1697,217 @@ mod tests {
         assert_eq!(meta.ended, Some(Ended::Window));
         assert!(dir.join("checkins.txt").exists());
         assert_eq!(decode(&dir.join("session.flac")).1, 25 * FRAME);
+    }
+
+    use super::sstv_signal;
+
+    impl Rig {
+        /// A rig whose SSTV tap waits for the decoder rather than drop
+        /// audio, since these tests tick far faster than real time.
+        fn lossless(root: &Path) -> Self {
+            let mut rig = Rig::new(root);
+            rig.rec.as_mut().unwrap().set_sstv_lossless(true);
+            rig
+        }
+
+        /// Feed `samples` as ticks of audio, the last one padded with zeros.
+        fn feed(&mut self, samples: &[i16], talker: Option<&str>) {
+            for chunk in samples.chunks(FRAME) {
+                let mut s = chunk.to_vec();
+                s.resize(FRAME, 0);
+                let frame = Frame {
+                    rate: RATE,
+                    samples: s,
+                };
+                let at = self.base + std::time::Duration::from_millis(self.n * 20);
+                let now = self.zoned();
+                self.rec
+                    .as_mut()
+                    .unwrap()
+                    .tick(Some(&frame), talker, at, now)
+                    .unwrap();
+                self.n += 1;
+            }
+        }
+    }
+
+    fn image_files(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = fs::read_dir(dir.join("images"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// `(offset_ms, mode, talker, file, partial)` of each image row.
+    fn image_rows(dir: &Path) -> Vec<(u64, String, Option<String>, String, bool)> {
+        astar_netarchive::read_rows(dir)
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| match r.kind {
+                LogKind::Image {
+                    offset_ms,
+                    mode,
+                    talker,
+                    file,
+                    partial,
+                    ..
+                } => Some((offset_ms, mode, talker, file, partial)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn error_rows(dir: &Path) -> Vec<String> {
+        astar_netarchive::read_rows(dir)
+            .unwrap()
+            .into_iter()
+            .filter_map(|r| match r.kind {
+                LogKind::Error { message } => Some(message),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_sstv_signal_ends_as_a_png_and_an_image_row() {
+        let root = temp("sstv");
+        let mut rig = Rig::lossless(&root);
+        rig.run(50, false, None);
+        rig.feed(&sstv_signal::robot36(RATE), Some("N0CALL"));
+        rig.run(150, false, None);
+        let dir = rig.dir();
+        rig.close();
+        let files = image_files(&dir);
+        assert_eq!(files.len(), 1, "{files:?}");
+        assert!(files[0].starts_with("001 "), "{files:?}");
+        assert!(files[0].ends_with(" Robot36 N0CALL.png"), "{files:?}");
+        let rows = image_rows(&dir);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let (offset_ms, mode, talker, file, partial) = &rows[0];
+        assert_eq!(mode, "Robot36");
+        assert_eq!(talker.as_deref(), Some("N0CALL"));
+        assert_eq!(file, &files[0]);
+        assert!(!partial);
+        let header_end = 1000 + sstv_signal::robot36_header_ms();
+        assert!(
+            offset_ms.abs_diff(header_end) <= 1000,
+            "{offset_ms} vs {header_end}"
+        );
+        assert!(error_rows(&dir).is_empty(), "{:?}", error_rows(&dir));
+    }
+
+    #[test]
+    fn session_closing_mid_picture_keeps_a_partial() {
+        let root = temp("sstvpart");
+        let mut rig = Rig::lossless(&root);
+        rig.run(50, false, None);
+        let signal = sstv_signal::robot36(RATE);
+        rig.feed(&signal[..signal.len() * 7 / 10], Some("N0CALL"));
+        let dir = rig.dir();
+        rig.close();
+        let rows = image_rows(&dir);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].4, "{rows:?}");
+        assert_eq!(image_files(&dir), vec![rows[0].3.clone()]);
+    }
+
+    #[test]
+    fn an_image_write_failure_leaves_the_session_recording() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp("sstvfail");
+        let mut rig = Rig::lossless(&root);
+        let dir = rig.dir();
+        fs::set_permissions(dir.join("images"), fs::Permissions::from_mode(0o555)).unwrap();
+        rig.run(50, false, None);
+        let signal = sstv_signal::robot36(RATE);
+        rig.feed(&signal, Some("N0CALL"));
+        rig.run(150, false, None);
+        let ticks = rig.n as usize;
+        rig.close();
+        fs::set_permissions(dir.join("images"), fs::Permissions::from_mode(0o755)).unwrap();
+        let errors = error_rows(&dir);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("sstv: "), "{errors:?}");
+        assert_eq!(image_rows(&dir), []);
+        assert_eq!(image_files(&dir), Vec::<String>::new());
+        assert_eq!(decode(&dir.join("session.flac")).1, ticks * FRAME);
+    }
+
+    #[test]
+    fn dropped_audio_keeps_later_pictures_on_the_session_timeline() {
+        let root = temp("sstvdrop");
+        let mut rig = Rig::lossless(&root);
+        rig.run(50, false, None);
+        // Two seconds the decoder never hears, as when it falls behind.
+        rig.rec.as_mut().unwrap().sstv_drop_next(100);
+        rig.run(100, false, Some("KX0AAA"));
+        rig.feed(&sstv_signal::robot36(RATE), Some("N0CALL"));
+        rig.run(150, false, None);
+        let dir = rig.dir();
+        rig.close();
+        let rows = image_rows(&dir);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let (offset_ms, _, talker, _, _) = &rows[0];
+        let header_end = 3000 + sstv_signal::robot36_header_ms();
+        assert!(
+            offset_ms.abs_diff(header_end) <= 1000,
+            "{offset_ms} vs {header_end}"
+        );
+        assert_eq!(talker.as_deref(), Some("N0CALL"));
+    }
+
+    #[test]
+    fn talker_at_reads_the_history_by_sample() {
+        let mut t = Timeline::default();
+        t.talkers.push_back((1000, Some("N0CALL".to_owned())));
+        t.talkers.push_back((5000, Some("KX0AAA".to_owned())));
+        t.talkers.push_back((9000, None));
+        // A sample before the oldest change kept (history trimmed) is unknown.
+        assert_eq!(t.talker_at(500), None);
+        // The decoder lags: a picture that began before a change keeps the
+        // talker of its start, not whoever talks now.
+        assert_eq!(t.talker_at(1000).as_deref(), Some("N0CALL"));
+        assert_eq!(t.talker_at(4999).as_deref(), Some("N0CALL"));
+        assert_eq!(t.talker_at(5000).as_deref(), Some("KX0AAA"));
+        assert_eq!(t.talker_at(9500), None);
+    }
+
+    #[test]
+    fn timeline_maps_decoder_samples_past_each_gap() {
+        let mut t = Timeline::default();
+        assert_eq!(t.session_sample(700), 700);
+        t.gaps.push_back((1000, 160));
+        t.gaps.push_back((2000, 480));
+        assert_eq!(t.session_sample(999), 999);
+        assert_eq!(t.session_sample(1000), 1160);
+        assert_eq!(t.session_sample(2500), 2980);
+    }
+
+    #[test]
+    fn an_images_folder_that_cannot_be_made_costs_only_the_pictures() {
+        let root = temp("sstvnodir");
+        let dir = root.join("session");
+        fs::create_dir_all(&dir).unwrap();
+        // A file where the folder goes.
+        fs::write(dir.join("images"), b"").unwrap();
+        assert!(SessionSstv::start(&dir, &t0()).is_none());
+        let errors = error_rows(&dir);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].starts_with("sstv: "), "{errors:?}");
+    }
+
+    #[test]
+    fn voice_alone_makes_no_image() {
+        let root = temp("sstvvoice");
+        let mut rig = Rig::lossless(&root);
+        rig.run(500, true, Some("N0CALL"));
+        rig.run(150, false, None);
+        let dir = rig.dir();
+        rig.close();
+        assert_eq!(image_rows(&dir), []);
+        assert_eq!(image_files(&dir), Vec::<String>::new());
+        assert_eq!(error_rows(&dir), Vec::<String>::new());
     }
 }

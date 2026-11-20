@@ -22,6 +22,7 @@ pub mod listener;
 pub mod manager;
 mod parrot;
 mod raw_dial;
+pub mod rebuild;
 pub mod registration;
 pub mod routing_config;
 mod runtime;

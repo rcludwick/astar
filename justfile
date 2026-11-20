@@ -200,7 +200,7 @@ cbindgen:
     ./scripts/check-cbindgen.sh
     ./scripts/check-cbindgen-serial.sh
 
-# The eleven merge invariants CI's `guard` stage enforces: no armed hardware /
+# The thirteen merge invariants CI's `guard` stage enforces: no armed hardware /
 # live-network opt-in, no git dependencies (ambe-thumbdv stays vendored, with
 # its licences), no invented install channel, an AGPL SPDX header on every
 # first-party rs/swift/sh/py file, no LGPL code in a default build (Codec 2
@@ -210,8 +210,10 @@ cbindgen:
 # characteristic writes, no tiny_http anywhere (every HTTP server
 # runs on astar-http), the EchoLink test fences (no EchoLink host name in
 # the engine; the loopback-only features never reach a real build), no packet
-# tap on a path that carries secrets, and the net recorder staying
-# receive-only. Each prints one line; run them before a push.
+# tap on a path that carries secrets, the net recorder staying
+# receive-only, and SSTV staying decode-only (the `sstv` encoder crate a
+# dev-dependency only, astar-sstv a leaf, no headerless starts). Each prints
+# one line; run them before a push.
 guards:
     ./ci/guard-safety-env.sh
     ./ci/guard-no-git-deps.sh
@@ -225,6 +227,7 @@ guards:
     ./ci/guard-echolink.sh
     ./ci/guard-packet-log.sh
     ./ci/guard-netrec-receive-only.sh
+    ./ci/guard-sstv.sh
 
 # RFC audit verifier (tracker-free: ticket refs are format-checked, plus
 # archive membership when docs/issues-archive.jsonl is present locally).
@@ -312,6 +315,21 @@ gui-shots *args:
 # (headless Chrome, fixture archive in a temp dir). `--check` also tests the DOM.
 nets-shots *args:
     crates/astar-netarchive/shots.sh {{args}}
+
+# Rewrite the net video's golden frames (crates/astar-netvideo/tests/golden/)
+# from the current renderer. Read the PNGs before committing them.
+netvideo-bless:
+    NETVIDEO_BLESS=1 cargo test -p astar-netvideo golden
+
+# The net video renderer's perf tests (ignored by `just ci`), in release.
+# They count frames per CPU second, so a busy machine does not fail them.
+netvideo-perf:
+    cargo test --release -p astar-netvideo perf -- --ignored --nocapture
+
+# Draw frame A's scenes and a walk through the fixture archive into
+# target/netvideo-preview/ (offscreen; nothing opens).
+netvideo-preview:
+    cargo run --release -p astar-netvideo --example frame_preview
 
 # ── node daemon (astar-server) ──────────────────────────────────────────────
 
@@ -481,7 +499,9 @@ ci: fmt-check clippy test cbindgen version-check release-test deploy-verify-test
     ./ci/guard-packet-log.sh
     ./ci/guard-netrec-receive-only.sh
     ./ci/guard-ble-ptt.sh
-    @echo "✓ ci: fmt + clippy + test + cbindgen + version-check + release-test + deploy-verify-test + public-check + dns-check + auth-check + http-check + gsm-check + soft-ambe-check + discord-guard + tiny-http-guard + echolink-guard + packet-log-guard + netrec-guard + ble-ptt-guard passed"
+    ./ci/guard-sstv.sh --self-test
+    ./ci/guard-sstv.sh
+    @echo "✓ ci: fmt + clippy + test + cbindgen + version-check + release-test + deploy-verify-test + public-check + dns-check + auth-check + http-check + gsm-check + soft-ambe-check + discord-guard + tiny-http-guard + echolink-guard + packet-log-guard + netrec-guard + ble-ptt-guard + sstv-guard passed"
 
 # astar-server's opt-in public-tls (HTTPS, ACME, Porkbun) and stream-mp3 (LAME)
 # features, which a default-features `just clippy`/`just test` never compiles. Unlike discord it

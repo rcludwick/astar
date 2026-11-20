@@ -88,7 +88,7 @@ pub use resample::{AntiAliasResampler, Resampler1, resample_offline};
 pub use rnnoise::{
     DenoiseChain, DenoiseMode, DenoiseStatus, RNNOISE_FRAME, RNNOISE_RATE, RnnoiseStage,
 };
-pub use router::{AudioRouter, CallAudio, MicId, OutputId, StoppedDevice};
+pub use router::{AudioRouter, CallAudio, HeardConsumer, MicId, OutputId, StoppedDevice};
 pub use signal_report::{Grade, SignalReport, analyze_signal, render_report, signal_report_text};
 pub use spectrum::{SPECTRUM_BINS, SpectrumAnalyzer};
 #[cfg(feature = "device-audio")]

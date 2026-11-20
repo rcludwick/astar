@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "astar-asl3"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "astar-http",
  "serde_json",
@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "astar-audio"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "astar-audio",
  "astar-codec",
@@ -342,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "astar-ble-ptt"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "proptest",
  "serde_json",
@@ -350,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "astar-cli"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "astar-asl3",
  "astar-audio",
@@ -366,7 +366,7 @@ dependencies = [
 
 [[package]]
 name = "astar-codec"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "ambe-thumbdv",
  "astar-dmr",
@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "astar-conformance"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "astar-iax-core",
  "pcap-parser",
@@ -395,7 +395,7 @@ dependencies = [
 
 [[package]]
 name = "astar-console"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "astar-asl3",
  "astar-audio",
@@ -423,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "astar-discord"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "astar-audio",
  "astar-iax",
@@ -437,18 +437,18 @@ dependencies = [
 
 [[package]]
 name = "astar-dmr"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "sha2 0.10.9",
 ]
 
 [[package]]
 name = "astar-dstar"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 
 [[package]]
 name = "astar-echolink"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "astar-codec",
  "miniz_oxide 0.9.1",
@@ -458,7 +458,7 @@ dependencies = [
 
 [[package]]
 name = "astar-gui"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "astar-station",
  "directories",
@@ -473,7 +473,7 @@ dependencies = [
 
 [[package]]
 name = "astar-http"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "proptest",
  "rcgen",
@@ -485,7 +485,7 @@ dependencies = [
 
 [[package]]
 name = "astar-iax"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "astar-audio",
  "astar-codec",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "astar-iax-core"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "bitflags 2.13.2",
  "bytes",
@@ -523,7 +523,7 @@ dependencies = [
 
 [[package]]
 name = "astar-inspect"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "astar-asl3",
  "astar-audio",
@@ -540,19 +540,21 @@ dependencies = [
 
 [[package]]
 name = "astar-m17"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "rand 0.10.3",
 ]
 
 [[package]]
 name = "astar-netarchive"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "astar-http",
+ "astar-netarchive",
  "astar-record",
  "claxon",
  "jiff",
+ "png",
  "serde",
  "serde_json",
  "tracing",
@@ -560,7 +562,7 @@ dependencies = [
 
 [[package]]
 name = "astar-netrec"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "astar-audio",
  "astar-codec",
@@ -568,9 +570,14 @@ dependencies = [
  "astar-dstar",
  "astar-http",
  "astar-iax",
+ "astar-iax-core",
  "astar-m17",
  "astar-netarchive",
+ "astar-netrec",
+ "astar-netvideo",
  "astar-record",
+ "astar-secrets",
+ "astar-sstv",
  "astar-station",
  "clap",
  "claxon",
@@ -578,6 +585,7 @@ dependencies = [
  "jiff",
  "serde",
  "serde_json",
+ "sstv",
  "thiserror 2.0.21",
  "toml 1.1.8+spec-1.1.0",
  "tracing",
@@ -585,8 +593,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "astar-netvideo"
+version = "0.1.23-beta"
+dependencies = [
+ "ab_glyph",
+ "astar-netarchive",
+ "astar-record",
+ "astar-secrets",
+ "bytes",
+ "claxon",
+ "jiff",
+ "libc",
+ "png",
+ "rcgen",
+ "rml_rtmp",
+ "rustls 0.23.46",
+ "serde",
+ "serde_json",
+ "tiny-skia",
+ "tracing",
+ "tracing-subscriber",
+ "webpki-roots 1.0.12",
+]
+
+[[package]]
 name = "astar-nodebench"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "astar-audio",
  "astar-codec",
@@ -603,11 +635,11 @@ dependencies = [
 
 [[package]]
 name = "astar-nxdn"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 
 [[package]]
 name = "astar-ptt"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "nusb",
  "serialport",
@@ -615,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "astar-record"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "claxon",
  "flacenc",
@@ -629,8 +661,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "astar-secrets"
+version = "0.1.23-beta"
+dependencies = [
+ "tempfile",
+ "toml_edit 0.25.17+spec-1.1.0",
+]
+
+[[package]]
 name = "astar-serial-sys"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "astar-ptt",
  "futures-lite",
@@ -639,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "astar-server"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "astar-audio",
  "astar-codec",
@@ -653,6 +693,7 @@ dependencies = [
  "astar-netarchive",
  "astar-nodebench",
  "astar-record",
+ "astar-secrets",
  "astar-server",
  "astar-station",
  "astar-wireguard",
@@ -687,8 +728,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "astar-sstv"
+version = "0.1.23-beta"
+dependencies = [
+ "astar-record",
+ "claxon",
+ "png",
+ "serde",
+ "serde_json",
+ "slowrx",
+ "sstv",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "astar-station"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "astar-asl3",
  "astar-audio",
@@ -702,8 +757,10 @@ dependencies = [
  "astar-iax-core",
  "astar-m17",
  "astar-record",
+ "astar-sstv",
  "astar-station",
  "claxon",
+ "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",
@@ -712,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "astar-sys"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "astar-audio",
  "astar-ble-ptt",
@@ -724,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "astar-wireguard"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 dependencies = [
  "base64 0.23.1",
  "boringtun",
@@ -734,7 +791,7 @@ dependencies = [
 
 [[package]]
 name = "astar-ysf"
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 
 [[package]]
 name = "async-broadcast"
@@ -1062,6 +1119,15 @@ name = "block"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d8c1fef690941d3e7788d328517591fecc684c084084702d6ff1641e993699a"
+
+[[package]]
+name = "block-buffer"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4152116fd6e9dadb291ae18fc1ec3575ed6d84c29642d97890f4b4a3417297e4"
+dependencies = [
+ "generic-array",
+]
 
 [[package]]
 name = "block-buffer"
@@ -1818,6 +1884,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "crypto-mac"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4857fd85a0c34b3c3297875b747c1e02e06b6a0ea32dd892d8192b9ce0813ea6"
+dependencies = [
+ "generic-array",
+ "subtle",
+]
+
+[[package]]
 name = "ctor"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2106,6 +2182,15 @@ dependencies = [
 
 [[package]]
 name = "digest"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3dd60d1080a57a05ab032377049e0591415d2b31afd7028356dbf3cc6dcb066"
+dependencies = [
+ "generic-array",
+]
+
+[[package]]
+name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
@@ -2146,7 +2231,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2398,7 +2483,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3234,6 +3319,16 @@ dependencies = [
  "stable-vec",
  "strum",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "hmac"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1441c6b1e930e2817404b5046f1f989899143a12bf92de603b69f4e0aee1e15"
+dependencies = [
+ "crypto-mac",
+ "digest 0.9.0",
 ]
 
 [[package]]
@@ -4840,7 +4935,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6131,7 +6226,7 @@ dependencies = [
  "once_cell",
  "socket2 0.6.5",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6538,6 +6633,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "rml_amf0"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63551cfcd4d1f42733c190e4b58dd268b1eacb73410d9afbf62784aa12cac240"
+dependencies = [
+ "byteorder",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "rml_rtmp"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a354e80eb7aa2a6fed09b3bd25c19bcfd32cf51f81f1219f4ec04f34519989da"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "hmac 0.10.1",
+ "rand 0.8.8",
+ "rml_amf0",
+ "sha2 0.9.9",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "roxmltree"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6647,7 +6767,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7113,6 +7233,19 @@ checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
 
 [[package]]
 name = "sha2"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d58a1e1bf39749807d89cf2d98ac2dfa0ff1cb3faa38fbb64dd88ac8013d800"
+dependencies = [
+ "block-buffer 0.9.0",
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.9.0",
+ "opaque-debug",
+]
+
+[[package]]
+name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
@@ -7235,6 +7368,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bdd58c3c93c3d278ca835519292445cb4b0d4dc59ccfdf7ceadaab3f8aeb4038"
 dependencies = [
  "version_check",
+]
+
+[[package]]
+name = "slowrx"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "adb2b89bcc519d2602fdbec7645d9c8ffc81c7303d7e7f1a78909c5c64e9e28f"
+dependencies = [
+ "rustfft",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -7445,6 +7588,15 @@ checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
+]
+
+[[package]]
+name = "sstv"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44268b9fe27023e58f42245a600dce6d4a32b77d438dd9e5ddf92bd8d220fa2e"
+dependencies = [
+ "libm",
 ]
 
 [[package]]
@@ -7699,10 +7851,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.6",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9200,7 +9352,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

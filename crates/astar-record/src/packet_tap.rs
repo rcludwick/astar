@@ -130,36 +130,126 @@ pub fn packet_tap_channel(
     (tap.with_pool(PacketPool::new(buffers)), rx)
 }
 
+/// One consumer of a call's packets: its slot, whether its `Start` landed
+/// and what it has lost since its last event.
+struct Consumer {
+    slot: PacketSlot,
+    started: StartedOn,
+    dropped: u32,
+}
+
+impl Consumer {
+    fn new(slot: PacketSlot) -> Self {
+        Self {
+            slot,
+            started: StartedOn::default(),
+            dropped: 0,
+        }
+    }
+
+    /// Offer one datagram (after its `Start`, when this consumer is owed
+    /// one). Never waits and never allocates.
+    fn offer(
+        &mut self,
+        id: PacketCallId,
+        meta: &Arc<CallMeta>,
+        at: Instant,
+        from: SocketAddr,
+        datagram: &[u8],
+    ) {
+        if self.started.needs_start(&self.slot) {
+            let offer = self.started.try_start(&self.slot, || PacketEvent::Start {
+                call: id,
+                meta: Arc::clone(meta),
+                at,
+                wall: SystemTime::now(),
+            });
+            match offer {
+                Offer::Sent => {}
+                Offer::NoTap => {
+                    self.dropped = 0;
+                    return;
+                }
+                Offer::Dropped => {
+                    self.dropped = self.dropped.saturating_add(1);
+                    return;
+                }
+            }
+        }
+        let dropped_before = self.dropped;
+        let offer = self.slot.try_offer_from(|tap| {
+            let bytes = tap.pool()?.copy_of(datagram)?;
+            Some(PacketEvent::Packet {
+                call: id,
+                at,
+                from,
+                dropped_before,
+                bytes,
+            })
+        });
+        match offer {
+            // With no tap, what was lost belonged to a capture that's over.
+            Offer::Sent | Offer::NoTap => self.dropped = 0,
+            Offer::Dropped => self.dropped = self.dropped.saturating_add(1),
+        }
+    }
+
+    fn end(&self, call: PacketCallId) {
+        if self.started.started() {
+            let dropped_before = self.dropped;
+            let _ = self.slot.try_offer(|| PacketEvent::End {
+                call,
+                dropped_before,
+            });
+        }
+    }
+}
+
 /// One call's tap. No method parks the caller: a busy slot, a full channel,
 /// an empty pool, an oversized datagram or no tap at all just means the
 /// packet is not logged. Capturing never allocates.
+///
+/// The packets go to up to two consumers, each on its own slot with its own
+/// channel and pool: the packet log, and the SSTV decoder's packet keeper
+/// ([`CallPacketTap::with_sstv`], attached to every IAX leg, outbound and
+/// inbound, so every `AllStar` call). Each
+/// counts its own losses, so one that is full or busy changes nothing the
+/// other sees.
 pub struct CallPacketTap {
-    slot: PacketSlot,
+    /// The packet log.
+    log: Consumer,
+    /// The SSTV decoder, which keeps the packets behind each picture.
+    sstv: Option<Consumer>,
     filter: MediaFilter,
     /// Shared with every `Start`, which a full channel can make the receive
     /// thread offer on each packet.
     meta: Arc<CallMeta>,
     id: PacketCallId,
-    started: StartedOn,
-    dropped: u32,
 }
 
 impl CallPacketTap {
     #[must_use]
     pub fn new(slot: PacketSlot, filter: MediaFilter, meta: CallMeta) -> Self {
         Self {
-            slot,
+            log: Consumer::new(slot),
+            sstv: None,
             filter,
             meta: Arc::new(meta),
             id: PacketCallId::next(),
-            started: StartedOn::default(),
-            dropped: 0,
         }
     }
 
     #[must_use]
     pub fn id(&self) -> PacketCallId {
         self.id
+    }
+
+    /// Also offer every packet to the SSTV decoder's slot. The log sees
+    /// exactly what it would without it.
+    #[must_use]
+    pub fn with_sstv(mut self, slot: PacketSlot) -> Self {
+        self.sstv = Some(Consumer::new(slot));
+        self
     }
 
     /// Correct the local address once the socket is bound.
@@ -194,52 +284,18 @@ impl CallPacketTap {
         if !(self.filter)(datagram) {
             return;
         }
-        if self.started.needs_start(&self.slot) {
-            let offer = self.started.try_start(&self.slot, || PacketEvent::Start {
-                call: self.id,
-                meta: Arc::clone(&self.meta),
-                at,
-                wall: SystemTime::now(),
-            });
-            match offer {
-                Offer::Sent => {}
-                Offer::NoTap => {
-                    self.dropped = 0;
-                    return;
-                }
-                Offer::Dropped => {
-                    self.dropped = self.dropped.saturating_add(1);
-                    return;
-                }
-            }
-        }
-        let (call, dropped_before) = (self.id, self.dropped);
-        let offer = self.slot.try_offer_from(|tap| {
-            let bytes = tap.pool()?.copy_of(datagram)?;
-            Some(PacketEvent::Packet {
-                call,
-                at,
-                from,
-                dropped_before,
-                bytes,
-            })
-        });
-        match offer {
-            // With no tap, what was lost belonged to a capture that's over.
-            Offer::Sent | Offer::NoTap => self.dropped = 0,
-            Offer::Dropped => self.dropped = self.dropped.saturating_add(1),
+        self.log.offer(self.id, &self.meta, at, from, datagram);
+        if let Some(sstv) = self.sstv.as_mut() {
+            sstv.offer(self.id, &self.meta, at, from, datagram);
         }
     }
 }
 
 impl Drop for CallPacketTap {
     fn drop(&mut self) {
-        if self.started.started() {
-            let (call, dropped_before) = (self.id, self.dropped);
-            let _ = self.slot.try_offer(|| PacketEvent::End {
-                call,
-                dropped_before,
-            });
+        self.log.end(self.id);
+        if let Some(sstv) = &self.sstv {
+            sstv.end(self.id);
         }
     }
 }
@@ -288,8 +344,8 @@ mod tests {
         for _ in 0..5 {
             t.capture(addr(2), b"x");
         }
-        assert_eq!(t.dropped, 0);
-        assert!(!t.started.started());
+        assert_eq!(t.log.dropped, 0);
+        assert!(!t.log.started.started());
     }
 
     #[test]
@@ -502,6 +558,144 @@ mod tests {
         t.capture(addr(2), b"b");
         assert!(matches!(&drained(&rx2)[0], PacketEvent::Start { meta, .. }
             if meta.codec == Some("ulaw")));
+    }
+
+    /// A log event with the parts a second consumer could disturb, and
+    /// without the call id and wall time, which differ per tap.
+    fn shape(ev: &PacketEvent) -> String {
+        match ev {
+            PacketEvent::Start { meta, at, .. } => format!("start {meta:?} {at:?}"),
+            PacketEvent::Packet {
+                at,
+                from,
+                dropped_before,
+                bytes,
+                ..
+            } => format!("packet {at:?} {from} {dropped_before} {:?}", &**bytes),
+            PacketEvent::Jitter { at, sample, .. } => format!("jitter {at:?} {sample:?}"),
+            PacketEvent::End { dropped_before, .. } => format!("end {dropped_before}"),
+        }
+    }
+
+    /// The same packets through a tap with and without the SSTV consumer,
+    /// the log's channel filling part way.
+    fn log_of(t0: Instant, with_sstv: bool) -> Vec<String> {
+        let (log, rx) = packet_tap_channel(6, 6);
+        let slot = PacketSlot::default();
+        slot.set(Some(log));
+        let mut t = CallPacketTap::new(slot, all, meta());
+        let mut _sstv = None;
+        if with_sstv {
+            let (sstv, sstv_rx) = packet_tap_channel(2, 2);
+            let sstv_slot = PacketSlot::default();
+            sstv_slot.set(Some(sstv));
+            t = t.with_sstv(sstv_slot);
+            _sstv = Some(sstv_rx);
+        }
+        let mut out = Vec::new();
+        for i in 0..20u8 {
+            t.set_codec("ulaw");
+            t.capture_at(
+                t0 + Duration::from_millis(u64::from(i) * 20),
+                addr(2),
+                &[i; 3],
+            );
+            if i % 8 == 7 {
+                out.extend(drained(&rx).iter().map(shape));
+            }
+        }
+        drop(t);
+        out.extend(drained(&rx).iter().map(shape));
+        out
+    }
+
+    #[test]
+    fn the_log_is_identical_with_sstv_listening() {
+        let t0 = Instant::now();
+        assert_eq!(log_of(t0, false), log_of(t0, true));
+    }
+
+    #[test]
+    fn sstv_gets_its_own_start_packets_and_end() {
+        let (log, log_rx) = packet_tap_channel(8, 8);
+        let slot = PacketSlot::default();
+        slot.set(Some(log));
+        let (sstv, sstv_rx) = packet_tap_channel(8, 8);
+        let sstv_slot = PacketSlot::default();
+        sstv_slot.set(Some(sstv));
+        let mut t = CallPacketTap::new(slot, all, meta()).with_sstv(sstv_slot);
+        let id = t.id();
+        t.set_codec("ulaw");
+        t.capture(addr(2), b"abc");
+        drop(t);
+        assert_eq!(drained(&log_rx).len(), 3);
+        let ev = drained(&sstv_rx);
+        assert!(matches!(
+            ev.as_slice(),
+            [
+                PacketEvent::Start { call: a, meta, .. },
+                PacketEvent::Packet { call: b, bytes, .. },
+                PacketEvent::End { call: c, .. },
+            ] if *a == id && *b == id && *c == id
+                && meta.codec == Some("ulaw") && &**bytes == b"abc"
+        ));
+    }
+
+    #[test]
+    fn sstv_alone_needs_no_log() {
+        let (sstv, sstv_rx) = packet_tap_channel(8, 8);
+        let sstv_slot = PacketSlot::default();
+        sstv_slot.set(Some(sstv));
+        let mut t = CallPacketTap::new(PacketSlot::default(), all, meta()).with_sstv(sstv_slot);
+        t.capture(addr(2), b"x");
+        assert_eq!(drained(&sstv_rx).len(), 2);
+    }
+
+    /// A consumer that never drains (or holds its lock) costs the receive
+    /// loop nothing and takes nothing from the log.
+    #[test]
+    fn a_full_or_held_sstv_tap_never_delays_or_starves_the_log() {
+        let (log, log_rx) = packet_tap_channel(256, 256);
+        let slot = PacketSlot::default();
+        slot.set(Some(log));
+        let (sstv, _never_drained) = packet_tap_channel(1, 1);
+        let sstv_dropped = sstv.dropped_counter();
+        let sstv_slot = PacketSlot::default();
+        sstv_slot.set(Some(sstv));
+        let mut t = CallPacketTap::new(slot, all, meta()).with_sstv(sstv_slot.clone());
+        for _ in 0..100 {
+            t.capture(addr(2), b"x");
+        }
+        let ev = drained(&log_rx);
+        assert_eq!(ev.len(), 101, "start and every packet");
+        assert!(ev.iter().all(|e| !matches!(
+            e,
+            PacketEvent::Packet {
+                dropped_before: 1..,
+                ..
+            }
+        )));
+        assert!(sstv_dropped.load(Ordering::Relaxed) >= 99);
+        // The log's buffers go back to its pool.
+        drop(ev);
+
+        let held = sstv_slot.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let h = std::thread::spawn(move || {
+            let _g = held.lock_for_test();
+            locked_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        locked_rx.recv().unwrap();
+        let start = Instant::now();
+        for _ in 0..200 {
+            t.capture(addr(2), b"y");
+        }
+        assert!(start.elapsed() < Duration::from_millis(50));
+        release_tx.send(()).unwrap();
+        h.join().unwrap();
+        assert_eq!(drained(&log_rx).len(), 200);
     }
 
     #[test]

@@ -13,6 +13,19 @@
 #
 # A D-Star net on a dongle also needs the astar user to be allowed to open
 # the stick; on most distributions that means SupplementaryGroups=dialout.
+#
+# Videos and live streams need ffmpeg with libx264 (`sudo apt install ffmpeg`).
+# It must be reachable from this unit: /usr/bin is on systemd's PATH, and for a
+# copy anywhere else set [video] ffmpeg to its full path in netrec.toml.
+# `astar-netrec --config /etc/astar/netrec.toml check` says which one it uses.
+#
+# Stream keys for live nets go in /etc/astar/netrec.env (root-owned, mode 0600;
+# systemd reads it before dropping to the astar user), one per line:
+#   ASTAR_NETREC_YOUTUBE_STREAM_KEY=...
+#   ASTAR_NETREC_TWITCH_STREAM_KEY=...
+# or in /etc/astar/credentials.toml, owned by astar, mode 0600. Never put a key
+# in this file: anyone on the machine can read it. astar-netrec removes these
+# variables before it starts ffmpeg, so they never reach a child process.
 
 [Unit]
 Description=astar-netrec, the receive-only net recorder
@@ -21,6 +34,8 @@ Wants=network-online.target
 
 [Service]
 User=astar
+# The leading - means: carry on when the file does not exist.
+EnvironmentFile=-/etc/astar/netrec.env
 ExecStart=/usr/local/bin/astar-netrec --config /etc/astar/netrec.toml run
 Restart=on-failure
 # A start that is refused (another recorder holds the lock, for example while

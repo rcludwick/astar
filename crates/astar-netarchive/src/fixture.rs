@@ -7,7 +7,9 @@
 //!
 //! * **Tuesday M17 net**, public, about 90 s, with `peaks.json` and
 //!   `my_callsigns`: ten overs (two of them short key-ups; the sixth, 34.8 s to
-//!   40.8 s, is playing at 40 s), a join, a drop and rejoin, and a leave.
+//!   40.8 s, is playing at 40 s), a join, a drop and rejoin, a leave, and two
+//!   SSTV pictures (PD120 from `KX0AAA E`, begun at 57.5 s, and Robot36 from
+//!   `N0CALL`, this station, begun at 80 s).
 //! * **Thursday D-Star net**, private: a finished session shaped like stage
 //!   1 wrote it (no `peaks.json`, no `my_callsigns` key), and a newer one
 //!   still recording (`ended: None`).
@@ -19,7 +21,7 @@ use jiff::Timestamp;
 use jiff::tz::{Offset, TimeZone};
 
 use crate::index::slug;
-use crate::layout::{net_dir_name, over_file_name, session_dir_name};
+use crate::layout::{image_file_name, net_dir_name, over_file_name, session_dir_name};
 use crate::log::{META_FILE, append_row, write_meta};
 use crate::model::{Ended, LogKind, LogRow, META_FORMAT, SessionMeta};
 use crate::peaks::{compute_peaks, write_peaks};
@@ -56,6 +58,8 @@ struct Spec<'a> {
     overs: &'a [(u64, u64, &'a str)],
     /// `(at_ms, kind)`.
     events: Vec<(u64, LogKind)>,
+    /// `(start_ms, logged_ms, mode, talker)`: pictures, written as PNGs.
+    images: &'a [(u64, u64, &'a str, &'a str)],
     ended: bool,
     peaks: bool,
 }
@@ -97,6 +101,12 @@ pub fn write_fixture(root: &Path) -> Fixture {
             (43_000, LogKind::Rejoined),
             (87_000, LogKind::Left),
         ],
+        images: &[
+            (57_500, 66_000, "PD120", "KX0AAA E"),
+            // One from this station, so the page draws a picture on its
+            // own side.
+            (80_000, 86_500, "Robot36", "N0CALL"),
+        ],
         ended: true,
         peaks: true,
     };
@@ -125,6 +135,7 @@ pub fn write_fixture(root: &Path) -> Fixture {
             ),
             (38_000, LogKind::Left),
         ],
+        images: &[],
         ended: true,
         peaks: false,
     };
@@ -138,6 +149,7 @@ pub fn write_fixture(root: &Path) -> Fixture {
         length_ms: 20_000,
         overs: &[(2_000, 6_000, "NC0NTL"), (9_000, 7_000, "KX0BBB-1")],
         events: vec![(100, LogKind::Joined)],
+        images: &[],
         ended: false,
         peaks: false,
     };
@@ -186,6 +198,67 @@ fn voice(len_ms: u64, seed: u64) -> Vec<i16> {
         .collect()
 }
 
+/// A 640 × 496 picture, the size of a PD120 frame: a dusk sky over two
+/// ranges of hills, a low sun, and a strip of colour bars along the bottom.
+fn test_card(path: &Path) {
+    const W: u32 = 640;
+    const H: u32 = 496;
+    const BARS: [[u8; 3]; 7] = [
+        [192, 192, 192],
+        [192, 192, 0],
+        [0, 192, 192],
+        [0, 192, 0],
+        [192, 0, 192],
+        [192, 0, 0],
+        [0, 0, 192],
+    ];
+    let mix = |a: f64, b: f64, t: f64| a + (b - a) * t;
+    let mut data = Vec::with_capacity((W * H * 3) as usize);
+    for y in 0..H {
+        for x in 0..W {
+            let (fx, fy) = (f64::from(x), f64::from(y));
+            let rgb: [f64; 3] = if y >= H - 56 {
+                let bar = BARS[(x * 7 / W) as usize];
+                [f64::from(bar[0]), f64::from(bar[1]), f64::from(bar[2])]
+            } else {
+                // Sky: deep blue at the top to amber at the horizon.
+                let t = (fy / 300.0).min(1.0);
+                let mut c = [mix(18.0, 250.0, t), mix(28.0, 150.0, t), mix(90.0, 70.0, t)];
+                // The sun, low and to the right, with a soft glow.
+                let d = ((fx - 450.0).powi(2) + (fy - 270.0).powi(2)).sqrt();
+                if d < 46.0 {
+                    c = [255.0, 226.0, 150.0];
+                } else if d < 120.0 {
+                    let g = (120.0 - d) / 74.0 * 0.5;
+                    c = [
+                        mix(c[0], 255.0, g),
+                        mix(c[1], 210.0, g),
+                        mix(c[2], 140.0, g),
+                    ];
+                }
+                let far = 300.0 - 28.0 * (fx / 70.0).sin() - 14.0 * (fx / 23.0 + 1.0).sin();
+                let near = 360.0 - 36.0 * (fx / 110.0 + 2.0).sin() - 10.0 * (fx / 31.0).sin();
+                if fy > near {
+                    c = [26.0, 38.0, 44.0];
+                } else if fy > far {
+                    c = [70.0, 66.0, 96.0];
+                }
+                c
+            };
+            // Every value is within 0..=255.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            data.extend(rgb.iter().map(|v| v.round().clamp(0.0, 255.0) as u8));
+        }
+    }
+    let file = std::fs::File::create(path).expect("create a PNG");
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), W, H);
+    enc.set_color(png::ColorType::Rgb);
+    enc.set_depth(png::BitDepth::Eight);
+    let mut w = enc.write_header().expect("a PNG header");
+    w.write_image_data(&data).expect("PNG pixels");
+    w.finish().expect("finish a PNG");
+}
+
 fn flac(path: &Path, samples: &[i16]) {
     let mut w = FlacWriter::create(path, RATE, 1).expect("create a FLAC");
     w.push_interleaved(samples).expect("write samples");
@@ -228,6 +301,27 @@ fn write_session(root: &Path, spec: &Spec<'_>) -> String {
                     offset_ms: start_ms,
                     talker: Some(talker.to_owned()),
                     file,
+                },
+            },
+        ));
+    }
+    for (i, &(start_ms, logged_ms, mode, talker)) in spec.images.iter().enumerate() {
+        let seq = u32::try_from(i + 1).expect("few pictures");
+        let image_start = at(start, start_ms);
+        let file = image_file_name(seq, &image_start.to_zoned(tz.clone()), mode, Some(talker));
+        std::fs::create_dir_all(dir.join("images")).expect("make images/");
+        test_card(&dir.join("images").join(&file));
+        rows.push((
+            logged_ms,
+            LogRow {
+                t: at(start, logged_ms).to_string(),
+                kind: LogKind::Image {
+                    start: image_start.to_string(),
+                    offset_ms: start_ms,
+                    mode: mode.to_owned(),
+                    talker: Some(talker.to_owned()),
+                    file,
+                    partial: false,
                 },
             },
         ));
@@ -342,7 +436,9 @@ mod tests {
         assert_eq!(m.window_start, "2026-11-03T18:55:00-07:00");
         assert_eq!(m.started_at, "2026-11-04T01:55:00Z");
         assert_eq!(m.my_callsigns, vec!["N0CALL".to_owned()]);
-        assert_eq!(read_rows(&tue).unwrap().len(), 14);
+        assert_eq!(read_rows(&tue).unwrap().len(), 16);
+        let png = std::fs::read(tue.join("images").join("001 18-55-57 PD120 KX0AAA.png")).unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
         assert_eq!(read_peaks(&tue).unwrap().unwrap().overs.len(), 10);
         let thu = root.join("thursday-d-star-net").join("2026-11-05 1900");
         let text = std::fs::read_to_string(thu.join(META_FILE)).unwrap();

@@ -1,0 +1,26 @@
+[package]
+name = "astar-sstv"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "astar-sstv: SSTV picture decoding (receive only) over slowrx, and PNG output."
+
+[dependencies]
+astar-record = { path = "../astar-record", version = "0.1.23-beta", default-features = false }
+slowrx = { workspace = true }
+png = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# The test-signal encoder. Dev-only: astar never transmits SSTV, and
+# ci/guard-sstv.sh keeps this crate out of every normal dependency table.
+sstv = "=0.3.1"
+claxon = "=0.4.3"
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

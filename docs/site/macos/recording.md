@@ -172,3 +172,5 @@ plug the drive back in, and record again.
 The message clears when the connection ends or the next recording starts.
 
 To capture a call at the packet level instead, see [Packet log](packet-log.md).
+SSTV pictures that come in during a call are saved separately, whether or
+not you are recording; see [SSTV pictures](sstv.md).

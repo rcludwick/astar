@@ -12,6 +12,7 @@ members = [
     "crates/astar-echolink",
     "crates/astar-audio",
     "crates/astar-record",
+    "crates/astar-sstv",
     "crates/astar-iax",
     "crates/astar-sys",
     "crates/astar-conformance",
@@ -24,6 +25,7 @@ members = [
     "crates/astar-serial-sys",
     "crates/astar-cli",
     "crates/astar-server",
+    "crates/astar-secrets",
     "crates/astar-wireguard",
     "crates/astar-m17",
     "crates/astar-dmr",
@@ -34,6 +36,7 @@ members = [
     "crates/astar-nodebench",
     "crates/astar-netarchive",
     "crates/astar-netrec",
+    "crates/astar-netvideo",
     "apps/gui",
 ]
 exclude = [
@@ -55,7 +58,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.1.22-beta"
+version = "0.1.23-beta"
 edition = "2024"
 # Real floor, verified against the committed Cargo.lock: apps/gui's graph pulls
 # font-types 1.89 (and iced/wgpu/image 1.88, zbus 1.87). The engine crates alone
@@ -126,7 +129,34 @@ jiff = { version = "0.2.38", default-features = false, features = ["std", "tz-sy
 toml = "1.1"
 clap = { version = "4", features = ["derive"] }
 base64 = "0.23"
+# SSTV picture decoding (crates/astar-sstv). Exact pin: a bump is a fresh
+# licence read (LICENSE-EXCEPTIONS.md §10).
+slowrx = "=0.9.0"
+png = "0.18"
+
+# slowrx's FFTs are far too slow unoptimised for a full-length SSTV picture
+# under `cargo test`; these two packages build optimised even in dev.
+[profile.dev.package.slowrx]
+opt-level = 3
+
+[profile.dev.package.rustfft]
+opt-level = 3
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# The net video's renderer draws 1080p frames pixel by pixel; unoptimised,
+# a test render of a 90 s session takes minutes. Optimise it (and tiny-skia)
+# in test builds too.
+[profile.dev.package.astar-netvideo]
+opt-level = 3
+
+[profile.dev.package.tiny-skia]
+opt-level = 3
+
+[profile.dev.package.tiny-skia-path]
+opt-level = 3
+
+[profile.dev.package.ab_glyph_rasterizer]
+opt-level = 3

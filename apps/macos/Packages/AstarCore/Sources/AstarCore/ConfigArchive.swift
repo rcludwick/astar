@@ -234,9 +234,11 @@ public struct ConfigArchive: Codable, Equatable {
     /// a hand-edited file cannot plant one either. `recording.packetLog` is
     /// the packet-log switch, folder and size limit: a folder path means
     /// nothing on another Mac, and a file must not turn on logging of every
-    /// packet. Adding these exclusions does not move `ConfigVersion`: nothing
-    /// that was ever exported changes meaning.
-    public static let machineLocalPrefixes = ["vocoder.", "recording.packetLog"]
+    /// packet. `sstv.` is the SSTV decoder's switch and picture folder: the
+    /// folder is a path on this Mac, and a file must not choose where this
+    /// Mac writes pictures. Adding these exclusions does not move
+    /// `ConfigVersion`: nothing that was ever exported changes meaning.
+    public static let machineLocalPrefixes = ["vocoder.", "recording.packetLog", "sstv."]
 
     /// Interface state that stays on this Mac even though it sits under
     /// `ui.`: which Settings sections are folded (`SettingsSectionID`). How

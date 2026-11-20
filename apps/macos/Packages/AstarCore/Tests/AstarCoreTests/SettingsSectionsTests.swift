@@ -49,6 +49,15 @@ final class SettingsSectionsTests: XCTestCase {
         }
     }
 
+    func testSstvSitsAfterRecording() {
+        let all = SettingsSectionID.allCases
+        let recording = try! XCTUnwrap(all.firstIndex(of: .recording))
+        XCTAssertEqual(all[recording + 1], .sstv)
+        XCTAssertEqual(SettingsSectionID.sstv.title, "SSTV")
+        XCTAssertEqual(SettingsSectionID.sstv.systemImage, "photo.on.rectangle")
+        XCTAssertFalse(SettingsSectionID.sstv.defaultExpanded)
+    }
+
     func testStateIsRememberedAcrossInstances() {
         let first = SettingsDisclosure(defaults: defaults)
         first.setExpanded(.recording, true)

@@ -893,6 +893,7 @@ mod tests {
             my_callsigns: Vec::new(),
             video: false,
             youtube_live: false,
+            twitch_live: false,
             youtube_upload: false,
         }
     }
@@ -1021,6 +1022,7 @@ mod tests {
                     LogKind::Joined => "joined",
                     LogKind::Over { .. } => "over",
                     LogKind::Dropped { .. } => "dropped",
+                    LogKind::Image { .. } => "image",
                     LogKind::Rejoined => "rejoined",
                     LogKind::Left => "left",
                     LogKind::Error { .. } => "error",

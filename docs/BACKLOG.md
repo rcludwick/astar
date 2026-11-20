@@ -12,7 +12,7 @@ inline. All 228 issues (164 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (189)
+## Open items (196)
 
 ### iax-linktot — Link keying through the bridge has no transmit time-out
 *P1 high · safety · labels: server, keying, allstar, cx:3*
@@ -3699,6 +3699,36 @@ Needed before the first VPS deploy of `astar-netrec`. Two parts:
 - A `just` recipe and a check script for a static VPS build of `astar-netrec`, beside `just server-release` and the checks astar-server's release has. Today `docs/RELEASING.md` has only a plain `cargo build --release -p astar-netrec --features release`, which is not cross-built and is attached to a release by hand.
 - A watchdog for a frozen D-Star loop or a poisoned pump. Either one can leave a session running with its link reading as up while no audio arrives, and nothing notices until the window ends.
 
+### netlive-stop-dns — stopping a live stream can wait on a DNS lookup or a connect
+*P2 medium · bug · labels: netrec, live*
+
+`LiveStream::stop` (`crates/astar-netvideo/src/live.rs`) joins the engine and then drops the publishers, and a publisher that is reconnecting is inside `to_socket_addrs()` or `TcpStream::connect_timeout` (`rtmp.rs`, `Publisher` connect). Neither can be interrupted: the name lookup has no time limit of its own, and the connect waits up to the I/O time-out. The daemon calls `stop` on its own thread when a net's window ends, so a slow resolver or a dead route holds the daemon there for that long. Fix: resolve and connect on a worker the stop does not join (or join with a deadline and leave it detached), and test with a resolver seam that blocks, reaching only 127.0.0.1.
+
+### netrec-retention-render-lock — retention ignores a manual `astar-netrec render`
+*P3 low · bug · labels: netrec, video*
+
+A render holds an operating-system lock on the session's `.video.lock` (`astar_netvideo::RENDER_LOCK`) while it writes `video.part.mp4`. The daemon's retention knows about its own render queue, but not about a render someone started by hand with `astar-netrec render`, so it can delete a session folder out from under that render. Retention should try the lock (non-blocking) before deleting a session and skip a folder whose lock is held, the same way two renders already keep off each other.
+
+### netvideo-text-shaping — the video's frame text has no kerning, shaping or bidi
+*P3 low · feature · labels: netrec, video*
+
+The frames' text is laid out one character at a time, left to right (`crates/astar-netvideo/src/font.rs`). Kerning comes only from the legacy `kern` table, and Inter keeps its kerning in GPOS, which `ab_glyph` does not read, so Latin text is a little looser than a typesetter would set it. There is no shaping (ligatures, Arabic joining, Indic reordering) and no bidi reordering, so a net name or talker label in those scripts draws wrongly, right-to-left text in logical order. A shaper (rustybuzz, plus unicode-bidi) in the frame renderer would fix all three; check the goldens and the per-frame render time when it lands.
+
+### netrec-youtube-upload — upload each video to YouTube after the net
+*P3 low · feature · labels: netrec, video, youtube*
+
+Listed under "What is coming" on `docs/site/netrec.md`. `youtube_upload` exists in the config but does nothing yet. After a public net's video is written, upload it through the YouTube Data API with the net's title and date, using OAuth credentials kept like the stream keys (never logged, never in `session.json`). Private nets are refused, as for streaming. Tests reach only a local fake of the API.
+
+### netrec-go-live-button — start and stop a live stream from the recordings page
+*P3 low · feature · labels: server, netrec, live*
+
+Listed under "What is coming" on `docs/site/netrec.md`. Today a stream starts and stops only from the config (`youtube_live`, `twitch_live`) and the net's window. Add an admin-only go-live control on `astar-server`'s recordings page that asks the running recorder to start or stop a net's stream, with its state shown live. Public nets only; the keys stay with the recorder and never cross to the server or the page.
+
+### netvideo-sstv — SSTV pictures in the video and the live stream
+*P3 low · feature · labels: netrec, video, live, sstv*
+
+Listed under "What is coming" on `docs/site/netrec.md`. Decoded pictures are saved in the session's `images/` folder and shown on the recordings page, but neither the rendered video nor the live stream draws them. Show each picture in the frame from the moment it was received (for a while, or until the next one), in both the render and the live encode, and update the goldens and the docs.
+
 ### netrec-settings — `[netrec]` on the astar-server settings page
 *P3 low · feature · labels: server, netrec*
 
@@ -3723,3 +3753,10 @@ With `[web] admin_on_public` off, the public bind has no sign-in, so `/nets/` th
 *P3 low · feature · labels: server, netrec*
 
 A session whose recorder crashed has no `ended` stamp, so astar-server's `/nets/` reads it as still recording and refuses the delete (409) until astar-netrec starts once and its crash recovery closes the session. A node that no longer runs the recorder cannot delete such a session from the page at all. Let an admin delete (or close) a session that is open but has no live recorder behind it, once the page can tell that no recorder is running.
+
+### astar-server-sstv — decode SSTV pictures on the node
+*P3 low · feature · labels: server, sstv*
+
+The macOS app decodes SSTV pictures heard on a call and the net recorder decodes them in every session, but `astar-server` does not: its `docs/FEATURES.md` cell reads "—", because a node is not a picture viewer and the net recorder already keeps pictures from recorded nets (plan ruling R14, 2026-11-11). `astar-station`'s `sstv` feature is off in the server's builds, so it does not link slowrx.
+
+If Rob wants it later: turn the feature on for the server, decode the conference audio, save pictures under a configured folder (`node.toml` `[sstv]`, settings-page card), keep the AllStarLink packets behind each picture as the app does, and show recent pictures on the admin page or the listener page. Receive-only, as everywhere: no encoder in any build (`ci/guard-sstv.sh`). Update the `FEATURES.md` row and the docs when it lands.

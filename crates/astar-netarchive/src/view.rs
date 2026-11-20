@@ -88,6 +88,10 @@ pub struct SessionView {
     pub public: bool,
     pub recording: bool,
     pub audio: AudioSrc,
+    /// The session's `video.mp4`, when one has been rendered. Left out of
+    /// the JSON until then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video: Option<String>,
     pub items: Vec<Item>,
     pub can_delete: bool,
     pub delete_url: Option<String>,
@@ -114,6 +118,22 @@ pub enum Item {
         /// Empty when the over's file is missing.
         peaks: Vec<u8>,
     },
+    /// A picture decoded from the session's audio.
+    Image {
+        /// 1-based, among the session's pictures.
+        seq: u32,
+        /// The base callsign, `None` when nobody was named.
+        call: Option<String>,
+        suffix: Option<String>,
+        /// Into `session.flac`, where the picture began.
+        offset_ms: u64,
+        clock: String,
+        /// The SSTV mode's token, e.g. `PD120`.
+        mode: String,
+        /// Kept part way through.
+        partial: bool,
+        file_url: String,
+    },
     Event {
         /// `joined`, `dropped`, `rejoined`, `left` or `error`.
         kind: String,
@@ -126,8 +146,21 @@ pub enum Item {
     },
 }
 
-/// The name a network goes by on the page.
-fn network_label(network: &str) -> String {
+impl Item {
+    /// Where this item falls on the `session.flac` timeline.
+    #[must_use]
+    pub const fn offset_ms(&self) -> u64 {
+        match self {
+            Self::Over { offset_ms, .. }
+            | Self::Image { offset_ms, .. }
+            | Self::Event { offset_ms, .. } => *offset_ms,
+        }
+    }
+}
+
+/// The name a network goes by on the page (and in the video's chip).
+#[must_use]
+pub fn network_label(network: &str) -> String {
     match network {
         "m17" => "M17".to_owned(),
         "dstar" => "D-Star".to_owned(),
@@ -290,7 +323,7 @@ fn my_calls(meta: &SessionMeta, opts: &ViewOpts) -> Vec<String> {
     out
 }
 
-/// The timeline: overs and events, ordered by where they fall in the
+/// The timeline: overs, pictures and events, ordered by where they fall in the
 /// session.
 fn items(
     archive: &Archive,
@@ -306,6 +339,7 @@ fn items(
     let base = session_url(e);
     let mut out = Vec::new();
     let mut seq = 0u32;
+    let mut image_seq = 0u32;
     let mut skip = vec![false; rows.len()];
     for (i, row) in rows.iter().enumerate() {
         if skip[i] {
@@ -342,6 +376,27 @@ fn items(
                     peaks: peaks.overs.get(file).cloned().unwrap_or_default(),
                 });
             }
+            LogKind::Image {
+                start: image_start,
+                offset_ms,
+                mode,
+                talker,
+                file,
+                partial,
+            } => {
+                image_seq = image_seq.saturating_add(1);
+                let call = talker.as_deref().and_then(split_call);
+                out.push(Item::Image {
+                    seq: image_seq,
+                    call: call.as_ref().map(|c| c.base.clone()),
+                    suffix: call.and_then(|c| c.suffix),
+                    offset_ms: *offset_ms,
+                    clock: clock_at(stamp(image_start), off),
+                    mode: mode.clone(),
+                    partial: *partial,
+                    file_url: format!("{base}images/{}", encode(file)),
+                });
+            }
             LogKind::Joined => out.push(event("joined", None, None)),
             LogKind::Rejoined => out.push(event("rejoined", None, None)),
             LogKind::Left => out.push(event("left", None, None)),
@@ -351,14 +406,17 @@ fn items(
                 }
             }
             LogKind::Dropped { reason } => {
-                // The next event that is neither an over nor an error: a
-                // rejoin there closes this drop, and the two draw as one
-                // divider. Errors are skipped because an anonymous viewer
-                // never sees them, and would otherwise get a stray rejoin.
-                let next =
-                    rows.iter().enumerate().skip(i + 1).find(|(_, r)| {
-                        !matches!(r.kind, LogKind::Over { .. } | LogKind::Error { .. })
-                    });
+                // The next event that is not an over, a picture or an
+                // error: a rejoin there closes this drop, and the two draw
+                // as one divider. Errors are skipped because an anonymous
+                // viewer never sees them, and would otherwise get a stray
+                // rejoin.
+                let next = rows.iter().enumerate().skip(i + 1).find(|(_, r)| {
+                    !matches!(
+                        r.kind,
+                        LogKind::Over { .. } | LogKind::Image { .. } | LogKind::Error { .. }
+                    )
+                });
                 let back = match next {
                     Some((j, r)) if matches!(r.kind, LogKind::Rejoined) => {
                         skip[j] = true;
@@ -370,10 +428,14 @@ fn items(
             }
         }
     }
-    out.sort_by_key(|item| match item {
-        Item::Over { offset_ms, .. } | Item::Event { offset_ms, .. } => *offset_ms,
-    });
+    out.sort_by_key(Item::offset_ms);
     out
+}
+
+/// Whether `e` has a rendered `video.mp4`: a regular file, as the route
+/// that serves it requires, not a link and not a render's part file.
+fn has_video(e: &SessionEntry) -> bool {
+    std::fs::symlink_metadata(e.dir.join("video.mp4")).is_ok_and(|m| m.file_type().is_file())
 }
 
 /// One session, as `access` may see it. The caller has already checked
@@ -415,6 +477,7 @@ pub fn session_view(
             url: format!("{}session.flac", session_url(e)),
             mime: "audio/flac".to_owned(),
         },
+        video: has_video(e).then(|| format!("{}video.mp4", session_url(e))),
         items: items(archive, e, &rows, access, off),
         can_delete: is_admin && delete_url.is_some() && m.ended.is_some(),
         delete_url,
@@ -483,7 +546,7 @@ mod tests {
                     detail,
                     ..
                 } => Some((kind.clone(), back_clock.clone(), detail.clone())),
-                Item::Over { .. } => None,
+                _ => None,
             })
             .collect()
     }
@@ -558,13 +621,7 @@ mod tests {
         // Nothing was written into the archive.
         assert!(!e.dir.join(crate::peaks::PEAKS_FILE).exists());
         // Items are in session order.
-        let offs: Vec<u64> = v
-            .items
-            .iter()
-            .map(|i| match i {
-                Item::Over { offset_ms, .. } | Item::Event { offset_ms, .. } => *offset_ms,
-            })
-            .collect();
+        let offs: Vec<u64> = v.items.iter().map(Item::offset_ms).collect();
         assert!(offs.windows(2).all(|w| w[0] <= w[1]), "{offs:?}");
     }
 
@@ -846,6 +903,94 @@ mod tests {
         assert_eq!(peaks.len(), 48);
         let _ = elsewhere;
         let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn image_rows_become_image_items_in_order() {
+        let s = setup("image");
+        let tue = s.a.find(&s.f.public_net, &s.f.public_session).unwrap();
+        // A second, half-kept picture from nobody, late in the session.
+        append_row(
+            &tue.dir,
+            &LogRow {
+                t: "2026-11-04T01:56:29Z".into(),
+                kind: LogKind::Image {
+                    start: "2026-11-04T01:56:21Z".into(),
+                    offset_ms: 81_000,
+                    mode: "Robot36".into(),
+                    talker: None,
+                    file: "002 18-56-21 Robot36 unknown.png".into(),
+                    partial: true,
+                },
+            },
+        )
+        .unwrap();
+        let v = session_view(&s.a, &tue, Access::Anonymous, &opts());
+        let images: Vec<(usize, &Item)> = v
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| matches!(i, Item::Image { .. }))
+            .collect();
+        assert_eq!(images.len(), 3);
+        // Images are not overs: the overs keep their count and their seqs.
+        assert_eq!(overs(&v).len(), 10);
+        let (at, first) = images[0];
+        let Item::Image {
+            seq,
+            call,
+            suffix,
+            offset_ms,
+            clock,
+            mode,
+            partial,
+            file_url,
+        } = first
+        else {
+            unreachable!()
+        };
+        assert_eq!(*seq, 1);
+        assert_eq!(
+            (call.as_deref(), suffix.as_deref()),
+            (Some("KX0AAA"), Some("E"))
+        );
+        assert_eq!(*offset_ms, 57_500);
+        assert_eq!(clock, "18:55:57");
+        assert_eq!(mode, "PD120");
+        assert!(!*partial);
+        assert_eq!(
+            file_url,
+            &format!(
+                "/nets/{}/{}/images/001%2018-55-57%20PD120%20KX0AAA.png",
+                s.f.public_net, s.f.public_session
+            )
+        );
+        // It sits after the over it began in (seq 8, from 57 s) and before
+        // the next one.
+        assert!(matches!(v.items[at - 1], Item::Over { seq: 8, .. }));
+        assert!(matches!(v.items[at + 1], Item::Over { seq: 9, .. }));
+        let Item::Image {
+            seq,
+            call,
+            partial,
+            mode,
+            ..
+        } = images[2].1
+        else {
+            unreachable!()
+        };
+        assert_eq!((*seq, call.as_deref(), *partial), (3, None, true));
+        assert_eq!(mode, "Robot36");
+        let offs: Vec<u64> = v.items.iter().map(Item::offset_ms).collect();
+        assert!(offs.windows(2).all(|w| w[0] <= w[1]), "{offs:?}");
+        let json = serde_json::to_value(&v).unwrap();
+        let img = json["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["type"] == "image")
+            .unwrap();
+        assert_eq!(img["mode"], "PD120");
     }
 
     #[test]

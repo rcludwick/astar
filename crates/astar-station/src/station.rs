@@ -30,6 +30,8 @@ use astar_record::tap::{
 use astar_record::{Layout, RecordError, RecordState, Recorder, RecorderConfig, RecorderInputs};
 
 use crate::config::NodeConfig;
+#[cfg(feature = "sstv")]
+use crate::sstv::{self, SstvConfig, SstvContext, SstvFrame, SstvSlot, SstvState};
 use crate::{
     NotLeased, PressOutcome, PttArbiter, PttEdge, PttSnapshot, PttSource, RegisterConfig,
     StationConfig, StationError, StationEvent, TxTimeoutOutOfRange,
@@ -699,6 +701,14 @@ pub struct Station {
     packet_log: Mutex<PacketLogSlot>,
     /// Wakes whoever waits for a change to `packet_log` to finish.
     packet_log_settled: Condvar,
+    /// SSTV decoding of heard audio. See [`Station::sstv_configure`].
+    #[cfg(feature = "sstv")]
+    sstv: Mutex<SstvSlot>,
+    /// Held for a whole [`Station::sstv_configure`], so two changes can't
+    /// put their taps on the session out of order. `sstv` is taken only
+    /// briefly inside it.
+    #[cfg(feature = "sstv")]
+    sstv_change: Mutex<()>,
 }
 
 /// Supervision state for automatic re-registration (iax-177d). Without it a
@@ -780,6 +790,10 @@ impl Station {
             recording: Mutex::new(RecordSlot::default()),
             packet_log: Mutex::new(PacketLogSlot::default()),
             packet_log_settled: Condvar::new(),
+            #[cfg(feature = "sstv")]
+            sstv: Mutex::new(SstvSlot::default()),
+            #[cfg(feature = "sstv")]
+            sstv_change: Mutex::new(()),
         };
         station.pin_station_policy();
         station.set_vocoder_trust(station.config.vocoder_trust.clone());
@@ -834,6 +848,10 @@ impl Station {
             recording: Mutex::new(RecordSlot::default()),
             packet_log: Mutex::new(PacketLogSlot::default()),
             packet_log_settled: Condvar::new(),
+            #[cfg(feature = "sstv")]
+            sstv: Mutex::new(SstvSlot::default()),
+            #[cfg(feature = "sstv")]
+            sstv_change: Mutex::new(()),
         };
         station.pin_station_policy();
         station.set_vocoder_trust(station.config.vocoder_trust.clone());
@@ -2129,6 +2147,134 @@ impl Station {
     pub fn packet_log_delete(&self, name: &str) -> Result<(), DeleteRefused> {
         let (dir, open) = self.packet_log_folder().ok_or(DeleteRefused::NoSuchLog)?;
         delete_log(&dir, name, &open)
+    }
+
+    #[cfg(feature = "sstv")]
+    /// Turn SSTV decoding of heard audio on (`Some`) or off (`None`).
+    /// Pictures are saved as PNG in `cfg.dir`, which is created, each with a
+    /// line in its `pictures.jsonl`. Receive only: this never transmits.
+    ///
+    /// The same config again changes nothing. A new one replaces the
+    /// decoder; `None` removes it and its tap.
+    ///
+    /// This returns before a replaced decoder has finished: stopping one
+    /// decodes the picture it has in flight, which can take seconds, so that
+    /// runs on a thread of its own and the half-heard picture (if worth
+    /// keeping) is saved a moment later, into the folder it started in.
+    /// Making the folder is the only wait, so callers on a UI thread are
+    /// fine unless the folder is on a slow disk.
+    ///
+    /// # Errors
+    /// [`StationError::Record`] when the folder can't be made or the decoder
+    /// thread can't start. Decoding is then off, even if it was on, and
+    /// [`Station::sstv_state`] carries the message.
+    pub fn sstv_configure(&self, cfg: Option<SstvConfig>) -> Result<(), StationError> {
+        let _change = self
+            .sstv_change
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if self.sstv.lock().unwrap().is_same(cfg.as_ref()) {
+            return Ok(());
+        }
+        let made = cfg
+            .as_ref()
+            .map_or(Ok(()), |c| std::fs::create_dir_all(&c.dir));
+        // While a picture airs the decoder holds off the receive jitter
+        // buffers' frame-dropping shrink through the session's cell.
+        let hold = self.session.lock().unwrap().shrink_hold();
+        let replaced = {
+            let mut slot = self.sstv.lock().unwrap();
+            slot.share_hold(hold);
+            slot.replace(cfg, made)
+        };
+        {
+            let mut session = self.session.lock().unwrap();
+            session.set_sstv_tap(replaced.tap);
+            session.set_sstv_packet_tap(replaced.packet_tap);
+        }
+        // The old worker stops with no lock held but `sstv_change`; see
+        // `sstv::stop_in_background` for the one case that blocks here.
+        if let Some(h) = replaced.old.and_then(sstv::stop_in_background) {
+            self.sstv.lock().unwrap().add_stopper(h);
+        }
+        replaced
+            .result
+            .map_err(|e| StationError::Record(e.to_string()))
+    }
+
+    #[cfg(feature = "sstv")]
+    /// What the station is connected to and who is talking. A picture keeps
+    /// the context it started with.
+    pub fn sstv_set_context(&self, ctx: SstvContext) {
+        self.sstv.lock().unwrap().set_context(ctx);
+    }
+
+    #[cfg(feature = "sstv")]
+    /// Whether a picture is airing and how far along, and the pictures that
+    /// came in. Never waits on a change in progress.
+    #[must_use]
+    pub fn sstv_state(&self) -> SstvState {
+        self.sstv.lock().unwrap().state()
+    }
+
+    #[cfg(feature = "sstv")]
+    /// The pixels of the picture that ended last, as RGBA; `None` before
+    /// any, or when the last one was lost. slowrx draws a picture only once
+    /// it has all its audio, so there is no half-drawn picture to show while
+    /// one airs: [`Station::sstv_state`] says how far along it is instead.
+    ///
+    /// The frame is shared, not copied: a caller that only wants its size
+    /// costs nothing, and one that wants the pixels copies them itself.
+    #[must_use]
+    pub fn sstv_frame(&self) -> Option<std::sync::Arc<SstvFrame>> {
+        self.sstv.lock().unwrap().frame_ref()
+    }
+
+    #[cfg(all(feature = "sstv", feature = "test-hooks"))]
+    /// Put `frame` up as the last finished picture, as if one had aired.
+    /// For the C ABI's tests; only the `test-hooks` feature, which only
+    /// tests turn on, has it.
+    #[doc(hidden)]
+    pub fn sstv_set_frame_for_test(&self, frame: SstvFrame) {
+        self.sstv.lock().unwrap().set_frame_for_test(frame);
+    }
+
+    #[cfg(feature = "sstv")]
+    /// Wait for replaced decoders to finish their last picture.
+    #[cfg(test)]
+    pub(crate) fn sstv_wait_stopped(&self) {
+        let stoppers = self.sstv.lock().unwrap().take_stoppers();
+        for h in stoppers {
+            let _ = h.join();
+        }
+    }
+
+    #[cfg(feature = "sstv")]
+    #[cfg(test)]
+    pub(crate) fn sstv_run(&self) -> Option<u64> {
+        self.sstv.lock().unwrap().run()
+    }
+
+    #[cfg(feature = "sstv")]
+    #[cfg(test)]
+    pub(crate) fn sstv_shrink_hold(&self) -> bool {
+        self.session
+            .lock()
+            .unwrap()
+            .shrink_hold()
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(feature = "sstv")]
+    #[cfg(test)]
+    pub(crate) fn sstv_packet_tap_set(&self) -> bool {
+        self.session.lock().unwrap().has_sstv_packet_tap()
+    }
+
+    #[cfg(feature = "sstv")]
+    #[cfg(test)]
+    pub(crate) fn sstv_tap(&self) -> Option<Tap<astar_record::tap::PcmChunk>> {
+        self.session.lock().unwrap().sstv_tap().cloned()
     }
 
     /// Install (or, with `None`, remove) the server's codec-frame tap. It

@@ -133,6 +133,18 @@ else
   shot session-phone "$BASE${SESSION}#t=40" 390 1600 "${DARK[@]}"
 fi
 shot replay-dark "$BASE${SESSION}#replay&t=40" 1280 800 "${DARK[@]}"
+# The head card at rest (no #t=, so nothing scrolls): its Video, Replay and
+# Delete buttons.
+shot session-head-dark "$BASE${SESSION}" 1280 420 "${DARK[@]}"
+shot session-head-light "$BASE${SESSION}" 1280 420 "${LIGHT[@]}"
+if [ -n "$NARROW" ]; then
+  run_chrome /dev/null "$NARROW" --disable-gpu --no-first-run --hide-scrollbars \
+    --user-data-dir="$PROFILE-narrow" --force-device-scale-factor=2 \
+    --virtual-time-budget=4000 --window-size=390,700 "${DARK[@]}" \
+    --screenshot="$OUT/session-head-phone.png" "$BASE${SESSION}" ||
+    { echo "chrome-headless-shell failed for session-head-phone" >&2; exit 1; }
+  echo "    session-head-phone.png"
+fi
 if [ -n "${NETS_MOCKUPS:-}" ]; then
   shot mockup-page "file://$(urlencode "$NETS_MOCKUPS/recordings-page.html")" 1280 1800 "${DARK[@]}"
   shot mockup-frames "file://$(urlencode "$NETS_MOCKUPS/video-frames.html")" 1280 1800 "${DARK[@]}"

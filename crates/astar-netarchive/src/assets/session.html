@@ -16,6 +16,7 @@
     <symbol id="i-play" viewBox="0 0 20 20"><path d="M5.5 3.6v12.8a1.1 1.1 0 0 0 1.66.95l10.4-6.4a1.1 1.1 0 0 0 0-1.9L7.16 2.65A1.1 1.1 0 0 0 5.5 3.6z"/></symbol>
     <symbol id="i-pause" viewBox="0 0 20 20"><rect x="4" y="3" width="4" height="14" rx="1.5"/><rect x="12" y="3" width="4" height="14" rx="1.5"/></symbol>
     <symbol id="i-expand" viewBox="0 0 16 16"><path d="M9.5 2.5h4v4M6.5 13.5h-4v-4M13.5 2.5 9 7M2.5 13.5 7 9"/></symbol>
+    <symbol id="i-video" viewBox="0 0 16 16"><rect x="1.75" y="3" width="12.5" height="10" rx="2.25"/><path d="M6.6 6v4l3.4-2z"/></symbol>
     <symbol id="i-trash" viewBox="0 0 16 16"><path d="M2.5 4h11M6 4V2.5h4V4M4 4l.7 9.5h6.6L12 4"/></symbol>
     <symbol id="i-close" viewBox="0 0 14 14"><path d="M2 2l10 10M12 2 2 12"/></symbol>
   </defs>
@@ -53,6 +54,7 @@
         <button class="sw" id="myside" type="button" role="switch" aria-checked="false" aria-labelledby="myside-label"></button>
       </div>
       <div class="acts">
+        <a class="act" id="video-btn" target="_blank" rel="noopener" hidden><svg aria-hidden="true"><use href="#i-video"/></svg>Video</a>
         <button class="act" id="replay-btn" type="button"><svg aria-hidden="true"><use href="#i-expand"/></svg>Replay</button>
         <button class="act danger" id="delete-btn" type="button" hidden><svg aria-hidden="true"><use href="#i-trash"/></svg>Delete</button>
       </div>

@@ -55,13 +55,12 @@
 //! written and is refused at load when group or others can read it; the
 //! node boots either way, because a chmod must not crash-loop a container.
 
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-};
+use std::{path::Path, sync::Arc};
 
-use toml_edit::DocumentMut;
+use astar_secrets::SecretStore;
+
+/// What fills "<owner> did not load it" in the file's mode refusal.
+const FILE_OWNER: &str = "the node";
 
 /// Default name of the credentials file, beside `node.toml`. Not
 /// `secrets.toml`: the settings page reports this path on the wire, and the
@@ -109,14 +108,14 @@ pub const ECHOLINK_PASSWORD_ENV: &str = "ASTAR_ECHOLINK_PASSWORD";
 /// leading comment on the FIRST KEY's prefix, not the root table — so
 /// removing that key would take the header with it — and a header with no
 /// key after it at all parses into the document's *trailing* text, which
-/// renders LAST. `write_document` covers both.
+/// renders LAST. `astar_secrets` covers both on every write.
 const CREDENTIALS_HEADER: &str =
     "# astar-server credentials — written by the settings page. Mode 0600.\n";
 
 /// Shared, interior-mutable secret store the Station resolver consults.
 #[derive(Clone, Default)]
 pub struct SecretProvider {
-    inner: Arc<Mutex<HashMap<String, String>>>,
+    inner: SecretStore,
 }
 
 impl SecretProvider {
@@ -128,21 +127,13 @@ impl SecretProvider {
 
     /// Push one credential (control-channel `ProvideSecret`).
     pub fn put(&self, username: impl Into<String>, secret: impl Into<String>) {
-        self.inner
-            .lock()
-            .expect("SecretProvider mutex poisoned")
-            .insert(username.into(), secret.into());
+        self.inner.put(username, secret);
     }
 
     /// Resolve `username` → secret.  Returns `""` if the username is unknown.
     #[must_use]
     pub fn resolve(&self, username: &str) -> String {
-        self.inner
-            .lock()
-            .expect("SecretProvider mutex poisoned")
-            .get(username)
-            .cloned()
-            .unwrap_or_default()
+        self.inner.get(username).unwrap_or_default()
     }
 
     /// Resolve the OUTBOUND dial secret for linking to `node` (iax-5029):
@@ -264,13 +255,9 @@ impl SecretProvider {
     /// error, and a parse error is not forwarded at all: `toml_edit` renders
     /// the offending line, and on this file that line is a credential.
     pub fn load_file(&self, path: &Path, node_id: Option<&str>) -> Result<usize, String> {
-        if !exists_and_is_private(path)? {
-            return Ok(0);
-        }
-        let Some(doc) = read_document(path)? else {
+        let Some(entries) = astar_secrets::load_private(path, FILE_OWNER)? else {
             return Ok(0);
         };
-        let entries = string_entries(path, &doc)?;
         let count = entries.len();
         for (key, value) in entries {
             let username = if key == NODE_CREDENTIAL_KEY {
@@ -318,14 +305,14 @@ impl SecretProvider {
     #[must_use]
     pub fn echolink_password(&self, callsign: &str) -> String {
         let key = echolink_key(callsign);
-        let store = self.inner.lock().expect("SecretProvider mutex poisoned");
-        if let Some(pw) = store.get(&key) {
-            return pw.clone();
+        if let Some(pw) = self.inner.get(&key) {
+            return pw;
         }
-        store
-            .iter()
+        self.inner
+            .entries()
+            .into_iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(&key))
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v)
             .unwrap_or_default()
     }
 
@@ -339,9 +326,7 @@ impl SecretProvider {
     /// sits in a file anyone else can read. `Err` is `cannot write <path>:
     /// <io error>` and never carries the value.
     pub fn save_file(path: &Path, key: &str, value: &str) -> Result<(), String> {
-        let mut doc = read_document(path)?.unwrap_or_else(new_document);
-        doc.insert(key, toml_edit::value(value));
-        write_document(path, doc)
+        astar_secrets::save(path, CREDENTIALS_HEADER, key, value)
     }
 
     /// The keys in the credentials file, sorted, values discarded.
@@ -349,12 +334,7 @@ impl SecretProvider {
     /// checked: this is how the settings page still shows which chips exist
     /// on a node that refused to load the file, beside the chmod to run.
     pub fn file_keys(path: &Path) -> Result<Vec<String>, String> {
-        let Some(doc) = read_document(path)? else {
-            return Ok(Vec::new());
-        };
-        let mut keys: Vec<String> = doc.iter().map(|(k, _)| k.to_owned()).collect();
-        keys.sort();
-        Ok(keys)
+        astar_secrets::keys(path)
     }
 
     /// Remove one key from the credentials file. `Ok(())` when the file or
@@ -362,13 +342,7 @@ impl SecretProvider {
     /// write as [`Self::save_file`], which also keeps the header on the file
     /// when the key removed was the first one.
     pub fn remove_from_file(path: &Path, key: &str) -> Result<(), String> {
-        let Some(mut doc) = read_document(path)? else {
-            return Ok(());
-        };
-        if doc.remove(key).is_none() {
-            return Ok(());
-        }
-        write_document(path, doc)
+        astar_secrets::remove(path, CREDENTIALS_HEADER, key)
     }
 
     /// Write every entry the store holds to `path`, replacing the file —
@@ -384,55 +358,35 @@ impl SecretProvider {
     /// one the running node registers with. Returns the number of distinct
     /// keys written.
     pub fn export_file(&self, path: &Path, node_id: Option<&str>) -> Result<usize, String> {
-        let mut entries: Vec<(String, String)> = self
-            .inner
-            .lock()
-            .expect("SecretProvider mutex poisoned")
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        // Usernames are HashMap keys, so unique: tuple order is key order.
-        entries.sort_unstable();
+        // Sorted by username, which is unique.
+        let entries = self.inner.entries();
         let holds_node_id = node_id.is_some_and(|id| entries.iter().any(|(k, _)| k == id));
-        let mut doc = new_document();
-        for (username, value) in &entries {
+        let mut file = Vec::with_capacity(entries.len());
+        for (username, value) in entries {
             let key = if node_id == Some(username.as_str()) {
-                NODE_CREDENTIAL_KEY
+                NODE_CREDENTIAL_KEY.to_owned()
             } else if holds_node_id && username == NODE_CREDENTIAL_KEY {
                 continue;
             } else {
-                username.as_str()
+                username
             };
-            doc.insert(key, toml_edit::value(value.as_str()));
+            file.push((key, value));
         }
-        let written = doc.len();
-        write_document(path, doc)?;
-        Ok(written)
+        astar_secrets::replace_all(path, CREDENTIALS_HEADER, &file)
     }
 
     /// Forget one credential. A no-op when the username is unknown. This is
     /// what `Forget` on the settings page reaches; a page that can set a
     /// credential but not revoke it is the more dangerous one.
     pub fn remove(&self, username: &str) {
-        self.inner
-            .lock()
-            .expect("SecretProvider mutex poisoned")
-            .remove(username);
+        self.inner.remove(username);
     }
 
     /// The usernames currently held, sorted. Names only — the settings page
     /// lists these as peers; the values never leave the store.
     #[must_use]
     pub fn usernames(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .inner
-            .lock()
-            .expect("SecretProvider mutex poisoned")
-            .keys()
-            .cloned()
-            .collect();
-        names.sort();
-        names
+        self.inner.usernames()
     }
 
     /// Return a `Box<dyn Fn(&str) -> String + Send + Sync>` over this provider,
@@ -486,142 +440,6 @@ pub fn is_inbound_username(username: &str) -> bool {
         || username.starts_with(LINK_PREFIX)
         || username.starts_with(DNS_CREDENTIAL_PREFIX)
         || username.starts_with(ECHOLINK_PREFIX))
-}
-
-// ---------------------------------------------------------------------------
-// The credentials file
-// ---------------------------------------------------------------------------
-
-/// A fresh document carrying the header as the root table's leading decor.
-/// That is where it renders from on the first write; after a re-parse it
-/// rides on the first key's prefix instead, which `write_document` covers.
-fn new_document() -> DocumentMut {
-    let mut doc = DocumentMut::new();
-    doc.decor_mut().set_prefix(CREDENTIALS_HEADER);
-    doc
-}
-
-/// `Ok(true)` when the file exists and only its owner can read it,
-/// `Ok(false)` when it does not exist. On non-unix targets existence is all
-/// there is to check.
-fn exists_and_is_private(path: &Path) -> Result<bool, String> {
-    let meta = match std::fs::metadata(path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
-    };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = meta.permissions().mode() & 0o777;
-        if mode & 0o077 != 0 {
-            let shown = path.display();
-            return Err(format!(
-                "credentials file {shown} is readable by group or others (mode 0o{mode:03o}); the node did not load it — run: chmod 600 {shown}"
-            ));
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = meta;
-    Ok(true)
-}
-
-/// Parse the file. `Ok(None)` when it does not exist. A parse failure is
-/// reported without the parser's own message: `toml_edit` prints the
-/// offending line under a caret, and every line of this file is a secret.
-fn read_document(path: &Path) -> Result<Option<DocumentMut>, String> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
-    };
-    let doc = text.parse::<DocumentMut>().map_err(|_| {
-        format!(
-            "credentials file {} does not parse; fix or delete it and set the credentials again from the settings page",
-            path.display()
-        )
-    })?;
-    Ok(Some(doc))
-}
-
-/// Every top-level `key = "string"` pair. Anything else — a table, a number
-/// — is refused by key name; key names are not material.
-fn string_entries(path: &Path, doc: &DocumentMut) -> Result<Vec<(String, String)>, String> {
-    doc.iter()
-        .map(|(key, item)| {
-            item.as_str()
-                .map(|v| (key.to_owned(), v.to_owned()))
-                .ok_or_else(|| {
-                    format!(
-                        "credentials file {}: key {key:?} is not a string",
-                        path.display()
-                    )
-                })
-        })
-        .collect()
-}
-
-/// `<file>.tmp` beside `path`.
-fn tmp_path(path: &Path) -> PathBuf {
-    let mut name = path.file_name().map_or_else(
-        || CREDENTIALS_FILE_NAME.into(),
-        std::ffi::OsStr::to_os_string,
-    );
-    name.push(".tmp");
-    path.with_file_name(name)
-}
-
-/// Write `doc` over `path` atomically: a 0600 temp file in the same
-/// directory (mode set on the open, before any byte lands — a later chmod
-/// would leave a window), fsync, rename. The umask can only remove bits from
-/// 0600, never add them. On failure the temp file is removed and the old
-/// file is still there.
-///
-/// Takes the document by value so the header can be re-attached. Two
-/// re-parse shapes need it: a parsed document keeps a leading comment on
-/// its first key, so removing that key removes the comment; and a file that
-/// is the header alone (after the last key was forgotten) parses with the
-/// header in the document's *trailing* text, which `toml_edit` renders
-/// LAST — so the next key would render above it and a second header would
-/// be prepended. The trailing copy is dropped first, then the root prefix
-/// is set whenever the rendered text does not already start with the header.
-fn write_document(path: &Path, mut doc: DocumentMut) -> Result<(), String> {
-    use std::io::Write;
-
-    if doc
-        .trailing()
-        .as_str()
-        .is_some_and(|t| t.contains(CREDENTIALS_HEADER.trim_end()))
-    {
-        doc.set_trailing("");
-    }
-    if !doc.to_string().starts_with(CREDENTIALS_HEADER) {
-        doc.decor_mut().set_prefix(CREDENTIALS_HEADER);
-    }
-    let rendered = doc.to_string();
-
-    let tmp = tmp_path(path);
-    // A stale temp file from an interrupted write would defeat create_new;
-    // it holds nothing the new write does not replace.
-    let _ = std::fs::remove_file(&tmp);
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let written = (|| -> std::io::Result<()> {
-        let mut file = opts.open(&tmp)?;
-        file.write_all(rendered.as_bytes())?;
-        file.sync_all()?;
-        std::fs::rename(&tmp, path)
-    })();
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("cannot write {}: {e}", path.display()));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

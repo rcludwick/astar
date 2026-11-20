@@ -41,6 +41,12 @@
         /// The main window — created on first use; the asterisk toggles its visibility.
         /// Replaces the old transient popover so the UI persists and can be moved.
         private lazy var window: NSWindow = makeWindow()
+        /// The SSTV Pictures window, made on first use and kept (closing it
+        /// hides it), so a second Show Pictures brings the same one forward.
+        private var sstvGalleryWindow: NSWindow?
+        /// The gallery window's title, which its content also uses to tell
+        /// its own window coming to the front from any other.
+        static let sstvGalleryTitle = "SSTV Pictures"
 
         init(
             session: CallSession, serial: SerialController, bluetooth: BluetoothPTTController,
@@ -104,6 +110,8 @@
             // Install the serial PTT source (was done in MenuPopover.onAppear under
             // MenuBarExtra); do it once here now that we own the lifecycle.
             serial.attach(to: session)
+
+            navigation.sstvGalleryOpener = { [weak self] in self?.showSstvGallery() }
         }
 
         // MARK: - Click routing
@@ -189,6 +197,30 @@
         func showSettings() {
             navigation.showsSettings = true
             showWindow()
+        }
+
+        /// Bring up the SSTV Pictures window, building it the first time.
+        func showSstvGallery() {
+            let w = sstvGalleryWindow ?? makeSstvGalleryWindow()
+            sstvGalleryWindow = w
+            NSApp.activate(ignoringOtherApps: true)
+            w.makeKeyAndOrderFront(nil)
+        }
+
+        private func makeSstvGalleryWindow() -> NSWindow {
+            let hosting = NSHostingController(
+                rootView: SstvGalleryWindowContent()
+                    .environmentObject(session)
+            )
+            let w = NSWindow(contentViewController: hosting)
+            w.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+            w.title = Self.sstvGalleryTitle
+            w.isReleasedWhenClosed = false  // close just hides it
+            w.contentMinSize = NSSize(width: 380, height: 300)
+            w.setContentSize(NSSize(width: 640, height: 520))
+            w.setFrameAutosaveName("astarSstvGallery")
+            if !w.setFrameUsingName("astarSstvGallery") { w.center() }
+            return w
         }
 
         /// Show (and focus) or hide the window. Since astar can be a menu-bar

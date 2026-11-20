@@ -258,6 +258,7 @@ pub(crate) fn clone_policy(p: &IncomingCallPolicy) -> IncomingCallPolicy {
         credential_resolver: p.credential_resolver.clone(),
         codec_policy: p.codec_policy,
         packet_slot: p.packet_slot.clone(),
+        sstv_packet_slot: p.sstv_packet_slot.clone(),
     }
 }
 

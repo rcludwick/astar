@@ -26,6 +26,7 @@ public enum SettingsSectionID: String, CaseIterable, Hashable, Sendable {
     case reflectorDirectory
     case spectrum
     case recording
+    case sstv
     case backup
 
     /// The header text. These are the names the sections already had.
@@ -44,6 +45,7 @@ public enum SettingsSectionID: String, CaseIterable, Hashable, Sendable {
         case .reflectorDirectory: return "Reflector directory"
         case .spectrum: return "Spectrum"
         case .recording: return "Recording"
+        case .sstv: return "SSTV"
         case .backup: return "Backup"
         }
     }
@@ -64,6 +66,7 @@ public enum SettingsSectionID: String, CaseIterable, Hashable, Sendable {
         case .reflectorDirectory: return "list.bullet.rectangle"
         case .spectrum: return "waveform"
         case .recording: return "record.circle"
+        case .sstv: return "photo.on.rectangle"
         case .backup: return "archivebox"
         }
     }

@@ -102,5 +102,14 @@
             }
             returnTarget = nil
         }
+
+        /// Opens the SSTV Pictures window. A separate window, not a pane: a
+        /// gallery wants room the call window does not have. Set by the
+        /// status item controller, which owns the app's windows.
+        var sstvGalleryOpener: (() -> Void)?
+
+        /// Show the SSTV Pictures window, from Settings → SSTV or the call
+        /// card's picture panel.
+        func showSstvGallery() { sstvGalleryOpener?() }
     }
 #endif

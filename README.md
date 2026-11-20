@@ -142,6 +142,7 @@ native UI rather than a shared web shell.
 | `astar-iax` | The high-level IAX2 client stack over `astar-iax-core`. |
 | `astar-codec` | G.711 µ-law/A-law and signed-linear (8/16 kHz), Codec 2, plus the AMBE backend that drives the dongle (DVstick 30 / ThumbDV). |
 | `astar-audio` | cpal device I/O, network-agnostic. |
+| `astar-sstv` | SSTV picture decoding (receive only) over the `slowrx` crate, and PNG output. |
 | `astar-station` | The multi-network station facade the clients drive. |
 | `astar-console` | Front-end-agnostic operator-console core. |
 | `astar-asl3` / `astar-m17` / `astar-dstar` / `astar-ysf` / `astar-nxdn` / `astar-dmr` | Per-network service layers. |
@@ -361,8 +362,8 @@ notices and the written offer that goes with static linking.
 
 ### Third-party components
 
-These keep their own terms and are **not** covered by the AGPL. The first four
-rows are paths in this repository; the last two are upstream dependencies:
+These keep their own terms and are **not** covered by the AGPL. The first five
+rows are paths in this repository; the last three are upstream dependencies:
 
 | Path or crate | Component | Licence |
 |---|---|---|
@@ -373,6 +374,7 @@ rows are paths in this repository; the last two are upstream dependencies:
 | `harness/asterisk_parity/c_iaxclient/vendored/libiax2` | The historical C libiax2, used only as a parity reference by the test harness — never linked into a shipped binary | GPL / LGPL, see its `COPYING` and `COPYING.LIB` |
 | `nnnoiseless` crate (dependency, not vendored) | RNNoise — mic noise reduction. Compiled into every build; the model is a const array in the crate | BSD-3-Clause — five copyright lines reproduced in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) |
 | `oxideav-gsm` crate (dependency, not vendored) | GSM 06.10 — the EchoLink voice codec, also used for GSM-only AllStar nodes. `astar-codec` feature `gsm` | MIT — notice and patent reasoning in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) §8 |
+| `slowrx` crate (dependency, not vendored) | SSTV picture decoding, a Rust port of Oona Räisänen's slowrx. Used by `astar-sstv` | MIT, port of ISC-licensed slowrx — both notices in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) §10 |
 
 Everything else — every `astar-*` crate, both applications, the bindings, the
 scripts and the docs — is AGPL-3.0-only. Every first-party `.rs`, `.swift`,

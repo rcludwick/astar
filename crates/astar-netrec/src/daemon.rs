@@ -18,23 +18,38 @@
 //! [`LOCK_FILE`] for as long as it lives. The kernel frees that lock however
 //! the process ends, even in a power cut, so nothing stale can ever block a
 //! start. [`STATE_FILE`] only tells `status` what the holder is doing.
+//!
+//! A public net with `youtube_live` or `twitch_live` on also streams live
+//! while it records: the session gets a [`astar_netvideo::LiveTap`], and a
+//! live stream reads it on threads of its own. Nothing about the stream can
+//! hold up or fail the recording; a stream that will not start is logged
+//! and the net is recorded all the same.
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::fs::{self, File, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, TryLockError as MutexTryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use astar_netarchive::{Ended, RetainPolicy, SessionMeta, recover_unfinished, retain};
+use astar_netvideo::{
+    DestName, DestState, Destination, Ffmpeg, FfmpegError, IngestUrl, LIVE_TAP_CAPACITY,
+    LiveStream, LiveSummary, SessionInfo, TapReceiver, live_tap,
+};
 use jiff::civil::DateTime;
 use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{Config, ConfigError, NetCfg, validate};
+use crate::config::{
+    CREDENTIALS_FILE, Config, ConfigError, NetCfg, StreamKeys, TWITCH_KEY_ENV, TWITCH_KEY_NAME,
+    Visibility, YOUTUBE_KEY_ENV, YOUTUBE_KEY_NAME, validate_with_keys,
+};
 use crate::feed::AudioFeed;
 use crate::listen::LinkStatus;
+use crate::render_queue::RenderQueue;
 use crate::runner::{Clock, NetAdapter, StationAdapter, run_session};
 use crate::schedule::{Window, current_or_next, windows_between};
 use crate::session::{FreeFn, SessionError, SessionRecorder};
@@ -126,6 +141,9 @@ pub struct DaemonState {
     pub linked: Option<bool>,
     /// The recorder's process id.
     pub pid: u32,
+    /// While streaming live, where the stream stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<LiveSummary>,
 }
 
 impl DaemonState {
@@ -137,6 +155,7 @@ impl DaemonState {
             next: None,
             linked: None,
             pid: std::process::id(),
+            live: None,
         }
     }
 
@@ -274,15 +293,49 @@ fn lock_archive(root: &Path) -> Result<File, DaemonError> {
     })
 }
 
-/// An adapter that keeps the state file's `linked` true to the link. The
-/// session polls `status` every tick, so this sees every change, and writes
-/// only on a change. It owns what it needs because a join moves the adapter
-/// to its own thread.
+/// An adapter that keeps the state file's `linked` true to the link, and
+/// its `live` true to the live stream. The session polls `status` every
+/// tick, so this sees every change, and writes only on a change. It owns
+/// what it needs because a join moves the adapter to its own thread.
 struct Watched {
     inner: Box<dyn NetAdapter>,
     root: PathBuf,
-    state: DaemonState,
-    linked: Cell<bool>,
+    /// What the state file says now.
+    shown: RefCell<DaemonState>,
+    /// The live stream's summary, which the stream keeps current.
+    live: Option<Arc<Mutex<LiveSummary>>>,
+}
+
+impl Watched {
+    /// The live summary, unless the stream holds it this instant: a tick
+    /// never waits for it, and the next tick looks again.
+    fn live_now(&self, previous: Option<&LiveSummary>) -> Option<LiveSummary> {
+        let slot = self.live.as_ref()?;
+        match slot.try_lock() {
+            Ok(s) => Some(s.clone()),
+            Err(MutexTryLockError::Poisoned(p)) => Some(p.into_inner().clone()),
+            Err(MutexTryLockError::WouldBlock) => previous.cloned(),
+        }
+    }
+}
+
+/// Whether two live summaries show the same thing: the rung, and each
+/// destination's name and state. A retry count or an error's wording
+/// changes on every failed connection, and rewriting the state file for
+/// each would be churn, so those ride along with the next real change.
+fn same_live(a: Option<&LiveSummary>, b: Option<&LiveSummary>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a.profile == b.profile
+                && a.destinations.len() == b.destinations.len()
+                && a.destinations
+                    .iter()
+                    .zip(&b.destinations)
+                    .all(|(x, y)| x.name == y.name && x.state == y.state)
+        }
+        _ => false,
+    }
 }
 
 impl NetAdapter for Watched {
@@ -293,12 +346,12 @@ impl NetAdapter for Watched {
     fn status(&self) -> LinkStatus {
         let status = self.inner.status();
         let linked = matches!(status, LinkStatus::Linked);
-        if self.linked.replace(linked) != linked {
-            let state = DaemonState {
-                linked: Some(linked),
-                ..self.state.clone()
-            };
-            if let Err(e) = write_state(&self.root, &state) {
+        let mut shown = self.shown.borrow_mut();
+        let live = self.live_now(shown.live.as_ref());
+        if shown.linked != Some(linked) || !same_live(shown.live.as_ref(), live.as_ref()) {
+            shown.linked = Some(linked);
+            shown.live = live;
+            if let Err(e) = write_state(&self.root, &shown) {
                 tracing::warn!("the state file could not be written: {e}");
             }
         }
@@ -338,37 +391,235 @@ fn open_session(
     Ok((adapter, rec))
 }
 
-/// Record an opened session to `leave_at`, showing it in the state file.
+/// Record an opened session to `leave_at`, showing it in the state file,
+/// and stream it live if the net says so. Returns the session's folder with
+/// how it ended.
+#[allow(clippy::too_many_arguments)] // one session's whole context
 fn run_open_session(
     hold: &mut Hold,
+    cfg: &Config,
+    live: &Live,
     net: &NetCfg,
-    (adapter, rec): (Box<dyn NetAdapter>, SessionRecorder),
+    (adapter, mut rec): (Box<dyn NetAdapter>, SessionRecorder),
     leave_at: Timestamp,
     clock: &dyn Clock,
     stop: &AtomicBool,
-) -> Result<SessionMeta, SessionError> {
+) -> (PathBuf, Result<SessionMeta, SessionError>) {
+    let dir = rec.dir().to_path_buf();
     let state = DaemonState::recording(net, clock.now());
     hold.show(state.clone());
+    let stream = start_live(cfg, live, net, &mut rec);
+    // `shown` is what is on disk, which has no `live` yet: the first tick
+    // writes it.
     let mut watched = Watched {
         inner: adapter,
         root: hold.root.clone(),
-        state,
-        linked: Cell::new(false),
+        shown: RefCell::new(state),
+        live: stream.as_ref().map(|h| Arc::clone(&h.summary)),
     };
     let result = run_session(&mut watched, rec, leave_at, clock, stop);
+    if let Some(handle) = stream {
+        let last = (handle.stop)();
+        tracing::info!(
+            "the live stream of {:?} ended: {}",
+            net.name,
+            describe_live(&last)
+        );
+    }
     // `Watched` wrote past `hold`, so what it remembers may be out of date.
     hold.shown = None;
-    result
+    (dir, result)
+}
+
+/// Give `rec` a live tap and start its stream, when `net` streams live
+/// anywhere. `None` (and the recording carries on) when it does not, or
+/// when the stream would not start.
+fn start_live(
+    cfg: &Config,
+    live: &Live,
+    net: &NetCfg,
+    rec: &mut SessionRecorder,
+) -> Option<LiveHandle> {
+    let dests = live_destinations(cfg, net, &live.keys);
+    if dests.is_empty() {
+        return None;
+    }
+    let info = match SessionInfo::from_meta(rec.meta(), &cfg.recorder.my_callsigns) {
+        Ok(info) => info,
+        Err(e) => {
+            tracing::error!("{:?} will not stream live: {e}", net.name);
+            return None;
+        }
+    };
+    let (tap, rx) = live_tap(LIVE_TAP_CAPACITY);
+    let handle = (live.start)(info, dests, rx)?;
+    rec.set_tap(tap);
+    Some(handle)
+}
+
+/// Where `net` streams live: each destination switched on that has a key
+/// and a usable ingest URL. Empty for a private net, whatever its switches
+/// say (`check` refuses that config; this refuses it again). A destination
+/// switched on with no key, or a bad URL, is skipped with one error line.
+#[must_use]
+pub fn live_destinations(cfg: &Config, net: &NetCfg, keys: &StreamKeys) -> Vec<Destination> {
+    if !(net.youtube_live || net.twitch_live) {
+        return Vec::new();
+    }
+    if net.visibility != Visibility::Public {
+        tracing::error!(
+            "{:?} is private, so it is never streamed live; set visibility = \"public\" to stream it",
+            net.name
+        );
+        return Vec::new();
+    }
+    let wanted = [
+        (
+            net.youtube_live,
+            DestName::YouTube,
+            &cfg.live.youtube_ingest,
+            &keys.youtube,
+            YOUTUBE_KEY_NAME,
+            YOUTUBE_KEY_ENV,
+        ),
+        (
+            net.twitch_live,
+            DestName::Twitch,
+            &cfg.live.twitch_ingest,
+            &keys.twitch,
+            TWITCH_KEY_NAME,
+            TWITCH_KEY_ENV,
+        ),
+    ];
+    let mut out = Vec::new();
+    for (on, name, ingest, key, key_name, env) in wanted {
+        if !on {
+            continue;
+        }
+        let Some(key) = key else {
+            tracing::error!(
+                "{:?} is not streamed to {name}: no {name} stream key is set; put {key_name} in {CREDENTIALS_FILE} beside the config, or set {env}",
+                net.name
+            );
+            continue;
+        };
+        match IngestUrl::parse(ingest) {
+            Ok(ingest) => out.push(Destination {
+                name,
+                ingest,
+                key: key.clone(),
+            }),
+            Err(e) => tracing::error!("{:?} is not streamed to {name}: {e}", net.name),
+        }
+    }
+    out
+}
+
+/// What starts a live stream for a session: its frame info, where to send
+/// it, and its tap. `None` when no stream started; the recording goes on.
+pub type LiveStarter = dyn Fn(SessionInfo, Vec<Destination>, TapReceiver) -> Option<LiveHandle>;
+
+/// A running live stream, as the daemon sees it.
+pub struct LiveHandle {
+    /// Where the stream stands, kept current by the stream.
+    pub summary: Arc<Mutex<LiveSummary>>,
+    /// Stops the stream and says where it stood.
+    pub stop: Box<dyn FnOnce() -> LiveSummary>,
+}
+
+impl LiveHandle {
+    /// The handle on a running [`LiveStream`].
+    #[must_use]
+    pub fn of(stream: LiveStream) -> Self {
+        Self {
+            summary: stream.summary_slot(),
+            stop: Box::new(move || stream.stop()),
+        }
+    }
+}
+
+/// What the daemon streams live with: the stream keys and a starter.
+pub struct Live {
+    /// The keys, each present or not.
+    pub keys: StreamKeys,
+    /// Starts a session's stream.
+    pub start: Box<LiveStarter>,
+}
+
+impl Live {
+    /// Nothing streams.
+    #[must_use]
+    pub fn off() -> Self {
+        Self {
+            keys: StreamKeys::default(),
+            start: Box::new(|_, _, _| None),
+        }
+    }
+
+    /// Stream with `ff`. Without one, a net that wants to stream is
+    /// recorded only, with an error line saying why.
+    #[must_use]
+    pub fn with_ffmpeg(keys: StreamKeys, ff: Option<Ffmpeg>) -> Self {
+        Self {
+            keys,
+            start: Box::new(move |info, dests, rx| {
+                let Some(ff) = ff.clone() else {
+                    tracing::error!(
+                        "{:?} is not streamed live: no usable ffmpeg was found (see `astar-netrec check`)",
+                        info.net
+                    );
+                    return None;
+                };
+                let net = info.net.clone();
+                match LiveStream::start(info, ff, dests, rx) {
+                    Ok(stream) => {
+                        tracing::info!("streaming {net:?} live");
+                        Some(LiveHandle::of(stream))
+                    }
+                    Err(e) => {
+                        tracing::error!("{net:?} is not streamed live: {e}; recording goes on");
+                        None
+                    }
+                }
+            }),
+        }
+    }
+}
+
+/// `YouTube live, Twitch retrying`.
+fn describe_live(s: &LiveSummary) -> String {
+    let dests: Vec<String> = s
+        .destinations
+        .iter()
+        .map(|d| {
+            let name = match d.name.as_str() {
+                "youtube" => "YouTube",
+                "twitch" => "Twitch",
+                other => other,
+            };
+            let state = match d.state {
+                DestState::Connecting => "connecting",
+                DestState::Live => "live",
+                DestState::Retrying => "retrying",
+                DestState::Off => "off",
+            };
+            format!("{name} {state}")
+        })
+        .collect();
+    format!("{}: {}", s.profile, dests.join(", "))
 }
 
 /// The daemon's working state.
 struct Daemon<'a> {
     cfg: &'a Config,
+    live: &'a Live,
     clock: &'a dyn Clock,
     stop: &'a AtomicBool,
     make: &'a dyn Fn(&NetCfg) -> Made,
     free: FreeFn,
     hold: Hold,
+    /// Finished sessions waiting for their video.
+    queue: RenderQueue,
     last_retain: Instant,
     skipped: u64,
 }
@@ -385,8 +636,9 @@ impl Daemon<'_> {
     }
 
     /// Run retention. No session is ever open here, because sessions run on
-    /// this same thread, so `busy` is empty. A failure is only logged: it
-    /// must not cost the next net.
+    /// this same thread, so `busy` is the folders queued for or under a
+    /// video render. A failure is only logged: it must not cost the next
+    /// net.
     fn retain(&mut self) {
         self.last_retain = self.clock.instant();
         let r = &self.cfg.recorder;
@@ -394,7 +646,7 @@ impl Daemon<'_> {
             max_bytes: r.max_bytes,
             max_age: Duration::from_secs(u64::from(r.max_age_days) * 86_400),
         };
-        match retain(&r.root, &policy, self.clock.now(), &[]) {
+        match retain(&r.root, &policy, self.clock.now(), &self.queue.busy()) {
             Ok(report) if !report.deleted.is_empty() => {
                 tracing::info!(
                     "retention deleted {} session(s), {} bytes kept",
@@ -509,14 +761,24 @@ impl Daemon<'_> {
         };
         *recorded = true;
         tracing::info!("recording {:?} until {}", net.name, window.leave_at);
-        let result = run_open_session(
+        let (dir, result) = run_open_session(
             &mut self.hold,
+            self.cfg,
+            self.live,
             net,
             opened,
             window.leave_at,
             self.clock,
             self.stop,
         );
+        // Queued before retention runs, so retention leaves it alone. A
+        // stopped daemon renders nothing: the queue stops with it.
+        if net.video
+            && !self.stopped()
+            && matches!(&result, Ok(meta) if meta.ended != Some(Ended::Error))
+        {
+            self.queue.push(dir);
+        }
         self.retain();
         match result {
             Ok(meta) if meta.ended == Some(Ended::Error) => {
@@ -544,20 +806,111 @@ impl Daemon<'_> {
 /// is running, failures are logged and the daemon carries on.
 pub fn run(
     cfg: &Config,
+    ff: Option<Ffmpeg>,
+    live: &Live,
     clock: &dyn Clock,
     stop: &AtomicBool,
     make: &dyn Fn(&NetCfg) -> Made,
 ) -> Result<(), DaemonError> {
-    run_with(cfg, clock, stop, make, astar_netarchive::free_bytes)
+    let queue = RenderQueue::new(
+        ff,
+        cfg.recorder.root.clone(),
+        cfg.recorder.my_callsigns.clone(),
+    );
+    run_live(
+        cfg,
+        live,
+        clock,
+        stop,
+        make,
+        astar_netarchive::free_bytes,
+        queue,
+    )
 }
 
-/// [`run`] with the free-space reading supplied.
+/// The `ffmpeg` the videos and live streams use, when any net wants
+/// either. Without one the nets are still recorded, and the log says once
+/// why there are no videos or streams.
+#[must_use]
+pub fn find_ffmpeg(cfg: &Config) -> Option<Ffmpeg> {
+    if !cfg
+        .nets
+        .iter()
+        .any(|n| n.video || n.youtube_live || n.twitch_live)
+    {
+        return None;
+    }
+    match astar_netvideo::find(&cfg.video.ffmpeg) {
+        Ok(ff) => {
+            tracing::info!(
+                "videos and live streams use ffmpeg {} at {}",
+                ff.version,
+                ff.path.display()
+            );
+            Some(ff)
+        }
+        Err(e) => {
+            tracing::warn!("no videos or live streams will be made: {e}");
+            None
+        }
+    }
+}
+
+/// Remove the `video.mp4.part` a render that is gone left in any session
+/// folder. Its session is not queued again: `astar-netrec render` makes it.
+fn remove_leftover_parts(root: &Path) {
+    let Ok(nets) = fs::read_dir(root) else { return };
+    for net in nets.flatten() {
+        if !net.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let Ok(sessions) = fs::read_dir(net.path()) else {
+            continue;
+        };
+        for session in sessions.flatten() {
+            let dir = session.path();
+            if !session.file_type().is_ok_and(|t| t.is_dir())
+                || fs::symlink_metadata(dir.join(astar_netvideo::VIDEO_PART)).is_err()
+            {
+                continue;
+            }
+            match astar_netvideo::remove_leftover_part(&dir) {
+                Ok(true) => tracing::info!(
+                    "removed an unfinished video from {}; `astar-netrec render` can make it",
+                    dir.display()
+                ),
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    "cannot remove the unfinished video in {}: {e}",
+                    dir.display()
+                ),
+            }
+        }
+    }
+}
+
+/// [`run`] with the free-space reading supplied and nothing streamed live.
+#[cfg(test)]
 pub(crate) fn run_with(
     cfg: &Config,
     clock: &dyn Clock,
     stop: &AtomicBool,
     make: &dyn Fn(&NetCfg) -> Made,
     free: FreeFn,
+    queue: RenderQueue,
+) -> Result<(), DaemonError> {
+    run_live(cfg, &Live::off(), clock, stop, make, free, queue)
+}
+
+/// [`run`] with the free-space reading supplied.
+pub(crate) fn run_live(
+    cfg: &Config,
+    live: &Live,
+    clock: &dyn Clock,
+    stop: &AtomicBool,
+    make: &dyn Fn(&NetCfg) -> Made,
+    free: FreeFn,
+    queue: RenderQueue,
 ) -> Result<(), DaemonError> {
     // The claim comes first, and holds until this returns: recovery marks every open session as crashed,
     // and a live recorder's session is open.
@@ -570,18 +923,23 @@ pub(crate) fn run_with(
         }
         Err(e) => tracing::error!("crash recovery failed: {e}"),
     }
+    remove_leftover_parts(&cfg.recorder.root);
     let mut daemon = Daemon {
         cfg,
+        live,
         clock,
         stop,
         make,
         free,
         hold,
+        queue,
         last_retain: clock.instant(),
         skipped: 0,
     };
     daemon.retain();
     daemon.run();
+    // A render under way is killed and leaves no part file.
+    daemon.queue.stop();
     Ok(())
 }
 
@@ -616,6 +974,7 @@ fn find_net<'a>(cfg: &'a Config, name: &str) -> Result<(usize, &'a NetCfg), Daem
 /// stopped the recording.
 pub fn record_now(
     cfg: &Config,
+    live: &Live,
     name: &str,
     length: Duration,
     clock: &dyn Clock,
@@ -637,7 +996,7 @@ pub fn record_now(
     };
     let free = astar_netarchive::free_bytes;
     let opened = open_session(&cfg.recorder.root, net, &window, clock, make, free)?;
-    let meta = run_open_session(&mut hold, net, opened, leave_at, clock, stop)?;
+    let meta = run_open_session(&mut hold, cfg, live, net, opened, leave_at, clock, stop).1?;
     if meta.ended == Some(Ended::Error) {
         return Err(DaemonError::SessionFailed(net.name.clone()));
     }
@@ -682,7 +1041,11 @@ pub fn status_line(root: &Path) -> String {
             } else {
                 "not linked"
             };
-            format!("recording {net:?} since {since}, {link}")
+            let live = state
+                .live
+                .as_ref()
+                .map_or(String::new(), |l| format!(" · live {}", describe_live(l)));
+            format!("recording {net:?} since {since}, {link}{live}")
         }
         "waiting" => {
             let joins = wall_clock(state.next.as_deref(), "%a %Y-%m-%d %H:%M");
@@ -713,16 +1076,17 @@ fn wall_clock(text: Option<&str>, format: &str) -> String {
         .map_or_else(|_| text.to_string(), |t| t.strftime(format).to_string())
 }
 
-/// What `check` prints: `validate`'s warnings, then the next windows, one line
-/// each, in each net's zone.
+/// What `check` prints: the warnings (a live switch with no key among
+/// them), then the next windows, one line each, in each net's zone.
 ///
 /// # Errors
-/// Whatever [`validate`] refuses.
+/// Whatever [`validate_with_keys`] refuses.
 pub fn check_report(
     cfg: &Config,
     now: Timestamp,
+    keys: &StreamKeys,
 ) -> Result<(Vec<String>, Vec<String>), ConfigError> {
-    let warnings = validate(cfg, now)?;
+    let warnings = validate_with_keys(cfg, now, keys)?;
     let horizon = now
         .checked_add(SignedDuration::from_hours(CHECK_HOURS))
         .unwrap_or(now);
@@ -749,6 +1113,26 @@ pub fn check_report(
     Ok((warnings, lines))
 }
 
+/// What `check` says about video and live: the `ffmpeg` found (or why
+/// none), and which stream keys are set. Only whether a key is there, never
+/// any of it.
+#[must_use]
+pub fn check_media(ff: &Result<Ffmpeg, FfmpegError>, keys: &StreamKeys) -> Vec<String> {
+    let ffmpeg = match ff {
+        Ok(ff) => format!("ffmpeg: {} {}", ff.path.display(), ff.version),
+        Err(e) => format!("ffmpeg: {e}"),
+    };
+    let set = |k: &Option<_>| if k.is_some() { "set" } else { "missing" };
+    vec![
+        ffmpeg,
+        format!(
+            "live: YouTube key {}, Twitch key {}",
+            set(&keys.youtube),
+            set(&keys.twitch)
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use std::fmt::Write as _;
@@ -759,6 +1143,7 @@ mod tests {
 
     use super::*;
     use crate::config::from_toml_str;
+    use crate::render_queue::RenderFn;
     use crate::runner::testing::{FakeAdapter, FakeClock, Plan, Seen};
 
     const RATE: u32 = 8000;
@@ -801,6 +1186,54 @@ mod tests {
             .unwrap();
         }
         from_toml_str(&text).unwrap()
+    }
+
+    /// The daemon as `run` starts it, but with no videos: the tests here
+    /// must not render with whatever `ffmpeg` this machine has.
+    fn run(
+        cfg: &Config,
+        clock: &dyn Clock,
+        stop: &AtomicBool,
+        make: &dyn Fn(&NetCfg) -> Made,
+    ) -> Result<(), DaemonError> {
+        let queue = no_videos(&cfg.recorder.root);
+        run_with(cfg, clock, stop, make, astar_netarchive::free_bytes, queue)
+    }
+
+    fn no_videos(root: &Path) -> RenderQueue {
+        RenderQueue::new(None, root.to_path_buf(), Vec::new())
+    }
+
+    /// A queue whose renders record the folder they were given, after
+    /// waiting for `release` (or a stop).
+    fn stub_queue(
+        root: &Path,
+        seen: &Arc<Mutex<Vec<PathBuf>>>,
+        release: &Arc<AtomicBool>,
+    ) -> RenderQueue {
+        let seen = Arc::clone(seen);
+        let release = Arc::clone(release);
+        let render: RenderFn = Arc::new(move |dir, stop| {
+            while !release.load(Ordering::Acquire) && !stop.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(5));
+            }
+            seen.lock().unwrap().push(dir.to_path_buf());
+            Ok(String::new())
+        });
+        RenderQueue::with(
+            Some(render),
+            root.to_path_buf(),
+            astar_netarchive::free_bytes,
+        )
+    }
+
+    /// Waits up to 10 s of real time for `done`.
+    fn real_wait(done: impl Fn() -> bool) -> bool {
+        let until = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < until && !done() {
+            thread::sleep(Duration::from_millis(10));
+        }
+        done()
     }
 
     fn at(hms: &str) -> jiff::Timestamp {
@@ -921,6 +1354,7 @@ mod tests {
             next: None,
             linked: Some(true),
             pid,
+            live: None,
         };
         fs::write(root.join(STATE_FILE), serde_json::to_vec(&s).unwrap()).unwrap();
     }
@@ -1121,6 +1555,415 @@ mod tests {
             .filter(|n| n.to_string_lossy().starts_with(STATE_FILE))
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    // ---- live ----
+
+    const KEY: &str = "N0CALL-TEST-STREAM-KEY-9X";
+
+    fn keys(youtube: bool, twitch: bool) -> StreamKeys {
+        StreamKeys {
+            youtube: youtube.then(|| astar_secrets::Secret::new(KEY.to_owned())),
+            twitch: twitch.then(|| astar_secrets::Secret::new(format!("{KEY}-TW"))),
+        }
+    }
+
+    /// A public noon net streaming to `YouTube` (and Twitch when `twitch`).
+    fn live_config(root: &Path, twitch: bool) -> Config {
+        let mut cfg = config(root, "0s", "0s", &[("Noon net", "daily 12:00", "2m")]);
+        cfg.nets[0].visibility = Visibility::Public;
+        cfg.nets[0].youtube_live = true;
+        cfg.nets[0].twitch_live = twitch;
+        cfg.nets[0].video = false;
+        cfg
+    }
+
+    fn summary(state: DestState) -> LiveSummary {
+        LiveSummary {
+            profile: "1080p30".into(),
+            destinations: vec![astar_netvideo::DestStatus {
+                name: "youtube".into(),
+                state,
+                reconnects: 0,
+                last_error: None,
+            }],
+        }
+    }
+
+    /// What a stub stream saw.
+    #[derive(Default)]
+    struct Stub {
+        starts: AtomicU32,
+        dests: Mutex<Vec<String>>,
+        /// Tap messages the session dropped, read when the stream stopped.
+        dropped: Mutex<Option<u64>>,
+        stops: AtomicU32,
+    }
+
+    /// A live starter that never reads its tap and reports `state`.
+    fn stub_live(keys: StreamKeys, stub: &Arc<Stub>, state: DestState) -> Live {
+        let stub = Arc::clone(stub);
+        Live {
+            keys,
+            start: Box::new(move |_info, dests, rx| {
+                stub.starts.fetch_add(1, Ordering::SeqCst);
+                *stub.dests.lock().unwrap() = dests.iter().map(|d| d.name.to_string()).collect();
+                let slot = Arc::new(Mutex::new(summary(state)));
+                let stub = Arc::clone(&stub);
+                let last = summary(state);
+                Some(LiveHandle {
+                    summary: slot,
+                    stop: Box::new(move || {
+                        *stub.dropped.lock().unwrap() = Some(rx.dropped());
+                        stub.stops.fetch_add(1, Ordering::SeqCst);
+                        last
+                    }),
+                })
+            }),
+        }
+    }
+
+    fn run_noon(cfg: &Config, live: &Live, hook: impl Fn(&FakeClock)) {
+        let fake = FakeClock::new(at("11:59:00"));
+        let stop = AtomicBool::new(false);
+        let seen = Arc::default();
+        let clock = Script::new(&fake, |c| {
+            hook(c);
+            if c.elapsed() >= mins(4) {
+                stop.store(true, Ordering::SeqCst);
+            }
+        });
+        let root = cfg.recorder.root.clone();
+        run_live(
+            cfg,
+            live,
+            &clock,
+            &stop,
+            &linking(&fake, &seen),
+            astar_netarchive::free_bytes,
+            no_videos(&root),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn private_net_never_goes_live() {
+        let root = temp("private-live");
+        let mut cfg = live_config(&root, true);
+        // Switched on, but private: `validate` refuses this, and it is
+        // bypassed here on purpose.
+        cfg.nets[0].visibility = Visibility::Private;
+        let log = logged(|| {
+            assert!(live_destinations(&cfg, &cfg.nets[0], &keys(true, true)).is_empty());
+        });
+        assert!(log.contains("private"), "{log}");
+        let stub = Arc::new(Stub::default());
+        run_noon(
+            &cfg,
+            &stub_live(keys(true, true), &stub, DestState::Live),
+            |_| {},
+        );
+        assert_eq!(stub.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(sessions(&root).len(), 1, "recorded all the same");
+    }
+
+    #[test]
+    fn live_off_starts_nothing() {
+        let root = temp("live-off");
+        let mut cfg = live_config(&root, false);
+        cfg.nets[0].youtube_live = false;
+        assert!(live_destinations(&cfg, &cfg.nets[0], &keys(true, true)).is_empty());
+        let stub = Arc::new(Stub::default());
+        run_noon(
+            &cfg,
+            &stub_live(keys(true, true), &stub, DestState::Live),
+            |_| {},
+        );
+        assert_eq!(stub.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(sessions(&root).len(), 1);
+    }
+
+    #[test]
+    fn switched_on_without_a_key_skips_that_destination() {
+        let root = temp("live-nokey");
+        let cfg = live_config(&root, true);
+        let mut dests = Vec::new();
+        let log = logged(|| dests = live_destinations(&cfg, &cfg.nets[0], &keys(true, false)));
+        assert_eq!(dests.len(), 1);
+        assert_eq!(dests[0].name, DestName::YouTube);
+        assert_eq!(dests[0].ingest.host, "a.rtmps.youtube.com");
+        let errors: Vec<&str> = log.lines().filter(|l| l.contains("ERROR")).collect();
+        assert_eq!(errors.len(), 1, "{log}");
+        assert!(errors[0].contains("Twitch"), "{log}");
+        assert!(errors[0].contains("twitch_stream_key"), "{log}");
+        assert!(errors[0].contains(CREDENTIALS_FILE), "{log}");
+        assert!(errors[0].contains(TWITCH_KEY_ENV), "{log}");
+        assert!(!log.contains(KEY), "{log}");
+        // No key at all: nothing to stream, and the daemon starts nothing.
+        let stub = Arc::new(Stub::default());
+        run_noon(
+            &cfg,
+            &stub_live(keys(false, false), &stub, DestState::Live),
+            |_| {},
+        );
+        assert_eq!(stub.starts.load(Ordering::SeqCst), 0);
+    }
+
+    /// Runs `f` on a thread of its own and fails if it is not done within
+    /// `limit`, so a regression that blocks fails the test rather than
+    /// hanging the run.
+    fn within(limit: Duration, f: impl FnOnce() + Send + 'static) {
+        let (done, finished) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            f();
+            let _ = done.send(());
+        });
+        match finished.recv_timeout(limit) {
+            Ok(()) => worker.join().expect("worker"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("not done within {limit:?}: something blocked")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                std::panic::resume_unwind(worker.join().expect_err("it panicked"))
+            }
+        }
+    }
+
+    #[test]
+    fn stalled_live_never_delays_a_tick() {
+        // The session runs on a fake clock, so it takes a second or two;
+        // a tick that blocked on the stalled stream would never finish.
+        within(Duration::from_secs(60), || {
+            let root = temp("live-stall");
+            let cfg = live_config(&root, false);
+            let stub = Arc::new(Stub::default());
+            run_noon(
+                &cfg,
+                &stub_live(keys(true, false), &stub, DestState::Live),
+                |_| {},
+            );
+            assert_eq!(stub.starts.load(Ordering::SeqCst), 1);
+            assert_eq!(
+                stub.stops.load(Ordering::SeqCst),
+                1,
+                "stopped after the session"
+            );
+            assert_eq!(*stub.dests.lock().unwrap(), ["YouTube"]);
+            let found = sessions(&root);
+            assert_eq!(found.len(), 1);
+            // Every tick of the two-minute window is in the recording, though
+            // nothing ever read the tap after its first thousand messages.
+            assert_eq!(seconds(&found[0]), 120);
+            let meta = read_meta(&found[0]).unwrap();
+            assert_eq!(meta.ended, Some(Ended::Window));
+            let dropped = stub
+                .dropped
+                .lock()
+                .unwrap()
+                .expect("the stream was stopped");
+            assert!(dropped >= 5_000, "{dropped} dropped");
+        });
+    }
+
+    /// An adapter that is always linked and never joins.
+    struct AlwaysLinked;
+
+    impl NetAdapter for AlwaysLinked {
+        fn join(&mut self) -> Result<Box<dyn AudioFeed>, String> {
+            Err("not in this test".into())
+        }
+        fn status(&self) -> LinkStatus {
+            LinkStatus::Linked
+        }
+        fn talker(&self) -> Option<String> {
+            None
+        }
+        fn leave(&mut self) {}
+        fn rate(&self) -> u32 {
+            8_000
+        }
+        fn dropped_frames(&self) -> u64 {
+            0
+        }
+    }
+
+    #[test]
+    fn the_state_file_is_written_on_a_state_change_not_on_every_retry() {
+        let root = temp("live-churn");
+        let cfg = live_config(&root, false);
+        let slot = Arc::new(Mutex::new(summary(DestState::Retrying)));
+        let w = Watched {
+            inner: Box::new(AlwaysLinked),
+            root: root.clone(),
+            shown: RefCell::new(DaemonState::recording(&cfg.nets[0], at("12:00:00"))),
+            live: Some(Arc::clone(&slot)),
+        };
+        let state = root.join(STATE_FILE);
+        w.status();
+        assert!(state.exists(), "the first tick writes the state file");
+        fs::remove_file(&state).unwrap();
+        // Retrying again, with a new count and a new error: no write.
+        for n in 1..=5 {
+            let mut s = slot.lock().unwrap();
+            s.destinations[0].reconnects = n;
+            s.destinations[0].last_error = Some(format!("refused, try {n}"));
+            drop(s);
+            w.status();
+        }
+        assert!(!state.exists(), "rewritten for a retry count");
+        // Live: a state change, so it is written, with the latest counts.
+        slot.lock().unwrap().destinations[0].state = DestState::Live;
+        w.status();
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&state).unwrap()).unwrap();
+        assert_eq!(json["live"]["destinations"][0]["state"], "live");
+        assert_eq!(json["live"]["destinations"][0]["reconnects"], 5);
+    }
+
+    #[test]
+    fn state_file_shows_live() {
+        let root = temp("live-state");
+        let cfg = live_config(&root, false);
+        let stub = Arc::new(Stub::default());
+        let text: Mutex<Option<String>> = Mutex::default();
+        let line: Mutex<Option<String>> = Mutex::default();
+        run_noon(
+            &cfg,
+            &stub_live(keys(true, false), &stub, DestState::Live),
+            |c| {
+                if c.elapsed() >= secs(90) && text.lock().unwrap().is_none() {
+                    *text.lock().unwrap() = fs::read_to_string(root.join(STATE_FILE)).ok();
+                    *line.lock().unwrap() = Some(status_line(&root));
+                }
+            },
+        );
+        let text = text
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("a state file mid-session");
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["state"], "recording");
+        assert_eq!(json["live"]["profile"], "1080p30");
+        assert_eq!(json["live"]["destinations"][0]["state"], "live");
+        assert_eq!(json["live"]["destinations"][0]["name"], "youtube");
+        assert!(!text.contains(KEY), "{text}");
+        let line = line.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            line,
+            "recording \"Noon net\" since 12:00, linked · live 1080p30: YouTube live"
+        );
+    }
+
+    #[test]
+    fn state_file_shows_live_while_the_link_is_still_down() {
+        let root = temp("live-unlinked");
+        let cfg = live_config(&root, false);
+        let stub = Arc::new(Stub::default());
+        let live = stub_live(keys(true, false), &stub, DestState::Connecting);
+        let fake = FakeClock::new(at("11:59:00"));
+        let stop = AtomicBool::new(false);
+        let seen: Arc<Mutex<Seen>> = Arc::default();
+        let text: Mutex<Option<String>> = Mutex::default();
+        let clock = Script::new(&fake, |c| {
+            if c.elapsed() >= secs(65) && text.lock().unwrap().is_none() {
+                *text.lock().unwrap() = fs::read_to_string(root.join(STATE_FILE)).ok();
+                stop.store(true, Ordering::SeqCst);
+            }
+        });
+        // A link that never comes up: `linked` never changes, so only the
+        // live summary can make the first write.
+        let make = |_: &NetCfg| -> Made {
+            let mut a = FakeAdapter::new(
+                &fake,
+                RATE,
+                vec![Plan::Link {
+                    script: vec![(Duration::ZERO, LinkStatus::Linking)],
+                    voice: 0,
+                }],
+            );
+            a.seen = Arc::clone(&seen);
+            Ok(Box::new(a))
+        };
+        let free = astar_netarchive::free_bytes;
+        run_live(&cfg, &live, &clock, &stop, &make, free, no_videos(&root)).unwrap();
+        let text = text
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("a state file mid-session");
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["linked"], false, "{text}");
+        assert_eq!(
+            json["live"]["destinations"][0]["state"], "connecting",
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn status_line_reports_live() {
+        let root = temp("live-status");
+        let _held = take_lock(&root);
+        let mut live = summary(DestState::Live);
+        live.destinations.push(astar_netvideo::DestStatus {
+            name: "twitch".into(),
+            state: DestState::Retrying,
+            reconnects: 2,
+            last_error: Some("timed out waiting for the server (127.0.0.1:1935)".into()),
+        });
+        let s = DaemonState {
+            live: Some(live),
+            ..DaemonState::recording(
+                &config(&root, "0s", "0s", &[("Tuesday M17 net", "Tue 19:00", "1h")]).nets[0],
+                at("19:55:00"),
+            )
+        };
+        fs::write(root.join(STATE_FILE), serde_json::to_vec(&s).unwrap()).unwrap();
+        assert_eq!(
+            status_line(&root),
+            "recording \"Tuesday M17 net\" since 19:55, not linked · live 1080p30: YouTube live, Twitch retrying"
+        );
+        // A state file from before live streams existed still reads.
+        write_state(&root, "recording", std::process::id());
+        assert_eq!(
+            status_line(&root),
+            "recording \"Tuesday M17 net\" since 19:55, linked"
+        );
+    }
+
+    #[test]
+    fn check_reports_key_presence_only() {
+        let root = temp("live-check");
+        let cfg = live_config(&root, true);
+        let k = keys(true, false);
+        let missing = Err(FfmpegError::Missing(PathBuf::from("ffmpeg")));
+        let lines = check_media(&missing, &k);
+        assert_eq!(lines[1], "live: YouTube key set, Twitch key missing");
+        assert!(
+            lines[0].starts_with("ffmpeg: ffmpeg was not found"),
+            "{lines:?}"
+        );
+        let found = Ok(Ffmpeg {
+            path: PathBuf::from("/opt/homebrew/bin/ffmpeg"),
+            version: "7.1.1".into(),
+        });
+        assert_eq!(
+            check_media(&found, &keys(false, true))[..],
+            [
+                "ffmpeg: /opt/homebrew/bin/ffmpeg 7.1.1",
+                "live: YouTube key missing, Twitch key set"
+            ]
+        );
+        let (warnings, _) = check_report(&cfg, at("00:00:00"), &k).unwrap();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("twitch_live is on but no Twitch stream key")),
+            "{warnings:?}"
+        );
+        for text in lines.iter().chain(&warnings) {
+            assert!(!text.contains(KEY), "{text}");
+        }
     }
 
     #[test]
@@ -1360,6 +2203,94 @@ mod tests {
     }
 
     #[test]
+    fn a_finished_session_is_queued_when_video_is_on() {
+        let root = temp("video");
+        let cfg = config(&root, "0s", "0s", &[("Noon net", "daily 12:00", "2m")]);
+        assert!(cfg.nets[0].video, "on unless switched off");
+        let fake = FakeClock::new(at("11:59:00"));
+        let stop = AtomicBool::new(false);
+        let seen = Arc::default();
+        let rendered: Arc<Mutex<Vec<PathBuf>>> = Arc::default();
+        let release = Arc::new(AtomicBool::new(true));
+        let queue = stub_queue(&root, &rendered, &release);
+        let clock = Script::new(&fake, |c| {
+            if c.elapsed() >= mins(4) {
+                // Real time: the worker is a real thread.
+                real_wait(|| !rendered.lock().unwrap().is_empty());
+                stop.store(true, Ordering::SeqCst);
+            }
+        });
+        let free = astar_netarchive::free_bytes;
+        run_with(&cfg, &clock, &stop, &linking(&fake, &seen), free, queue).unwrap();
+        let found = sessions(&root);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(*rendered.lock().unwrap(), found);
+    }
+
+    #[test]
+    fn video_off_queues_nothing() {
+        let root = temp("novideo");
+        let mut cfg = config(&root, "0s", "0s", &[("Noon net", "daily 12:00", "2m")]);
+        cfg.nets[0].video = false;
+        let fake = FakeClock::new(at("11:59:00"));
+        let stop = AtomicBool::new(false);
+        let seen = Arc::default();
+        let rendered: Arc<Mutex<Vec<PathBuf>>> = Arc::default();
+        let release = Arc::new(AtomicBool::new(true));
+        let queue = stub_queue(&root, &rendered, &release);
+        let clock = Script::new(&fake, |c| {
+            if c.elapsed() >= mins(4) {
+                // Long enough for a queued render to have run.
+                thread::sleep(Duration::from_millis(300));
+                stop.store(true, Ordering::SeqCst);
+            }
+        });
+        let free = astar_netarchive::free_bytes;
+        run_with(&cfg, &clock, &stop, &linking(&fake, &seen), free, queue).unwrap();
+        assert_eq!(sessions(&root).len(), 1);
+        assert!(rendered.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn retention_skips_a_session_being_rendered() {
+        let root = temp("renderbusy");
+        let mut cfg = config(&root, "0s", "0s", &[("Noon net", "daily 12:00", "2m")]);
+        cfg.recorder.max_bytes = 0;
+        let fake = FakeClock::new(at("11:59:00"));
+        let stop = AtomicBool::new(false);
+        let seen = Arc::default();
+        let rendered: Arc<Mutex<Vec<PathBuf>>> = Arc::default();
+        // Never released: the render is under way until the stop.
+        let release = Arc::new(AtomicBool::new(false));
+        let queue = stub_queue(&root, &rendered, &release);
+        let clock = Script::stopping(&fake, mins(4), &stop);
+        let free = astar_netarchive::free_bytes;
+        run_with(&cfg, &clock, &stop, &linking(&fake, &seen), free, queue).unwrap();
+        let found = sessions(&root);
+        assert_eq!(found.len(), 1, "deleted while it was being rendered");
+        assert_eq!(read_meta(&found[0]).unwrap().ended, Some(Ended::Window));
+    }
+
+    #[test]
+    fn leftover_part_file_is_removed_at_start() {
+        let root = temp("leftover");
+        let cfg = config(&root, "0s", "0s", &[("Noon net", "daily 12:00", "1m")]);
+        let dir = plant(&root, "old", Some("2026-11-03T01:00:00Z"));
+        fs::write(dir.join(astar_netvideo::VIDEO_PART), b"half a video").unwrap();
+        fs::write(dir.join(astar_netvideo::VIDEO_FILE), b"an old video").unwrap();
+        let fake = FakeClock::new(at("11:00:00"));
+        let stop = AtomicBool::new(true);
+        let seen = Arc::default();
+        run(&cfg, &fake, &stop, &linking(&fake, &seen)).unwrap();
+        assert!(!dir.join(astar_netvideo::VIDEO_PART).exists());
+        // Not re-queued, and the finished video is left alone.
+        assert_eq!(
+            fs::read(dir.join(astar_netvideo::VIDEO_FILE)).unwrap(),
+            b"an old video"
+        );
+    }
+
+    #[test]
     fn low_disk_retries_each_minute_then_skips_the_window() {
         static CALLS: AtomicU32 = AtomicU32::new(0);
         #[allow(clippy::unnecessary_wraps)] // the shape of a free-space reading
@@ -1375,7 +2306,15 @@ mod tests {
         let seen: Arc<Mutex<Seen>> = Arc::default();
         let clock = Script::stopping(&fake, mins(10), &stop);
         let logs = logged(|| {
-            run_with(&cfg, &clock, &stop, &linking(&fake, &seen), full).unwrap();
+            run_with(
+                &cfg,
+                &clock,
+                &stop,
+                &linking(&fake, &seen),
+                full,
+                no_videos(&root),
+            )
+            .unwrap();
         });
 
         assert_eq!(CALLS.load(Ordering::SeqCst), 5, "one try a minute");
@@ -1399,7 +2338,15 @@ mod tests {
         let stop = AtomicBool::new(false);
         let seen = Arc::default();
         let clock = Script::stopping(&fake, mins(10), &stop);
-        run_with(&cfg, &clock, &stop, &linking(&fake, &seen), clears).unwrap();
+        run_with(
+            &cfg,
+            &clock,
+            &stop,
+            &linking(&fake, &seen),
+            clears,
+            no_videos(&root),
+        )
+        .unwrap();
 
         let found = sessions(&root);
         assert_eq!(found.len(), 1, "{found:?}");
@@ -1503,6 +2450,7 @@ mod tests {
         let seen = Arc::default();
         let meta = record_now(
             &cfg,
+            &Live::off(),
             "noon NET",
             mins(2),
             &fake,
@@ -1529,8 +2477,16 @@ mod tests {
         let fake = FakeClock::new(at("03:00:00"));
         let stop = AtomicBool::new(false);
         let seen = Arc::default();
-        let err =
-            record_now(&cfg, "Third", mins(2), &fake, &stop, &linking(&fake, &seen)).unwrap_err();
+        let err = record_now(
+            &cfg,
+            &Live::off(),
+            "Third",
+            mins(2),
+            &fake,
+            &stop,
+            &linking(&fake, &seen),
+        )
+        .unwrap_err();
         let text = err.to_string();
         assert!(matches!(err, DaemonError::UnknownNet { .. }), "{text}");
         assert!(text.contains("First") && text.contains("Second"), "{text}");
@@ -1547,6 +2503,7 @@ mod tests {
         let seen: Arc<Mutex<Seen>> = Arc::default();
         let err = record_now(
             &cfg,
+            &Live::off(),
             "Noon net",
             mins(2),
             &fake,
@@ -1574,6 +2531,7 @@ mod tests {
         });
         record_now(
             &cfg,
+            &Live::off(),
             "Noon net",
             mins(1),
             &clock,
@@ -1594,7 +2552,8 @@ mod tests {
         let fake = FakeClock::new(at("03:00:00"));
         let stop = AtomicBool::new(false);
         let make = |_: &NetCfg| -> Made { Err("no such callsign".to_string()) };
-        let err = record_now(&cfg, "Noon net", mins(1), &fake, &stop, &make).unwrap_err();
+        let err =
+            record_now(&cfg, &Live::off(), "Noon net", mins(1), &fake, &stop, &make).unwrap_err();
         assert!(err.to_string().contains("no such callsign"), "{err}");
         assert!(!root.join(STATE_FILE).exists());
     }
@@ -1605,7 +2564,7 @@ mod tests {
         let mut cfg = config(&root, "5m", "10m", &[("Noon net", "daily 12:00", "1h")]);
         cfg.nets[0].tz = jiff::tz::TimeZone::get("America/Denver").unwrap();
         cfg.recorder.callsign = "N0CALL".to_string();
-        let (warnings, lines) = check_report(&cfg, at("00:00:00")).unwrap();
+        let (warnings, lines) = check_report(&cfg, at("00:00:00"), &StreamKeys::default()).unwrap();
         assert!(
             warnings.iter().any(|w| w.contains("N0CALL")),
             "{warnings:?}"
@@ -1621,7 +2580,7 @@ mod tests {
     fn check_report_says_when_nothing_is_scheduled() {
         let root = temp("empty");
         let cfg = config(&root, "5m", "10m", &[]);
-        let (_, lines) = check_report(&cfg, at("00:00:00")).unwrap();
+        let (_, lines) = check_report(&cfg, at("00:00:00"), &StreamKeys::default()).unwrap();
         assert_eq!(
             lines,
             vec!["nothing scheduled in the next year".to_string()]

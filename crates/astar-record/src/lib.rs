@@ -17,6 +17,7 @@ pub mod flac;
 #[cfg(feature = "writer")]
 pub mod frame_writer;
 pub mod frames;
+pub mod jsonl;
 #[cfg(feature = "writer")]
 pub mod layout;
 #[cfg(feature = "writer")]
@@ -26,7 +27,7 @@ pub mod over;
 pub mod packet_log;
 pub mod packet_pool;
 pub mod packet_tap;
-#[cfg(feature = "writer")]
+// Std only: astar-iax reads captures back without the writer feature.
 pub mod pcap;
 #[cfg(feature = "writer")]
 pub mod recorder;

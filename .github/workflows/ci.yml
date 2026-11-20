@@ -112,6 +112,8 @@ jobs:
           ./ci/guard-echolink.sh
           ./ci/guard-packet-log.sh
           ./ci/guard-netrec-receive-only.sh
+          ./ci/guard-sstv.sh --self-test
+          ./ci/guard-sstv.sh
 
   # The `just ci` equivalent. `just` is deliberately not installed on the box,
   # so the recipes are spelled out; keep the two in step by hand.

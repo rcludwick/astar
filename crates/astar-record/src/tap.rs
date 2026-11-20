@@ -4,7 +4,7 @@
 
 //! Bounded, read-only taps from the audio and network code into the recorder.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, TryLockError};
 
@@ -127,6 +127,10 @@ pub struct TapSlot<T> {
     /// Bumped by every [`TapSlot::set`], so a producer can tell that the
     /// tap it opened a stream on is no longer the one installed.
     generation: Arc<AtomicU64>,
+    /// Whether [`TapSlot::set`] last installed a tap: a lock-free hint so a
+    /// producer feeding several slots can tell how many want an item before
+    /// it builds one.
+    installed: Arc<AtomicBool>,
 }
 
 impl<T> Clone for TapSlot<T> {
@@ -135,6 +139,7 @@ impl<T> Clone for TapSlot<T> {
             inner: Arc::clone(&self.inner),
             contended: Arc::clone(&self.contended),
             generation: Arc::clone(&self.generation),
+            installed: Arc::clone(&self.installed),
         }
     }
 }
@@ -149,6 +154,7 @@ impl<T> Default for TapSlot<T> {
             inner: Arc::new(inner),
             contended: Arc::new(AtomicU64::new(0)),
             generation: Arc::new(AtomicU64::new(0)),
+            installed: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -160,8 +166,17 @@ impl<T> TapSlot<T> {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.installed.store(tap.is_some(), Ordering::Relaxed);
         *g = tap;
         self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Whether a tap is installed, read without the lock: safe on the audio
+    /// thread. Only a hint, since a [`TapSlot::set`] can land straight after
+    /// it; an offer still goes through the lock.
+    #[must_use]
+    pub fn has_tap(&self) -> bool {
+        self.installed.load(Ordering::Relaxed)
     }
 
     /// Which [`TapSlot::set`] the slot is on: a lock-free read, safe on the
@@ -308,6 +323,18 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), 7);
         slot.set(None);
         assert!(!slot.offer_with(|| 8));
+    }
+
+    #[test]
+    fn has_tap_follows_set_on_every_clone() {
+        let (tap, _rx) = tap_channel::<u32>(4);
+        let slot = TapSlot::default();
+        let other = slot.clone();
+        assert!(!slot.has_tap());
+        slot.set(Some(tap));
+        assert!(slot.has_tap() && other.has_tap());
+        other.set(None);
+        assert!(!slot.has_tap() && !other.has_tap());
     }
 
     #[test]
