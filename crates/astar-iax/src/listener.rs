@@ -706,6 +706,9 @@ fn leg_run_loop(p: LegSpawn) {
                         break;
                     }
                 }
+                // `Manager::send_picture_audio` refuses an inbound leg, so a
+                // picture never reaches this loop. Dropping one ends it.
+                RuntimeCommand::Picture(_) => {}
                 RuntimeCommand::Shutdown => {
                     terminated = true;
                     break;

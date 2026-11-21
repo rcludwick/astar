@@ -85,6 +85,7 @@ fn parse_var(s: &str) -> Result<(String, String), String> {
 }
 
 #[derive(Args)]
+#[allow(clippy::struct_excessive_bools)] // CLI switches
 struct RunArgs {
     #[command(flatten)]
     rig: RigArgs,
@@ -103,6 +104,10 @@ struct RunArgs {
     /// Override the hold window of "holds" checks (the design says 60).
     #[arg(long, value_name = "SECS")]
     hold_secs: Option<u64>,
+    /// Also run the long cases: the SSTV scenarios send Scottie 2 and PD120
+    /// as well as Robot 36 (minutes more).
+    #[arg(long)]
+    long: bool,
     /// Scenario ids to run, in order (default: all).
     scenarios: Vec<String>,
 }
@@ -323,6 +328,7 @@ fn run(a: &RunArgs) -> ExitCode {
     if let Some(h) = a.hold_secs {
         tuning.hold = Duration::from_secs(h);
     }
+    tuning.long = a.long;
 
     let color = std::io::stdout().is_terminal();
     eprintln!("nodebench: run {id} -> {}", run_dir.display());

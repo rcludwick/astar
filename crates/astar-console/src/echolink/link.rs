@@ -68,6 +68,29 @@
 //! [`TX_CAP_NOTICE`] for the app and [`member_cap_notice`] for the node.
 //! There is no setting that turns it off; it is the `EchoLink` twin of
 //! D-Star's time-out timer.
+//!
+//! # Sending a picture
+//!
+//! An SSTV picture is sent in place of the microphone
+//! ([`EchoLinkLink::send_picture`]). Its whole audio, at 8 kHz, arrives
+//! already cut into 160-sample frames and paced by the same pacer an
+//! `AllStarLink` call uses ([`PicturePacing`]): frame `n` falls due at
+//! `t0 + n × 20 ms`. Each due frame is GSM-encoded and queued exactly like a
+//! microphone frame, so four make a packet and every packet takes the next
+//! sequence number. Nothing is dropped or repeated, and nothing reads the
+//! clock to number a packet, so the numbering runs unbroken from the
+//! picture's first packet to its last and carries straight on into the
+//! voice after it. (`EchoLink`'s header carries no time-stamp of its own:
+//! the sequence number is the clock a receiver plays out by.)
+//!
+//! The picture starts on a fresh packet and with a fresh GSM encoder, so its
+//! packets are the same whatever was said before it; only its last packet
+//! is filled out with silent frames. While it runs, whatever the
+//! microphone queued is thrown away. The audio socket's read timeout drops
+//! to [`PICTURE_POLL`] so the thread never sleeps through a due frame. If
+//! the key comes up or the transmit cap stops the over, the picture is cut
+//! ([`CutReason::Unkeyed`]); if the call ends or we hang up, it is cut
+//! ([`CutReason::CallEnded`]).
 
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
@@ -83,6 +106,7 @@ use astar_echolink::directory::StationEntry;
 use astar_echolink::qso::{Qso, QsoAction, QsoEvent, QsoState};
 use astar_echolink::voice::{self, AudioPacket, Datagram, FRAMES_PER_PACKET, GSM_FRAME_LEN};
 use astar_echolink::{PeerAddr, Timings};
+use astar_iax::{CutReason, PicturePacing};
 use astar_record::packet_tap::{CallMeta, CallPacketTap, PacketCallId, PacketNetwork, PacketSlot};
 use tracing::{debug, warn};
 
@@ -93,6 +117,9 @@ use crate::voice_route::RateBridge;
 
 /// How long the thread blocks on the audio socket each pass.
 const READ_TIMEOUT: Duration = Duration::from_millis(50);
+/// How long it blocks while a picture is being sent: well inside one 20 ms
+/// frame, so a due frame never waits on the socket.
+const PICTURE_POLL: Duration = Duration::from_millis(5);
 /// Receive buffer. Every datagram we accept is far shorter; a longer one is
 /// cut here and then classified like any other.
 const RECV_BUF: usize = 4096;
@@ -204,6 +231,9 @@ struct TxState {
     /// flush: what tells a continuing over from a new one.
     last_heard: Option<Instant>,
     cap: TxCap,
+    /// The picture being sent in place of the microphone, if any. Dropping
+    /// it while it runs cuts it as [`CutReason::CallEnded`].
+    picture: Option<PicturePacing>,
 }
 
 /// What [`TxCap::check`] decided for one pass.
@@ -279,6 +309,8 @@ enum Command {
     Remove(String),
     /// Send a chat line to every connected station.
     Chat(String),
+    /// Send a picture to a station, by callsign, in place of its microphone.
+    Picture(String, PicturePacing),
     Shutdown,
 }
 
@@ -367,6 +399,7 @@ impl EchoLinkLink {
                 last_frame: None,
                 last_heard: None,
                 cap: TxCap::default(),
+                picture: None,
             },
             info_sent: false,
             first,
@@ -391,6 +424,16 @@ impl EchoLinkLink {
         let _ = self.commands.send(Command::Chat(text.to_owned()));
     }
 
+    /// Send a picture to the station with this callsign, in place of its
+    /// microphone, starting on the thread's next pass. If the station is not
+    /// in the table, or the thread has stopped, the pacing is dropped, which
+    /// cuts the picture as [`CutReason::CallEnded`].
+    pub(crate) fn send_picture(&self, call: &str, pacing: PicturePacing) {
+        let _ = self
+            .commands
+            .send(Command::Picture(call.to_owned(), pacing));
+    }
+
     /// The bound audio and control addresses; `None` while no socket is open.
     pub(crate) fn local_addrs(&self) -> Option<PeerAddr> {
         *lock(&self.local)
@@ -411,6 +454,8 @@ impl Drop for EchoLinkLink {
 struct Sockets {
     audio: UdpSocket,
     control: UdpSocket,
+    /// The audio socket's read timeout as last set.
+    read_timeout: Duration,
 }
 
 impl Sockets {
@@ -421,7 +466,21 @@ impl Sockets {
         let control = net::bind_udp(control)?;
         audio.set_read_timeout(Some(READ_TIMEOUT))?;
         control.set_nonblocking(true)?;
-        Ok(Self { audio, control })
+        Ok(Self {
+            audio,
+            control,
+            read_timeout: READ_TIMEOUT,
+        })
+    }
+
+    /// Block on the audio socket for `timeout` from now on.
+    fn set_read_timeout(&mut self, timeout: Duration) {
+        if self.read_timeout != timeout {
+            match self.audio.set_read_timeout(Some(timeout)) {
+                Ok(()) => self.read_timeout = timeout,
+                Err(e) => debug!(error = %e, "echolink: could not set the read timeout"),
+            }
+        }
     }
 
     fn local(&self) -> io::Result<PeerAddr> {
@@ -458,6 +517,10 @@ impl Run {
             let now = Instant::now();
             for slot in &mut self.peers {
                 transmit(sockets, slot, now, self.max_transmit);
+            }
+            let picture = self.peers.iter().any(|s| s.tx.picture.is_some());
+            if let Some(sockets) = self.sockets.as_mut() {
+                sockets.set_read_timeout(if picture { PICTURE_POLL } else { READ_TIMEOUT });
             }
             self.read_control(&mut buf);
             self.read_audio(&mut buf);
@@ -513,6 +576,15 @@ impl Run {
                 self.reap();
             }
             Command::Chat(text) => self.chat(&text),
+            Command::Picture(call, pacing) => {
+                if let (Some(sockets), Some(slot)) = (
+                    self.sockets.as_ref(),
+                    self.peers.iter_mut().find(|s| s.entry.call == call),
+                ) {
+                    start_picture(sockets, slot, pacing);
+                }
+                // Otherwise `pacing` drops here: the call has ended.
+            }
             Command::Shutdown => return false,
         }
         true
@@ -733,10 +805,16 @@ fn apply(sockets: &Sockets, slot: &mut PeerSlot, actions: Vec<QsoAction>, locati
 
 /// End the contact from our side. A transmission in progress is finished
 /// first: what the mic already queued goes out, the last partial packet
-/// padded with silence, and only then the BYE.
+/// padded with silence, and only then the BYE. A picture in progress is cut
+/// instead, its last partial packet padded the same way.
 fn hang_up(sockets: &Sockets, slot: &mut PeerSlot, location: &str) {
+    // Our own hangup ends a picture at once (dropping it marks it cut), and
+    // what the microphone queued under it is never sent.
+    let picture = slot.tx.picture.take().is_some();
     if slot.tx.keyed && *lock(&slot.shared.state) == QsoState::Connected {
-        if let PeerAudio::Client { call_audio, .. } = &slot.audio {
+        if let PeerAudio::Client { call_audio, .. } = &slot.audio
+            && !picture
+        {
             let frames: Vec<Vec<i16>> = call_audio.tx_frames.try_iter().collect();
             for frame in frames {
                 if let Ok(pcm) = <[i16; FRAME_SAMPLES]>::try_from(frame.as_slice()) {
@@ -799,44 +877,7 @@ fn receive(slot: &mut PeerSlot, packet: &AudioPacket, now: Instant) {
 fn transmit(sockets: &Sockets, slot: &mut PeerSlot, now: Instant, max_transmit: Duration) {
     let connected = *lock(&slot.shared.state) == QsoState::Connected;
     match &slot.audio {
-        PeerAudio::Client { call_audio, ptt } => {
-            let request = connected && ptt.load(Ordering::Acquire);
-            let verdict = slot.tx.cap.check(request, now, max_transmit);
-            if verdict == CapVerdict::Stop {
-                warn!(
-                    call = %slot.entry.call,
-                    "echolink: transmission reached the {max_transmit:?} transmit cap — unkeying \
-                     (release PTT to re-arm)"
-                );
-                capped(&slot.shared, TX_CAP_NOTICE.to_owned());
-            }
-            let want = request && verdict == CapVerdict::Send;
-            if want && !slot.tx.keyed {
-                slot.tx.keyed = true;
-                slot.tx.pending.clear();
-                slot.shared.ptt.store(true, Ordering::Relaxed);
-                *lock(&slot.shared.notice) = None;
-            }
-            if !slot.tx.keyed {
-                // Not transmitting: what the mic queued is never sent.
-                while call_audio.tx_frames.try_recv().is_ok() {}
-                return;
-            }
-            let frames: Vec<Vec<i16>> = call_audio.tx_frames.try_iter().collect();
-            for frame in frames {
-                if let Ok(pcm) = <[i16; FRAME_SAMPLES]>::try_from(frame.as_slice()) {
-                    queue_frame(sockets, slot, &pcm);
-                }
-            }
-            if !want {
-                if connected {
-                    flush_partial(sockets, slot);
-                }
-                slot.tx.pending.clear();
-                slot.tx.keyed = false;
-                slot.shared.ptt.store(false, Ordering::Relaxed);
-            }
-        }
+        PeerAudio::Client { .. } => transmit_client(sockets, slot, now, max_transmit, connected),
         PeerAudio::Member {
             from_conference, ..
         } => {
@@ -896,6 +937,112 @@ fn transmit(sockets: &Sockets, slot: &mut PeerSlot, now: Instant, max_transmit: 
                 slot.tx.last_frame = None;
             }
         }
+    }
+}
+
+/// One pass of the transmit side for the app's call: its microphone, or
+/// the picture sent in its place.
+fn transmit_client(
+    sockets: &Sockets,
+    slot: &mut PeerSlot,
+    now: Instant,
+    max_transmit: Duration,
+    connected: bool,
+) {
+    let PeerAudio::Client { call_audio, ptt } = &slot.audio else {
+        return;
+    };
+    let request = connected && ptt.load(Ordering::Acquire);
+    let verdict = slot.tx.cap.check(request, now, max_transmit);
+    if verdict == CapVerdict::Stop {
+        warn!(
+            call = %slot.entry.call,
+            "echolink: transmission reached the {max_transmit:?} transmit cap — unkeying \
+             (release PTT to re-arm)"
+        );
+        capped(&slot.shared, TX_CAP_NOTICE.to_owned());
+    }
+    let want = request && verdict == CapVerdict::Send;
+    if !connected {
+        // The call has gone: dropping the picture cuts it, and
+        // nothing more of it is sent.
+        slot.tx.picture = None;
+    } else if let Some(picture) = slot.tx.picture.as_ref()
+        && !want
+    {
+        picture.cut(CutReason::Unkeyed);
+    }
+    if want && !slot.tx.keyed {
+        slot.tx.keyed = true;
+        slot.tx.pending.clear();
+        slot.shared.ptt.store(true, Ordering::Relaxed);
+        *lock(&slot.shared.notice) = None;
+    }
+    if !slot.tx.keyed {
+        // Not transmitting: what the mic queued is never sent.
+        while call_audio.tx_frames.try_recv().is_ok() {}
+        slot.tx.picture = None;
+        return;
+    }
+    if slot.tx.picture.is_some() {
+        // A picture owns the transmit side: the mic is thrown away.
+        while call_audio.tx_frames.try_recv().is_ok() {}
+        send_picture_frames(sockets, slot);
+    } else {
+        let frames: Vec<Vec<i16>> = call_audio.tx_frames.try_iter().collect();
+        for frame in frames {
+            if let Ok(pcm) = <[i16; FRAME_SAMPLES]>::try_from(frame.as_slice()) {
+                queue_frame(sockets, slot, &pcm);
+            }
+        }
+    }
+    if !want {
+        if connected {
+            flush_partial(sockets, slot);
+        }
+        slot.tx.pending.clear();
+        slot.tx.keyed = false;
+        slot.shared.ptt.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Take over the transmit side for a picture. What the microphone already
+/// queued goes out first, padded, so the picture starts on a packet of its
+/// own; the encoder starts fresh, so the picture's packets do not depend on
+/// what was said before it. Only the app's call carries pictures; a
+/// conference member's slot drops the pacing, which cuts it.
+fn start_picture(sockets: &Sockets, slot: &mut PeerSlot, pacing: PicturePacing) {
+    if !matches!(slot.audio, PeerAudio::Client { .. }) {
+        return;
+    }
+    if *lock(&slot.shared.state) != QsoState::Connected {
+        pacing.cut(CutReason::CallEnded);
+        return;
+    }
+    if slot.tx.keyed {
+        flush_partial(sockets, slot);
+    }
+    slot.enc = GsmEncoder::new();
+    slot.tx.picture = Some(pacing);
+}
+
+/// Send every picture frame that has fallen due, in order, four to a packet.
+/// When the picture ends, its last partial packet is filled out with
+/// silence and sent, so the voice after it starts on a packet of its own.
+fn send_picture_frames(sockets: &Sockets, slot: &mut PeerSlot) {
+    let Some(picture) = slot.tx.picture.take() else {
+        return;
+    };
+    while let Some(n) = picture.next_due() {
+        if let Ok(pcm) = <[i16; FRAME_SAMPLES]>::try_from(picture.frame(n)) {
+            queue_frame(sockets, slot, &pcm);
+        }
+        picture.mark_sent();
+    }
+    if picture.is_over() {
+        flush_partial(sockets, slot);
+    } else {
+        slot.tx.picture = Some(picture);
     }
 }
 

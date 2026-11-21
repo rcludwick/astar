@@ -10,7 +10,7 @@
 use std::time::{Duration, Instant};
 
 use astar_station::PressOutcome::{Held, Ignored, KeyNow};
-use astar_station::PttSource::{Bluetooth, Legacy, Manual, Serial, Vox};
+use astar_station::PttSource::{Bluetooth, Legacy, Manual, Picture, Serial, Vox};
 use astar_station::{
     DEFAULT_TX_TIMEOUT, ForcedReason, ForcedRecord, MAX_TX_TIMEOUT, MIN_TX_TIMEOUT, NotLeased,
     PttArbiter, PttEdge, PttSnapshot, PttSource, TxTimeoutOutOfRange,
@@ -785,13 +785,16 @@ fn forced_seq_increments() {
 
 #[test]
 fn source_bits_and_raw_values_are_the_abi() {
-    assert_eq!(PttSource::ALL, [Manual, Vox, Serial, Bluetooth, Legacy]);
-    assert_eq!(PttSource::ALL.map(PttSource::bit), [1, 2, 4, 8, 16]);
+    assert_eq!(
+        PttSource::ALL,
+        [Manual, Vox, Serial, Bluetooth, Legacy, Picture]
+    );
+    assert_eq!(PttSource::ALL.map(PttSource::bit), [1, 2, 4, 8, 16, 32]);
     for (raw, src) in (0_u32..).zip(PttSource::ALL) {
         assert_eq!(PttSource::from_raw(raw), Some(src));
         assert_eq!(src as u32, raw);
     }
-    assert_eq!(PttSource::from_raw(5), None);
+    assert_eq!(PttSource::from_raw(6), None);
     assert_eq!(PttSource::from_raw(u32::MAX), None);
     assert_eq!(ForcedReason::LeaseExpired as u32, 1);
     assert_eq!(ForcedReason::TxTimeout as u32, 2);

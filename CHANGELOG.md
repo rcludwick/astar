@@ -13,6 +13,27 @@ pre-release to the patch number, which sorts wrongly: `0.1.10beta` is newer
 than `0.1.9beta` and a string comparison says the opposite. Shipped versions
 are left as they were spelled.
 
+## 0.1.24-beta — 2026-11-20
+
+A quiet release on the outside: the groundwork for sending pictures, and a
+cleaner home for the code that repairs pictures you receive.
+
+### Changed
+
+- **Received SSTV pictures are repaired by astar's own copy of the `sstv`
+  library.** The step that straightens a picture whose audio arrived with
+  gaps or uneven timing used to live inside astar. It now lives in a fork of
+  the open-source `sstv` crate, kept in `vendor/sstv` under its MIT licence,
+  so the repair can be offered back upstream. Pictures should look the same
+  as in 0.1.23-beta.
+
+### Not yet
+
+- **Sending SSTV pictures** now exists in the engine and is proven on the
+  test bench, through a stock AllStarLink node and through astar-server, with
+  simulated network jitter. It is not in the app or in any shipped build yet:
+  a Send Picture button comes later.
+
 ## 0.1.23-beta — 2026-11-19
 
 Pictures and video. astar now catches SSTV pictures sent over the air and

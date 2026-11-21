@@ -302,6 +302,8 @@ struct StationShared {
     stop: AtomicBool,
     arrivals: Mutex<Vec<Arrival>>,
     audio_packets: AtomicUsize,
+    /// Every audio packet received, whole, with when it arrived.
+    audio_bytes: Mutex<Vec<(Instant, Vec<u8>)>>,
     seq: Mutex<u16>,
 }
 
@@ -335,6 +337,7 @@ impl FakeStation {
             stop: AtomicBool::new(false),
             arrivals: Mutex::new(Vec::new()),
             audio_packets: AtomicUsize::new(0),
+            audio_bytes: Mutex::new(Vec::new()),
             seq: Mutex::new(0),
         });
         let spawn = |name: &str, sock: &UdpSocket, run: fn(&UdpSocket, &StationShared)| {
@@ -504,6 +507,14 @@ impl FakeStation {
         self.shared.audio_packets.load(Ordering::SeqCst)
     }
 
+    /// Every audio packet received, echoed or not, whole and in arrival
+    /// order, each with the moment it arrived: what a test reads a sender's
+    /// sequence numbers, header and GSM frames from.
+    #[must_use]
+    pub fn audio_received(&self) -> Vec<(Instant, Vec<u8>)> {
+        lock(&self.shared.audio_bytes).clone()
+    }
+
     /// The text of every chat line received, in order.
     #[must_use]
     pub fn chats(&self) -> Vec<String> {
@@ -654,6 +665,7 @@ fn audio_loop(sock: &UdpSocket, shared: &StationShared) {
         };
         record(shared, at, from, kind.clone());
         if kind == Kind::Audio {
+            lock(&shared.audio_bytes).push((at, bytes.to_vec()));
             shared.audio_packets.fetch_add(1, Ordering::SeqCst);
             if shared.echo.load(Ordering::SeqCst) {
                 send(sock, bytes, from);

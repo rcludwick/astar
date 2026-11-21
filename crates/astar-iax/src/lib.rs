@@ -21,6 +21,7 @@ mod link_log;
 pub mod listener;
 pub mod manager;
 mod parrot;
+mod picture_tx;
 mod raw_dial;
 pub mod rebuild;
 pub mod registration;
@@ -54,6 +55,7 @@ pub use manager::{
     ManagerSnapshot, PeerMemberHandle, SourceMemberHandle,
 };
 pub use parrot::{ParrotConfig, run_parrot};
+pub use picture_tx::{CutReason, PictureEnd, PicturePacing, PictureTx};
 pub use raw_dial::{RawDial, TxFrames, dial_raw, dial_raw_with_policy};
 pub use registration::{Registrar, Registration, RegistrationEvent};
 pub use routing_config::{ConnectionId, ConnectionSpec, RoutingConfig};

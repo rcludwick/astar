@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "astar-asl3"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "astar-http",
  "serde_json",
@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "astar-audio"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "astar-audio",
  "astar-codec",
@@ -342,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "astar-ble-ptt"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "proptest",
  "serde_json",
@@ -350,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "astar-cli"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "astar-asl3",
  "astar-audio",
@@ -366,7 +366,7 @@ dependencies = [
 
 [[package]]
 name = "astar-codec"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "ambe-thumbdv",
  "astar-dmr",
@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "astar-conformance"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "astar-iax-core",
  "pcap-parser",
@@ -395,7 +395,7 @@ dependencies = [
 
 [[package]]
 name = "astar-console"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "astar-asl3",
  "astar-audio",
@@ -423,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "astar-discord"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "astar-audio",
  "astar-iax",
@@ -437,18 +437,18 @@ dependencies = [
 
 [[package]]
 name = "astar-dmr"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "sha2 0.10.9",
 ]
 
 [[package]]
 name = "astar-dstar"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 
 [[package]]
 name = "astar-echolink"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "astar-codec",
  "miniz_oxide 0.9.1",
@@ -458,7 +458,7 @@ dependencies = [
 
 [[package]]
 name = "astar-gui"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "astar-station",
  "directories",
@@ -473,7 +473,7 @@ dependencies = [
 
 [[package]]
 name = "astar-http"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "proptest",
  "rcgen",
@@ -485,10 +485,11 @@ dependencies = [
 
 [[package]]
 name = "astar-iax"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "astar-audio",
  "astar-codec",
+ "astar-iax",
  "astar-iax-core",
  "astar-record",
  "astar-wireguard",
@@ -507,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "astar-iax-core"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "bitflags 2.13.2",
  "bytes",
@@ -523,7 +524,7 @@ dependencies = [
 
 [[package]]
 name = "astar-inspect"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "astar-asl3",
  "astar-audio",
@@ -540,14 +541,14 @@ dependencies = [
 
 [[package]]
 name = "astar-m17"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "rand 0.10.3",
 ]
 
 [[package]]
 name = "astar-netarchive"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "astar-http",
  "astar-netarchive",
@@ -562,7 +563,7 @@ dependencies = [
 
 [[package]]
 name = "astar-netrec"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "astar-audio",
  "astar-codec",
@@ -594,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "astar-netvideo"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "ab_glyph",
  "astar-netarchive",
@@ -618,28 +619,32 @@ dependencies = [
 
 [[package]]
 name = "astar-nodebench"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "astar-audio",
  "astar-codec",
  "astar-http",
  "astar-iax",
  "astar-iax-core",
+ "astar-sstv",
+ "astar-station",
  "clap",
  "ctrlc",
+ "png",
  "serde",
  "serde_json",
+ "sstv",
  "toml 0.8.2",
  "ureq 2.12.1",
 ]
 
 [[package]]
 name = "astar-nxdn"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 
 [[package]]
 name = "astar-ptt"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "nusb",
  "serialport",
@@ -647,7 +652,7 @@ dependencies = [
 
 [[package]]
 name = "astar-record"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "claxon",
  "flacenc",
@@ -662,7 +667,7 @@ dependencies = [
 
 [[package]]
 name = "astar-secrets"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "tempfile",
  "toml_edit 0.25.17+spec-1.1.0",
@@ -670,7 +675,7 @@ dependencies = [
 
 [[package]]
 name = "astar-serial-sys"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "astar-ptt",
  "futures-lite",
@@ -679,7 +684,7 @@ dependencies = [
 
 [[package]]
 name = "astar-server"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "astar-audio",
  "astar-codec",
@@ -729,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "astar-sstv"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "astar-record",
  "claxon",
@@ -743,7 +748,7 @@ dependencies = [
 
 [[package]]
 name = "astar-station"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "astar-asl3",
  "astar-audio",
@@ -762,6 +767,7 @@ dependencies = [
  "claxon",
  "serde",
  "serde_json",
+ "sstv",
  "tracing",
  "tracing-subscriber",
  "zeroize",
@@ -769,7 +775,7 @@ dependencies = [
 
 [[package]]
 name = "astar-sys"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "astar-audio",
  "astar-ble-ptt",
@@ -781,7 +787,7 @@ dependencies = [
 
 [[package]]
 name = "astar-wireguard"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 dependencies = [
  "base64 0.23.1",
  "boringtun",
@@ -791,7 +797,7 @@ dependencies = [
 
 [[package]]
 name = "astar-ysf"
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 
 [[package]]
 name = "async-broadcast"
@@ -7593,8 +7599,6 @@ dependencies = [
 [[package]]
 name = "sstv"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44268b9fe27023e58f42245a600dce6d4a32b77d438dd9e5ddf92bd8d220fa2e"
 dependencies = [
  "libm",
 ]

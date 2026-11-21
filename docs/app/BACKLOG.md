@@ -12,7 +12,7 @@ inline. All 129 issues (107 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (49)
+## Open items (50)
 
 ### astar-b02hw — Rob's hardware checks for the B02PTT button, before the release that ships it
 *P1 high · task · labels: macos, ptt, bluetooth, hardware, test, cx:3*
@@ -753,3 +753,52 @@ From review of `work/recording`:
   new connection.
 - Pressing **Record** during a cross-network redial names the file after the
   network being dialled rather than the one still connected (cosmetic).
+
+### astar-sstv-send — a Send Picture control in the app
+*P3 low · feature · labels: macos, sstv, cross-platform, cx:5*
+
+The engine can send an SSTV picture on an AllStarLink or EchoLink call:
+`Station::send_picture` in `astar-station`, behind the off-by-default
+feature `sstv-tx` (see the "Send an SSTV picture" row in
+`docs/FEATURES.md`). No shipped build turns it on, and nothing outside Rust
+can reach it yet. This item is everything between that and a person
+pressing a button:
+
+- **The bindings.** A C ABI for `send_picture` in `astar-sys` (start a
+  picture, read its progress, cancel it, read how it ended), then `just
+  cbindgen`, and the Swift side in `AstarStation`. `xcframework` and the
+  app turn `sstv-tx` on; `ci/guard-sstv.sh` changes on purpose to allow
+  exactly that build, and `LICENSE-EXCEPTIONS.md` section 14 says the
+  shipped app now carries the fork's encoder.
+- **Choosing the picture.** Any image the person picks, scaled and cropped
+  to the chosen mode's size (Robot 36 320×240, Scottie 2 320×256, PD120
+  640×496 and so on), with a preview of what will actually go out.
+- **The time-out.** A picture longer than the transmit time-out is refused
+  by the engine and the time-out is never stretched for it. The control
+  says so before sending: "PD120 takes 2 min 10 s; your transmit time-out
+  is 2 min", with the way to change the time-out, or a shorter mode.
+- **Progress and cancel** in the picture card: the mode, the time sent of
+  the total, and a Stop button. Push-to-talk released or the universal stop
+  also cancels it, and the card says how the picture ended (sent,
+  cancelled, timed out, call ended). One label to fix with this work: an
+  EchoLink picture cut short by the EchoLink link's own transmit cap
+  reports `Cancelled` today, not a time-out, so the card would say the
+  person stopped it when the link did.
+- **Why it starts with 4 s of silence.** The user docs must say it: a stock
+  AllStarLink node's jitter buffer settles during the first ~3.4 s after
+  key-up by dropping 20 ms of audio at fixed times, and a drop inside the
+  picture's header (the VIS code that names the mode, only 0.3 s long)
+  loses the whole picture at every receiver. The engine's 4 s silent lead
+  (`PICTURE_LEAD`) moves the header past that. Measured on nodebench:
+  `harness/nodebench/RIG.md`, "The lead-in experiment".
+- **EchoLink pictures come out softer.** EchoLink carries audio as GSM
+  06.10, which smears the tones: a picture's round-trip error is about 33
+  on the 0–255 scale, against about 5.5 over AllStarLink, and the link
+  itself adds nothing to that. The app should tell the person before they
+  send on EchoLink.
+- **Every platform.** Per `docs/FEATURES.md`, the feature is owed to every
+  client: macOS first, then the `astar-uiclone` clients (the Windows/Linux
+  Iced client is paused).
+- **User documentation** on the public site (`docs/site/macos/sstv.md`
+  today says astar never sends a picture, which stays true until this
+  ships), and the `docs/FEATURES.md` rows updated in the same commit.

@@ -55,10 +55,16 @@ exclude = [
     # source; built as a path dependency only when astar-codec's opt-in
     # `dstar-soft-ambe` asks for it. See vendor/ham-digital-modes-ambe/VENDORED.md.
     "vendor/ham-digital-modes-ambe",
+    # Vendored fork of the `sstv` crate 0.3.1 (MIT, Tobias Klockau), the SSTV
+    # encoder and decoder, with public scan timing and an `encode` feature.
+    # Excluded for the same reason as codec2: fmt/clippy never judge upstream's
+    # code, and the fork's patches stay small enough to offer back. See
+    # vendor/sstv/VENDORED.md.
+    "vendor/sstv",
 ]
 
 [workspace.package]
-version = "0.1.23-beta"
+version = "0.1.24-beta"
 edition = "2024"
 # Real floor, verified against the committed Cargo.lock: apps/gui's graph pulls
 # font-types 1.89 (and iced/wgpu/image 1.88, zbus 1.87). The engine crates alone
@@ -132,6 +138,11 @@ base64 = "0.23"
 # SSTV picture decoding (crates/astar-sstv). Exact pin: a bump is a fresh
 # licence read (LICENSE-EXCEPTIONS.md §10).
 slowrx = "=0.9.0"
+# The SSTV encoder/decoder, forked at vendor/sstv (MIT; LICENSE-EXCEPTIONS.md
+# section 14). Default features off here, because its default turns the
+# encoder on: only astar-station's `sstv-tx` and dev-dependencies may ask for
+# `encode` (ci/guard-sstv.sh).
+sstv = { path = "vendor/sstv", version = "0.3.1", default-features = false }
 png = "0.18"
 
 # slowrx's FFTs are far too slow unoptimised for a full-length SSTV picture

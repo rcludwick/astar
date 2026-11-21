@@ -108,6 +108,9 @@ pub struct RigConfig {
     pub node_iax: SocketAddr,
     /// Where astar-server's IAX2 listener is (inside the pod).
     pub server_iax: SocketAddr,
+    /// The ASL3 node's IAX2 as published on the host (the SSTV station dials
+    /// it through the jitter relay). Offset by 20000 like the others.
+    pub node_iax_host: SocketAddr,
     /// astar-server's IAX2 listener as published on the host (the IAX probe
     /// dials this). Host ports are offset by 20000 so stray local tests that
     /// dial 127.0.0.1:4569/4570/8730 never land in the rig.
@@ -217,6 +220,7 @@ impl RigConfig {
             server_number: "1998".into(),
             node_iax: SocketAddr::from(([127, 0, 0, 1], 4569)),
             server_iax: SocketAddr::from(([127, 0, 0, 1], 4570)),
+            node_iax_host: SocketAddr::from(([127, 0, 0, 1], 24569)),
             server_iax_host: SocketAddr::from(([127, 0, 0, 1], 24570)),
             ami: SocketAddr::from(([127, 0, 0, 1], 25038)),
             ami_user: "nodebench".into(),

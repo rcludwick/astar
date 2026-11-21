@@ -703,6 +703,576 @@ up by about as much: `audio_node_to_server` 107–148 ms in these runs against
 path dominates. Both stay far inside the 500 ms threshold, which is
 unchanged.
 
+## SSTV: the outside decoder (2026-11-19, `work/sstv-tx`)
+
+Later SSTV checks need a decoder that shares no code with astar, so a picture
+astar sends is read by something that cannot agree with it by accident. The
+image `localhost/nodebench-sstv-decode` holds two unmodified Python decoders,
+each pinned to a commit (`images/sstv-decode/Containerfile`). `rig.sh build`
+builds it, which needs the network once; it runs with `--network none` and
+`decode <in.wav> <out.png>` prints `Detected SSTV mode <name>`. In Rust,
+`astar_nodebench::outside::outside_decode(wav)` does that and returns the mode,
+size and RGB pixels.
+
+| Decoder | Modes it reads |
+|---|---|
+| `colaclanth/sstv` (tried first) | Martin 1/2, Scottie 1/2/DX, Robot 36, Robot 72 |
+| `ta2ldv/sstv-decoder` (fallback when the first stops) | Martin 1/2, Scottie 1/2/DX, PD50, PD90, PD120; not Robot |
+
+The first has no PD modes: on a PD120 recording it stops at the VIS code (the
+number that names the mode), and `decode.sh` then hands the recording to the
+second. The second has no licence file; it is fetched when the image is built
+and never copied into the repo. The original C `slowrx` was not tried: it is a
+GTK program, and running it headless means editing it, which would stop it
+being unmodified.
+
+Mean absolute error per colour channel (0 to 255) against the test picture
+that `astar-sstv`'s tests use, from a 16-bit mono WAV made by the `sstv` crate
+encoder:
+
+| Mode | Decoder | Size read | 8 kHz | 44.1 kHz |
+|---|---|---|---|---|
+| Robot 36 | colaclanth | 320x240 | 32.8 | 24.9 |
+| Scottie 2 | colaclanth | 320x256 | 27.2 | 27.3 |
+| PD120 | ta2ldv | 640x494 | 2.33 | 2.27 |
+
+The Robot 36 and Scottie 2 figures are large because the first decoder maps
+tones to brightness its own way: the pictures look right (colour bars in the
+right places, a grey ramp), but the bars come out darker than 191 and the ramp
+reaches white early. So use these figures as a ceiling for "the decoder read
+the picture", and compare with astar's own decoder for fidelity. PD120 reads
+back at 494 rows rather than 496; the error above is measured at that size.
+
+The test `outside_decodes_robot36` (in `outside.rs`) is ignored unless
+`NODEBENCH_OUTSIDE=1`, because it needs podman and the image. It asserts the
+mode, 320x240, and a mean error under 49.2 (32.8 and half again).
+
+## SSTV through the node (2026-11-19, `work/sstv-tx`)
+
+`sstv_station_to_node` is the proof the SSTV sender was built for: an astar
+station sends a picture to a stock ASL3 node over a jittery network, and
+something that shares no code with astar reads the picture off the node's
+radio.
+
+### What the scenario does
+
+For each relay profile (`clean`, `net-1118`, `harsh`; seed 1118 every time):
+
+1. A **headless station** starts. It is a `Station` built with `sstv-tx`
+   whose audio backend is `NullBackend`: no sound device, and a microphone
+   that never produces a sample, so the only audio on the call is the
+   picture. (`PullBackend` cannot be used: it has no input device, and a
+   call's connect refuses a backend with no default input.)
+2. A **jitter relay** (`relay.rs`) starts on 127.0.0.1, aimed at the node's
+   published IAX2 port, 127.0.0.1:24569. The station dials the relay's
+   address, so every packet it sends crosses the relay.
+3. The node lists the link as `1997`; the bench waits for the node to finish
+   announcing the new link on the air.
+4. The bench starts recording the node's radio (USRP), and the station calls
+   `send_picture` with the test picture (`picture.rs`: colour bars, a grey
+   ramp and a diagonal). The picture starts with 4 s of silence
+   (`PICTURE_LEAD`; it was 0.3 s for the first measurement, see below).
+   Robot 36 always; with `--long`, Scottie 2 and PD120 as well, the PD120
+   station with its transmit time-out set to 3 minutes.
+5. When the picture ends `Sent` and the node has been quiet for 1.5 s, the
+   station hangs up and the recording is judged.
+
+**How the station gets onto the node.** The station dials the way the app
+dials a node: the Web Transceiver call shape, IAX2 username
+`allstar-public`, `CALLING_NUMBER` = the node it wants (1999),
+`CALLING_NAME` = who it is (1997). The engine has no other primary-call
+shape, so the node's `[radio]` user (which needs username `radio`) cannot
+take it. The image gained two pieces of configuration for it:
+
+- `iax.conf`: an `[allstar-public]` user, md5 with the rig's test secret,
+  context `nodebench-station`.
+- `extensions.conf`: `[nodebench-station]`. Stock ASL3 runs
+  `authwebphone.pl` here, which asks the AllStar portal who the caller is;
+  the bench never reaches the portal, so it accepts the name `1997` and
+  nothing else. It then sets the caller number to `1997` and runs
+  `Rpt(1999,X)`, as the stock context does (`X`: an endpoint the dialplan
+  has already checked). Without setting the caller number, app_rpt reads
+  the dialled node as the caller and refuses with "Trying to link to
+  self?".
+
+### Three ways of looking at each recording
+
+- **The decoders.** `astar-sstv` (slowrx, re-timing on, as the app decodes)
+  is judged on the plain mean error per colour channel against the picture
+  sent. The outside decoder is judged on its *fitted* error
+  (`picture::fitted_error`): per channel, the line `decoded ≈ gain ×
+  original + offset` is fitted first, and what is left over is measured.
+  That forgives its own brightness scale (bars darker than 191, the ramp
+  white early), which says nothing about whether the picture arrived. Its
+  raw error is in the check's detail too. The gain is held at zero or
+  above, so an inverted picture is not forgiven. When it reads fewer rows
+  than were sent (ta2ldv has read PD120 as 640×494), the two are compared
+  over the rows it read, from the top: rows 0–493.
+  The third decoder is the `sstv` fork's own (`vendor/sstv`), with its
+  de-jitter in front (`Decoder::decode_dejittered`), judged like slowrx on
+  the plain mean error and required on every profile; see "The fork's own
+  decoder" below.
+- **What reached the node** (from the pod's capture, before the node does
+  anything with it): how late each voice frame arrived against its own
+  timestamp, which timestamps never arrived (the relay's drops), and whether
+  the audio is the station's audio exactly.
+- **The node's audio against the sent audio** (`timeline`): the recording
+  is lined up against the station's exact audio 20 ms at a time, and every
+  place where audio was dropped, made up, or came out silent is listed with
+  its time in the picture. USRP sequence numbers only show frames lost
+  between the node and the bench, and in every run here that was zero; this
+  is what shows what the node's own jitter buffer did. A saved recording can
+  be lined up again with `NODEBENCH_SSTV_WAV=<cell>.wav cargo test -p
+  astar-nodebench --lib saved_recording -- --ignored --nocapture`
+  (`NODEBENCH_SSTV_MODE=scottie2|pd120` for the long modes).
+  A recording that comes back half a sample late (after a slin16 hop) is
+  lined up against the sent audio delayed to match (`line_up`; see "SSTV
+  through astar-server's bridge").
+
+### The limits
+
+Each limit in `scenario/sstv.rs` is twice the worst `clean` figure with the
+4 s lead, among the `clean` cells where the line-up shows the node carried
+the audio whole: nothing dropped, made up, silent or unmatched. A limit
+backed by fewer than five such cells is marked provisional in the code.
+
+| Mode | slowrx (plain) | outside (fitted) | fork, de-jittered (plain) | From |
+|---|---|---|---|---|
+| Robot 36 | 11.5 | 43.1 | 24.9 (provisional) | 7 slip-free `clean` cells of 12: worst 5.77 and 21.54 (29.42 raw). Fork: 4 slip-free cells of 8, worst 12.47 |
+| Scottie 2 | 16.9 (provisional) | 32.1 (provisional) | 13.6 (provisional) | 1 slip-free `clean` cell of 2: 8.43 and 16.05 (28.16 raw). Fork: 2 of 2, worst 6.81 |
+| PD120 | 12.9 (provisional) | 4.7 (provisional) | 22.1 (provisional) | 2 slip-free `clean` cells of 2: 6.46 and 2.33, read at 640×496 both times. Fork: 2 of 2, worst 11.06 |
+
+The fork's cells come from both SSTV scenarios (`sstv_station_to_node` and
+`sstv_station_via_server`, 2026-11-20); see the next section. Of its eight
+`clean` Robot 36 cells, four were left out of the limit because the node
+slipped in them: both cells of `091827Z` (the node dropped 10 ms and made up
+40 ms; made up 40 ms in the two-hop one), `092514Z` (made up 20 ms at
+8.84 s) and `093518Z` (made up 20 ms at 13.42 s). The four kept are
+`092836Z`, `093156Z` and both cells of `093855Z`. Its error barely moved
+with a slip (12.28–12.47 in the four left out), which is the de-jitter at
+work.
+
+A wrong or garbled picture scores about 85–100, so a limit set from cells
+where the node slipped (78 or 89) would pass garbage; these do not.
+
+A `clean` cell where the node did slip is judged on the same limit. It
+fails if it is over, and is neither retried nor excused. The check's detail
+then says what the line-up measured: what the node dropped or made up and
+where, how many frames came out silent, and how late frames reached the
+node. In the 12 runs at 4 s, that made **a `clean` Robot 36 cell red in 2 of
+12 runs** (slowrx 39.06 after an 80 ms jump in `20261120T065809Z`; outside
+44.70 after a 20 ms slip in `20261120T062313Z`) and the **`clean` Scottie 2
+outside check red in 1 of 2** (42.67 after a 20 ms slip). A red `clean`
+SSTV cell whose detail names a node slip is that, not a sender fault.
+
+On `net-1118` and `harsh` slowrx must be under its limit; the outside
+decoder must be only when the recording is whole. Otherwise its check is a
+skip, "not required", whose text names what was measured (for example
+"net-1118: the node dropped 40 ms, 2 frames silent") and gives its figure.
+
+### The fork's own decoder (2026-11-20)
+
+When the de-jitter (astar-sstv's re-timer) moved into the `sstv` fork, the
+fork's own decoder with the de-jitter in front became the third decoder in
+`judge`. It shares the de-jitter with slowrx's path, but not slowrx's
+demodulator.
+
+Runs: `20261120T091827Z` (both scenarios), `092514Z`, `092836Z`, `093156Z`
+and `093518Z` (`sstv_station_to_node`), and `093855Z` (both scenarios,
+`--long`): eight Robot 36 cells per profile, two each of Scottie 2 and
+PD120. The checks ran with no limit first; every figure below is under the
+limits pinned from them.
+
+| Profile | Robot 36: fork (slowrx) | Scottie 2: fork (slowrx) | PD120: fork (slowrx) |
+|---|---|---|---|
+| `clean` | 11.45–12.47 (5.47–6.48) | 6.69, 6.81 (8.10, 9.96) | 10.87, 11.06 (4.21, 5.34) |
+| `net-1118` | 11.60–13.16 (5.73–6.79) | 6.61, 7.42 (8.69, 10.09) | 10.77, 11.88 (4.87, 5.14) |
+| `harsh` | 16.51–20.34 (5.56–6.52) | 7.39, 8.38 (9.71, 10.52) | 11.63, 17.26 (6.73, 8.75) |
+
+- **It gives the picture back on every profile.** Every cell, in both
+  scenarios, read the right mode and the full picture, and under jitter it
+  stays close to its own `clean` figure, as slowrx does: the de-jitter does
+  for the fork's decoder what it does for slowrx.
+- **Its floor is its demodulator, not the timing.** On `clean` Robot 36 it
+  sits at 12.47 in run after run, and PD120 at about 11, twice slowrx's.
+  That is the 8 kHz noise the fork measurement found (defect 1 in the notes'
+  "Measuring the `sstv` fork": a zero-crossing frequency counter with about
+  two samples a pixel), and no re-timing can remove it. Scottie 2, whose
+  pixels are longest, is the one mode where the fork beats slowrx (6.7
+  against 8.1–10.0).
+- **`harsh` Robot 36 costs it most** (16.5–20.3 against 12.5 on `clean`):
+  the rows the de-jitter rebuilds are blended from noisier neighbours. The
+  highest, 20.34, is under its limit of 24.9.
+
+**Confirmed with the limits pinned** (run `20261120T110534Z`, both scenarios
+once, Robot 36): 60 checks, 56 passed, 0 failed, 4 skipped (the outside
+decoder off `clean`, as always). The fork, against its limit of 24.9:
+
+| Profile | `sstv_station_to_node`: fork (slowrx; outside) | `sstv_station_via_server`: fork (slowrx; outside) |
+|---|---|---|
+| `clean` | 12.47 (5.47; 21.54) | 11.45 (5.53; 21.86) |
+| `net-1118` | 11.75 (6.15; skip, 24.29) | 12.90 (5.99; skip, 48.15) |
+| `harsh` | 13.27 (6.22; skip, 61.28) | 15.46 (8.81; skip, 60.38) |
+
+Both `clean` cells were slip-free and match the cells the limit came from.
+
+### The level
+
+Every recording peaks at 16764, −5.8 dBFS, against the sender's −6 dBFS: the
+node neither clipped nor compressed the picture. The clean slowrx error
+through the node (5.6–6.3) is the same as through a bare loopback peer in
+`astar-station`'s own test (5.5).
+
+### First results, with a 0.3 s lead: 17 Robot 36 runs per profile, 1 `--long` run
+
+All runs on the arm64 Mac VM, 2026-11-19 (UTC 03:15–04:29). Each run sends
+one picture per profile. The station sent every picture in full, ended
+`Sent`, 38.4 s for Robot 36, and the node listed the link within 0.9 s every
+time.
+
+| Profile | slowrx | outside | Relay drops; delay p50 / p99 / max (ms) | Lateness at the node, p99 / max (ms; the last 9 runs) | USRP frames lost |
+|---|---|---|---|---|---|
+| `clean` | 16 of 17 pass: 5.58–6.34, one 40.83 | 14 of 17 under 44.3: 21.54–31.19; one 54.37, two with no picture read | 0; 0 / 0 / 0 | 7–13 / 10–82 | 0 in every run |
+| `net-1118` | 0 of 17: no picture started | 0 of 17: no VIS read | 5–6; 2 / 72–78 / 126 | 81–88 / 135–143 | 0 |
+| `harsh` | 4 of 17 pass: 6.62–7.08; one 26.46; twelve with no picture started | never under 44.3: 56.8–58.6 in the five runs it read a picture; no VIS read in twelve | 25–27; 6 / 185–194 / 252 | 185–203 / 255–266 | 0 |
+
+`--long` (run `20261120T040101Z`): on `clean`, Scottie 2 gave 8.75 (slowrx)
+and 16.05 fitted (outside), and PD120 5.97 and 2.38 fitted, read at the full
+640×496. On `net-1118` and `harsh` no decoder started a picture in either
+mode.
+
+The relay's delay figures are effective delays: a packet the schedule holds
+back also holds back the packets behind it, since the relay keeps order. So
+the p99 is several times the schedule's own (25 ms at `net-1118`).
+
+### Finding, with the 0.3 s lead: the node's jitter buffer cuts 20 ms out of the VIS header
+
+**On `net-1118` no picture starts, in any mode, in any run.** The cause is
+the same every time, and it is in the node, not the network:
+
+- **What reached the node was whole.** The capture shows the station's
+  audio sample for sample, except the relay's six dropped frames, at 0.84,
+  4.70, 15.64, 25.40, 28.20 and 34.56 s into the picture. None is in the
+  header. Frames arrived up to 135–143 ms late.
+- **The node's jitter buffer grows, then shrinks.** Early in the call the
+  late frames make Asterisk's jitter buffer grow (in some runs the line-up
+  shows 20–30 ms made up at about 0.35 s). It then shrinks again one 20 ms
+  frame at a time, dropping a frame at 1.38, 1.92 and 2.56 s, and in some
+  runs 3.22 s: the same times in every run, because the relay's schedule is
+  seeded.
+- **1.92 s is inside the VIS code.** The VIS code, the eight bits that name
+  the mode, runs from 1.71 to 2.01 s of the transmission, 30 ms a bit. In
+  the recording, bits 4–6 last 70 ms instead of 90 (the tone track of run
+  `20261120T035741Z`: `1250` Hz for seven 10 ms steps where nine were
+  sent). colaclanth reports "invalid parity bit", ta2ldv reads VIS 68 with a
+  parity error, and slowrx never starts a picture.
+
+`harsh` shows the same shrinking (20 ms dropped at 1.80, 2.46, 3.14 and
+3.80 s), and its 400 ms blackout at 10.0 s comes out as about twenty silent
+frames. Whether a drop lands inside the VIS bits depends on a few
+milliseconds of timing, so 4 of 17 harsh runs started a picture, and those
+slowrx decoded well (6.6–7.1, 33–39 rows rebuilt by its re-timing). The
+outside decoder, with no repair, was never under its limit on `harsh`.
+
+**`clean` is not quite clean.** The relay adds nothing, but the Mac's path
+into the podman VM does: frames reached the node up to 82 ms late in one
+run. The node's jitter buffer then slips on `clean` too. In run
+`20261120T032938Z` it dropped 60 ms at 3.32 s, and slowrx came back at
+40.83; in two runs a slip at 1.51 or 1.70 s cost the outside decoder the
+VIS. So 1 slowrx and 3 outside `clean` cells of 17 failed limits set from
+the first five runs. On a Linux host, without gvproxy, this may not happen.
+
+What this meant for the sender: the node settles within about 3.4 s of
+key-up, and with a 0.3 s lead the VIS started 1.7 s in (0.3 s of silence,
+0.8 s of tuning tones, the leader). Any jitter-buffer slip in the 0.3 s of
+VIS bits loses the whole picture at every decoder. So the lead was tried
+longer.
+
+### The lead-in experiment (2026-11-20)
+
+`PICTURE_LEAD` was set by hand to 1, 2, 3 and 4 s, five scenario runs each
+(Robot 36, all three profiles). With a lead of L seconds the VIS bits run
+from L + 1.41 to L + 1.71 s after key-up. The 0.3 s row is the 17 runs
+above. "Outside" counts runs under the `clean` limit of the time (44.3
+fitted); off `clean` the check itself was a skip.
+
+| Lead | `net-1118` slowrx / outside | `harsh` slowrx / outside | `clean` slowrx / outside | A node drop inside the VIS (`net-1118` / `harsh`) |
+|---|---|---|---|---|
+| 0.3 s | 0/17 / 0 (no VIS read) | 4/17 / 0 | 16/17 / 14/17 | 17/17 / not counted¹ |
+| 1 s | 0/5 / 0 | 0/5 / 0 | 5/5 / 5/5 | 5/5 / 5/5 |
+| 2 s | 5/5 / 2 of 3 read | 4/5 / 0 | 4/5 / 4/5 | 0/5 / 2/5 |
+| 3 s | 5/5 / 5/5 | 5/5 / 0 | 5/5 / 5/5 | 0/5 / 1/5 (decoded anyway) |
+| 4 s | 5/5 / 4/5 | 5/5 / 0 | 5/5 / 5/5 | 0/5 / 0/5 |
+
+¹ Node drops inside the VIS were not counted for the 0.3 s `harsh` runs,
+because the line-up that measures them was added later. What is known:
+in 12 of the 17 runs no decoder read a VIS and no picture started; the
+`harsh` drops the line-up did see came at about 1.80, 2.46, 3.14 and
+3.80 s after key-up; and the VIS bits run from 1.71 to 2.01 s.
+
+- **The drops come at fixed times after key-up, not after the audio.** The
+  drop near 2.6 s is at 2.54–2.62 s at every lead where there is audio to
+  see it, and the one near 3.3 s at 3.22–3.38 s. Drops inside the silent
+  lead cannot be seen; they show only as a 10–50 ms offset where the tones
+  begin. A longer lead does not stop the settling; it moves the header past
+  it.
+- **At 1 s** slowrx starts a picture but gets it wrong (error about 101,
+  colours swapped): the 2.62 s drop cuts the last VIS bits and the start
+  of the picture.
+- **From 3 s** the header never met a settling drop on `net-1118`.
+
+The ruling was a 4 s lead (`PICTURE_LEAD`,
+`crates/astar-station/src/sstv_tx.rs`).
+
+### Results with the 4 s lead (2026-11-20)
+
+Ten scenario runs and two `--long` runs, 06:00–07:15 UTC, so 12 Robot 36
+pictures per profile and 2 each of Scottie 2 and PD120. Every picture was
+sent in full and ended `Sent` (Robot 36 42.1 s); USRP lost no frame in any
+of them; no node drop fell inside a VIS header.
+
+| Profile | slowrx | rows repaired | outside (fitted) | Relay drops; delay p50 / p99 / max (ms) | Lateness at the node, max (ms) |
+|---|---|---|---|---|---|
+| `clean` | 12/12 started; 5.47–5.77, one 39.06 | 0–7 | VIS read 12/12: 21.54–44.70 | 0; 0 / 0 / 0 | 13–111 |
+| `net-1118` | 12/12: 6.17–6.89 | 0–10 | VIS read 12/12: 21.95–55.60 | 5–6; 2 / 66–72 / 126 | 134–143 |
+| `harsh` | 12/12: 5.45–7.14 | 24–37 | VIS read 8/12: 54.2–61.3 | 25–27; 6 / 175–187 / 252 | 262–269 |
+| `--long` Scottie 2 (clean / net / harsh) | 8.10, 8.43 / 8.94, 9.69 / 11.25, 10.36 | 0 / 0–3 / 26–33 | 42.67, 16.05 / 17.58, 16.39 / 53.95, 55.32 | | |
+| `--long` PD120 (clean / net / harsh) | 6.46, 6.46 / 6.70, 6.58 / 5.86, 6.25 | 0 / 18–22 / 82–98 | 2.33, 2.33 / 33.69, 67.34 / 72.20, 71.38 | | |
+
+**Slips inside the picture.**
+
+- On `net-1118` the node still slips later in the picture: up to three
+  times per Robot 36 picture, every one ±20 ms, at times such as 6.6–7.2,
+  10.2, 16.7–16.9, 18.6, 24.8–25.5 and 34.6 s after key-up (5 of 12
+  pictures had none). PD120, three times as long, had seven or eight, with
+  two jumps of +80 and +100 ms in one run.
+- On `harsh` there are 9 to 12 per Robot 36 picture, plus the 400 ms
+  blackout at about 10.1 s, which comes out as silent frames.
+- slowrx's re-timing repairs them: every `net-1118` and `harsh` picture
+  passed, with up to 10 rows rebuilt on `net-1118` and 24–37 on `harsh`
+  (82–98 on a `harsh` PD120). The outside decoder has no repair, and its
+  fitted error rises with each slip (55.6 at worst on `net-1118`, 54–72 on
+  `harsh`), so off `clean` it stays a recorded figure, not a pass condition.
+
+**What still fails, and how often.**
+
+- Against the limits above (slip-free `clean` figures), slowrx passed every
+  `net-1118` and `harsh` picture. On `clean`, 2 of 12 Robot 36 runs and 1 of
+  2 Scottie 2 runs had a red cell, each where the node slipped (see "The
+  limits").
+- **The node slips even on `clean`: in 5 of 12 Robot 36 pictures** and 1 of
+  2 Scottie 2 pictures, although the relay adds nothing there.
+  - In three of the Robot 36 ones a frame reached the node 47–111 ms late.
+    That lateness comes from before the node: the Mac, its path into the
+    podman VM (gvproxy), or the sender's own timing; the capture cannot
+    tell those apart.
+  - In the other two (`20261120T061141Z`, `20261120T062313Z`) the node made
+    up 20 ms of silence while no frame was later than 17 ms. **The cause of
+    those two is not established.**
+  - *An unverified guess:* the sender's clock (the Mac) and the node's
+    clock (the podman VM) run free of each other, and a jitter buffer has to
+    slip now and then to absorb any difference in rate. What would settle
+    it: over one long send (several minutes), measure the offset between
+    the two clocks from the capture (arrival time against the sender's
+    timestamp, fitted as a straight line) and compare the slip rate with
+    the drift that line implies.
+- **An 80 ms jump is more than slowrx's re-timer repairs.** In
+  `20261120T065809Z` (`clean` Robot 36) the node dropped 80 ms at 7.7 s,
+  and slowrx came back at 39.06 with 7 rows repaired, where a dozen 20 ms
+  slips on `harsh` cost it nothing (5.5–7.1). Its WAV and decoded PNGs are
+  in `.nodebench/20261120T065809Z/sstv_station_to_node/` (local, not in
+  git). Backlog: `astar-sstv-retime-80ms`.
+- The outside decoder failed to read the VIS in 4 of 12 `harsh` pictures.
+  In each of those four, and in none of the eight it read, the node dropped
+  20 ms at 5.38 s: in the second leader tone, 30 ms before the VIS bits
+  start at 5.41 s. slowrx started all four pictures anyway. On `harsh` the
+  jitter buffer is still moving about 1.4 s after the tones begin, so even a
+  4 s lead does not keep the whole header clear there.
+
+## SSTV through astar-server's bridge (2026-11-20, `work/sstv-tx`)
+
+`sstv_station_via_server` is the two-hop version of `sstv_station_to_node`.
+The pictures damaged on 2026-11-18 crossed a node in the middle of the
+path, so this puts one there: astar-server.
+
+### What the scenario does
+
+For each relay profile (`clean`, `net-1118`, `harsh`; seed 1118):
+
+1. astar-server links to the node (`POST /link`, transceive), and the bench
+   waits until both sides list the link.
+2. A jitter relay starts on 127.0.0.1, aimed this time at **astar-server's**
+   published IAX2 port, 127.0.0.1:24570.
+3. The same headless station as `sstv_station_to_node` dials the relay,
+   asking for astar-server's node number (1998) and presenting itself as
+   1997, as the IAX probe does (`common::iax_probe`). It still uses the Web
+   Transceiver call shape (username `allstar-public`), the only primary-call
+   shape the engine has. **astar-server's bench config needed no change for
+   it:** its listener runs `auth = "off"` with no `allowed_nodes`, so it
+   answers any caller, and it is only reachable from the host's 127.0.0.1.
+   The bench waits until astar-server lists one new active call.
+4. The station sends the picture (4 s lead, as before). astar-server's
+   bridge mixes the call into the link; the node puts the link's audio on
+   its radio, where the bench records it over USRP.
+5. The recording is judged by the same `judge`, on the **same limits** as
+   `sstv_station_to_node`. No two-hop limits were needed: the `clean` figures
+   here (below) sit inside the existing ones.
+
+Besides "the node's audio against the sent audio", each cell measures both
+hops from the pod's capture, with the same lateness and line-up:
+
+- **What reached astar-server**: the relay's output, voice frames to port
+  4570.
+- **What astar-server sent the node**: voice frames to port 4569 from
+  astar-server's link socket. The link runs slin16, so those frames are
+  16 kHz; every other sample is kept for the line-up.
+
+A cell that fails keeps the pod's full frames (`<cell>.frames.txt`, via
+`common::save_cell_frames`), the node's recording, and each hop's audio as
+`<cell>.to-server.wav` and `<cell>.to-node.wav`.
+
+### The recording comes back half a sample late
+
+The first runs reported that the node "dropped 303 ms at 5.87 s" on `clean`,
+with 1,300 of about 1,800 frames unmatched, while slowrx decoded the picture
+at 5.7. Nothing had been lost. The picture crosses the link as slin16, so
+it is resampled 8 → 16 → 8 kHz on the way, and it comes back:
+
+- **half a sample (62.5 µs) late**: a fractional-delay search against the
+  sent audio peaks at −0.50 samples, correlation 0.999, all through the
+  picture;
+- **gently rolled off**: −0.5 dB at 1–1.5 kHz, −1 dB at 1.5–2 kHz, −2 dB at
+  2.5–3 kHz, −7 dB above 3.5 kHz.
+
+Lined up on whole samples, each 20 ms frame then correlates at about 0.8,
+under the line-up's 0.9, and the walk loses track. So the line-up now tries
+the sent audio both as it is and half a sample late (each sample averaged
+with the one before, which also reproduces the roll-off; correlation 0.997),
+and keeps the reading with fewer unmatched frames (`line_up` in
+`scenario/sstv.rs`). The check says "half a sample late" when that reading
+won. A recording on time keeps the plain reading (it also wins ties).
+
+**Confirmed live after the change** (run `20261120T084004Z`, both scenarios
+once, after the two scenarios were folded onto one send flow,
+`send_cell`): `sstv_station_to_node` passed every check, and none of its
+line-ups chose the half-sample reading. Its figures sit with the 4 s-lead
+results: `clean` slowrx 5.77, outside 21.54; `net-1118` slowrx 6.55
+(outside, a skip, 22.01); `harsh` slowrx 5.50, 33 rows repaired (outside,
+a skip, 59.04). `sstv_station_via_server` in the same run: `clean` 5.66 and
+21.86, `net-1118` 6.25 (23.97), and `harsh` **failed again at 15.12**, with
+61 timestamps missing from the bridge's output against 26 at its input.
+astar-server ran its base config, `/etc/nodebench/node.toml`, identical to
+`images/astar-server/node.toml`; no overlay is applied.
+
+### Results (3 runs, 2026-11-20)
+
+Runs `20261120T074855Z`, `075446Z` and `080040Z`, Robot 36. Two trial runs
+before them (`073305Z`, `073921Z`, made while the line-up and the second hop's
+measurement were being fixed) gave the same decoder figures and are in
+brackets. Every picture was sent in full and ended `Sent` after 42.1 s; USRP
+lost no frame; astar-server listed the station's call within 0.3 s.
+
+| Profile | slowrx | rows repaired | outside (fitted) | `sstv_station_to_node`, 4 s lead (slowrx; outside) |
+|---|---|---|---|---|
+| `clean` | 3/3: 5.66, 5.66, 5.87 (5.84, 5.66) | 0 | 3/3: 21.86 ×3 (22.02, 21.86) | 12/12 started, 5.47–5.77, one 39.06; 21.54–44.70 |
+| `net-1118` | 3/3: 5.90, 5.73, 5.83 (5.74, 5.92) | 18–21 | skip: 27.66, 48.24, 48.20 | 12/12: 6.17–6.89; skip, 21.95–55.60 |
+| `harsh` | **2/3: 9.78, 9.53, 16.79 (9.60, 17.81)** | 46–55 (70) | skip: 63.86, 51.33, 60.32 | **12/12: 5.45–7.14**, 24–37 repaired; skip, 54.2–61.3 |
+
+What each hop carried:
+
+| Profile | Reached astar-server: timestamps missing; frames silent; latest (ms) | astar-server sent the node: timestamps missing; frames silent; latest (ms) | The node's recording |
+|---|---|---|---|
+| `clean` | 0; 0; 14–57 | 0; 0; 11–27 | whole every run (half a sample late) |
+| `net-1118` | 4; 3; 134–145 | 0; 15–30; 12–72 | 20 ms made up at 6.2–6.6 s; 6–12 frames silent |
+| `harsh` | 24–25; 23–24; 262–265 | **66–67; 85–107**; 14–16 | 91–235 frames silent; the line-up loses track after the long silences |
+
+On `clean` the bridge and the link carry the Robot 36 picture whole, and the
+figures match `sstv_station_to_node`'s slip-free ones. The node did not slip
+on `clean` in these runs: the bridge re-times the audio onto its own 20 ms
+tick, and frames reached the node at most 27 ms late.
+
+**`--long` (run `20261120T080751Z`, one run).** 90 checks, 2 failed, both
+`clean` outside checks, both where the audio was not whole:
+
+| Mode | `clean` slowrx; outside | `net-1118` slowrx (outside, skip) | `harsh` slowrx (outside, skip) | Bridge output, `harsh`: timestamps missing |
+|---|---|---|---|---|
+| Robot 36 | 5.88; 21.86 | 5.96 (48.93) | 11.18 (59.84) — limit 11.5 | 60 |
+| Scottie 2 | 10.57; **37.77, limit 32.1** | 7.94 (17.83) | 7.72 (57.86) | 82 |
+| PD120 | 5.18; **49.76, limit 4.7** | 4.52 (4.28) | 12.65 (73.36) — limit 12.9 | 129 |
+
+- **`clean` Scottie 2, outside 37.77: the bridge.** A frame reached
+  astar-server 54 ms late (the Mac → VM path; the relay adds nothing on
+  `clean`), and the bridge's output has one silent frame at 38.22 s and the
+  audio 20 ms later from then on: finding 9's mechanism, at its smallest.
+  The node passed that on unchanged.
+- **`clean` PD120, outside 49.76: the node.** The bridge's output is whole
+  (0 missing, 0 silent, lined up throughout), and frames reached the node at
+  most 10 ms late, yet the node made up 40 ms at 51.77 s. That is the
+  unexplained `clean` slip already recorded for `sstv_station_to_node`, not
+  the bridge. The outside decoder has no repair and PD120's limit (4.7,
+  provisional) is tight, so one slip fails it; slowrx read 5.18.
+- On `harsh`, Robot 36 and PD120 passed slowrx with little to spare (11.18
+  of 11.5, 12.65 of 12.9), with 46 and 110 rows repaired.
+
+### Finding 9: astar-server's bridge turns late audio into silence
+
+**`harsh` passes `sstv_station_to_node` (slowrx 12 of 12, 5.45–7.14) and
+fails here in 3 of 6 runs (16.79, 17.81, 15.12; the others 9.5–9.8).** By the
+brief's rule the bridge is the suspect, and the capture says it is.
+
+- **What reached astar-server was whole apart from the relay's drops.**
+  The first hop's audio lines up against the sent audio with nothing
+  dropped or made up. Its only silent frames are the relay's 24–25 dropped
+  ones (one at 4.62 s, the 400 ms blackout at 10.04 s, and single frames at
+  15.24, 24.66 and 27.46 s). The other frames arrived, up to 265 ms late.
+- **What astar-server sent the node was not.** It carried 66–67 missing
+  timestamps where the input had 24–25, and long silences where the input
+  had audio. The tracked offsets of `harsh` in run `080040Z`
+  (`harsh-Robot-36.to-node.wav`), in seconds after key-up, are the same in
+  every run, since the relay's schedule is seeded:
+
+  | At (s) | The bridge's output |
+  |---|---|
+  | 6.52 | 260 ms of silence, then the audio 20 ms later than before |
+  | 10.04 | 400 ms of silence (the relay's own blackout) |
+  | 11.24 | 20 ms of silence, then +20 ms |
+  | 19.62 | 200 ms of silence, then −40 ms |
+  | 22.14 | 220 ms of silence, then +40 ms; −60 ms at 22.48 s; 60 ms silent at 22.80 s, then +20 ms |
+  | 24.00 | 220 ms of silence, then +40 ms |
+  | 31.74 | 180 ms of silence, then −60 ms |
+  | 33.66, 34.04, 36.36 | 80, 40 and 80 ms of silence |
+  | 36.48 | 240 ms of silence |
+
+  Apart from 10.04 s, none of these is a relay drop. They are where the
+  relay's delay bursts hold audio back by 150–265 ms. A minus sign means
+  audio was cut out (the output ran ahead), a plus sign means time was
+  added.
+- **On `net-1118` the same thing is smaller.** The bridge sent 60–80 ms of
+  silence at 6.14–6.52 s and 20–60 ms at 19.3, 21.8, 23.7, 31.4 and 36.1 s,
+  where the input had only three single-frame relay drops. slowrx repairs
+  that (5.7–5.9), so `net-1118` passes.
+- **Lateness at the node is low.** The bridge puts out frames on its own
+  20 ms tick with fresh timestamps, so the node's jitter buffer sees
+  steady audio (14–16 ms latest on `harsh`). The jitter was absorbed at the
+  bridge by throwing audio away, where the stock node in
+  `sstv_station_to_node` absorbed 265 ms of it with ±20 ms slips.
+
+**The likely cause, not verified by instrumenting the bridge:** the
+conference's per-member cushion (`crates/astar-audio/src/dejitter.rs`). By its
+own documentation, it holds at most 80 ms (`MAX_HOLD_TICKS`), drops a frame
+later than that, ends a talk spurt after 100 ms with nothing queued, and
+drops the oldest frames when a burst after a stall overfills the queue.
+A 150–265 ms stall followed by a burst does all of those: silence for the
+stall, then a fresh anchor and dropped frames. That matches the silences of
+180–260 ms followed by offsets of ±20–60 ms.
+
+Not fixed here (fixing the bridge is outside this task). The artifacts for
+the failed cells are local, not in git:
+`.nodebench/20261120T080040Z/sstv_station_via_server/` (`harsh-Robot-36.wav`,
+`.to-server.wav`, `.to-node.wav`, `.frames.txt`) and
+`.nodebench/20261120T073921Z/sstv_station_via_server/` (the first failure,
+without the hop WAVs).
+
 ## Safety
 
 - **No traffic leaves the rig.** All node-to-node traffic is 127.0.0.1
@@ -716,7 +1286,8 @@ unchanged.
   default URL.
 - **No outbound HTTP from the dialplan.** `func_curl` is not loaded, and the
   stock `[allstar-public]` (authwebphone.pl) and `[my-ip]` (myip.vg)
-  contexts are gone.
+  contexts are gone. The bench's own `[allstar-public]` IAX user (the SSTV
+  station's way in) lands in `nodebench-station`, which looks nothing up.
 - **No node list download.** `asl3-update-nodelist` is not installed.
 - **Not enforced at the network level.** The pod sits on podman's default
   network and *has* a default route. Its silence is configuration plus the
@@ -726,3 +1297,10 @@ unchanged.
   installation, not registration.
 - `key_refusal` and the transmit time-out are untouched by the bench and
   by every fix above.
+- **SSTV sending stays out of shipped builds.** astar-nodebench turns on
+  `astar-station`'s `sstv-tx`, so a workspace-wide `cargo build --workspace`
+  (or `cargo test --workspace`, or `just build-release`, which ships
+  nothing) now compiles the picture sender into every member that uses
+  astar-station. Every shipped recipe builds its crate with
+  `-p`, where features are resolved for that crate alone, and
+  `ci/guard-sstv.sh`'s tree rule checks each shipped crate the same way.

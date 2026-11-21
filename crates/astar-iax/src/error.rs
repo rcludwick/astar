@@ -44,6 +44,11 @@ pub enum IaxError {
     /// An announcement could not be produced (resolution failed) or has no TX
     /// path (a to-air request on a monitor-only call).
     AnnounceUnavailable,
+    /// A picture is already being sent on this call.
+    PictureBusy,
+    /// There is no answered, dialed call to send a picture on: the call is
+    /// not pooled, still connecting, ended, or an inbound leg.
+    PictureNoCall,
 }
 
 impl std::fmt::Display for IaxError {
@@ -75,6 +80,8 @@ impl std::fmt::Display for IaxError {
                     "announcement unavailable: resolution failed or no TX path"
                 )
             }
+            Self::PictureBusy => write!(f, "a picture is already being sent on this call"),
+            Self::PictureNoCall => write!(f, "no answered call to send a picture on"),
         }
     }
 }

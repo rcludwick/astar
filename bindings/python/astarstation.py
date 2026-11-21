@@ -110,6 +110,9 @@ PTT_VOX = 1
 PTT_SERIAL = 2
 PTT_BLUETOOTH = 3
 PTT_LEGACY = 4
+# An SSTV picture the engine is sending. Only the engine presses it: a
+# ptt_source(PTT_PICTURE, True) is refused with IAX_ERR_INVALID.
+PTT_PICTURE = 5
 
 # Snapshot.ptt_forced_reason values (mirror IAX_PTT_FORCED_*).
 PTT_FORCED_NONE = 0

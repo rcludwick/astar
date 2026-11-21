@@ -171,8 +171,8 @@ developed against day to day.
 
 | Mode | Dongle | Status |
 |---|---|---|
-| **D-Star** | required | Works. XLX/XRF reflectors over DExtra. |
-| **DMR** | would be required | Not yet — astar can classify DMR networks and store a radio ID, but nothing dials. |
+| **D-Star** | by default; optional with the software vocoder | Works. XLX/XRF reflectors over DExtra. |
+| **DMR** | required | Receive only. Link a talkgroup and timeslot on one network's master and hear it; astar has no DMR transmit path yet. |
 | **YSF** | required | Works. YSF reflectors, receive and transmit. |
 | **NXDN** | required | Receive only. Link a talkgroup on an NXDNReflector and hear it; astar has no NXDN transmit path yet. |
 | **M17** | not needed | Works. Codec 2, built in. |

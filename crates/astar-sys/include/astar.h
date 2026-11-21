@@ -372,6 +372,14 @@
 #define IAX_PTT_LEGACY 4
 
 /**
+ * An SSTV picture the engine is sending. Only the engine presses it: a
+ * press through [`iax_station_ptt_source`] is [`IAX_ERR_INVALID`]. It shows
+ * in the snapshot's masks while a picture is on the air; a client that does
+ * not know it can treat it like any other source holding the key.
+ */
+#define IAX_PTT_PICTURE 5
+
+/**
  * [`IaxState::ptt_forced_reason`] before the first forced stop.
  */
 #define IAX_PTT_FORCED_NONE 0

@@ -22,6 +22,7 @@ mod links;
 mod register;
 mod smoke;
 mod speech_echo;
+mod sstv;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -160,6 +161,9 @@ pub struct Tuning {
     pub hold_poll: Duration,
     /// How long a link gets to come up.
     pub setup_timeout: Duration,
+    /// Run the long cases too (`--long`): Scottie 2 and PD120 in the SSTV
+    /// scenarios, beside Robot 36.
+    pub long: bool,
 }
 
 impl Default for Tuning {
@@ -168,6 +172,7 @@ impl Default for Tuning {
             hold: Duration::from_secs(60),
             hold_poll: Duration::from_secs(1),
             setup_timeout: Duration::from_secs(20),
+            long: false,
         }
     }
 }
@@ -300,6 +305,8 @@ pub fn registry() -> Vec<Box<dyn Scenario>> {
         Box::new(keepalive::KeepaliveExchange),
         Box::new(dtmf::DtmfLinkCommand),
         Box::new(handshake::CalltokenRetransmit),
+        Box::new(sstv::SstvStationToNode),
+        Box::new(sstv::SstvStationViaServer),
         // Last: it can exhaust the node's call numbers (RIG.md finding 2),
         // and it restarts the node afterwards to clear them.
         Box::new(register::RegisterWithNode),

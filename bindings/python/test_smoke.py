@@ -33,6 +33,7 @@ from astarstation import (
     PTT_FORCED_NONE,
     PTT_LEGACY,
     PTT_MANUAL,
+    PTT_PICTURE,
     AnswerPolicy,
     AuthPolicy,
     Mode,
@@ -379,11 +380,14 @@ def test_ptt_surface_mirrors_the_ffi_refusals() -> None:
         assert st.snapshot().ptt_latched == 0
 
         # Unknown source ids are refused, never mapped onto a default.
-        for src in (5, 2**32 - 1, -1):
+        for src in (6, 2**32 - 1, -1):
             _expect_code(IAX_ERR_INVALID, st.ptt_source, src, True)
             _expect_code(IAX_ERR_INVALID, st.ptt_lease_renew, src)
 
         _expect_code(IAX_ERR_NOT_LEASED, st.ptt_lease_renew, PTT_BLUETOOTH)
+        # The picture source is the engine's alone: a press from here is refused.
+        _expect_code(IAX_ERR_INVALID, st.ptt_source, PTT_PICTURE, True)
+        assert st.snapshot().ptt_sources == 0
         # Bluetooth keys only through a lease: a plain press is refused and
         # holds or latches nothing; its release is accepted.
         _expect_code(IAX_ERR_INVALID, st.ptt_source, PTT_BLUETOOTH, True)

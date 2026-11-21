@@ -97,6 +97,27 @@ impl PttWatchHook {
     }
 }
 
+/// The station's one SSTV picture slot (feature `sstv-tx`): the watchdog
+/// reaps an ended picture from it and lets go of `PttSource::Picture`.
+#[cfg(feature = "sstv-tx")]
+use crate::sstv_tx::PictureSlot;
+
+/// Without `sstv-tx` there are no pictures, so the slot is zero-sized and
+/// every method is a no-op.
+#[cfg(not(feature = "sstv-tx"))]
+#[derive(Clone, Default)]
+struct PictureSlot(());
+
+#[cfg(not(feature = "sstv-tx"))]
+impl PictureSlot {
+    #[allow(clippy::unused_self)]
+    fn reap(&self, _arbiter: &mut PttArbiter) -> PttEdge {
+        PttEdge::None
+    }
+    #[allow(clippy::unused_self)]
+    fn call_lost(&self) {}
+}
+
 /// The running `astar-ptt-watch` thread. Dropping `stop` wakes it at once
 /// and it exits; `Station::drop` then joins `handle`.
 struct PttWatch {
@@ -111,6 +132,7 @@ struct PttWatch {
 fn spawn_ptt_watch(
     ptt: Weak<Mutex<PttArbiter>>,
     session: Weak<Mutex<ConsoleSession>>,
+    picture: PictureSlot,
     hook: PttWatchHook,
 ) -> std::io::Result<PttWatch> {
     let (stop, stopped) = mpsc::channel::<()>();
@@ -125,14 +147,15 @@ fn spawn_ptt_watch(
                 let (Some(ptt), Some(session)) = (ptt.upgrade(), session.upgrade()) else {
                     return;
                 };
-                ptt_watch_tick(&ptt, &session, &hook, Instant::now());
+                ptt_watch_tick(&ptt, &session, &picture, &hook, Instant::now());
             }
         })?;
     Ok(PttWatch { stop, handle })
 }
 
 /// One watchdog step: let the arbiter apply the transmit time-out and the
-/// lease, and forward an unkey to the console while still holding the
+/// lease, let go of `PttSource::Picture` once the picture holding it has
+/// ended (feature `sstv-tx`), and forward an unkey to the console while still holding the
 /// arbiter (lock order arbiter → session), so no press can slip in between
 /// the decision and the unkey. The console's answer is ignored: a call that
 /// is already gone is already unkeyed.
@@ -144,13 +167,16 @@ fn spawn_ptt_watch(
 fn ptt_watch_tick(
     ptt: &Mutex<PttArbiter>,
     session: &Mutex<ConsoleSession>,
+    picture: &PictureSlot,
     hook: &PttWatchHook,
     now: Instant,
 ) {
     let _ = panic::catch_unwind(AssertUnwindSafe(|| {
         let mut arbiter = relock(ptt);
         hook.maybe_panic();
-        if arbiter.tick(now) == PttEdge::Unkey {
+        let timed = arbiter.tick(now);
+        let reaped = picture.reap(&mut arbiter);
+        if timed == PttEdge::Unkey || reaped == PttEdge::Unkey {
             let _ = relock(session).set_ptt(false);
         }
     }));
@@ -682,6 +708,10 @@ pub struct Station {
     ptt_seen_seq: AtomicU64,
     /// The watchdog's test hook; inert unless built with `test-hooks`.
     ptt_watch_hook: PttWatchHook,
+    /// The SSTV picture being sent, if any (feature `sstv-tx`; zero-sized
+    /// without it). See [`Station::send_picture`]. Lock order: `ptt`, then
+    /// this, then `session`.
+    picture: PictureSlot,
     /// Memoized [`Station::m17_available`] probe, keyed on the exact
     /// `codec_dirs` value it was computed against (iax-f2b8 Task 4).
     /// `codec2_available`'s static backend does a full `Codec2::new()`
@@ -785,6 +815,7 @@ impl Station {
             ptt_watch: Mutex::new(None),
             ptt_seen_seq: AtomicU64::new(0),
             ptt_watch_hook: PttWatchHook::default(),
+            picture: PictureSlot::default(),
             #[cfg(feature = "m17")]
             codec2_probe_cache: Mutex::new(None),
             recording: Mutex::new(RecordSlot::default()),
@@ -843,6 +874,7 @@ impl Station {
             ptt_watch: Mutex::new(None),
             ptt_seen_seq: AtomicU64::new(0),
             ptt_watch_hook: PttWatchHook::default(),
+            picture: PictureSlot::default(),
             #[cfg(feature = "m17")]
             codec2_probe_cache: Mutex::new(None),
             recording: Mutex::new(RecordSlot::default()),
@@ -3839,7 +3871,11 @@ impl Station {
     /// (`"bluetooth presses need a lease"`) for [`PttSource::Bluetooth`],
     /// which keys only through [`Station::ptt_lease_press`] so that the engine
     /// bounds every Bluetooth hold — refused before the arbiter is touched, so
-    /// nothing is held or latched; [`StationError::PttLatched`] while the
+    /// nothing is held or latched; the same, with
+    /// `"picture presses come only from send_picture"`, for
+    /// [`PttSource::Picture`], which only the engine's own picture sender
+    /// holds (releasing it is allowed, and stops a picture being sent);
+    /// [`StationError::PttLatched`] while the
     /// source is latched; otherwise the console's own refusal
     /// ([`StationError::NotConnected`], [`StationError::Audio`] for no capture
     /// device, [`StationError::Nxdn`], [`StationError::Dmr`]), after the press
@@ -3850,6 +3886,11 @@ impl Station {
         if on && src == PttSource::Bluetooth {
             return Err(StationError::InvalidArgument(
                 "bluetooth presses need a lease",
+            ));
+        }
+        if on && src == PttSource::Picture {
+            return Err(StationError::InvalidArgument(
+                "picture presses come only from send_picture",
             ));
         }
         if on {
@@ -3997,6 +4038,162 @@ impl Station {
         true
     }
 
+    /// Send an SSTV picture on the live `AllStarLink` or `EchoLink` call
+    /// (feature `sstv-tx`).
+    ///
+    /// The whole picture is encoded first, at the call's rate (the bus rate
+    /// on an `AllStarLink` call, 8 kHz on an `EchoLink` one), scaled to
+    /// peak at [`PICTURE_PEAK_DBFS`](crate::PICTURE_PEAK_DBFS) and padded with
+    /// [`PICTURE_LEAD`](crate::PICTURE_LEAD) and
+    /// [`PICTURE_TAIL`](crate::PICTURE_TAIL) of silence. The station then
+    /// keys by holding [`PttSource::Picture`] in the PTT arbiter, so the one
+    /// transmit time-out covers the picture like any other key-down, and
+    /// hands the audio to the call's own picture pacer (one pacer, shared by
+    /// both networks). The audio never passes through the microphone lane
+    /// (input gain, noise reduction, the compressor, transmit trim), and no
+    /// microphone is needed. While it runs, microphone audio is not sent.
+    ///
+    /// The returned handle reports progress, can cancel, and says how the
+    /// picture ended. When it ends for any reason, the station lets go of
+    /// [`PttSource::Picture`] and unkeys at once (a small `astar-picture-end`
+    /// thread per picture watches for the end; the PTT watchdog's tick is
+    /// the backstop); if the transmit
+    /// time-out fires mid-picture, the picture is cut and the handle says
+    /// [`SendEnd::TimedOut`](crate::SendEnd::TimedOut). The time-out itself
+    /// is never changed.
+    ///
+    /// The station's own stop controls stop a picture too: [`Station::set_ptt`]
+    /// with `false`, or the universal stop [`Station::ptt_stop_all`], unkeys
+    /// and cancels it, and the handle says
+    /// [`SendEnd::Cancelled`](crate::SendEnd::Cancelled), the same as
+    /// calling its `cancel`.
+    ///
+    /// The checks run in this order, and a refusal keys nothing: the call
+    /// and its network; the picture's size; its length against the time-out
+    /// ([`Station::picture_duration`] must not exceed [`Station::tx_timeout`]);
+    /// nothing already on the air.
+    ///
+    /// No remote surface reaches this method: astar-server never calls it.
+    ///
+    /// # Errors
+    /// [`SendPictureError::NoCall`], [`SendPictureError::WrongNetwork`] (an
+    /// M17, D-Star, System Fusion, NXDN or DMR session),
+    /// [`SendPictureError::WrongSize`], [`SendPictureError::TooLong`],
+    /// [`SendPictureError::OnAir`].
+    ///
+    /// [`SendPictureError::NoCall`]: crate::SendPictureError::NoCall
+    /// [`SendPictureError::WrongNetwork`]: crate::SendPictureError::WrongNetwork
+    /// [`SendPictureError::WrongSize`]: crate::SendPictureError::WrongSize
+    /// [`SendPictureError::TooLong`]: crate::SendPictureError::TooLong
+    /// [`SendPictureError::OnAir`]: crate::SendPictureError::OnAir
+    #[cfg(feature = "sstv-tx")]
+    pub fn send_picture(
+        &self,
+        picture: &crate::SstvPicture,
+        mode: crate::SstvTxMode,
+    ) -> Result<crate::PictureSend, crate::SendPictureError> {
+        use crate::SendPictureError;
+        use crate::sstv_tx::{PictureSend, Sending, check_size, encode_picture};
+
+        // 1. A call, on a network that can carry a picture.
+        let target = {
+            let session = relock(&self.session);
+            match session.active_network() {
+                None => return Err(SendPictureError::NoCall),
+                Some("AllStarLink" | "EchoLink") => {}
+                Some(other) => return Err(SendPictureError::WrongNetwork(other)),
+            }
+            session.picture_target().ok_or(SendPictureError::NoCall)?
+        };
+        // 2. The mode's size.
+        check_size(picture, mode)?;
+        // 3. Short enough to finish under the time-out, which is never changed.
+        //    A picture exactly as long as the time-out is accepted. The
+        //    time-out may then fire inside its 300 ms silent tail, which
+        //    cuts only silence; the picture's last line has already gone.
+        let duration = Self::picture_duration(mode);
+        let timeout = self.tx_timeout();
+        if duration > timeout {
+            return Err(SendPictureError::TooLong {
+                picture: duration,
+                timeout,
+            });
+        }
+        // 4. Nothing on the air. Checked here so a busy station refuses
+        //    before the encode, and again below under the arbiter, which is
+        //    the check that counts.
+        if target.keyed || self.picture.busy() || relock(&self.ptt).is_on_air() {
+            return Err(SendPictureError::OnAir);
+        }
+        let pcm: Arc<[i16]> = encode_picture(picture, mode, target.rate)?.into();
+        self.ensure_ptt_watch()
+            .map_err(|_| SendPictureError::NoCall)?;
+
+        let mut arbiter = relock(&self.ptt);
+        // A picture that has ended but still holds its source is let go of
+        // first, so a send straight after a cancel or an end is not refused.
+        if self.picture.reap(&mut arbiter) == PttEdge::Unkey {
+            let _ = relock(&self.session).set_ptt(false);
+        }
+        if arbiter.is_on_air() || self.picture.busy() {
+            return Err(SendPictureError::OnAir);
+        }
+        let mut session = relock(&self.session);
+        match session.picture_target() {
+            None => return Err(SendPictureError::NoCall),
+            Some(t) if t.keyed => return Err(SendPictureError::OnAir),
+            Some(_) => {}
+        }
+        let forced_seq = arbiter.snapshot().forced.seq;
+        if arbiter.press(PttSource::Picture, Instant::now()) != PressOutcome::KeyNow {
+            return Err(SendPictureError::OnAir);
+        }
+        if session.key_for_picture().is_err() {
+            arbiter.rollback_press(PttSource::Picture);
+            let _ = arbiter.release(PttSource::Picture);
+            return Err(SendPictureError::NoCall);
+        }
+        let tx = match session.send_picture_audio(pcm) {
+            Ok(tx) => tx,
+            Err(e) => {
+                // Roll the press back: let go of the source and unkey.
+                if arbiter.release(PttSource::Picture) == PttEdge::Unkey {
+                    let _ = session.set_ptt(false);
+                }
+                return Err(match e {
+                    astar_console::ConsoleError::Iax(astar_iax::IaxError::PictureBusy) => {
+                        SendPictureError::OnAir
+                    }
+                    _ => SendPictureError::NoCall,
+                });
+            }
+        };
+        drop(session);
+        let sending = Arc::new(Sending::new(tx, forced_seq));
+        self.picture.put(Arc::clone(&sending));
+        drop(arbiter);
+        crate::sstv_tx::spawn_end_watch(
+            Arc::clone(&sending),
+            self.picture.clone(),
+            Arc::downgrade(&self.ptt),
+            Arc::downgrade(&self.session),
+        );
+        Ok(PictureSend {
+            sending,
+            slot: self.picture.clone(),
+            ptt: Arc::downgrade(&self.ptt),
+            session: Arc::downgrade(&self.session),
+        })
+    }
+
+    /// How long `mode` takes on the air, lead-in and tail included: the
+    /// length [`Station::send_picture`] compares with the transmit time-out.
+    #[cfg(feature = "sstv-tx")]
+    #[must_use]
+    pub fn picture_duration(mode: crate::SstvTxMode) -> Duration {
+        crate::sstv_tx::picture_duration(mode)
+    }
+
     /// Record a press (with a lease when `lease` is `Some`) and key the
     /// console on the OR's rising edge. A console refusal rolls the press
     /// back (`rollback_press` latches the source unless it is `Legacy`).
@@ -4041,6 +4238,7 @@ impl Station {
             let watch = spawn_ptt_watch(
                 Arc::downgrade(&self.ptt),
                 Arc::downgrade(&self.session),
+                self.picture.clone(),
                 self.ptt_watch_hook.clone(),
             )
             .map_err(|_| StationError::Audio("could not start the ptt watchdog".into()))?;
@@ -4055,6 +4253,7 @@ impl Station {
     /// call; a `/key` held through it is released, so the next call's `/key`
     /// keys as before.
     fn ptt_call_ended(&self) {
+        self.picture.call_lost();
         let mut arbiter = relock(&self.ptt);
         if arbiter.call_ended() == PttEdge::Unkey {
             let _ = relock(&self.session).set_ptt(false);
@@ -4085,11 +4284,13 @@ impl Station {
             snap.answered_seq
         };
         if arbiter.observe_call(answered, call_seq) == PttEdge::Unkey {
+            self.picture.call_lost();
             let _ = relock(&self.session).set_ptt(false);
             snap.ptt = false;
             return;
         }
         if node && last_seq != snap.answered_seq && arbiter.is_on_air() {
+            self.picture.call_lost();
             let held = arbiter.snapshot().sources;
             for src in PttSource::ALL {
                 if held & src.bit() != 0 {

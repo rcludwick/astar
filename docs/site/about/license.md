@@ -8,7 +8,7 @@ icon: lucide/scale
 
 astar's own code is licensed under the **GNU Affero General Public License,
 version 3.0 only** — the engine crates, `astar-server`, the macOS app, the Iced
-client, the bindings, and these docs. Three vendored components keep their own
+client, the bindings, and these docs. The vendored components keep their own
 terms; they are listed under [Third-party components](#third-party-components)
 below.
 
@@ -39,8 +39,8 @@ by per-file headers.
 
 ## Third-party components
 
-Five paths in the repository, and two upstream dependencies (plus a system
-`libcodec2`, if the opt-in `codec2-runtime` feature loads one), are **not**
+These paths in the repository and upstream dependencies (plus a system
+`libcodec2`, if the opt-in `codec2-runtime` feature loads one) are **not**
 AGPL-3.0. This list matches the table in the repository's `README.md`; if the
 two ever disagree, the licence files shipped alongside the code win.
 
@@ -49,10 +49,16 @@ two ever disagree, the licence files shipped alongside the code win.
 | `vendor/ambe-thumbdv` | ThumbDV / DV3000 AMBE driver | MIT **OR** Apache-2.0 |
 | `vendor/codec2` / system `libcodec2` | Codec 2 — the M17 voice codec (the `codec2` crate, vendored unmodified). Opt-in features only | `LGPL-2.1-only AND MIT` / LGPL-2.1 |
 | `vendor/ham-digital-modes-ambe` | Bruce Perens' software D-Star vocoder (AMBE 3600×2400), without its AMBE+2 code. Linked into the macOS app and astar-server's static release | `LGPL-3.0-or-later` |
+| `vendor/mp3lame-sys`, `vendor/mp3lame-encoder` | LAME, the MP3 encoder behind astar-server's `/stream.mp3`. Only in the opt-in `stream-mp3` feature | LAME itself LGPL-2.0-or-later; the two Rust crates LGPL-3.0 |
+| `vendor/sstv` | A patched fork of the `sstv` crate, an SSTV encoder and decoder. Linked into the macOS app and the net recorder for its de-jitter; its encoder is in no shipped build | MIT |
 | `apps/gui/assets/fonts` | The Inter typeface, bundled with the Iced client | SIL Open Font License 1.1 (`LICENSE-Inter.txt`) |
+| `assets/fonts` | The Inter typeface, drawn into the net recorder's video frames | SIL Open Font License 1.1 (`OFL.txt`) |
 | `harness/asterisk_parity/c_iaxclient/vendored/libiax2` | The historical C libiax2, used only as a parity reference by the test harness — never linked into a shipped binary | GPL v2 (`COPYING`) / LGPL v2 (`COPYING.LIB`) |
 | `nnnoiseless` crate | RNNoise — mic noise reduction, compiled into every build | BSD-3-Clause |
 | `oxideav-gsm` crate | GSM 06.10 — the EchoLink voice codec, also used for GSM-only AllStar nodes | MIT |
+| `slowrx` crate | SSTV picture decoding, a Rust port of Oona Räisänen's slowrx | MIT, port of ISC-licensed slowrx |
+| `tiny-skia`, `ab_glyph`, `rml_rtmp` crates | Drawing, text and live streaming for the net recorder's video | BSD-3-Clause, Apache-2.0, MIT |
+| `subtle` crate | Constant-time comparison of IAX2 authentication answers, in every build | BSD-3-Clause |
 
 ### `nnnoiseless` (RNNoise)
 
@@ -124,6 +130,30 @@ operator chooses it; the dongle is the default. Its notices:
   every change, and the ISC notices of mbelib and DSD, whose tables it uses.
 * `LICENSE-EXCEPTIONS.md` §9 — the LGPL notices, the relinking terms, and the
   patent reasoning.
+
+### `vendor/sstv`
+
+`vendor/sstv` is a fork of the `sstv` crate, version 0.3.1, by Tobias
+Klockau. SSTV (slow-scan television) sends a still picture as audio tones, and
+the crate can both make those tones from a picture (encode) and turn them back
+into a picture (decode). It is licensed **MIT** and keeps those terms; astar's
+changes to it are MIT too.
+
+astar forked it for one part in particular, the **de-jitter**. A picture that
+arrives over the internet has small gaps and timing slips in its audio, and the
+de-jitter lines the picture's scan lines back up before astar's own decoder,
+`slowrx`, reads them. `astar-sstv` links the fork for that, so the macOS app
+and the net recorder (`astar-netrec`) carry its code. The crate's own decoder
+is compiled in with it but nothing that ships calls it.
+
+The encoder sits behind the fork's `encode` feature. Only `astar-station`'s
+`sstv-tx` feature turns it on, no shipped build turns `sstv-tx` on, and
+`ci/guard-sstv.sh` fails the build if one ever does. Its notices:
+
+* `vendor/sstv/LICENSE`
+* `vendor/sstv/VENDORED.md` — provenance: upstream repository, the exact
+  revision forked, and every patch against it.
+* `LICENSE-EXCEPTIONS.md` §14 — the notice and what each part is used for.
 
 ### `apps/gui/assets/fonts`
 

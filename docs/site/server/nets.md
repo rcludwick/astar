@@ -6,8 +6,8 @@ icon: lucide/messages-square
 
 [`astar-netrec`](../netrec.md) records scheduled nets into a folder. This page
 covers how `astar-server` shows that folder: a list of recorded nets, one page
-per night laid out as a conversation, one play button, and a delete button for
-administrators. The pages themselves are described under
+per night laid out as a conversation, with any SSTV pictures and the net's
+video, one play button, and a delete button for administrators. The pages themselves are described under
 [The recordings page](../netrec.md#the-recordings-page); this page covers what is
 specific to the server.
 
@@ -91,3 +91,8 @@ When the recorder drew a [video of the net](../netrec.md#video-of-each-net),
 the server serves it too, at the session's address plus `video.mp4`, with the
 same rules: anyone for a public session, signed-in users for a private one.
 The session page then shows a **Video** button beside Replay that opens it.
+
+SSTV pictures the recorder saved in a session's `images/` folder are served
+the same way, at the session's address plus `images/` and the file name, and
+appear in the conversation as the [recordings page](../netrec.md#what-a-picture-leaves-in-the-session)
+describes. Only pictures named in the session's log are served.

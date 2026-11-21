@@ -15,15 +15,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use astar_audio::CallAudio;
+use astar_codec::gsm::FRAME_SAMPLES;
 use astar_echolink::PeerAddr;
 use astar_echolink::directory::StationEntry;
 use astar_echolink::qso::QsoState;
+use astar_iax::{CutReason, IaxError, PictureEnd, PicturePacing, PictureTx};
 use astar_record::packet_tap::{PacketCallId, PacketSlot};
 use tracing::warn;
 
 use super::EchoLinkNetwork;
 use super::link::{EchoLinkLink, PeerAudio, PeerShared};
-use crate::ConsoleError;
+use crate::{ConsoleError, PictureTarget};
+
+/// The rate an `EchoLink` call's audio runs at, and so the rate a picture's
+/// audio must be at: GSM 06.10 is 8 kHz.
+const PICTURE_RATE: u32 = 8_000;
 
 pub(super) const BIND_FAILED: &str =
     "Couldn't open UDP ports 5198–5199 — is another EchoLink program running?";
@@ -79,6 +85,9 @@ pub struct EchoLinkSession {
     ptt: Arc<AtomicBool>,
     entry: StationEntry,
     packet_slot: PacketSlot,
+    /// The last picture handed to the link, so a second one is refused
+    /// while it runs.
+    picture: Option<PictureTx>,
 }
 
 impl EchoLinkSession {
@@ -121,6 +130,7 @@ impl EchoLinkSession {
             ptt,
             entry: station,
             packet_slot,
+            picture: None,
         })
     }
 
@@ -128,6 +138,59 @@ impl EchoLinkSession {
     /// while connected.
     pub fn set_ptt(&mut self, on: bool) {
         self.ptt.store(on, Ordering::Release);
+    }
+
+    /// The call's transmit side, for a picture sender: the rate its audio
+    /// must be at (8 kHz) and whether PTT is requested right now. `None`
+    /// unless the call is connected.
+    #[must_use]
+    pub fn picture_target(&self) -> Option<PictureTarget> {
+        (*lock(&self.shared.state) == QsoState::Connected).then(|| PictureTarget {
+            rate: PICTURE_RATE,
+            keyed: self.ptt.load(Ordering::Acquire),
+        })
+    }
+
+    /// Send a whole picture's audio, at 8 kHz, in place of the microphone.
+    /// The same contract as the `AllStarLink` call's
+    /// `Manager::send_picture_audio`: the caller has already keyed (if PTT
+    /// is not requested, the handle has already ended with
+    /// [`CutReason::Unkeyed`]); this neither keys nor unkeys; if the key
+    /// comes up or the call ends mid-picture, the picture is cut and the
+    /// handle says why. The link paces it with the same pacer an
+    /// `AllStarLink` call uses (see the link module's "Sending a picture").
+    ///
+    /// # Errors
+    /// - [`ConsoleError::NotConnected`] unless the call is connected.
+    /// - [`ConsoleError::Iax`] carrying [`IaxError::PictureBusy`] while an
+    ///   earlier picture is still running, or [`IaxError::Io`] if the pacer
+    ///   thread could not be spawned. These are the `AllStarLink` path's own
+    ///   errors, so a caller handles one set for both networks.
+    pub fn send_picture_audio(&mut self, pcm: Arc<[i16]>) -> Result<PictureTx, ConsoleError> {
+        if *lock(&self.shared.state) != QsoState::Connected {
+            return Err(ConsoleError::NotConnected);
+        }
+        if self.picture.as_ref().is_some_and(|p| p.ended().is_none()) {
+            return Err(ConsoleError::Iax(IaxError::PictureBusy));
+        }
+        // One GSM frame, 20 ms at 8 kHz: the unit the pacer and the packets
+        // count in.
+        let frame_len = FRAME_SAMPLES;
+        let total = pcm.len().div_ceil(frame_len);
+        let tx = if total == 0 {
+            PictureTx::already_ended(0, PictureEnd::Sent)
+        } else if !self.ptt.load(Ordering::Acquire) {
+            PictureTx::already_ended(total, PictureEnd::Cut(CutReason::Unkeyed))
+        } else {
+            // The link polls on a short timeout while a picture runs, so the
+            // pacer has nothing to wake.
+            let (tx, pacing) = PicturePacing::start(pcm, frame_len, || {})
+                .map_err(|e| ConsoleError::Iax(IaxError::Io(e)))?;
+            self.link.send_picture(&self.entry.call, pacing);
+            tx
+        };
+        self.picture = Some(tx.clone());
+        Ok(tx)
     }
 
     /// Send a chat line. Dropped unless the call is connected.

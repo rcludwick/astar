@@ -7,10 +7,11 @@
 
 use std::collections::VecDeque;
 
-use slowrx::{ModeSpec, SstvDecoder, SstvEvent, WORKING_SAMPLE_RATE_HZ};
+use slowrx::{ChannelLayout, ModeSpec, SstvDecoder, SstvEvent, SstvMode, WORKING_SAMPLE_RATE_HZ};
+use sstv::dejitter::{Plan, fill_rows, radio_lines};
 
 use crate::Mode;
-use crate::retime::{Plan, fill_rows, radio_lines, rows_of_line};
+use crate::mode::scan_timing;
 
 /// A sample whose magnitude is below this counts as silence (about −54 dBFS).
 pub const SILENCE_LEVEL: i16 = 64;
@@ -580,7 +581,7 @@ impl Decoder {
         let spec = &pic.spec;
         // The picture and a little more, for a slow clock or stuffed
         // audio. Lost audio makes the picture end sooner, never later.
-        let secs = (f64::from(radio_lines(spec)) + 0.25) * spec.line_seconds + 0.05;
+        let secs = (f64::from(radio_lines(&scan_timing(spec))) + 0.25) * spec.line_seconds + 0.05;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let target = (secs * f64::from(self.rate)).ceil() as usize;
         self.held = Some(Held {
@@ -609,10 +610,11 @@ impl Decoder {
                 (to > from).then_some((from, to - from))
             })
             .collect();
-        let plan = Plan::new(&held.audio, held.given, self.rate, &spec, &known);
+        let timing = scan_timing(&spec);
+        let plan = Plan::new(&held.audio, held.given, self.rate, &timing, &known);
 
-        pic.repair = display_rows(&plan.damaged, &spec, pic.line_height, pic.height);
-        pic.patched = display_rows(&plan.patched, &spec, pic.line_height, pic.height);
+        pic.repair = display_rows(plan.damaged(), &spec, pic.line_height, pic.height);
+        pic.patched = display_rows(plan.patched(), &spec, pic.line_height, pic.height);
 
         // The picture's nominal length and one line more, but only as far
         // as the input reaches: what comes after the picture goes to slowrx
@@ -620,7 +622,7 @@ impl Decoder {
         // zeros ahead of the next real audio.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let nominal =
-            ((f64::from(radio_lines(&spec)) + 1.0) * spec.line_seconds * f64::from(self.rate))
+            ((f64::from(radio_lines(&timing)) + 1.0) * spec.line_seconds * f64::from(self.rate))
                 .ceil() as usize;
         let length = plan.covered(held.given, nominal);
         let used = plan.raw_at(length, held.audio.len());
@@ -730,6 +732,17 @@ impl Decoder {
             // never switched on, so nothing else can begin a picture.
             _ => {}
         }
+    }
+}
+
+/// Which slowrx image rows radio line `k`'s audio feeds.
+fn rows_of_line(spec: &ModeSpec, k: u32) -> std::ops::Range<u32> {
+    match spec.channel_layout {
+        ChannelLayout::PdYcbcr => 2 * k..2 * k + 2,
+        // Robot 36 / 24 send one colour difference per line and the next
+        // row borrows it.
+        ChannelLayout::RobotYuv if spec.mode != SstvMode::Robot72 => k..k + 2,
+        _ => k..k + 1,
     }
 }
 

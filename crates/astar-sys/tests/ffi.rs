@@ -2659,9 +2659,10 @@ fn ptt_error_codes_and_texts_are_pinned() {
             IAX_PTT_VOX,
             IAX_PTT_SERIAL,
             IAX_PTT_BLUETOOTH,
-            IAX_PTT_LEGACY
+            IAX_PTT_LEGACY,
+            IAX_PTT_PICTURE
         ],
-        [0, 1, 2, 3, 4]
+        [0, 1, 2, 3, 4, 5]
     );
     assert_eq!(
         [
@@ -2841,6 +2842,7 @@ fn release_is_never_refused_even_idle() {
         IAX_PTT_SERIAL,
         IAX_PTT_BLUETOOTH,
         IAX_PTT_LEGACY,
+        IAX_PTT_PICTURE,
     ] {
         assert_eq!(
             unsafe { iax_station_ptt_source(st, src, false) },
@@ -2856,7 +2858,7 @@ fn release_is_never_refused_even_idle() {
 #[test]
 fn unknown_ptt_source_is_invalid_and_touches_nothing() {
     let st = new_station();
-    for src in [5, 31, u32::MAX] {
+    for src in [6, 31, u32::MAX] {
         for on in [true, false] {
             assert_eq!(
                 unsafe { iax_station_ptt_source(st, src, on) },
@@ -2879,6 +2881,24 @@ fn unknown_ptt_source_is_invalid_and_touches_nothing() {
     let s = snapshot_of(st);
     assert_eq!(s.ptt_sources, 0);
     assert_eq!(s.ptt_latched, 0);
+    unsafe { iax_station_free(st) };
+}
+
+/// Only the engine's picture sender holds `IAX_PTT_PICTURE`: a press from a
+/// client is refused and holds or latches nothing.
+#[test]
+fn picture_source_cannot_be_pressed_from_outside() {
+    let st = new_station();
+    assert_eq!(
+        unsafe { iax_station_ptt_source(st, IAX_PTT_PICTURE, true) },
+        IAX_ERR_INVALID
+    );
+    assert_eq!(
+        last_error_of(st),
+        "invalid argument: picture presses come only from send_picture"
+    );
+    let s = snapshot_of(st);
+    assert_eq!((s.ptt_sources, s.ptt_latched), (0, 0));
     unsafe { iax_station_free(st) };
 }
 

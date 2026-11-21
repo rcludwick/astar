@@ -658,6 +658,11 @@ pub const IAX_PTT_BLUETOOTH: u32 = 3;
 /// [`iax_station_set_ptt`]'s callers: `astar-server`, the CLI, Python and
 /// the Iced client.
 pub const IAX_PTT_LEGACY: u32 = 4;
+/// An SSTV picture the engine is sending. Only the engine presses it: a
+/// press through [`iax_station_ptt_source`] is [`IAX_ERR_INVALID`]. It shows
+/// in the snapshot's masks while a picture is on the air; a client that does
+/// not know it can treat it like any other source holding the key.
+pub const IAX_PTT_PICTURE: u32 = 5;
 /// [`IaxState::ptt_forced_reason`] before the first forced stop.
 pub const IAX_PTT_FORCED_NONE: u32 = 0;
 /// The Bluetooth lease ran out without a renew: the button's link went
@@ -676,6 +681,7 @@ const _: () = assert!(IAX_PTT_VOX == PttSource::Vox as u32);
 const _: () = assert!(IAX_PTT_SERIAL == PttSource::Serial as u32);
 const _: () = assert!(IAX_PTT_BLUETOOTH == PttSource::Bluetooth as u32);
 const _: () = assert!(IAX_PTT_LEGACY == PttSource::Legacy as u32);
+const _: () = assert!(IAX_PTT_PICTURE == PttSource::Picture as u32);
 const _: () = assert!(IAX_PTT_FORCED_LEASE_EXPIRED == ForcedReason::LeaseExpired as u32);
 const _: () = assert!(IAX_PTT_FORCED_TX_TIMEOUT == ForcedReason::TxTimeout as u32);
 

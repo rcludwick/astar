@@ -360,6 +360,9 @@ pub struct WireVoice {
     /// Samples per second of `samples` (8000, or 16000 for slin16).
     pub rate: u32,
     pub samples: Vec<i16>,
+    /// The low 16 bits of the sender's timestamp in ms (all a mini frame
+    /// carries; a full frame's is cut to match).
+    pub ts16: u16,
 }
 
 /// The shell command that dumps every UDP payload from `src` to `dst`
@@ -385,6 +388,16 @@ pub fn voice_script(capture_dir: &str, src: Option<u16>, dst: u16, since: Option
          done; true",
         dir = capture_dir.trim_end_matches('/'),
     )
+}
+
+/// The low 16 bits of an IAX2 datagram's timestamp: bytes 4–7 of a full
+/// frame, 2–3 of a mini frame.
+fn voice_ts16(datagram: &[u8]) -> Option<u16> {
+    let at = if datagram.first()? & 0x80 != 0 { 6 } else { 2 };
+    Some(u16::from_be_bytes([
+        *datagram.get(at)?,
+        *datagram.get(at + 1)?,
+    ]))
 }
 
 /// G.711 mu-law to linear.
@@ -499,7 +512,13 @@ pub fn voice_frames(
     Ok(lines
         .into_iter()
         .filter_map(|(t, d)| {
-            decode_voice(&d, &mut format).map(|(rate, samples)| WireVoice { t, rate, samples })
+            let ts16 = voice_ts16(&d)?;
+            decode_voice(&d, &mut format).map(|(rate, samples)| WireVoice {
+                t,
+                rate,
+                samples,
+                ts16,
+            })
         })
         .collect())
 }

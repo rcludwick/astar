@@ -23,8 +23,7 @@ What this page will eventually cover:
 * Sending DTMF commands to the far end.
 * Reading the level meters and the spectrum display.
 * Microphone characterization and per-profile gain.
-* M17 sessions.
-* D-Star, once it reaches this client.
+* M17, D-Star and System Fusion sessions.
 
 In the meantime:
 
@@ -32,3 +31,5 @@ In the meantime:
 * [Hardware](hardware.md) — USB radio interfaces and PTT wiring.
 * [Bluetooth PTT button](bluetooth-ptt.md) — the Inrico B02PTT's button as
   your push-to-talk.
+* [EchoLink](echolink.md), [Recording](recording.md) and
+  [SSTV pictures](sstv.md) — each has its own page already.

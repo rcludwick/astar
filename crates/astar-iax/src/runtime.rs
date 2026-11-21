@@ -32,6 +32,8 @@ use crate::transport::{LinkSocket, NetStack};
 pub(crate) enum RuntimeCommand {
     /// Forward an FSM-level command (PTT, DTMF, text, hangup, …).
     App(AppCommand),
+    /// Send a picture in place of the microphone (see `picture_tx`).
+    Picture(crate::picture_tx::PictureJob),
     /// Tear the call down and exit the runtime thread.
     Shutdown,
 }
@@ -291,6 +293,19 @@ pub(crate) fn voice_ts_ladder(
     (ts, reanchored)
 }
 
+/// TX instrumentation (iax-5530) for one outbound voice or picture frame:
+/// the drain-burst size (bunching) and the inter-frame send spacing.
+fn count_tx_send(burst: &mut usize, last_send: &mut Option<Instant>, max_gap_ms: &mut u64) {
+    *burst += 1;
+    let send_now = Instant::now();
+    if let Some(prev) = *last_send {
+        #[allow(clippy::cast_possible_truncation)]
+        let gap = send_now.duration_since(prev).as_millis() as u64;
+        *max_gap_ms = (*max_gap_ms).max(gap);
+    }
+    *last_send = Some(send_now);
+}
+
 /// Observes wire frames in/out when an observer channel is installed.
 /// Zero-cost (single `Option` check) when no observer is set.
 struct Tracer {
@@ -501,6 +516,9 @@ fn run_loop(
     // Our own hangup to an app_rpt node, held while it reads !!DISCONNECT!!
     // (nodebench finding 3; `link_keying::DISCONNECT_GRACE`).
     let mut pending_hangup: Option<crate::link_keying::PendingHangup> = None;
+    // The picture being sent in place of the microphone, if any. Dropping it
+    // on any return below marks it cut because the call ended.
+    let mut picture: Option<crate::picture_tx::ActivePicture> = None;
     loop {
         let now = Instant::now();
         let next_timer = timers
@@ -527,8 +545,14 @@ fn run_loop(
                     Some((cause.clone(), false))
                 }
                 RuntimeCommand::Shutdown => Some((None, true)),
-                RuntimeCommand::App(_) => None,
+                RuntimeCommand::App(_) | RuntimeCommand::Picture(_) => None,
             };
+            // Our own hangup ends the picture now, not after the app_rpt
+            // disconnect grace: dropping it marks it cut because the call
+            // ended, and no frame of it goes out after this.
+            if wants_hangup.is_some() {
+                picture = None;
+            }
             if let Some(p) = pending_hangup.as_mut()
                 && wants_hangup.is_some()
             {
@@ -591,6 +615,10 @@ fn run_loop(
                     ) {
                         return;
                     }
+                }
+                RuntimeCommand::Picture(job) => {
+                    // The Manager refuses a second picture while one runs.
+                    picture = Some(crate::picture_tx::ActivePicture::new(job));
                 }
                 RuntimeCommand::Shutdown => {
                     let actions = fsm.handle(Event::App(AppCommand::Hangup {
@@ -801,23 +829,73 @@ fn run_loop(
         // (and the live frames after it) lay one clean ladder. When pre-roll is
         // disabled this never fires, so `media_lead` stays 0 and the ladder is
         // byte-identical to today.
+        //
+        // While a picture runs the swap still consumes the lead, but the
+        // flushed pre-roll frames are thrown away with the rest of the mic
+        // audio, so nothing is armed: the lead must not carry over into the
+        // voice that follows the picture.
         let lead = preroll_lead.swap(0, Ordering::Relaxed);
-        if lead > 0 {
+        if lead > 0 && picture.is_none() {
             media_lead = 0;
             preroll_remaining = lead;
         }
+        // A picture owns the transmit side while it runs (`picture_tx`): its
+        // frames go out on time-stamps counted from frames sent, anchored once
+        // at the voice ladder's next value, and microphone audio is thrown
+        // away. When it ends the ladder continues from the frame after its
+        // last, so voice carries on without a step.
         let mut burst = 0usize;
-        while let Ok(pcm) = mic_rx.try_recv() {
-            // TX instrumentation (iax-5530): drain-burst size (bunching) +
-            // inter-frame send spacing.
-            burst += 1;
-            let send_now = Instant::now();
-            if let Some(prev) = tx_last_send {
-                #[allow(clippy::cast_possible_truncation)]
-                let gap = send_now.duration_since(prev).as_millis() as u64;
-                tx_max_gap_ms = tx_max_gap_ms.max(gap);
+        if let Some(pic) = picture.as_mut() {
+            while mic_rx.try_recv().is_ok() {}
+            while let Some(n) = pic.next_due() {
+                count_tx_send(&mut burst, &mut tx_last_send, &mut tx_max_gap_ms);
+                tx_frames += 1;
+                let format = fsm.negotiated_format().unwrap_or(VoiceFormat::G711U);
+                let (pcm, ts) = pic.frame(n, || {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let wall_ms = start.elapsed().as_millis() as u32;
+                    let mut probe = next_voice_ts;
+                    voice_ts_ladder(&mut probe, wall_ms, media_lead).0
+                });
+                let payload = edge.encode(format, pcm);
+                let actions = fsm.handle(Event::App(AppCommand::SendVoice {
+                    format,
+                    payload,
+                    ts,
+                }));
+                let terminated = dispatch_actions(
+                    actions,
+                    sock.as_ref(),
+                    &mut rel,
+                    &mut timers,
+                    &spk_tx,
+                    &event_tx,
+                    &state,
+                    &remote_keyed,
+                    &mut tracer,
+                    fsm.negotiated_format().unwrap_or(VoiceFormat::G711U),
+                    &mut rx_decode_warned,
+                    &mut edge,
+                    &mut rx_clock,
+                    &mut keying,
+                    &mut link_log,
+                );
+                pic.mark_sent();
+                if terminated {
+                    return;
+                }
             }
-            tx_last_send = Some(send_now);
+            if pic.is_over() {
+                if let Some(next) = pic.resume_ts() {
+                    next_voice_ts = Some(next);
+                }
+                picture = None;
+            }
+        }
+        while picture.is_none()
+            && let Ok(pcm) = mic_rx.try_recv()
+        {
+            count_tx_send(&mut burst, &mut tx_last_send, &mut tx_max_gap_ms);
             #[allow(clippy::cast_possible_truncation)]
             let wall_ms = start.elapsed().as_millis() as u32;
             let (ts, reanchored) = voice_ts_ladder(&mut next_voice_ts, wall_ms, media_lead);

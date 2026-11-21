@@ -12,7 +12,7 @@ inline. All 228 issues (164 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (196)
+## Open items (200)
 
 ### iax-linktot — Link keying through the bridge has no transmit time-out
 *P1 high · safety · labels: server, keying, allstar, cx:3*
@@ -3759,4 +3759,42 @@ A session whose recorder crashed has no `ended` stamp, so astar-server's `/nets/
 
 The macOS app decodes SSTV pictures heard on a call and the net recorder decodes them in every session, but `astar-server` does not: its `docs/FEATURES.md` cell reads "—", because a node is not a picture viewer and the net recorder already keeps pictures from recorded nets (plan ruling R14, 2026-11-11). `astar-station`'s `sstv` feature is off in the server's builds, so it does not link slowrx.
 
-If Rob wants it later: turn the feature on for the server, decode the conference audio, save pictures under a configured folder (`node.toml` `[sstv]`, settings-page card), keep the AllStarLink packets behind each picture as the app does, and show recent pictures on the admin page or the listener page. Receive-only, as everywhere: no encoder in any build (`ci/guard-sstv.sh`). Update the `FEATURES.md` row and the docs when it lands.
+If Rob wants it later: turn the feature on for the server, decode the conference audio, save pictures under a configured folder (`node.toml` `[sstv]`, settings-page card), keep the AllStarLink packets behind each picture as the app does, and show recent pictures on the admin page or the listener page. Update the `FEATURES.md` row and the docs when it lands.
+
+Sending from the node is a different matter, and it is not designed. The engine can send a picture on an AllStarLink or EchoLink call (`Station::send_picture`, feature `sstv-tx`, off in every shipped build and kept out by `ci/guard-sstv.sh`), but the safety rule in `CLAUDE.md` says sending is a person-started action like PTT and that no remote, scheduled or automatic path may call it. Everything the node does is reached remotely, so sending from the node would first need Rob to change that rule; only then could it be designed, and it would also mean turning `sstv-tx` on in the server's `release` set and changing the guard on purpose. Decoding needs none of this.
+
+One precondition any server-side sending must close first: in node (conference) mode the active call can change without the old call being unkeyed. `adopt_inbound` in `crates/astar-console/src/session.rs` moves `active` to the newly adopted call, and `observe_ptt_call` in `crates/astar-station/src/station.rs` then releases every source and unkeys the new call, not the old one. A picture running on the old call could then go on outside the transmit time-out, with that call still keyed. It cannot happen today, because `sstv-tx` is in no server build and handset mode refuses a second call.
+
+### astar-sstv-retime-80ms — a single 80 ms jump is not fully repaired by the re-timer
+*P3 low · bug · labels: sstv*
+
+On nodebench (`sstv_station_to_node`, run `20261120T065809Z`, `clean` Robot 36; its WAV and both decoded PNGs are in that run's `sstv_station_to_node/` folder under `.nodebench/`, local only), the ASL3 node's jitter buffer dropped 80 ms in one go at 7.7 s after key-up. `astar-sstv`'s decoder, re-timing on, came back at a mean error of 39.06, against 5.5–5.8 for a whole picture: it repaired 7 rows, not the picture after the jump. Twenty-millisecond slips, even a dozen in one picture, are repaired well (`harsh`: 5.5–7.1), so the trouble is the size of one jump, not the count. Reproduce from the saved WAV (`NODEBENCH_SSTV_WAV`, `harness/nodebench/RIG.md`, "SSTV through the node"), find why the re-timer does not recover after an 80 ms step, and add a synthetic test with a single 80 ms cut. The re-timer is now the `sstv` fork's de-jitter, `vendor/sstv/src/dejitter/mod.rs`.
+
+### astar-server-bridge-late-audio — the bridge turns audio that arrives late into silence
+*P2 medium · bug · labels: server, audio, sstv*
+
+On nodebench, an SSTV picture sent through astar-server's bridge to a stock AllStarLink node failed in 3 of 6 runs on the `harsh` network profile (`sstv_station_via_server`; slowrx mean error 16.79, 17.81 and 15.12 against a limit of 11.5), while the same picture sent straight to the node passed 12 of 12 (`sstv_station_to_node`, 5.45–7.14). `harness/nodebench/RIG.md`, "Finding 9: astar-server's bridge turns late audio into silence", has the measurements.
+
+What the capture shows: the audio that reached astar-server was whole apart from the relay's own 24–25 dropped frames, with frames up to 265 ms late. What the bridge sent on to the node had 66–67 missing time-stamps and silences of 180–260 ms, each followed by the audio shifted ±20–60 ms, at the places where the relay held audio back. The node itself saw steady audio. So the bridge, not the node, threw the late audio away. On `net-1118` the same happens on a smaller scale (60–80 ms silences), and slowrx repairs it.
+
+The likely cause, **not confirmed by instrumenting the bridge**: the conference's per-member cushion (`crates/astar-audio/src/dejitter.rs`) holds at most 80 ms (`MAX_HOLD_TICKS`), drops a frame later than that, ends a talk spurt after 100 ms with nothing queued, and drops the oldest frames when a burst after a stall overfills it. A stall of 150–265 ms followed by a burst does all of those. This affects voice through the bridge as well as pictures; a picture just makes it measurable.
+
+Saved captures (local, not in git): `.nodebench/20261120T080040Z/sstv_station_via_server/` (`harsh-Robot-36.wav`, `.to-server.wav`, `.to-node.wav`, `.frames.txt`) and `.nodebench/20261120T073921Z/sstv_station_via_server/` (the first failure, without the hop WAVs). Next step: instrument the cushion and re-run `nodebench run` (the relay's schedule is seeded with 1118, so the stalls fall at the same times) to confirm which of its rules drops the audio, then decide whether a member's cushion should grow to follow late audio, as a stock node's jitter buffer does, and re-run the scenario.
+
+### sstv-fork-decoder — four defects in the `sstv` fork's own decoder
+*P4 backlog · bug · labels: sstv, upstream*
+
+astar decodes pictures with slowrx (`astar-sstv`), and that does not change. The `sstv` fork's own decoder (`vendor/sstv`, `Decoder::decode`, and `decode_dejittered` with the de-jitter in front) is used only as the third decoder on nodebench. Measuring it against slowrx on the 2026-11-18 pictures and on damaged copies of its own encoder's output found four defects that the de-jitter does not fix (notes: `superpowers/notes/astar/2026-11-19-sstv-fork-measurement.md`, "Defects inside the crate"):
+
+1. **The demodulator is noisy at 8 kHz.** It counts midline crossings and holds the last estimate, and Scottie 2 has about two samples a pixel at 8 kHz: about 4000 one-row specks on a clean picture against slowrx's 200; Robot 36 and PD120 about twice slowrx's error.
+2. **The header is lost in moderate noise**: no picture at 16 dB signal-to-noise and below, where slowrx decodes down to 10 dB.
+3. **No correction for a sender tuned off frequency**: the header fails at ±50 Hz and pixel values shift with smaller offsets, where slowrx measures the offset from the leader tone and copes to ±60 Hz.
+4. **It never notices a transmission has stopped**: silence after a cut picture comes out as picture rows until the input ends (172 rows for 40 sent).
+
+These matter only if the fork's decoder is ever to be used in astar or the fixes offered upstream. The patch series prepared for upstream (scan timing, the `encode` feature, the de-jitter) lists them as found but not fixed.
+
+### nodebench-sstv-late-frames — where the late frames on `clean` come from
+*P4 backlog · investigation · labels: nodebench, sstv*
+
+On the `clean` relay profile, where the relay adds no delay, frames of a picture sent by `sstv_station_to_node` still reached the node up to 47–111 ms late in some runs, and the node's jitter buffer slipped because of it (`harness/nodebench/RIG.md`, "SSTV through the node"). The bench cannot yet say whether that lateness comes from the sender (the station's own send timing) or from the host's path into the podman VM (gvproxy on the Mac). The IAX2 run loop already counts the largest gap between two frames it sends (`tx_max_gap_ms` in `crates/astar-iax/src/runtime.rs`, logged as `max_send_gap_ms`). Reporting that figure for each bench cell would settle it: a small send gap beside a late arrival puts the lateness on the path, and a large one puts it on the sender.
+

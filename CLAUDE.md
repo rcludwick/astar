@@ -4,9 +4,10 @@ Native multi-network ham-radio client and node: AllStarLink (IAX2), M17, and
 D-Star. One cargo workspace, one git history. AGPL-3.0-only throughout, except
 the vendored licence islands: `vendor/ambe-thumbdv` (MIT/Apache-2.0),
 `vendor/codec2` (LGPL-2.1-only AND MIT), `vendor/ham-digital-modes-ambe`
-(Bruce Perens' software D-Star vocoder, LGPL-3.0-or-later, no AMBE+2 code), and
+(Bruce Perens' software D-Star vocoder, LGPL-3.0-or-later, no AMBE+2 code),
 `vendor/mp3lame-sys` + `vendor/mp3lame-encoder` (LAME, LGPL; astar-server's
-opt-in `stream-mp3` only).
+opt-in `stream-mp3` only), and `vendor/sstv` (a patched fork of the `sstv`
+crate, MIT).
 
 Design polish is a first-class requirement: astar should be pretty and easy to
 use, not just functional.
@@ -53,7 +54,8 @@ apps/gui/        The Iced client for Windows/Linux (crate astar-gui).
 vendor/          ambe-thumbdv — the ThumbDV vocoder driver, MIT/Apache island;
                  codec2 — the M17 voice codec (pure Rust), LGPL-2.1/MIT island;
                  ham-digital-modes-ambe — Bruce Perens' D-Star AMBE vocoder, LGPL-3.0 island;
-                 mp3lame-sys / mp3lame-encoder — LAME for /stream.mp3, LGPL island.
+                 mp3lame-sys / mp3lame-encoder — LAME for /stream.mp3, LGPL island;
+                 sstv — the SSTV encoder/decoder crate, forked, MIT island.
 docs/            Engine docs + docs/app/ for the app's own backlog/design.
 ```
 
@@ -122,6 +124,12 @@ committed `astar.h` / `astarserial.h` must not drift.
 * **`astar-server` exposes remote keying** (`POST /key`). Its `NodeCommand::Key`
   handler refuses while the snapshot reports `dstar_active`
   (`key_refusal` in `crates/astar-server/src/controller.rs`). That guard stays.
+* **`astar-station`'s `sstv-tx` (`Station::send_picture`) transmits.** It is
+  in no shipped build and no default feature set, and `ci/guard-sstv.sh`
+  enforces that. Sending a picture is a person-started action, like PTT: no
+  remote, scheduled or automatic path may call it. The transmit time-out
+  covers it, and it never changes the time-out. Tests and the bench send
+  only to `127.0.0.1`.
 * **Secrets** (node secret, portal pass) are connect/init in-args ONLY: never
   stored on a Station, never in snapshots/events/errors, never logged.
 * Hardware-gated suites (`IAX_THUMBDV_TESTS=1`) are never run by an agent.
@@ -175,8 +183,8 @@ software backend exists.
 `rcludwick/ambe`.** That prohibition is about that specific effort and is not
 lifted by any of the above.
 
-`vendor/ambe-thumbdv/Cargo.toml`, `vendor/codec2/Cargo.toml` and
-`vendor/ham-digital-modes-ambe/Cargo.toml` hard-code
+`vendor/ambe-thumbdv/Cargo.toml`, `vendor/codec2/Cargo.toml`,
+`vendor/ham-digital-modes-ambe/Cargo.toml` and `vendor/sstv/Cargo.toml` hard-code
 `license`/`version`/`edition`/`repository` (and `codec2` its `authors`) on
 purpose. Do not convert them to `.workspace = true` — that would relicense
 someone else's MIT/Apache or LGPL code as AGPL. See each one's `VENDORED.md`.
@@ -184,7 +192,9 @@ someone else's MIT/Apache or LGPL code as AGPL. See each one's `VENDORED.md`.
 it: it stays byte-for-byte upstream. The same holds for `vendor/mp3lame-sys`
 and `vendor/mp3lame-encoder` (LGPL-3.0), whose `VENDORED.md` files list every
 patch; `stream-mp3` must never become a default feature
-(`ci/guard-codec2-licensing.sh`).
+(`ci/guard-codec2-licensing.sh`). `vendor/sstv` is likewise excluded and
+formatting-exempt; its patches against upstream stay small and separable so
+they can be offered back, and its `VENDORED.md` lists them.
 
 ## Distribution reality
 

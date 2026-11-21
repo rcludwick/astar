@@ -6,19 +6,23 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "astar-sstv: SSTV picture decoding (receive only) over slowrx, and PNG output."
+description = "astar-sstv: SSTV picture decoding over slowrx, with the sstv fork's de-jitter in front, and PNG output."
 
 [dependencies]
-astar-record = { path = "../astar-record", version = "0.1.23-beta", default-features = false }
+astar-record = { path = "../astar-record", version = "0.1.24-beta", default-features = false }
 slowrx = { workspace = true }
+# The de-jitter that re-times a picture before slowrx sees it, from the
+# vendored `sstv` fork (MIT). Decode only: never its encoder
+# (ci/guard-sstv.sh).
+sstv = { workspace = true, features = ["std", "dejitter"] }
 png = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-# The test-signal encoder. Dev-only: astar never transmits SSTV, and
-# ci/guard-sstv.sh keeps this crate out of every normal dependency table.
-sstv = "=0.3.1"
+# The test-signal encoder, from the vendored fork at vendor/sstv. Dev-only:
+# the decoder never reaches the encoder (ci/guard-sstv.sh).
+sstv = { workspace = true, features = ["std", "encode"] }
 claxon = "=0.4.3"
 serde_json = { workspace = true }
 

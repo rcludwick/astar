@@ -43,3 +43,18 @@ codecpriority = host
 context = radio-secure
 transfer = no
 qualify = no
+
+; The SSTV station (sstv_station_to_node). It dials the way the astar app
+; dials a node, the Web Transceiver call shape: username allstar-public,
+; CALLING_NUMBER = the node it wants, CALLING_NAME = who it is. The stock
+; ASL3 [allstar-public] context asks the AllStar portal who that is; the
+; bench's nodebench-station context (extensions.conf) asks nothing and takes
+; only the name 1997. Test-only secret, as for [1998].
+[allstar-public]
+type = user
+auth = md5
+secret = nodebench-loopback-only
+@CODECS@
+codecpriority = host
+context = nodebench-station
+transfer = no

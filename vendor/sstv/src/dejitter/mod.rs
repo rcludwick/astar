@@ -1,17 +1,14 @@
-// astar — Copyright (c) 2026 Rob Ludwick.
-// SPDX-License-Identifier: AGPL-3.0-only
-// Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
-
-//! Scan-timing repair: put every line of a picture back on time before
-//! slowrx sees it.
+//! De-jitter: put every line of a picture back on time before a decoder
+//! sees it.
 //!
-//! slowrx finds the line rate by fitting one straight line through all the
-//! line-sync pulses. That copes with a sender whose clock is a little off,
-//! but not with a step: when a 20 ms frame of audio is lost, every later
-//! line arrives 20 ms early and lands in the wrong place.
+//! A decoder that follows the line-sync pulses only near where it expects
+//! them, or fits one straight line through all of them, copes with a sender
+//! whose clock is a little off, but not with a step: when a 20 ms frame of
+//! audio is lost on a network link, every later line arrives 20 ms early and
+//! lands in the wrong place.
 //!
 //! So, once the header has named the mode, this module works on the whole
-//! picture's audio at once:
+//! picture's audio at once ([`Plan`]):
 //!
 //! 1. Runs of exact zeros a few milliseconds long are cut out. Real audio
 //!    never holds the same exact zero for that long; these are gaps a far
@@ -23,7 +20,7 @@
 //! 3. Each found pulse becomes an anchor: where it is in the audio, and
 //!    where it should be on a perfect grid of nominal line lengths. The
 //!    audio is resampled piecewise-linearly between anchors, so every pulse
-//!    sits exactly on the grid, and slowrx decodes a picture whose timing
+//!    sits exactly on the grid, and the decoder gets a picture whose timing
 //!    is clean.
 //! 4. A line whose two pulses are further apart or closer together than a
 //!    line length (audio was lost or added inside it), or whose audio is
@@ -35,6 +32,10 @@
 //!
 //! The work is linear in the picture's length. Above 16 kHz the pulse search
 //! runs on a decimated copy, so its cost does not grow with the sample rate.
+//!
+//! [`Decoder::decode_dejittered`](crate::Decoder::decode_dejittered) runs
+//! all of this in front of this crate's own decoder. The parts are public so
+//! another decoder can be given the same repair.
 
 #![allow(
     clippy::cast_possible_truncation,
@@ -45,9 +46,15 @@
     clippy::many_single_char_names
 )]
 
-use slowrx::{ChannelLayout, ModeSpec, SstvMode, SyncPosition};
+extern crate std;
+use std::vec;
+use std::vec::Vec;
 
-use crate::decode::SILENCE_LEVEL;
+use crate::timing::{ScanTiming, SyncPosition};
+
+/// A sample whose magnitude is below this counts as silence (about −54 dBFS):
+/// where the input's last heard sample is.
+const SILENCE_LEVEL: i16 = 64;
 
 /// The sync tone's band. The tone is 1200 Hz; black is 1500 Hz.
 const SYNC_LOW_HZ: f64 = 1000.0;
@@ -77,7 +84,7 @@ const LOST_LINES: usize = 3;
 const PULSE_FILL: f64 = 0.6;
 /// ...and it stands this far above the audio either side of it.
 const PULSE_CONTRAST: f64 = 0.35;
-/// Below this magnitude (as in [`crate::SILENCE_LEVEL`]) a sample is silent.
+/// Below this magnitude (as in [`SILENCE_LEVEL`]) a sample is silent.
 const SILENT: f32 = 64.0 / 32768.0;
 /// A line with more than this share of silent audio is lost.
 const SILENT_SHARE: f64 = 0.5;
@@ -92,16 +99,17 @@ const SILENT_SHARE: f64 = 0.5;
 /// Stuffed zero runs (up to [`ZERO_RUN_MAX_SECS`]) are cut before lines are
 /// marked, so most never count here. Some are never cut and so can still
 /// mark their line: a run of exact zeros longer than [`ZERO_RUN_MAX_SECS`]
-/// (silence, which is meant to), one inside the audio slowrx was already
+/// (silence, which is meant to), one inside the audio the decoder was already
 /// given (`keep` in [`Plan::new`]), one touching known-lost audio, and a
 /// run of near-zero samples that are not exact zeros.
 const SILENT_RUN_SECS: f64 = 0.010;
 /// Runs of at most this many marked display rows are filled; a longer run is
 /// a gap too wide to make up, and is left as decoded.
-pub(crate) const MAX_FILL_ROWS: u32 = 8;
+pub const MAX_FILL_ROWS: u32 = 8;
 
-/// A picture's audio, re-timed.
-pub(crate) struct Plan {
+/// A picture's audio, re-timed: built from the whole picture's audio by
+/// [`Plan::new`], then read out on the perfect grid by [`Plan::render`].
+pub struct Plan {
     /// The input with stuffed zeros cut out, as `f32`.
     audio: Vec<f32>,
     /// Where each cut was: (index in `audio`, raw samples cut before it).
@@ -114,32 +122,25 @@ pub(crate) struct Plan {
     line_out: f64,
     /// Per radio line: its audio was lost or mistimed, and its rows should
     /// be rebuilt from their neighbours.
-    pub(crate) damaged: Vec<bool>,
+    damaged: Vec<bool>,
     /// Per radio line: part of it was lost and filled from the line before.
     /// The fill keeps the timing, but is not that line's picture, so its
     /// rows are rebuilt from their neighbours as well.
-    pub(crate) patched: Vec<bool>,
+    patched: Vec<bool>,
     /// Output position where line 0 starts.
     first: f64,
 }
 
-/// Radio lines in a picture of `spec`: PD sends two rows per line.
-pub(crate) fn radio_lines(spec: &ModeSpec) -> u32 {
-    match spec.channel_layout {
-        ChannelLayout::PdYcbcr => spec.image_lines / 2,
-        _ => spec.image_lines,
-    }
+/// Radio lines (sync pulse to sync pulse) in a picture of `timing`: the PD
+/// modes send two rows per line.
+#[must_use]
+pub fn radio_lines(timing: &ScanTiming) -> u32 {
+    timing.image_lines / timing.rows_per_line.max(1)
 }
 
 /// Seconds from the start of a line to the middle of its sync pulse.
-fn pulse_offset_secs(spec: &ModeSpec) -> f64 {
-    match spec.sync_position {
-        SyncPosition::Scottie => {
-            let chan = f64::from(spec.line_pixels) * spec.pixel_seconds;
-            2.0 * (spec.septr_seconds + chan) + spec.sync_seconds / 2.0
-        }
-        _ => spec.sync_seconds / 2.0,
-    }
+fn pulse_offset_secs(timing: &ScanTiming) -> f64 {
+    timing.sync_offset() + timing.sync_seconds / 2.0
 }
 
 impl Plan {
@@ -148,11 +149,12 @@ impl Plan {
     /// exactly as they are. `known` lists audio known to be lost, as (start,
     /// length) in `raw`: already filled in by the caller, it keeps its time
     /// (it is never cut as stuffing) and its lines are marked repaired.
-    pub(crate) fn new(
+    #[must_use]
+    pub fn new(
         raw: &[i16],
         keep: usize,
         rate: u32,
-        spec: &ModeSpec,
+        timing: &ScanTiming,
         known: &[(usize, usize)],
     ) -> Self {
         let (audio, cuts) = cut_zero_runs(raw, keep.min(raw.len()), rate, known);
@@ -161,13 +163,13 @@ impl Plan {
         let (ind, freq) = sync_band(&audio, decim, fr);
         let prefix = prefix_sums(&ind);
 
-        let lines = radio_lines(spec) as usize;
-        let line = spec.line_seconds * fr;
-        let offset = pulse_offset_secs(spec) * fr;
+        let lines = radio_lines(timing) as usize;
+        let line = timing.line_seconds * fr;
+        let offset = pulse_offset_secs(timing) * fr;
         let finder = PulseFinder {
             prefix: &prefix,
-            width: (spec.sync_seconds * fr).max(2.0),
-            guard: (spec.sync_seconds * fr / 2.0).max(0.001 * fr),
+            width: (timing.sync_seconds * fr).max(2.0),
+            guard: (timing.sync_seconds * fr / 2.0).max(0.001 * fr),
         };
         // The lines the input reaches: a picture cut off early (abandoned
         // on silence or at the end of the stream) holds just its first part,
@@ -189,7 +191,7 @@ impl Plan {
             DAMAGE_SECS * fr,
         );
         // With most pulses lost in noise there is too little to go on, and
-        // slowrx's own fit through the whole picture does better: leave the
+        // the decoder's own timing does better: leave the
         // timing alone. "Most" counts only the lines the input reaches.
         if found.iter().filter(|p| p.is_some()).count() * 2 < reach {
             found.fill(None);
@@ -224,14 +226,13 @@ impl Plan {
                     .then(|| locate_hole(&freq, &pulses, j, cj, c, line, err))
                     .flatten();
                 if let Some(h) = hole {
+                    anchors.push((tj + h, cj + h));
                     if err < 0.0 {
                         // Audio lost: a gap in the output, filled later.
-                        anchors.push((tj + h, cj + h));
                         anchors.push((tj + h - err, cj + h + 1e-6));
                         holes.push((tj + h, tj + h - err));
                     } else {
                         // Audio added: skip over it.
-                        anchors.push((tj + h, cj + h));
                         anchors.push((tj + h + 1e-6, cj + h + err));
                     }
                     let at = line_of(tj + h - err.min(0.0) / 2.0);
@@ -243,9 +244,9 @@ impl Plan {
                     // rows from their neighbours. A Scottie pulse sits
                     // mid-line, so the span between two of them holds the
                     // end of line j and the start of line k.
-                    let last = match spec.sync_position {
+                    let last = match timing.sync_position {
                         SyncPosition::Scottie => k,
-                        _ => k - 1,
+                        SyncPosition::Start => k - 1,
                     };
                     for d in &mut damaged[j..=last.min(lines - 1)] {
                         *d = true;
@@ -277,6 +278,21 @@ impl Plan {
             first: to_input(phase - offset),
         }
         .marked(known, rate)
+    }
+
+    /// Per radio line: its audio was lost or mistimed, and the rows it feeds
+    /// should be rebuilt from their neighbours ([`fill_rows`]).
+    #[must_use]
+    pub fn damaged(&self) -> &[bool] {
+        &self.damaged
+    }
+
+    /// Per radio line: part of it was lost and filled from the line before.
+    /// The fill keeps the timing but is not that line's picture, so the rows
+    /// it feeds should be rebuilt from their neighbours as well.
+    #[must_use]
+    pub fn patched(&self) -> &[bool] {
+        &self.patched
     }
 
     /// Mark the lines lost to silence and to `known` holes.
@@ -413,7 +429,8 @@ impl Plan {
 
     /// The longest output, from `from` up to `to` samples, whose every
     /// sample comes from audio that arrived: at least `from`.
-    pub(crate) fn covered(&self, from: usize, to: usize) -> usize {
+    #[must_use]
+    pub fn covered(&self, from: usize, to: usize) -> usize {
         let to = to.max(from);
         let end = self.audio.len() as f64;
         if self.input_at(to as f64) < end {
@@ -439,7 +456,8 @@ impl Plan {
 
     /// The raw input sample (before zero runs were cut) that output sample
     /// `t` comes from, rounded down and clamped to `raw_len`.
-    pub(crate) fn raw_at(&self, t: usize, raw_len: usize) -> usize {
+    #[must_use]
+    pub fn raw_at(&self, t: usize, raw_len: usize) -> usize {
         let x = self.input_at(t as f64).max(0.0) as usize;
         let i = self.cuts.partition_point(|c| c.0 <= x);
         let cut = if i == 0 { 0 } else { self.cuts[i - 1].1 };
@@ -448,7 +466,8 @@ impl Plan {
 
     /// Output samples `from..to`, on the perfect grid. Where the input has
     /// run out the output is silent.
-    pub(crate) fn render(&self, from: usize, to: usize) -> Vec<f32> {
+    #[must_use]
+    pub fn render(&self, from: usize, to: usize) -> Vec<f32> {
         let x = &self.audio;
         let at = |i: isize| -> f32 {
             usize::try_from(i)
@@ -1007,22 +1026,13 @@ fn track(
     out
 }
 
-/// Which slowrx image rows radio line `k`'s audio feeds.
-pub(crate) fn rows_of_line(spec: &ModeSpec, k: u32) -> std::ops::Range<u32> {
-    match spec.channel_layout {
-        ChannelLayout::PdYcbcr => 2 * k..2 * k + 2,
-        // Robot 36 / 24 send one colour difference per line and the next
-        // row borrows it.
-        ChannelLayout::RobotYuv if spec.mode != SstvMode::Robot72 => k..k + 2,
-        _ => k..k + 1,
-    }
-}
-
-/// Rebuild the `marked` display rows of a `width`-pixel RGB picture from the
-/// nearest good rows above and below, using only the first `limit` rows.
-/// Runs longer than [`MAX_FILL_ROWS`] are left alone. Returns the rows
-/// rebuilt.
-pub(crate) fn fill_rows(rgb: &mut [u8], width: u32, marked: &[bool], limit: u32) -> u32 {
+/// Rebuild the `marked` rows of a picture from its good rows.
+///
+/// `rgb` is a `width`-pixel RGB picture, three bytes a pixel, and each marked
+/// row among its first `limit` is blended from the nearest good rows above
+/// and below. Runs longer than [`MAX_FILL_ROWS`] are left alone. Returns the
+/// rows rebuilt.
+pub fn fill_rows(rgb: &mut [u8], width: u32, marked: &[bool], limit: u32) -> u32 {
     let stride = width as usize * 3;
     let rows = (limit as usize).min(marked.len()).min(rgb.len() / stride);
     let mut filled = 0;
@@ -1057,7 +1067,8 @@ pub(crate) fn fill_rows(rgb: &mut [u8], width: u32, marked: &[bool], limit: u32)
                     }
                     (Some(a), None) => rgb[a * stride + x],
                     (None, Some(b)) => rgb[b * stride + x],
-                    (None, None) => unreachable!(),
+                    // Ruled out above: a run with no good row either side.
+                    (None, None) => continue,
                 };
                 rgb[r * stride + x] = v;
             }
@@ -1073,6 +1084,9 @@ mod tests {
         MAX_FILL_ROWS, PHASE_LINES, Plan, PulseFinder, cut_zero_runs, fill_rows, prefix_sums,
         reacquire, sync_band, track,
     };
+    use crate::modes::SCOTTIE_2;
+    use std::vec;
+    use std::vec::Vec;
 
     thread_local! {
         /// Whole-line phase searches [`reacquire`] has run on this thread.
@@ -1341,8 +1355,8 @@ mod tests {
     /// Which of the first lines of a Scottie 2 picture `raw` (at 8 kHz, no
     /// sync pulses, so the timing is left alone) are marked damaged.
     fn damaged_lines(raw: &[i16]) -> Vec<usize> {
-        let spec = slowrx::for_mode(slowrx::SstvMode::Scottie2);
-        let plan = Plan::new(raw, 0, RATE as u32, &spec, &[]);
+        let timing = SCOTTIE_2.scan_timing();
+        let plan = Plan::new(raw, 0, RATE as u32, &timing, &[]);
         (0..plan.damaged.len())
             .filter(|&k| plan.damaged[k])
             .collect()
@@ -1402,8 +1416,8 @@ mod tests {
     fn output_stops_where_the_input_does() {
         // Half a second of input with no pulses in it: nothing to re-time,
         // and no more output than the input can fill.
-        let spec = slowrx::for_mode(slowrx::SstvMode::Scottie2);
-        let plan = Plan::new(&[100_i16; 8000], 0, 16_000, &spec, &[]);
+        let timing = SCOTTIE_2.scan_timing();
+        let plan = Plan::new(&[100_i16; 8000], 0, 16_000, &timing, &[]);
         assert_eq!(plan.covered(0, 20_000), 7999);
         assert_eq!(plan.covered(0, 5_000), 5_000);
         assert_eq!(plan.covered(9_000, 20_000), 9_000);

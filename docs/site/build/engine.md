@@ -62,11 +62,26 @@ so anything cargo understands works:
 just build -p astar-audio          # one crate
 just test  -p astar-server         # one crate's tests
 just clippy                        # whole workspace, warnings as errors
-cargo build --workspace --release  # or: just build-release
+cargo build --release -p astar-server  # one crate, optimised
 ```
 
 The release profile uses thin LTO and a single codegen unit, so it is
 noticeably slower to build and meaningfully faster to run.
+
+**Build anything you mean to ship one crate at a time, with `-p`.** When cargo
+builds the whole workspace at once (`cargo build --workspace --release`, or
+`just build-release`), it works out one set of features for every crate
+together. That is called *feature unification*: if any member turns a feature
+on, every member that shares the crate gets it. The test bench,
+`astar-nodebench`, turns on `astar-station`'s `sstv-tx`, the SSTV picture
+sender, so a workspace build compiles that sender into every crate that uses
+`astar-station`, the server and the app's engine included. Nothing in them
+calls it, so it is dead code, but it is not what a shipped build contains.
+With `-p`, cargo works out the features for that one crate alone, which is
+how every shipped artifact is built (`just xcframework`,
+`just server-release`), and `ci/guard-sstv.sh` checks it stays that way. A
+workspace build is still the right tool for development: `just build`,
+`just test` and `just clippy` all use one.
 
 ## Feature flags
 

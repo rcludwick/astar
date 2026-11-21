@@ -46,17 +46,24 @@ The popover is the whole client. In broad strokes:
 * **Quick settings** — the config's PTT hardware, input and output device,
   gains, VOX threshold and hang time, codec, talk timer.
 * **Level meters and spectrum** for what you are sending and receiving.
+* **Record** — saves the call to an audio file on your Mac. See
+  [Recording](recording.md).
+* **SSTV picture card** — when someone sends a slow-scan TV picture on an
+  AllStarLink or EchoLink call, a card under the call card shows it coming
+  in and then the finished picture, which is saved to a folder and kept in a
+  gallery window. See [SSTV pictures](sstv.md).
 
 Settings adds the rest: your AllStarLink and EchoLink accounts, audio configs
 ("setups"), microphone profiles and characterization, serial PTT wiring, the
-Bluetooth PTT button, the transmit time-out, and device selection.
+Bluetooth PTT button, the transmit time-out, SSTV pictures, and device
+selection.
 
 ## Finding your way around Settings
 
 Open Settings with the sliders button in the popover footer, or with ⌘,
 from the menu bar. It is one long list of sections: Audio configs, Mic Profiles,
-Operator, AllStarLink, EchoLink, DMR, NXDN, Vocoders, Favorites, Reflector directory,
-Spectrum, Recording and Backup.
+Transmit, Operator, AllStarLink, EchoLink, DMR, NXDN, Vocoders, Favorites,
+Reflector directory, Spectrum, Recording, SSTV and Backup.
 
 That is a lot to scroll through, so each section folds away. Every section
 header has a small triangle at its left edge, the same kind of disclosure
@@ -103,7 +110,10 @@ you are looking at.
 | **AllStarLink (IAX2)** | The primary target. Dials nodes; speaks the `app_rpt` link-layer dialect on top of IAX2. |
 | **M17** | Native support, including reflectors. Transmits your callsign, so set it before you key. The app links Codec 2 in, so there is nothing to install; a system `libcodec2` is used in preference when one is present — see [Codec 2](../build/prerequisites.md#codec-2-only-for-m17). |
 | **EchoLink** | Log in with your validated callsign, browse and search the station list, call a station, talk and chat. Voice is GSM 06.10, built in. See [EchoLink](echolink.md). |
-| **D-Star** *(needs a dongle)* | XLX/XRF reflectors over DExtra. Voice is AMBE, which runs on a **hardware vocoder dongle**, so the network appears in the picker only while one you have added in [Settings → Vocoders](vocoders.md) is attached — or always, when you choose D-Star's built-in software vocoder there. See [Digital voice](hardware.md#digital-voice). |
+| **D-Star** *(dongle or software vocoder)* | XLX/XRF reflectors over DExtra. Voice is AMBE, which runs on a **hardware vocoder dongle**, so the network appears in the picker only while one you have added in [Settings → Vocoders](vocoders.md) is attached — or always, when you choose D-Star's built-in software vocoder there. See [Digital voice](hardware.md#digital-voice). |
+| **System Fusion** *(needs a dongle)* | YSF reflectors, receive and transmit. Voice is AMBE+2, which only the dongle can run. |
+| **NXDN** *(needs a dongle; receive only)* | A talkgroup on an NXDNReflector. Set your NXDN ID in Settings → NXDN. |
+| **DMR** *(needs a dongle; receive only)* | A talkgroup and timeslot on one network's master. Set your DMR radio ID in Settings → DMR. |
 
 ## Audio and PTT hardware
 
@@ -118,5 +128,19 @@ astar too; a config uses either it or a USB radio interface. See
 
 ## What these docs cover
 
-Install and hardware setup, and a stub for day-to-day operating — see
-[Using astar](usage.md). Detailed usage documentation has not been written yet.
+The pages in this section, in the order you are likely to need them:
+
+* [First run](first-run.md) — from the download to a first contact.
+* [Audio configs](configs.md), [Favorites and recents](favorites.md) and
+  [the reflector directory](reflectors.md) — saving setups and finding
+  something to dial.
+* [Hardware](hardware.md), [Bluetooth PTT button](bluetooth-ptt.md) and
+  [Vocoders](vocoders.md) — radio interfaces, push-to-talk and the D-Star
+  vocoder dongle.
+* [EchoLink](echolink.md) — logging in and calling a station.
+* [Recording](recording.md) and [SSTV pictures](sstv.md) — keeping what you
+  hear.
+* [Packet log](packet-log.md) — capturing a call's packets for a bug report.
+
+A full walkthrough of day-to-day operating has not been written yet; see
+[Using astar](usage.md).

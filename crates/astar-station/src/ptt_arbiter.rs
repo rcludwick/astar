@@ -3,7 +3,8 @@
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 //! The PTT arbiter: the one place that decides whether the station is on air
 //! when several sources can key it — the on-screen button and Space, VOX, a
-//! USB radio interface, a Bluetooth LE button, and `Station::set_ptt` callers.
+//! USB radio interface, a Bluetooth LE button, `Station::set_ptt` callers,
+//! and an SSTV picture being sent.
 //!
 //! It is pure. It owns no lock, no thread and no clock: every method that
 //! needs the time takes `now`. That lets the tests drive the lease and the
@@ -74,16 +75,21 @@ pub enum PttSource {
     /// `Station::set_ptt` callers: the node daemon's `/key`, the CLI, Python
     /// and the Iced client.
     Legacy = 4,
+    /// An SSTV picture being sent (`Station::send_picture`, feature
+    /// `sstv-tx`). Held for the whole picture, so the transmit time-out
+    /// covers it like any other key-down. Only the engine presses it.
+    Picture = 5,
 }
 
 impl PttSource {
     /// Every source in discriminant order, for building and walking masks.
-    pub const ALL: [PttSource; 5] = [
+    pub const ALL: [PttSource; 6] = [
         PttSource::Manual,
         PttSource::Vox,
         PttSource::Serial,
         PttSource::Bluetooth,
         PttSource::Legacy,
+        PttSource::Picture,
     ];
 
     /// This source's bit in a [`PttSnapshot`] mask: `1 << discriminant`.
@@ -102,6 +108,7 @@ impl PttSource {
             2 => Some(PttSource::Serial),
             3 => Some(PttSource::Bluetooth),
             4 => Some(PttSource::Legacy),
+            5 => Some(PttSource::Picture),
             _ => None,
         }
     }
@@ -217,8 +224,8 @@ fn mask_of(pred: impl Fn(PttSource) -> bool) -> u32 {
 /// for the rules; `Station` owns one behind a mutex and forwards its edges.
 #[derive(Debug)]
 pub struct PttArbiter {
-    held: [Option<Hold>; 5],
-    latched: [bool; 5],
+    held: [Option<Hold>; PttSource::ALL.len()],
+    latched: [bool; PttSource::ALL.len()],
     on_air_since: Option<Instant>,
     tx_timeout: Duration,
     forced: ForcedRecord,
@@ -230,8 +237,8 @@ impl PttArbiter {
     #[must_use]
     pub fn new() -> PttArbiter {
         PttArbiter {
-            held: [None; 5],
-            latched: [false; 5],
+            held: [None; PttSource::ALL.len()],
+            latched: [false; PttSource::ALL.len()],
             on_air_since: None,
             tx_timeout: DEFAULT_TX_TIMEOUT,
             forced: ForcedRecord {
@@ -487,5 +494,35 @@ impl PttArbiter {
 impl Default for PttArbiter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picture_source_is_bit_5() {
+        assert_eq!(PttSource::Picture.bit(), 32);
+        assert_eq!(PttSource::from_raw(5), Some(PttSource::Picture));
+        assert_eq!(PttSource::ALL.len(), 6);
+        assert_eq!(PttSource::ALL[5], PttSource::Picture);
+        assert_eq!(PttSource::from_raw(6), None);
+    }
+
+    #[test]
+    fn timeout_forces_a_picture_off() {
+        let t0 = Instant::now();
+        let mut a = PttArbiter::new();
+        assert_eq!(a.press(PttSource::Picture, t0), PressOutcome::KeyNow);
+        assert_eq!(a.tick(t0 + DEFAULT_TX_TIMEOUT / 2), PttEdge::None);
+        assert_eq!(a.tick(t0 + DEFAULT_TX_TIMEOUT), PttEdge::Unkey);
+        let snap = a.snapshot();
+        assert_eq!(snap.forced.reason, Some(ForcedReason::TxTimeout));
+        assert_eq!(snap.forced.sources, PttSource::Picture.bit());
+        assert_eq!(snap.latched, PttSource::Picture.bit());
+        // Releasing re-arms it, as for every other source.
+        assert_eq!(a.release(PttSource::Picture), PttEdge::None);
+        assert_eq!(a.snapshot().latched, 0);
     }
 }

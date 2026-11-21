@@ -161,6 +161,9 @@ struct Connection {
     /// keyed (iax-confjb). Its cushioned audio may hold the links keyed for
     /// [`KEY_TAIL`] after that, and never when it was never keyed.
     key_seen_at: Option<std::time::Instant>,
+    /// The last picture started on this call ([`Manager::send_picture_audio`]),
+    /// kept so a second one is refused while it runs.
+    picture: Option<crate::picture_tx::PictureTx>,
 }
 
 /// Secret-free snapshot of the whole pool. The single read surface for
@@ -1201,6 +1204,7 @@ impl Manager {
                 preroll_lead,
                 member: None,
                 key_seen_at: None,
+                picture: None,
             },
         );
         // iax-6a3f: in conference/bridge mode a dialed call must JOIN the mix,
@@ -1315,6 +1319,7 @@ impl Manager {
                 preroll_lead: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 member,
                 key_seen_at: None,
+                picture: None,
             },
         );
         Ok(id)
@@ -1505,6 +1510,62 @@ impl Manager {
             self.router.set_gate(&mic, false);
         }
         conn.call.set_ptt(false)
+    }
+
+    /// The bus sample rate of a call's transmit side: the rate
+    /// [`Manager::send_picture_audio`] expects its audio at. `None` if `call`
+    /// isn't pooled.
+    #[must_use]
+    pub fn tx_bus_rate(&self, call: CallId) -> Option<u32> {
+        self.calls
+            .contains_key(&call)
+            .then_some(self.config.sample_rate)
+    }
+
+    /// Send a whole picture's audio on a call in place of its microphone.
+    ///
+    /// `pcm` is the whole transmission at the call's bus rate
+    /// ([`Manager::tx_bus_rate`]). The call must already be keyed by the
+    /// caller; this neither keys nor unkeys. If it is not keyed, the returned
+    /// handle has already ended with [`crate::CutReason::Unkeyed`]; if it
+    /// unkeys or ends mid-picture, the picture is cut and the handle says
+    /// why. See `picture_tx` for how the frames are paced and time-stamped.
+    ///
+    /// # Errors
+    /// - [`IaxError::PictureNoCall`] if `call` isn't pooled, isn't answered,
+    ///   has ended, or is an adopted inbound leg (whose run loop has no
+    ///   picture path).
+    /// - [`IaxError::PictureBusy`] if a picture is already running on `call`.
+    /// - [`IaxError::Io`] if the pacer thread could not be spawned.
+    pub fn send_picture_audio(
+        &mut self,
+        call: CallId,
+        pcm: Arc<[i16]>,
+    ) -> Result<crate::picture_tx::PictureTx, IaxError> {
+        let frame_len = astar_audio::router::frame_samples(self.config.sample_rate);
+        let conn = self.calls.get_mut(&call).ok_or(IaxError::PictureNoCall)?;
+        if conn.call.adopt_sample_rate().is_some() || !conn.call.is_active() {
+            return Err(IaxError::PictureNoCall);
+        }
+        if conn.picture.as_ref().is_some_and(|p| p.ended().is_none()) {
+            return Err(IaxError::PictureBusy);
+        }
+        let total = pcm.len().div_ceil(frame_len);
+        let tx = if total == 0 {
+            crate::picture_tx::PictureTx::already_ended(0, crate::picture_tx::PictureEnd::Sent)
+        } else if !conn.call.ptt_engaged() {
+            crate::picture_tx::PictureTx::already_ended(
+                total,
+                crate::picture_tx::PictureEnd::Cut(crate::picture_tx::CutReason::Unkeyed),
+            )
+        } else {
+            let (tx, job) =
+                crate::picture_tx::start(pcm, frame_len, conn.call.ptt_gate(), conn.call.waker())?;
+            conn.call.start_picture(job)?;
+            tx
+        };
+        conn.picture = Some(tx.clone());
+        Ok(tx)
     }
 
     /// Hang up and remove a call from the pool. Unbinds its mic and detaches

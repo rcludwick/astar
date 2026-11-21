@@ -6,7 +6,7 @@
 # nodebench rig: the loopback pod (ASL3 node 1999 + astar-server 1998 +
 # tshark), driven by podman. See RIG.md.
 #
-#   rig.sh build                  build both images (native arch)
+#   rig.sh build                  build the images (native arch)
 #   rig.sh up [--ulaw] [--debug] [--register] [--fill-callerid]
 #                                 start the pod, wait until both nodes answer
 #                                 (options: RIG.md "Variants")
@@ -68,6 +68,7 @@ case "$cmd" in
         podman build -t localhost/nodebench-astar-server \
             -f "$here/images/astar-server/Containerfile" \
             --ignorefile "$here/images/astar-server/Containerfile.ignore" "$repo"
+        podman build -t localhost/nodebench-sstv-decode "$here/images/sstv-decode"
         ;;
     up)
         codecs="${NODEBENCH_CODECS:-slin16,slin,ulaw}"

@@ -1,0 +1,97 @@
+# astar: vendored MIT island inside an AGPL-3.0-only workspace. `license`,
+# `version`, `edition` and `repository` are hard-coded on purpose: inheriting
+# them from the workspace would relicense Tobias Klockau's code. The crate is
+# also in the workspace `exclude` and carries the empty `[workspace]` below.
+# See VENDORED.md.
+[package]
+name = "sstv"
+version = "0.3.1"
+edition = "2024"
+rust-version = "1.88"
+description = "Encode and decode slow-scan television (SSTV) transmissions, no_std compatible"
+repository = "https://github.com/unexcellent/sstv"
+license = "MIT"
+readme = "README.md"
+keywords = ["sstv", "ham-radio", "amateur-radio", "no-std", "encoding"]
+categories = ["multimedia::audio", "multimedia::encoding", "embedded", "no-std"]
+include = ["/src/**/*.rs", "/build.rs", "/examples/*.rs", "/README.md", "/LICENSE"]
+
+[features]
+# astar: `encode` and `dejitter` are new; see VENDORED.md.
+default = ["std", "encode"]
+std = ["alloc"]
+# The tone encoder (`Encoder`, `Synthesizer`). Off, the crate decodes only.
+encode = []
+# The de-jitter (`sstv::dejitter`, `Decoder::decode_dejittered`): puts a
+# picture's lines back on time before decoding it.
+dejitter = ["std"]
+alloc = []
+image = ["std", "dep:image"]
+wav = ["std", "dep:hound"]
+mp3 = ["std", "dep:mp3lame-encoder", "dep:minimp3"]
+
+[dependencies]
+libm = "0.2.8"
+image = { version = "0.25.1", optional = true }
+hound = { version = "3.5.1", optional = true }
+mp3lame-encoder = { version = "0.2.2", optional = true }
+minimp3 = { version = "0.5.1", optional = true }
+
+[dev-dependencies]
+image = "0.25.1"
+hound = "3.5.1"
+flate2 = "1.0.28"
+lewton = "0.10"
+claxon = "0.4"
+rand = "0.9"
+rand_distr = "0.5"
+
+# astar: the de-jitter's tests build their signals with the encoder.
+[[test]]
+name = "dejitter"
+required-features = ["encode", "dejitter"]
+
+[[example]]
+name = "encode"
+required-features = ["image", "wav"]
+
+[[example]]
+name = "decode"
+required-features = ["image", "wav", "mp3"]
+
+# The tests process audio sample by sample; unoptimized, they run many times
+# slower. Level 1 gains most of the speed while keeping compiles quick, and
+# debug assertions and overflow checks stay on.
+[profile.test]
+opt-level = 1
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+unreachable = "deny"
+unimplemented = "deny"
+unchecked_time_subtraction = "deny"
+todo = "deny"
+string_slice = "deny"
+panic_in_result_fn = "deny"
+panic = "deny"
+exit = "deny"
+
+as_conversions = "allow"
+arithmetic_side_effects = "allow"
+indexing_slicing = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+# `f64::mul_add` does not exist without std.
+suboptimal_flops = "allow"
+
+# astar: an empty workspace table makes this crate its own workspace root, so
+# Cargo never adopts it into an enclosing workspace (see VENDORED.md).
+[workspace]

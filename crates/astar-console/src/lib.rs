@@ -72,7 +72,7 @@ pub use session::nxdn_available;
 pub use session::ysf_available;
 pub use session::{
     AnswerPolicy, ConsoleConfig, ConsoleError, ConsoleSession, LinkConnectSpec, LinkKeyResolver,
-    RecordTaps, RegisterOutcome, list_devices, m17_available, resolve_device,
+    PictureTarget, RecordTaps, RegisterOutcome, list_devices, m17_available, resolve_device,
 };
 #[cfg(feature = "dstar")]
 pub use session::{dstar_available, dstar_available_with};

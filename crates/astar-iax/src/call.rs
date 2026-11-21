@@ -541,6 +541,35 @@ impl Call {
         Ok(())
     }
 
+    /// Whether push-to-talk is engaged (read without the snapshot's locks).
+    pub(crate) fn ptt_engaged(&self) -> bool {
+        self.ptt.engaged()
+    }
+
+    /// Whether the runtime reports the call answered and media-active.
+    pub(crate) fn is_active(&self) -> bool {
+        self.state.load(Ordering::Relaxed) == STATE_ACTIVE
+    }
+
+    /// Hand a picture to this call's run loop. Only a dialed call's run loop
+    /// sends pictures; the caller checks that first.
+    ///
+    /// # Errors
+    /// [`IaxError::PictureNoCall`] if the runtime thread has exited. The job
+    /// is dropped with the failed send, which marks the picture cut.
+    pub(crate) fn start_picture(&self, job: crate::picture_tx::PictureJob) -> Result<(), IaxError> {
+        self.cmd_tx
+            .send(RuntimeCommand::Picture(job))
+            .map_err(|_| IaxError::PictureNoCall)?;
+        let _ = self.waker.wake();
+        Ok(())
+    }
+
+    /// The push-to-talk gate, which a picture watches so it stops on unkey.
+    pub(crate) fn ptt_gate(&self) -> crate::audio_bridge::PttGate {
+        self.ptt.clone()
+    }
+
     /// Engage/release push-to-talk. Engaged = captured audio is encoded and
     /// sent to the peer; released = silence. Also notifies the peer (`SendPtt`).
     ///

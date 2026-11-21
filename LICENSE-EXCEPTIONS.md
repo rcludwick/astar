@@ -571,9 +571,11 @@ This is a summary of the public record, not legal advice.
 ## 10. SSTV decoding via `slowrx` (MIT) — notices
 
 astar decodes slow-scan TV pictures with **`slowrx`** 0.9.0, a pure-Rust port
-by Jason Herald of Oona Räisänen's slowrx decoder, from crates.io. It is the
-one SSTV dependency of `crates/astar-sstv`, which every build that decodes
-pictures carries: today the macOS app's engine, where `astar-sys` turns on
+by Jason Herald of Oona Räisänen's slowrx decoder, from crates.io. It is one
+of the two SSTV dependencies of `crates/astar-sstv`; the other is the vendored
+`sstv` fork (section 14), whose de-jitter re-times a received picture before
+slowrx decodes it. Every build that decodes pictures carries
+`astar-sstv`: today the macOS app's engine, where `astar-sys` turns on
 `astar-station`'s `sstv` feature. `astar-server` does not decode SSTV and
 leaves that feature off, so it does not link slowrx. It is MIT: no relink or
 source obligation on astar, only attribution, and there is no C library to
@@ -591,10 +593,15 @@ Png's own dependencies are permissive too: `flate2`, `fdeflate`,
 `miniz_oxide` and `crc32fast` are MIT or Apache-2.0 (`miniz_oxide` also
 Zlib), `simd-adler32` is MIT, and `adler2` is 0BSD, MIT or Apache-2.0.
 
-astar only receives SSTV. The **`sstv`** crate (0.3.1, MIT), which can
-encode pictures, is a **dev-dependency of `astar-sstv` only**: it makes the
-test signals and never ships in any build. `ci/guard-sstv.sh` fails if any
-`Cargo.toml` names it anywhere but a `[dev-dependencies]` table.
+astar only receives SSTV in every build that ships today. The **`sstv`**
+crate (MIT), which can encode pictures, is vendored as a patched fork at
+`vendor/sstv` (section 14). It makes the test signals, and its encoder is
+also what `astar-station`'s off-by-default `sstv-tx` feature sends pictures
+with; no shipped build turns that feature on. `ci/guard-sstv.sh` fails if
+the published crate is named anywhere, if anything but `sstv-tx` and
+dev-dependencies asks for the encoder, or if a shipped build's dependency
+tree builds the crate with its encoder (its `encode` or `default` feature).
+The crate itself is in those trees, for the de-jitter; the encoder is not.
 
 `slowrx` (from the crate's `LICENSE`):
 
@@ -821,4 +828,62 @@ PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
 LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+---
+
+## 14. The `sstv` crate, vendored (MIT) — notices
+
+`vendor/sstv` is a fork of the **`sstv`** crate 0.3.1 by Tobias Klockau
+(<https://github.com/unexcellent/sstv>, upstream commit `9761c4c`), an SSTV
+encoder and decoder. It is **MIT**: no relink or source obligation on astar,
+only that the copyright and permission notice travel with the code, which
+`vendor/sstv/LICENSE` does and the text below repeats. The fork's own changes
+are MIT too, offered on the same terms.
+
+It is a licence island inside the AGPL-3.0-only tree. Its `Cargo.toml`
+hard-codes `license`, `version`, `edition` and `repository` instead of
+inheriting them from the workspace, which would relabel Klockau's code as
+AGPL. It is in the workspace `exclude`, so `cargo fmt --all` and clippy never
+touch it. `vendor/sstv/VENDORED.md` lists every patch against upstream.
+
+It is the test-signal encoder for `astar-sstv`, `astar-netrec` and
+`astar-nodebench` (dev-dependencies, with the `encode` feature on), and the
+encoder behind `astar-station`'s `sstv-tx` feature, which is off by default,
+which only the bench turns on, and which no shipped build includes
+(`ci/guard-sstv.sh`). The fork's `encode` feature can be turned off to leave
+the encoder out; the workspace entry does so, so a crate must ask for it by
+name. `astar-sstv` uses the fork's de-jitter (feature `dejitter`, encoder
+off), which re-times a received picture before `slowrx` (section 10) decodes
+it: Rob Ludwick's own code, written for astar and moved into the fork under
+its MIT licence so it can be offered upstream. The `sstv` crate's own decoder
+is compiled into the builds that carry the de-jitter, since only `encode` is
+behind a feature, but no shipped build calls it; only the bench measures it.
+It has one runtime dependency, `libm` (MIT OR Apache-2.0), and optional ones astar does
+not turn on (`image`, `hound`, `minimp3`, `mp3lame-encoder`).
+
+`sstv` (from the crate's `LICENSE`):
+
+```
+MIT License
+
+Copyright (c) 2026 Tobias Klockau
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```

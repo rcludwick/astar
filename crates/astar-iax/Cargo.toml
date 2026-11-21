@@ -12,11 +12,11 @@ description = "High-level idiomatic Rust API for the IAX2 protocol."
 workspace = true
 
 [dependencies]
-astar-iax-core = { path = "../astar-iax-core", version = "0.1.23-beta" }
-astar-audio = { path = "../astar-audio", version = "0.1.23-beta", default-features = false }
-astar-codec = { path = "../astar-codec", version = "0.1.23-beta", features = ["gsm"] }
-astar-record = { path = "../astar-record", version = "0.1.23-beta", default-features = false }
-astar-wireguard = { path = "../astar-wireguard", version = "0.1.23-beta" }
+astar-iax-core = { path = "../astar-iax-core", version = "0.1.24-beta" }
+astar-audio = { path = "../astar-audio", version = "0.1.24-beta", default-features = false }
+astar-codec = { path = "../astar-codec", version = "0.1.24-beta", features = ["gsm"] }
+astar-record = { path = "../astar-record", version = "0.1.24-beta", default-features = false }
+astar-wireguard = { path = "../astar-wireguard", version = "0.1.24-beta" }
 # Stateless CALLTOKENs (src/calltoken.rs). Both are already in the tree
 # through boringtun and astar-dmr; no new crate.
 hmac = "0.12"
@@ -41,7 +41,10 @@ device-audio = ["astar-audio/device-audio"]
 serde = ["dep:serde", "astar-iax-core/serde"]
 # Bench/test-only surface: `dial_raw_with_profile` (a raw dial with a
 # caller-built CallProfile, so a test peer can present CALLING_NUMBER like an
-# app_rpt node does). Off by default; only crates/astar-nodebench turns it on.
+# app_rpt node does), and `PictureTx::stall_pacer`, which stalls a picture's
+# pacer. Off by default; only crates/astar-nodebench, this crate's own
+# tests and astar-station's `test-hooks` (itself reached only from
+# dev-dependencies) turn it on.
 test-support = []
 
 [dev-dependencies]
@@ -53,3 +56,6 @@ tracing-subscriber.workspace = true
 # feature only turns on for test builds, mirroring astar-audio's own
 # self-dependency in its Cargo.toml.
 astar-audio = { path = "../astar-audio", features = ["test-backend"] }
+# The picture-transmit tests (tests/picture_tx.rs) stall the pacer through a
+# `test-support` hook, so test builds turn the feature on for this crate.
+astar-iax = { path = ".", features = ["test-support"] }

@@ -121,6 +121,16 @@ struct InboundState {
     allowlist: Option<KnownNodes>,
 }
 
+/// The live IAX2 call's transmit side, as [`ConsoleSession::picture_target`]
+/// reports it to a picture sender.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PictureTarget {
+    /// The bus rate the picture's audio must be at.
+    pub rate: u32,
+    /// Whether the call is keyed right now.
+    pub keyed: bool,
+}
+
 /// Operator-supplied configuration for a web-transceiver call.
 pub struct ConsoleConfig {
     /// Destination `AllStar` node number, e.g. `"55553"` — the node being
@@ -2161,6 +2171,45 @@ impl ConsoleSession {
     /// # Errors
     /// [`ConsoleError::NotConnected`] if no call is live.
     pub fn set_ptt(&mut self, on: bool) -> Result<(), ConsoleError> {
+        self.set_ptt_with(on, true)
+    }
+
+    /// Key the live call for a picture, which brings its own audio and so
+    /// needs no microphone: exactly [`Self::set_ptt`]`(true)`, except that a
+    /// voice route (an `EchoLink` call's) with no capture device is keyed
+    /// anyway rather than refused with [`ConsoleError::NoCaptureDevice`].
+    /// The capture lane is still opened when it can be, so a person who
+    /// holds PTT through the end of the picture is heard after it. Unkey
+    /// with [`Self::set_ptt`]`(false)`.
+    ///
+    /// It refuses by itself on every network that cannot carry a picture,
+    /// so no caller can use it to key a digital-voice session (M17, D-Star,
+    /// System Fusion, NXDN, DMR) without a microphone, which would put an
+    /// RF header over silence on the air.
+    ///
+    /// # Errors
+    /// [`ConsoleError::NotConnected`] with no call; the network's own error
+    /// ([`ConsoleError::M17`], [`ConsoleError::Dstar`], [`ConsoleError::Ysf`],
+    /// [`ConsoleError::Nxdn`], [`ConsoleError::Dmr`]) on a network that
+    /// cannot carry a picture; otherwise as [`Self::set_ptt`], less
+    /// `NoCaptureDevice`.
+    pub fn key_for_picture(&mut self) -> Result<(), ConsoleError> {
+        const NO_PICTURE: &str = "this network cannot carry a picture";
+        match self.active_network() {
+            Some("AllStarLink" | "EchoLink") => self.set_ptt_with(true, false),
+            Some("M17") => Err(ConsoleError::M17(NO_PICTURE.into())),
+            Some("D-Star") => Err(ConsoleError::Dstar(NO_PICTURE.into())),
+            Some("System Fusion") => Err(ConsoleError::Ysf(NO_PICTURE.into())),
+            Some("NXDN") => Err(ConsoleError::Nxdn(NO_PICTURE.into())),
+            Some("DMR") => Err(ConsoleError::Dmr(NO_PICTURE.into())),
+            // No call, or (never today) a name not listed: refuse, never key.
+            None | Some(_) => Err(ConsoleError::NotConnected),
+        }
+    }
+
+    /// [`Self::set_ptt`], with the capture lane's refusal optional: a
+    /// key-down with `capture_required` false goes ahead without one.
+    fn set_ptt_with(&mut self, on: bool, capture_required: bool) -> Result<(), ConsoleError> {
         // NXDN has no transmit path yet (`crate::nxdn`'s Transmit section),
         // and the refusal has to come out BEFORE the gate below opens: a
         // key-down that opened the capture lane and then refused would leave
@@ -2189,7 +2238,7 @@ impl ConsoleSession {
         // an RF header over a stream of silence is worse than no key at all.
         if self.voice_route.is_some() {
             if on {
-                if !self.key_voice_route(true) {
+                if !self.key_voice_route(true) && capture_required {
                     return Err(ConsoleError::NoCaptureDevice);
                 }
             } else {
@@ -2305,6 +2354,89 @@ impl ConsoleSession {
         let id = self.active.ok_or(ConsoleError::NotConnected)?;
         let mgr = self.manager.as_ref().ok_or(ConsoleError::NotConnected)?;
         mgr.send_dtmf(id, digit).map_err(ConsoleError::from)
+    }
+
+    /// The network the live call is on, as a person would name it:
+    /// `"AllStarLink"` for an IAX2 call, `"EchoLink"`, `"M17"`, `"D-Star"`,
+    /// `"System Fusion"`, `"NXDN"` or `"DMR"`; `None` with no call. A sender
+    /// that only some networks can carry (an SSTV picture) reads this to
+    /// refuse the others by name. The sessions are mutually exclusive, so at
+    /// most one of them is live.
+    #[must_use]
+    pub fn active_network(&self) -> Option<&'static str> {
+        if self.m17_is_active() {
+            Some("M17")
+        } else if self.dstar_is_active() {
+            Some("D-Star")
+        } else if self.ysf_is_active() {
+            Some("System Fusion")
+        } else if self.nxdn_is_active() {
+            Some("NXDN")
+        } else if self.dmr_is_active() {
+            Some("DMR")
+        } else if self.echolink_is_active() {
+            Some("EchoLink")
+        } else {
+            self.active.map(|_| "AllStarLink")
+        }
+    }
+
+    /// The live call's transmit side, for a picture sender: the rate its
+    /// audio must be at, and whether the call is keyed right now. For an
+    /// IAX2 call that is the bus rate, and keyed by any PTT source or by an
+    /// announcement that seized it; `None` unless the call is answered and
+    /// media-active. For an `EchoLink` call it is 8 kHz, and keyed while PTT
+    /// is requested; `None` unless the call is connected. `None` on every
+    /// other network.
+    #[must_use]
+    pub fn picture_target(&self) -> Option<PictureTarget> {
+        #[cfg(feature = "echolink")]
+        if self.active_network() == Some("EchoLink") {
+            return self.echolink.as_ref()?.picture_target();
+        }
+        if self.active_network() != Some("AllStarLink") {
+            return None;
+        }
+        let id = self.active?;
+        let mgr = self.manager.as_ref()?;
+        let rate = mgr.tx_bus_rate(id)?;
+        let call = mgr
+            .snapshot()
+            .calls
+            .into_iter()
+            .find(|c| c.id == id && c.is_active())?;
+        Some(PictureTarget {
+            rate,
+            keyed: call.is_keyed(),
+        })
+    }
+
+    /// Hand a whole picture's audio, at [`PictureTarget::rate`], to the
+    /// live call's picture path: the active IAX2 call's
+    /// (`Manager::send_picture_audio`) or the `EchoLink` call's
+    /// ([`EchoLinkSession::send_picture_audio`]), which share one contract
+    /// and one pacer. The call must already be keyed
+    /// ([`Self::key_for_picture`]); this neither keys nor unkeys.
+    ///
+    /// # Errors
+    /// [`ConsoleError::NotConnected`] with no IAX2 or `EchoLink` call, or an
+    /// `EchoLink` call not connected; [`ConsoleError::Iax`] carrying
+    /// `PictureNoCall`, `PictureBusy` or an I/O error from the picture path.
+    pub fn send_picture_audio(
+        &mut self,
+        pcm: std::sync::Arc<[i16]>,
+    ) -> Result<astar_iax::PictureTx, ConsoleError> {
+        #[cfg(feature = "echolink")]
+        if self.active_network() == Some("EchoLink") {
+            let session = self.echolink.as_mut().ok_or(ConsoleError::NotConnected)?;
+            return session.send_picture_audio(pcm);
+        }
+        if self.active_network() != Some("AllStarLink") {
+            return Err(ConsoleError::NotConnected);
+        }
+        let id = self.active.ok_or(ConsoleError::NotConnected)?;
+        let mgr = self.manager.as_mut().ok_or(ConsoleError::NotConnected)?;
+        mgr.send_picture_audio(id, pcm).map_err(ConsoleError::from)
     }
 
     /// Play an announcement on the active call (iax-da05).
@@ -7574,6 +7706,34 @@ mod tests {
         let _audio = s.open_voice_route(None, None, null).expect("route");
         assert!(s.key_voice_route(true));
         assert!(s.key_voice_route(false));
+    }
+
+    /// `key_for_picture` keys without a microphone only where a picture can
+    /// go. On an M17 session with no capture device it must refuse by
+    /// itself, or it would put an RF header over silence on the reflector.
+    #[cfg(feature = "m17")]
+    #[test]
+    fn key_for_picture_refuses_on_m17() {
+        let target = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind silent target");
+        let addr = target.local_addr().expect("local addr");
+        let mut s = ConsoleSession::new();
+        s.m17_connect(
+            Box::new(NullBackend::new()),
+            m17_cfg(addr),
+            Some("no such device"),
+            None,
+        )
+        .expect("m17 connect; a missing capture device is not fatal");
+        assert!(
+            matches!(s.key_for_picture(), Err(ConsoleError::M17(_))),
+            "a picture key on M17 must be refused"
+        );
+        assert!(!s.snapshot().ptt, "a refused key never reports as keyed");
+        assert!(
+            !s.m17_state().expect("a live session").ptt,
+            "nothing was forwarded to the M17 session"
+        );
+        s.m17_disconnect();
     }
 
     #[test]

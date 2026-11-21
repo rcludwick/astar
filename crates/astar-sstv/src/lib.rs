@@ -17,7 +17,6 @@
 mod decode;
 mod mode;
 mod png_out;
-mod retime;
 mod worker;
 
 pub use decode::{

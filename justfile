@@ -211,9 +211,10 @@ cbindgen:
 # runs on astar-http), the EchoLink test fences (no EchoLink host name in
 # the engine; the loopback-only features never reach a real build), no packet
 # tap on a path that carries secrets, the net recorder staying
-# receive-only, and SSTV staying decode-only (the `sstv` encoder crate a
-# dev-dependency only, astar-sstv a leaf, no headerless starts). Each prints
-# one line; run them before a push.
+# receive-only, and SSTV sending out of every shipped build (only the forked
+# `sstv` at vendor/sstv, its encoder reached only by astar-station's
+# `sstv-tx`, which only the bench turns on; astar-sstv a leaf, no headerless
+# starts). Each prints one line; run them before a push.
 guards:
     ./ci/guard-safety-env.sh
     ./ci/guard-no-git-deps.sh

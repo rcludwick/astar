@@ -25,9 +25,9 @@ see the [net recorder](../netrec.md#sstv-pictures).
 ## astar never sends a picture
 
 astar only **receives** SSTV. There is no way to send a picture from it: no
-button, no setting, and no picture encoder in any build. Turning decoding on
-changes nothing about what astar transmits. It only listens to the audio you
-are already hearing.
+button, no setting, and no picture encoder in any build that ships. Turning
+decoding on changes nothing about what astar transmits. It only listens to
+the audio you are already hearing.
 
 ## Which networks can carry a picture
 
@@ -245,4 +245,7 @@ astar does three things while a picture airs:
 The decoder at the heart of this is **slowrx.rs** by Jason Herald, a Rust
 port of **slowrx** by Oona Räisänen. Both are free software (MIT and ISC);
 their notices are in `LICENSE-EXCEPTIONS.md` §10, in astar's source (see
-[Licence](../about/license.md)).
+[Licence](../about/license.md)). The timing repair that lines a picture's scan
+lines back up before slowrx reads them lives in astar's fork of the **`sstv`**
+crate by Tobias Klockau, also MIT; its notice is in `LICENSE-EXCEPTIONS.md`
+§14.

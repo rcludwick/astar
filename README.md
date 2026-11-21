@@ -6,15 +6,15 @@
 
 <p align="center">
   A native ham-radio digital-voice client and node —
-  <strong>AllStarLink (IAX2)</strong>, <strong>M17</strong>,
-  <strong>D-Star</strong> and <strong>System Fusion</strong>, on one Rust core
-  with native front-ends.
+  <strong>AllStarLink (IAX2)</strong>, <strong>EchoLink</strong>,
+  <strong>M17</strong>, <strong>D-Star</strong> and
+  <strong>System Fusion</strong>, on one Rust core with native front-ends.
 </p>
 
 <p align="center">
   <a href="https://github.com/rcludwick/astar/releases/latest"><strong>Latest release</strong></a> ·
   <a href="CHANGELOG.md">changelog</a> · AGPL-3.0-only ·
-  macOS today, Windows and Linux in progress
+  macOS today; the Windows and Linux client is paused
 </p>
 
 <p align="center">
@@ -22,6 +22,7 @@
   <a href="https://rcludwick.github.io/astar/build/">Build from source</a> ·
   <a href="https://rcludwick.github.io/astar/macos/hardware/">Hardware</a> ·
   <a href="https://rcludwick.github.io/astar/server/">astar-server</a> ·
+  <a href="https://rcludwick.github.io/astar/netrec/">Net recorder</a> ·
   <a href="https://discord.gg/zDz5R8rVAM">Discord</a>
 </p>
 
@@ -34,6 +35,15 @@ noise and writes a per-device profile (notches for hum and whine, RNNoise for
 the rest, or a pass-through when there is nothing to fix).
 It drives generic USB radio interfaces (serial PTT + USB audio; the AllScan
 UCI150 is the reference device) and also runs as an always-on node daemon.
+
+It keeps what it hears, too. The macOS app records a call at the press of a
+button, and decodes any **SSTV picture** sent on an AllStarLink or EchoLink
+call, showing it as it comes in and saving it to a gallery (receive only:
+no build of astar that ships can send a picture). **`astar-netrec`**, the net recorder, joins
+scheduled M17 and D-Star nets listen-only and keeps each one as audio, a log
+of who talked when, its SSTV pictures and a 1080p **video** of the evening;
+it can also **stream a public net live** to YouTube and Twitch. astar-server
+shows those recordings in a browser as a conversation.
 
 > ### Latest release
 >
@@ -49,12 +59,16 @@ UCI150 is the reference device) and also runs as an always-on node daemon.
 > **M17 needs nothing installed.** The app has linked Codec 2 in since
 > `0.1.4beta`; a system `libcodec2` is still preferred when one is present.
 >
-> **D-Star, System Fusion, NXDN and DMR need a dongle.** All four are AMBE+2
-> with no software vocoder, so they run on an AMBE-3000 USB stick: the **DVMEGA
-> DVstick 30** or NW Digital Radio's **ThumbDV / DV3000**. Plug one in and the
-> networks appear; pull it and they go. D-Star and System Fusion are in the
-> macOS app fully; NXDN and DMR are receive only, everywhere they exist —
-> astar has no transmit path for either yet. AllStarLink and M17 need neither.
+> **System Fusion, NXDN and DMR need a dongle; D-Star can use one.** The
+> first three are AMBE+2, which is still under patent and has no software
+> vocoder, so they run on an AMBE-3000 USB stick: the **DVMEGA DVstick 30** or
+> NW Digital Radio's **ThumbDV / DV3000**. Plug one in and the networks
+> appear; pull it and they go. D-Star uses the older AMBE, whose patent has
+> expired, so it runs on the same stick by default or on Bruce Perens'
+> software vocoder, built into the app and chosen in Settings → Vocoders.
+> D-Star and System Fusion are in the macOS app fully; NXDN and DMR are
+> receive only, everywhere they exist — astar has no transmit path for either
+> yet. AllStarLink, EchoLink and M17 need no dongle.
 >
 > This is a beta of a project that has only just started shipping. Expect rough
 > edges, expect things to move.
@@ -81,7 +95,9 @@ that is satisfied out of the box — see [M17 and Codec 2](#m17-and-codec-2).
 rather than on the build: the vocoder is an AMBE-3000 USB dongle — a DVMEGA
 DVstick 30 or a ThumbDV / DV3000 — so each network appears in the picker when
 one is plugged in and disappears when it is pulled. One dongle serves all
-four, one network at a time. NXDN and DMR are receive only everywhere they
+four, one network at a time. D-Star is the exception when you choose its
+built-in software vocoder in Settings → Vocoders: then it needs no dongle and
+is always in the picker. NXDN and DMR are receive only everywhere they
 exist — astar has no transmit path for either yet. `astar-server` does not
 enable `dstar`, `ysf`, `nxdn` or `dmr` in its own manifest, though a workspace
 build unifies features and compiles them in anyway; the daemon refuses to key
@@ -103,12 +119,12 @@ progress rather than a feature list.
 * **macOS** — the primary front-end. A menu-bar app with a real main window and,
   by default, a Dock icon you can switch off. This is the one that gets the
   design attention.
-* **Linux** — the Iced client builds, tests and runs headless in CI-style
-  container runs (`just gui-linux`), and its rendering is verified from
-  screenshots. It has not had a sit-down-and-use-it pass on real hardware.
-* **Windows** — the Iced client cross-compiles and links (`just gui-windows`).
-  Runtime verification on an actual Windows machine is still an open backlog
-  item. Treat it as unproven.
+* **Windows and Linux** — **paused.** The Iced client still builds and
+  cross-compiles (`just gui-linux`, `just gui-windows`), but it is not being
+  tested or published, and features since then (EchoLink in the client,
+  recording, SSTV pictures and more) are macOS-only for now. A replacement
+  that matches the macOS app's look and feel is planned. The node daemon and
+  the net recorder are a different matter: both run on Linux.
 * **iOS** — the app target exists and builds multiplatform from day one, but
   no iOS UI work has happened.
 
@@ -122,12 +138,15 @@ One cargo workspace, one git history, three deliverables:
 |---|---|
 | `crates/` | **astar-lib** — the engine. Protocol, codecs, audio, PTT, the multi-network station facade, and the C ABI. Pure Rust, no UI. |
 | `crates/astar-server` | **astar-server** — the always-on node daemon (inbound IAX2 + local handset bridge), with an HTTP control plane and a TUI. |
+| `crates/astar-netrec` | **astar-netrec** — the net recorder: records scheduled nets listen-only, saves their SSTV pictures, renders a video of each and can stream it live. |
 | `apps/macos` | **astar** — the SwiftUI app (macOS menu-bar today, iOS targeted). |
-| `apps/gui` | **astar** — the Iced client for Windows and Linux, same intended feature set. |
+| `apps/gui` | **astar** — the Iced client for Windows and Linux. Paused; a replacement is planned. |
 | `bindings/` | The engine's own bindings: Swift (`AstarStation`, `AstarSerial`) and Python. |
 | `vendor/ambe-thumbdv` | The ThumbDV / DV3000 AMBE vocoder driver. An MIT/Apache-2.0 island — see [Licence](#licence). |
 | `vendor/codec2` | Codec 2, the M17 voice codec (the pure-Rust `codec2` crate, unmodified). An LGPL-2.1-only AND MIT island — see [Licence](#licence). |
 | `vendor/ham-digital-modes-ambe` | Bruce Perens' software D-Star vocoder (AMBE 3600×2400), without its AMBE+2 code. An LGPL-3.0-or-later island, built into the shipped app and server release — see [Licence](#licence). |
+| `vendor/mp3lame-sys`, `vendor/mp3lame-encoder` | LAME, the MP3 encoder for astar-server's opt-in `/stream.mp3`. An LGPL island — see [Licence](#licence). |
+| `vendor/sstv` | A patched fork of the `sstv` crate, an SSTV encoder and decoder. Its de-jitter repairs received pictures in the shipped app; its encoder is in no shipped build. An MIT island — see [Licence](#licence). |
 
 **Architecture rule: fat core, thin views.** All protocol / audio / PTT logic
 lives in `crates/`. The macOS and Iced clients are views over the same engine,
@@ -142,7 +161,7 @@ native UI rather than a shared web shell.
 | `astar-iax` | The high-level IAX2 client stack over `astar-iax-core`. |
 | `astar-codec` | G.711 µ-law/A-law and signed-linear (8/16 kHz), Codec 2, plus the AMBE backend that drives the dongle (DVstick 30 / ThumbDV). |
 | `astar-audio` | cpal device I/O, network-agnostic. |
-| `astar-sstv` | SSTV picture decoding (receive only) over the `slowrx` crate, and PNG output. |
+| `astar-sstv` | SSTV picture decoding over the `slowrx` crate, with the `sstv` fork's de-jitter in front to repair a picture's timing, and PNG output. It decodes only; sending a picture is `astar-station`'s off-by-default `sstv-tx`. |
 | `astar-station` | The multi-network station facade the clients drive. |
 | `astar-console` | Front-end-agnostic operator-console core. |
 | `astar-asl3` / `astar-m17` / `astar-dstar` / `astar-ysf` / `astar-nxdn` / `astar-dmr` | Per-network service layers. |
@@ -153,6 +172,11 @@ native UI rather than a shared web shell.
 | `astar-inspect` | Web console harness. |
 | `astar-conformance` | Asterisk-parity / pcap conformance harness. |
 | `astar-server` | The node daemon. |
+| `astar-netrec` | The net recorder daemon. |
+| `astar-netarchive` | Reads a net recorder's archive and serves its pages (used by `astar-netrec` and `astar-server`). |
+| `astar-netvideo` | Draws a recorded net as video frames, encodes `video.mp4` through `ffmpeg`, and publishes live RTMP(S) streams. |
+| `astar-echolink` | EchoLink protocol: directory, station list, GSM audio and the per-station connection state machine. |
+| `astar-record` | Call recording: the streaming FLAC writer and track layouts. |
 | `astar-gui` (`apps/gui`) | The Iced client. |
 
 ---
@@ -362,19 +386,24 @@ notices and the written offer that goes with static linking.
 
 ### Third-party components
 
-These keep their own terms and are **not** covered by the AGPL. The first five
-rows are paths in this repository; the last three are upstream dependencies:
+These keep their own terms and are **not** covered by the AGPL. The first
+eight rows are paths in this repository; the rest are upstream dependencies:
 
 | Path or crate | Component | Licence |
 |---|---|---|
 | `vendor/ambe-thumbdv` | ThumbDV / DV3000 AMBE driver (Rob's own, vendored in) | MIT **OR** Apache-2.0 — see its `LICENSE-MIT`, `LICENSE-APACHE`, and `VENDORED.md` |
 | `vendor/codec2` (the `codec2` crate, vendored unmodified) / system `libcodec2` | Codec 2 — the M17 voice codec. Opt-in features only, never in a default feature set | `LGPL-2.1-only AND MIT` / LGPL-2.1 — see its `LICENSE-LGPL-2.1` and `VENDORED.md`; notices and relink offer in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) |
 | `vendor/ham-digital-modes-ambe` | Bruce Perens' software D-Star vocoder. The `dstar-soft-ambe` feature: not a cargo default, but linked statically into the macOS app and astar-server's static release; D-Star only, and the dongle stays the default choice | `LGPL-3.0-or-later` — see its `LICENSE` and `VENDORED.md`; notices and patent reasoning in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) §9 |
-| `apps/gui/assets/fonts` | Inter typeface | SIL Open Font License 1.1 |
+| `vendor/mp3lame-sys`, `vendor/mp3lame-encoder` | LAME, the MP3 encoder behind astar-server's `/stream.mp3`. The opt-in `stream-mp3` feature only, never a default | LAME itself LGPL-2.0-or-later; the two Rust crates LGPL-3.0 — see [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) §5 |
+| `vendor/sstv` | A patched fork of Tobias Klockau's `sstv` crate 0.3.1, an SSTV encoder and decoder. `astar-sstv` links it for its de-jitter, which re-times a received picture before slowrx decodes it, so the macOS app and `astar-netrec` carry it; its encoder is behind a feature that no shipped build turns on | MIT — see its `LICENSE` and `VENDORED.md`; notice in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) §14 |
+| `apps/gui/assets/fonts` | Inter typeface, for the Iced client | SIL Open Font License 1.1 |
+| `assets/fonts` | Inter typeface, drawn into the net recorder's video frames | SIL Open Font License 1.1 — see [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) §11 |
 | `harness/asterisk_parity/c_iaxclient/vendored/libiax2` | The historical C libiax2, used only as a parity reference by the test harness — never linked into a shipped binary | GPL / LGPL, see its `COPYING` and `COPYING.LIB` |
 | `nnnoiseless` crate (dependency, not vendored) | RNNoise — mic noise reduction. Compiled into every build; the model is a const array in the crate | BSD-3-Clause — five copyright lines reproduced in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) |
 | `oxideav-gsm` crate (dependency, not vendored) | GSM 06.10 — the EchoLink voice codec, also used for GSM-only AllStar nodes. `astar-codec` feature `gsm` | MIT — notice and patent reasoning in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) §8 |
 | `slowrx` crate (dependency, not vendored) | SSTV picture decoding, a Rust port of Oona Räisänen's slowrx. Used by `astar-sstv` | MIT, port of ISC-licensed slowrx — both notices in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) §10 |
+| `tiny-skia`, `ab_glyph`, `rml_rtmp` crates (dependencies, not vendored) | Drawing, text and live streaming for the net recorder's video (`astar-netvideo`) | BSD-3-Clause, Apache-2.0, MIT — notices in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) §12 |
+| `subtle` crate (dependency, not vendored) | Constant-time comparison of IAX2 authentication answers and call tokens, in every build | BSD-3-Clause — notice in [`LICENSE-EXCEPTIONS.md`](LICENSE-EXCEPTIONS.md) §13 |
 
 Everything else — every `astar-*` crate, both applications, the bindings, the
 scripts and the docs — is AGPL-3.0-only. Every first-party `.rs`, `.swift`,

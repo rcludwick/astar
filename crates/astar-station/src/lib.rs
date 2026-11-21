@@ -43,6 +43,8 @@ mod ptt_arbiter;
 mod sstv;
 #[cfg(feature = "sstv")]
 mod sstv_packets;
+#[cfg(feature = "sstv-tx")]
+mod sstv_tx;
 mod station;
 
 /// The D-Star vocoder choice (astar-dstar-perens): the dongle by default, or
@@ -75,6 +77,12 @@ pub use astar_record::{Layout, RecordState};
 #[cfg(feature = "sstv")]
 pub use sstv::{
     SSTV_INDEX_FILE, SSTV_RECENT_MAX, SstvConfig, SstvContext, SstvFrame, SstvPictureRow, SstvState,
+};
+// Sending SSTV pictures: what `Station::send_picture` takes and returns.
+#[cfg(feature = "sstv-tx")]
+pub use sstv_tx::{
+    PICTURE_LEAD, PICTURE_PEAK_DBFS, PICTURE_TAIL, PictureSend, SendEnd, SendPictureError,
+    SstvPicture, SstvTxMode, encode_picture, sstv_tx_modes,
 };
 // The packet log's surface, for the same reason.
 pub use astar_record::packet_log::{

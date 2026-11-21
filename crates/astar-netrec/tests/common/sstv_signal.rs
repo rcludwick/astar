@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
 //! A test SSTV signal: a Robot 36 picture of colour bars, made by the `sstv`
-//! crate's encoder. That crate is a dev-dependency only, so it never reaches
-//! a shipped build: astar decodes SSTV and never sends it.
+//! crate's encoder. Here it is a dev-dependency only, so it never reaches the
+//! recorder's build: the net recorder decodes SSTV and cannot send it.
 //!
 //! Shared by the session tests (`src/session.rs` includes this file by path)
 //! and the end-to-end tests.

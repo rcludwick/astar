@@ -54,6 +54,23 @@ engine the [macOS app](../macos/index.md) uses, with no UI attached.
 * **A control channel**: HTTP for commands, Server-Sent Events for a live
   stream, plus a small read-only status page.
 
+Around that core, each of these has its own page:
+
+* **[EchoLink](echolink.md)** — sign in to the EchoLink directory and call
+  stations into the conference.
+* **[Discord bridge](discord.md)** — a listen-only Discord voice channel, with
+  slash commands to point the node somewhere.
+* **[The public page](listening.md)** — a read-only page about the node, with
+  the net's audio live if you turn it on.
+* **[Recording](recording.md)** — every transmission through the node saved
+  to its own file.
+* **[Net recordings](nets.md)** — the nets recorded by
+  [`astar-netrec`](../netrec.md), shown as a conversation in a browser, with
+  their SSTV pictures and the video of each net.
+* **[Packet log](packet-log.md)** — a capture of every live call's voice
+  packets, for debugging.
+* **[Signing in](admin.md)** — passkeys for the admin pages.
+
 ## Running it
 
 ```bash

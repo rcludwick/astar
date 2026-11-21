@@ -24,6 +24,9 @@
 //! * [`soak`] holds a link for hours and logs every drop (and plays the
 //!   nat topology).
 //! * [`serve`] is the results page on 127.0.0.1:8740.
+//! * [`outside`] runs the outside SSTV decoder in a container on a WAV file.
+//! * [`picture`] is the SSTV test picture and the errors that compare a
+//!   decoded picture with it.
 //! * [`speech`] is the committed test phrase and the comparison that says
 //!   whether it came back through a link whole.
 //!
@@ -32,8 +35,11 @@
 
 pub mod audio;
 pub mod node;
+pub mod outside;
 pub mod pcap;
+pub mod picture;
 pub mod probe;
+pub mod relay;
 pub mod report;
 pub mod rig;
 pub mod scenario;
