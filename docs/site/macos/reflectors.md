@@ -5,7 +5,7 @@ icon: lucide/search
 # Searching the reflector directory
 
 astar carries a list of digital-voice reflectors: thousands of D-Star, M17,
-System Fusion, NXDN and DMR rooms, with their names, where they are and who
+System Fusion, NXDN, DMR and P25 rooms, with their names, where they are and who
 runs them. You can search that list instead of remembering a reflector's
 name, and pick one to put it in the dial field. While you are logged in to
 EchoLink, the same search covers EchoLink's stations too.

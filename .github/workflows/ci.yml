@@ -106,6 +106,7 @@ jobs:
           ./ci/guard-spdx-headers.sh
           ./ci/guard-codec2-licensing.sh
           ./ci/guard-dstar-soft-ambe.sh
+          ./ci/guard-p25-imbe.sh
           ./ci/guard-discord-feature.sh
           ./ci/guard-ble-ptt.sh
           ./ci/guard-no-tiny-http.sh

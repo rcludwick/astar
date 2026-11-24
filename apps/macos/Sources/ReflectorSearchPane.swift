@@ -170,7 +170,7 @@
                     ) {
                         Text("All networks").tag(DirectorySearchNetwork?.none)
                         ForEach(availableNetworks, id: \.id) { network in
-                            Text(network.displayName).tag(DirectorySearchNetwork?.some(network))
+                            filterItem(network).tag(DirectorySearchNetwork?.some(network))
                         }
                     }
                     .labelsHidden()
@@ -345,9 +345,37 @@
                 .background(.quaternary, in: Capsule())
         }
 
+        /// A filter menu item. A network that ships in testing carries the
+        /// same test-tube symbol and words as the popover's "In testing" tag —
+        /// a menu item cannot hold the capsule itself, and the closed menu
+        /// shows the item, so the tag reads there too while it is chosen.
+        @ViewBuilder
+        private func filterItem(_ network: DirectorySearchNetwork) -> some View {
+            if network.appNetwork?.isInTesting == true {
+                Label("\(network.displayName) · In testing", systemImage: "testtube.2")
+                    .accessibilityLabel("\(network.displayName), in testing")
+            } else {
+                Text(network.displayName)
+            }
+        }
+
+        /// The app network a row would dial on, when it ships in testing.
+        private func inTestingNetwork(for entry: DirectoryEntry) -> Network? {
+            Network.matching(entry.network).flatMap { $0.isInTesting ? $0 : nil }
+        }
+
+        /// What selecting a dialable row does, plus what a network in testing
+        /// is — the spoken counterpart of the row's tag.
+        private func dialableHint(for entry: DirectoryEntry) -> String {
+            guard let network = inTestingNetwork(for: entry) else { return "Fills the dial field" }
+            return "Fills the dial field. \(network.displayName) is in testing and receive only."
+        }
+
         @ViewBuilder
         private func row(for entry: DirectoryEntry) -> some View {
-            let dialable = entry.isDialable
+            // The feed's word AND this build's: a P25 row in a build without
+            // P25 is listed, greyed, and says why (`directoryRefusal`).
+            let dialable = entry.isDialable && session.directoryRefusal(for: entry) == nil
             Button {
                 select(entry)
             } label: {
@@ -366,6 +394,9 @@
                                 .lineLimit(1)
                         }
                         Spacer(minLength: 6)
+                        if let testing = inTestingNetwork(for: entry) {
+                            InTestingTag(network: testing)
+                        }
                         networkBadge(entry.network.displayName)
                     }
                     if let subtitle = subtitle(for: entry) {
@@ -395,7 +426,7 @@
                 [entry.network.displayName, subtitle(for: entry)]
                     .compactMap { $0 }.joined(separator: ", ")
             )
-            .accessibilityHint(dialable ? "Fills the dial field" : unavailableReason(for: entry))
+            .accessibilityHint(dialable ? dialableHint(for: entry) : unavailableReason(for: entry))
         }
 
         private func subtitle(for entry: DirectoryEntry) -> String? {
@@ -405,13 +436,14 @@
         }
 
         private func unavailableReason(for entry: DirectoryEntry) -> String {
+            if let refusal = session.directoryRefusal(for: entry) { return refusal }
             guard let dial = entry.dial else { return "Listed with no way to connect" }
             return "astar can’t dial \(dial.kind) yet"
         }
 
         /// Fill the field — or ask for the room first.
         private func select(_ entry: DirectoryEntry) {
-            guard entry.isDialable else { return }
+            guard entry.isDialable, session.directoryRefusal(for: entry) == nil else { return }
             if ReflectorModuleOptions.options(for: entry.dial).isEmpty {
                 onSelect(entry.id, .reflector(entry.network))
                 onBack()

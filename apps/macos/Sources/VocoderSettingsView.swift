@@ -19,7 +19,7 @@
     ///
     /// Above the list, which vocoder each mode uses. D-Star may use the
     /// software vocoder instead of a stick; System Fusion, NXDN and DMR are
-    /// dongle-only, and the pane says why.
+    /// dongle-only, and P25 is software-only; the pane says why for each.
     struct VocoderSettingsView: View {
         @EnvironmentObject private var vocoders: VocoderSettings
         @EnvironmentObject private var disclosure: SettingsDisclosure
@@ -181,7 +181,34 @@
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                p25Row
             }
+        }
+
+        /// P25: no picker, because there is nothing to choose — IMBE runs on
+        /// this Mac and no supported stick can do it. Same row shape as the
+        /// dongle-only modes above, with `cpu` where they show a lock.
+        @ViewBuilder
+        private var p25Row: some View {
+            let label =
+                vocoders.p25Compiled ? VocoderModeRow.p25Software : VocoderModeRow.p25NotInBuildLabel
+            HStack(spacing: 10) {
+                Text(VocoderModeRow.p25Title)
+                    .font(.callout)
+                Spacer(minLength: 8)
+                Label(label, systemImage: vocoders.p25Compiled ? "cpu" : "slash.circle")
+                    .labelStyle(.titleAndIcon)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.top, 4)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(VocoderModeRow.p25Title): \(label)")
+            Text(vocoders.p25Compiled ? VocoderModeRow.p25Reason : VocoderModeRow.p25NotInBuild)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
 
         @ViewBuilder

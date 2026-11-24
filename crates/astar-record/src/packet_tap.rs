@@ -41,6 +41,7 @@ pub enum PacketNetwork {
     Ysf,
     Dmr,
     Nxdn,
+    P25,
 }
 
 impl PacketNetwork {
@@ -55,6 +56,7 @@ impl PacketNetwork {
             Self::Ysf => "ysf",
             Self::Dmr => "dmr",
             Self::Nxdn => "nxdn",
+            Self::P25 => "p25",
         }
     }
 }

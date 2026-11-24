@@ -156,6 +156,26 @@ public enum VocoderModeRow: String, CaseIterable, Identifiable, Sendable {
     /// Why Software is greyed out in a build without it.
     public static let softwareNotInBuild =
         "This build of astar doesn’t include the software vocoder."
+
+    // P25 is not a case: it has no choice to make. P25 Phase 1 is IMBE, which
+    // no DVSI stick astar supports can decode, so its row only states what it
+    // uses and why — and the cases above stay the modes a stick can serve.
+
+    /// The P25 row's title.
+    public static let p25Title = "P25"
+    /// What P25 uses, shown where the other rows show a picker or "Dongle only".
+    public static let p25Software = "Software (IMBE)"
+    /// The P25 row's label in a build without P25.
+    public static let p25NotInBuildLabel = "Not in this build"
+    /// Why P25 runs in software and has no dongle choice.
+    public static let p25Reason =
+        "P25 Phase 1 uses IMBE, whose patents have expired, so astar decodes it on "
+        + "this Mac. The DVSI sticks astar supports can’t do P25’s IMBE, so there is "
+        + "no dongle option."
+    /// The P25 caption in a build without P25.
+    public static let p25NotInBuild =
+        "This build of astar doesn’t include P25, so P25 reflectors are listed but "
+        + "can’t be dialled."
 }
 
 // MARK: - Engine seam
@@ -206,6 +226,10 @@ public final class VocoderSettings: ObservableObject {
     /// Whether this build contains the software D-Star vocoder. When it does
     /// not, Software is offered greyed out with the reason.
     public let softwareVocoderCompiled: Bool
+    /// Whether this build contains P25 (and with it the IMBE vocoder). The
+    /// P25 row says "Software (IMBE)" when it does, "Not in this build" when
+    /// it does not.
+    public let p25Compiled: Bool
     private let dstarDefaults: UserDefaults
     private let onDStarVocoderChanged: (DStarVocoder) -> Void
 
@@ -216,6 +240,7 @@ public final class VocoderSettings: ObservableObject {
         onTrustChanged: @escaping ([String]) -> Void = { _ in },
         dstarDefaults: UserDefaults = .standard,
         softwareVocoderCompiled: Bool = Station.dstarSoftwareVocoderCompiled,
+        p25Compiled: Bool = Station.p25Compiled,
         onDStarVocoderChanged: @escaping (DStarVocoder) -> Void = { _ in }
     ) {
         self.store = store
@@ -225,6 +250,7 @@ public final class VocoderSettings: ObservableObject {
         self.trusted = TrustedVocoder.sanitized(store.load())
         self.dstarDefaults = dstarDefaults
         self.softwareVocoderCompiled = softwareVocoderCompiled
+        self.p25Compiled = p25Compiled
         self.onDStarVocoderChanged = onDStarVocoderChanged
         self.dstarVocoder = DStarVocoderPreference.load(dstarDefaults)
     }

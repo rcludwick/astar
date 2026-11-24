@@ -213,6 +213,60 @@ example **Speaker stopped: B02PTT-6522**. The call stays up but you will not
 hear it (or, for the mic, not be heard). Reconnect the device, then hang up
 and call again; the next call opens it afresh.
 
+### Monitor speaker
+
+Picture the usual setup: the Mac's output goes to a USB radio interface, so
+what you hear in the room is nothing at all. The audio is going down a cable
+into the radio. The **monitor** fixes that. It plays a second copy of the
+output on another device, such as the Mac's own speakers or your headphones,
+so you can listen to what goes to the radio.
+
+**Turn it on in Quick settings.** Open **Quick settings** and find the
+**Speaker** card. Under **Out** and **Vol** there is a **Monitor** menu. It
+starts at **Off**. Pick a device from the list and the copy starts playing
+right away, even in the middle of a call. Choose **Off** to stop it. The
+choice is saved with the active config.
+
+**Turn it on in a config.** Each config card in Settings → Configs has a
+**Monitor** row directly under **Output**, with the same list. A config
+remembers its own monitor, so your radio-interface config can use the Mac
+speakers while your headset config uses none. See
+[Configs](configs.md).
+
+**Set how loud it is.** Once a device is chosen, a **Volume** slider appears
+under the menu. It runs from 0 to 400 %. It is separate from **Vol** for the
+main output, so a monitor speaker that is too loud can be turned down on its
+own. In Quick settings the volume is saved with the config when you choose
+**Save changes**, like the other gains.
+
+**Mute it from the call controls.** While a monitor is set, a speaker button
+appears in the call controls, between the packet capture button and
+**Disconnect**. Click it to mute the monitor, and click again to unmute. A
+small grey **Muted** tag appears beside the Monitor menu while it is muted.
+Muting lasts for the session. It is not saved, so a restart starts unmuted.
+
+**What you hear.** The monitor carries what the main output plays: the other
+station's audio, plus anything astar plays to the output. Your own microphone
+is not included. Because it is a second device playing the same audio, it can
+trail the main output by up to about 150 ms.
+
+**Two messages you may see.**
+
+* **Monitor turned off: it was the same device as the output.** A monitor
+  cannot play on the device the output already uses. If you change **Out** to
+  your monitor's device, astar switches the monitor to **Off** and says so.
+  Pick a different device to turn it back on.
+* **Monitor unavailable**, with a reason after it. A red triangle appears
+  beside the menu when the chosen device cannot be opened, for example
+  because it was unplugged or turned off. The main output keeps playing. Plug
+  the device back in and the monitor starts again.
+
+!!! note
+    On AllStarLink (IAX2) calls the monitor can keep the device open after a
+    hangup, playing silence, which stops a Bluetooth or USB speaker from going
+    to sleep. Choose **Off** to release it. This is on the backlog as
+    `astar-monitor-idle-close`.
+
 ## Next steps
 
 * [Using astar](usage.md) — day-to-day operating.

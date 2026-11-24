@@ -5,9 +5,10 @@ D-Star. One cargo workspace, one git history. AGPL-3.0-only throughout, except
 the vendored licence islands: `vendor/ambe-thumbdv` (MIT/Apache-2.0),
 `vendor/codec2` (LGPL-2.1-only AND MIT), `vendor/ham-digital-modes-ambe`
 (Bruce Perens' software D-Star vocoder, LGPL-3.0-or-later, no AMBE+2 code),
-`vendor/mp3lame-sys` + `vendor/mp3lame-encoder` (LAME, LGPL; astar-server's
-opt-in `stream-mp3` only), and `vendor/sstv` (a patched fork of the `sstv`
-crate, MIT).
+`vendor/imbe-vocoder` (Pavel Yazev's P25 IMBE vocoder, Rust port,
+GPL-3.0-or-later), `vendor/mp3lame-sys` + `vendor/mp3lame-encoder` (LAME,
+LGPL; astar-server's opt-in `stream-mp3` only), and `vendor/sstv` (a patched
+fork of the `sstv` crate, MIT).
 
 Design polish is a first-class requirement: astar should be pretty and easy to
 use, not just functional.
@@ -54,6 +55,7 @@ apps/gui/        The Iced client for Windows/Linux (crate astar-gui).
 vendor/          ambe-thumbdv — the ThumbDV vocoder driver, MIT/Apache island;
                  codec2 — the M17 voice codec (pure Rust), LGPL-2.1/MIT island;
                  ham-digital-modes-ambe — Bruce Perens' D-Star AMBE vocoder, LGPL-3.0 island;
+                 imbe-vocoder — Pavel Yazev's P25 IMBE vocoder, Rust port, GPL-3.0 island;
                  mp3lame-sys / mp3lame-encoder — LAME for /stream.mp3, LGPL island;
                  sstv — the SSTV encoder/decoder crate, forked, MIT island.
 docs/            Engine docs + docs/app/ for the app's own backlog/design.
@@ -146,11 +148,25 @@ committed `astar.h` / `astarserial.h` must not drift.
 ## D-Star / AMBE
 
 The ThumbDV / DV3000 dongle via `vendor/ambe-thumbdv` is the default vocoder
-everywhere, and `astar-codec`'s `ambe-hw` feature is off by default.
+everywhere a dongle can do the mode (P25 Phase 1 is the exception: see
+below), and `astar-codec`'s `ambe-hw` feature is off by default.
 
 **Software vocoders are permitted where the patent term has expired and the
-licence is AGPL-compatible — which today means D-Star's AMBE and nothing
-else.** Decided 2026-09-19 (Rob), reversing the previous hardware-only rule.
+licence is AGPL-compatible — which today means D-Star's AMBE and P25 Phase 1
+IMBE, and nothing else.** Decided by Rob for D-Star on 2026-09-19, reversing
+the previous hardware-only rule, and for P25 Phase 1 IMBE on 2026-11-21.
+
+**P25 Phase 1 IMBE: decided 2026-11-21 (Rob): "Software IMBE only".** Every
+patent that reads on full-rate IMBE has expired, and the DVSI sticks cannot
+do P25 full rate (DVSI lists it "NO" for every AMBE-3000 and AMBE-3003 part,
+so no stick Rob owns can do IMBE). So P25 has no dongle path and no switch:
+Pavel Yazev's vocoder (`vendor/imbe-vocoder`, feature `p25-soft-imbe`, which
+the network feature `p25` requires) is its only vocoder. `just xcframework`
+builds it in (`ASTAR_P25_SOFT_IMBE=0` leaves P25 out), the iPhone App Store
+build included, with the risk recorded in `LICENSE-EXCEPTIONS.md` section 15;
+astar-server and astar-netrec do not carry it. No encryption: P25 links no
+crypto and never decrypts; encrypted calls are muted. P25 Phase 2 is AMBE+2
+and stays hardware-only and out. `ci/guard-p25-imbe.sh` enforces all of it.
 
 **Built in since 2026-11-01** (Rob: "We want to build it in by default. But we
 want a switch for d-star to use the dongle (dvstick) or bruce perens' codec in
@@ -167,32 +183,36 @@ permission, the hard-coded licence and the shipped-build opt-in.
 | Generation | Modes | Status |
 |---|---|---|
 | AMBE 3600×2400 | D-Star | Patent term expired. A software backend is allowed. |
-| AMBE+2 | DMR, NXDN, YSF | Reads on **US8359197 until 2028-05-20**. Hardware only. Do not add a software backend, and do not let a "software vocoder" config option reach these modes. |
+| IMBE | P25 Phase 1 | Patent terms expired. Software only (`vendor/imbe-vocoder`); no DVSI stick astar supports can do it. |
+| AMBE+2 | DMR, NXDN, YSF, P25 Phase 2 | Reads on **US8359197 until 2028-05-20**. Hardware only. Do not add a software backend, and do not let a "software vocoder" config option reach these modes. |
 
 So the software/hardware selector is **per-mode, never global**: offering it
-for DMR, NXDN or YSF would ship an encumbered codec. A UI that greys those out
-needs to say why.
+for DMR, NXDN, YSF or P25 Phase 2 would ship an encumbered codec. A UI that
+greys those out needs to say why.
 
 Any software backend is an **opt-in cargo feature, off by default** (a shipped
 build may turn it on by name, as `dstar-soft-ambe` is), with its
 licence and the patent reasoning recorded in `LICENSE-EXCEPTIONS.md` — the
 `codec2` entry is the pattern. The ThumbDV path stays the default even where a
-software backend exists.
+software backend exists, wherever a stick can do the mode at all.
 
 **Unchanged: never reference or vendor the software AMBE work from
 `rcludwick/ambe`.** That prohibition is about that specific effort and is not
 lifted by any of the above.
 
 `vendor/ambe-thumbdv/Cargo.toml`, `vendor/codec2/Cargo.toml`,
-`vendor/ham-digital-modes-ambe/Cargo.toml` and `vendor/sstv/Cargo.toml` hard-code
+`vendor/ham-digital-modes-ambe/Cargo.toml`, `vendor/imbe-vocoder/Cargo.toml`
+and `vendor/sstv/Cargo.toml` hard-code
 `license`/`version`/`edition`/`repository` (and `codec2` its `authors`) on
 purpose. Do not convert them to `.workspace = true` — that would relicense
-someone else's MIT/Apache or LGPL code as AGPL. See each one's `VENDORED.md`.
+someone else's MIT/Apache, LGPL or GPL code as AGPL. See each one's
+`VENDORED.md`.
 `vendor/codec2` is also in the workspace `exclude`, so fmt/clippy never touch
 it: it stays byte-for-byte upstream. The same holds for `vendor/mp3lame-sys`
 and `vendor/mp3lame-encoder` (LGPL-3.0), whose `VENDORED.md` files list every
 patch; `stream-mp3` must never become a default feature
-(`ci/guard-codec2-licensing.sh`). `vendor/sstv` is likewise excluded and
+(`ci/guard-codec2-licensing.sh`). `vendor/imbe-vocoder` is excluded too,
+tested by `just imbe-check` instead. `vendor/sstv` is likewise excluded and
 formatting-exempt; its patches against upstream stay small and separable so
 they can be offered back, and its `VENDORED.md` lists them.
 

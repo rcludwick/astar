@@ -11,7 +11,8 @@ Mac, and how to share part of it with someone else.
 ## Audio configs
 
 A **saved config** is one rig you switch to in a single click: its PTT
-hardware, the input and output devices, the mic and speaker gains, compression,
+hardware, the input and output devices, the monitor speaker and its volume,
+the mic and speaker gains, compression,
 noise reduction, VOX, full duplex, and — for a serial interface like the
 UCI150 — the whole serial/PTT wiring.
 

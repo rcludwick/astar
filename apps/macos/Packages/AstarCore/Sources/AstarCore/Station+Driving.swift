@@ -30,6 +30,7 @@ extension CallSnapshot {
             ysfAvailable: s.ysfAvailable, ysfActive: s.ysfActive,
             nxdnAvailable: s.nxdnAvailable, nxdnActive: s.nxdnActive,
             dmrAvailable: s.dmrAvailable, dmrActive: s.dmrActive,
+            p25Available: s.p25Available, p25Active: s.p25Active,
             echolinkAvailable: s.echolinkAvailable, echolinkActive: s.echolinkActive,
             echolinkLoggedIn: s.echolinkLoggedIn,
             speakerStopped: s.speakerStopped, micStopped: s.micStopped,
@@ -68,8 +69,9 @@ extension Station: StationDriving {
     // signatures are already the protocol's, defaulted arguments included.
     // connectYSF/ysfDisconnect/ysfState the same, for the same reason, and
     // m17State alongside them. connectNXDN/nxdnDisconnect/nxdnState (iax-b9c2)
-    // likewise, and connectDMR/dmrDisconnect/dmrState the same again. The
-    // nine echolink… calls match verbatim too.
+    // likewise, and connectDMR/dmrDisconnect/dmrState the same again, and
+    // connectP25/p25Disconnect/p25State once more. The nine echolink… calls
+    // match verbatim too.
 }
 
 extension RecordState {
@@ -212,6 +214,13 @@ public struct NullStation: StationDriving {
     /// No engine, so no link — the same answer the real station gives while
     /// idle, which keeps the last-heard line absent rather than wrong.
     public func dmrState() throws -> DMRState? { nil }
+    public func connectP25(host: String, callsign: String) throws {
+        throw NullStationError.noEngine
+    }
+    public func p25Disconnect() throws {}
+    /// No engine, so no link — the same answer the real station gives while
+    /// idle, which keeps the last-heard line absent rather than wrong.
+    public func p25State() throws -> P25State? { nil }
     public func echolinkLogin(callsign: String, password: String, servers: [String]) throws {
         throw NullStationError.noEngine
     }

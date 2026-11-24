@@ -19,8 +19,8 @@ use astar_station::LinkMode;
 use astar_station::{
     AnswerPolicy, CallMode, CallStatus, CodecPolicy, DtmfMode, ForcedReason, HeardEntry,
     InboundConfig, IncomingAuthPolicy, IncomingCallPolicy, Layout, MIN_PACKET_LOG_BYTES,
-    NodeConfig, OperatingMode, PacketLogConfig, PortalCredentials, PttSnapshot, PttSource,
-    RecordRequest, RegisterConfig, Station, StationConfig, StationError, StationEvent,
+    MonitorState, NodeConfig, OperatingMode, PacketLogConfig, PortalCredentials, PttSnapshot,
+    PttSource, RecordRequest, RegisterConfig, Station, StationConfig, StationError, StationEvent,
     VocoderEnrolment, VocoderTrust, VoiceFormat, WgConfigError, WgLinkConfig,
 };
 
@@ -428,6 +428,20 @@ pub struct IaxState {
     /// refuses remote keying while a digital-voice link holds the dongle and
     /// must read that without compiling the feature.
     pub dmr_active: bool,
+    /// `true` when P25 Phase 1 receive is compiled in (the `p25` feature).
+    /// P25's vocoder is software IMBE and needs no dongle, so nothing else
+    /// goes into it; it is the same answer as [`astar_p25_compiled`].
+    pub p25_available: bool,
+    /// `true` while a P25 link is live, including one that ended `failed`
+    /// and has not been disconnected (so a UI can say the link was lost).
+    /// Mutually exclusive with every other network (see
+    /// [`iax_station_connect_p25`]).
+    ///
+    /// RECEIVE ONLY: there is no P25 transmit path, so a key is refused
+    /// rather than queued and a UI must not offer PTT while this is set.
+    ///
+    /// Feature-INDEPENDENT, exactly as [`Self::dmr_active`] is.
+    pub p25_active: bool,
     /// `true` when this library was built with its `echolink` feature, so
     /// the `iax_station_echolink_*` calls do something. `EchoLink` needs no
     /// hardware, so nothing else goes into it.
@@ -631,6 +645,12 @@ pub const IAX_ERR_INVALID: c_int = -26;
 /// first, then press again.
 pub const IAX_ERR_PTT_LATCHED: c_int = -27;
 
+/// P25 error: an empty reflector address or a malformed port, a callsign the
+/// wire cannot carry (empty, longer than 10, or not printable ASCII), a
+/// resolve or bind failure, a refused key (P25 is receive-only), or the `p25`
+/// feature not being compiled in. Read `iax_station_last_error` for which.
+pub const IAX_ERR_P25: c_int = -28;
+
 /// Number of log-spaced dBFS bins [`iax_station_mic_spectrum`] writes when
 /// monitoring (iax-e73e). Size the `out` array to (at least) this; a larger
 /// buffer is fine (the extra entries are left untouched). A literal here so
@@ -730,6 +750,7 @@ fn err_code(e: &StationError) -> c_int {
         StationError::Ysf(_) => IAX_ERR_YSF,
         StationError::Nxdn(_) => IAX_ERR_NXDN,
         StationError::Dmr(_) => IAX_ERR_DMR,
+        StationError::P25(_) => IAX_ERR_P25,
         StationError::Record(_) => IAX_ERR_RECORD,
         StationError::NotLeased => IAX_ERR_NOT_LEASED,
         StationError::InvalidArgument(_) => IAX_ERR_INVALID,
@@ -800,6 +821,8 @@ fn fill_state(
         nxdn_active: s.nxdn_active,
         dmr_available: s.dmr_available,
         dmr_active: s.dmr_active,
+        p25_available: s.p25_available,
+        p25_active: s.p25_active,
         echolink_available,
         echolink_active: s.echolink_active,
         echolink_logged_in: s.echolink_logged_in,
@@ -1802,6 +1825,97 @@ pub unsafe extern "C" fn iax_station_set_output_gain(st: *mut IaxStation, gain: 
     .unwrap_or(IAX_ERR_PANIC)
 }
 
+/// [`iax_station_monitor_state`]: no monitor device chosen, or no call's
+/// output open.
+pub const IAX_MONITOR_OFF: c_int = 0;
+/// [`iax_station_monitor_state`]: the monitor is playing.
+pub const IAX_MONITOR_PLAYING: c_int = 1;
+/// [`iax_station_monitor_state`]: a monitor device is chosen but cannot play;
+/// the reason is written to the caller's buffer.
+pub const IAX_MONITOR_UNAVAILABLE: c_int = 2;
+
+/// Choose the speaker monitor's device: a listen-only copy of the output,
+/// played on a second device. `device` is named as `iax_station_set_devices`
+/// names the output (a device-name substring); NULL or `""` turns the monitor
+/// off. The choice outlives calls. Returns [`IAX_OK`], [`IAX_ERR_NULL`] (NULL
+/// `st`), [`IAX_ERR_AUDIO`] when the device cannot be resolved or opened right
+/// now (the choice is kept; see [`iax_station_monitor_state`] and
+/// [`iax_station_last_error`]), or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_set_monitor_device(
+    st: *mut IaxStation,
+    device: *const c_char,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let device = unsafe { opt_str(device) };
+        result_code(station, station.inner.set_monitor_device(device))
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Set the speaker monitor's volume (clamped `[0.0, 4.0]`, default 1.0; NaN
+/// reads as 0). Applies live. Returns [`IAX_OK`], [`IAX_ERR_NULL`] (NULL
+/// `st`), or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_set_monitor_gain(st: *mut IaxStation, gain: c_float) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        station.inner.set_monitor_gain(gain);
+        IAX_OK
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Mute or unmute the speaker monitor (default unmuted). Live only. Returns
+/// [`IAX_OK`], [`IAX_ERR_NULL`] (NULL `st`), or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_set_monitor_muted(st: *mut IaxStation, muted: bool) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        station.inner.set_monitor_muted(muted);
+        IAX_OK
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// What the speaker monitor is doing: [`IAX_MONITOR_OFF`] (0),
+/// [`IAX_MONITOR_PLAYING`] (1) or [`IAX_MONITOR_UNAVAILABLE`] (2), or a
+/// negative `IAX_ERR_*`. When unavailable, the reason is written to `buf` of
+/// `len` bytes (NUL-terminated, truncate-safe); otherwise `buf` gets an empty
+/// string. `buf` may be NULL when `len == 0`. A device name or error text —
+/// secret-free.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_monitor_state(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let (code, reason) = match station.inner.monitor_state() {
+            MonitorState::Off => (IAX_MONITOR_OFF, String::new()),
+            MonitorState::Playing => (IAX_MONITOR_PLAYING, String::new()),
+            MonitorState::Unavailable(why) => (IAX_MONITOR_UNAVAILABLE, why),
+        };
+        unsafe { fill_buf(&reason, buf, len) };
+        code
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
 /// Toggle RX/output compression on the live/next call (iax-a4e7 PHASE 1):
 /// automatic leveling of the RECEIVED audio, reusing the mic-path compressor
 /// (makeup gain included) on the output bus, applied BEFORE the output gain
@@ -2587,6 +2701,7 @@ pub unsafe extern "C" fn iax_error_text(code: c_int) -> *const c_char {
         IAX_ERR_YSF => b"ysf error\0",
         IAX_ERR_NXDN => b"nxdn error\0",
         IAX_ERR_DMR => b"dmr error\0",
+        IAX_ERR_P25 => b"p25 error\0",
         IAX_ERR_RECORD => b"recording error\0",
         IAX_ERR_ECHOLINK => b"echolink error\0",
         IAX_ERR_NOT_LEASED => b"ptt source holds no lease\0",
@@ -2811,7 +2926,7 @@ mod ptt_ffi_loopback_tests {
 
     /// A heap `IaxStation` around a `NullBackend` station, as
     /// `iax_station_new` would build it, so `iax_station_free` owns it.
-    fn null_backend_station() -> *mut IaxStation {
+    pub(super) fn null_backend_station() -> *mut IaxStation {
         Box::into_raw(Box::new(IaxStation {
             inner: Station::with_backend_factory(
                 StationConfig::default(),
@@ -2839,7 +2954,7 @@ mod ptt_ffi_loopback_tests {
     /// Link `st` over M17 to a fresh fake reflector on loopback and wait
     /// (at most 2 s) for the answer. Each call spawns its own reflector,
     /// because a reflector acknowledges only one CONN.
-    fn link(st: *mut IaxStation) {
+    pub(super) fn link(st: *mut IaxStation) {
         let station = unsafe { &*st };
         let addr = spawn_reflector();
         assert!(
@@ -5345,6 +5460,292 @@ fn dmr_snapshot_json(s: &astar_station::DmrSnapshot) -> serde_json::Value {
 }
 
 // ---------------------------------------------------------------------------
+// P25 Phase 1 (receive only)
+// ---------------------------------------------------------------------------
+
+/// `1` when this library was built with P25 Phase 1 receive (its `p25`
+/// feature, which carries the software IMBE vocoder), `0` when not. P25 needs
+/// no hardware, so this is also what [`IaxState::p25_available`] reports.
+#[unsafe(no_mangle)]
+pub extern "C" fn astar_p25_compiled() -> c_int {
+    c_int::from(astar_station::p25_compiled())
+}
+
+/// Link to a `P25Reflector` and decode the audio on it (P25 Phase 1).
+///
+/// `host` is `host[:port]` (an IPv6 literal in brackets); a bare host gets
+/// the `P25Reflector` default port, 41000. `callsign` is this station's own,
+/// 1–10 printable ASCII characters, sent in the poll. There is no talkgroup
+/// argument: a `P25Reflector` is one talkgroup and its poll carries none, so
+/// there is nothing to send.
+///
+/// No dongle: P25's vocoder is the software IMBE decoder, so this never opens
+/// a serial port or probes a `ThumbDV`. Encrypted calls are muted, never
+/// decrypted.
+///
+/// **RECEIVE ONLY.** A key-down is REFUSED with [`IAX_ERR_P25`], not queued,
+/// so a UI must not offer PTT while this link is live.
+///
+/// `host` and `callsign` are required (NULL/non-UTF-8 → [`IAX_ERR_NULL`] /
+/// [`IAX_ERR_UTF8`]). Returns [`IAX_OK`], [`IAX_ERR_ALREADY_CONNECTED`] (any
+/// other network is live), [`IAX_ERR_P25`] (read `iax_station_last_error`),
+/// or [`IAX_ERR_PANIC`].
+///
+/// NOTE: this resolves `host` and binds a socket, so it can block on DNS.
+/// Call it off any UI thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_connect_p25(
+    st: *mut IaxStation,
+    host: *const c_char,
+    callsign: *const c_char,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let host = match unsafe { req_str(host) } {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        let callsign = match unsafe { req_str(callsign) } {
+            Ok(s) => s,
+            Err(c) => return c,
+        };
+        result_code(station, station.inner.p25_connect(host, callsign))
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Disconnect the live P25 link, if any, including one that ended `failed`.
+/// Idempotent — a no-op while idle. Returns [`IAX_OK`], [`IAX_ERR_NULL`], or
+/// [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_p25_disconnect(st: *mut IaxStation) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        station.inner.p25_disconnect();
+        IAX_OK
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Write the live P25 link's state as JSON into the caller buffer `buf` of
+/// `len` bytes (NUL-terminated, truncate-safe; same contract as
+/// [`iax_station_dstar_state`] — returns the byte length the full JSON needs,
+/// excluding the NUL, so a `len == 0` call is a sizing query).
+///
+/// ```json
+/// {"link":"linked","reflector":"p25.example.net:41000","last_heard":"1234567",
+///  "last_heard_id":1234567,"talkgroup":10200,"frames_rx":36,"receiving":true,
+///  "encrypted":false,"backend":"software","ptt":false,"rx_db":-18.5}
+/// ```
+///
+/// `link` is one of `idle`/`linking`/`linked`/`unlinking`/`failed`. A link
+/// that heard nothing for 120 s, or hit a receive error, stays `failed` until
+/// [`iax_station_p25_disconnect`], so a UI can say the link was lost.
+///
+/// `last_heard` is the talker's radio ID rendered as a string (P25 voice
+/// carries no callsign); `last_heard_id` is the same number. `talkgroup` is
+/// read from the traffic and is a label only. Both persist past the end of a
+/// transmission; `receiving` says whether one is in progress. `encrypted` is
+/// `true` while the call in progress is encrypted: it is muted, and astar
+/// never decrypts. `ptt` is always `false`.
+///
+/// Writes `{}` when no link is active or the `p25` feature isn't compiled in.
+/// Returns [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_p25_state(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let json = p25_state_json(station);
+        unsafe { fill_buf(&json, buf, len) }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Render the live P25 link's state as JSON, or `"{}"` when there is none.
+fn p25_state_json(station: &IaxStation) -> String {
+    #[cfg(feature = "p25")]
+    {
+        let Some(s) = station.inner.p25_state() else {
+            return "{}".to_string();
+        };
+        p25_snapshot_json(&s).to_string()
+    }
+    #[cfg(not(feature = "p25"))]
+    {
+        let _ = station;
+        "{}".to_string()
+    }
+}
+
+/// The document one snapshot renders as. Split out so a test can render a
+/// snapshot it built itself. Built through `serde_json`, not `format!`: the
+/// reflector string and the talker come from outside, and a quote or
+/// backslash in them must not break out of a string.
+#[cfg(feature = "p25")]
+fn p25_snapshot_json(s: &astar_station::P25Snapshot) -> serde_json::Value {
+    serde_json::json!({
+        "link": s.link_state,
+        "reflector": s.reflector,
+        "last_heard": s.last_heard,
+        "last_heard_id": s.last_heard_id,
+        "talkgroup": s.talkgroup,
+        "frames_rx": s.frames_rx,
+        "receiving": s.receiving,
+        "encrypted": s.encrypted,
+        "backend": s.backend,
+        "ptt": s.ptt,
+        "rx_db": s.rx_dbfs,
+    })
+}
+
+#[cfg(test)]
+mod p25_tests {
+    //! Offline coverage of the P25 entry points: the no-link document, the
+    //! error code's identity, the NULL guards and the compiled flag. No
+    //! socket is opened.
+    use super::*;
+    use std::ptr;
+
+    fn station() -> *mut IaxStation {
+        let cfg = IaxConfig {
+            input: ptr::null(),
+            output: ptr::null(),
+            portal_user: ptr::null(),
+            portal_pass: ptr::null(),
+            portal_node: ptr::null(),
+            secret: ptr::null(),
+            codec_policy: ptr::null(),
+        };
+        let st = unsafe { iax_station_new(std::ptr::from_ref(&cfg)) };
+        assert!(!st.is_null());
+        st
+    }
+
+    #[test]
+    fn p25_state_json_is_empty_without_a_link() {
+        let st = station();
+        assert_eq!(p25_state_json(unsafe { &*st }), "{}");
+        unsafe { iax_station_free(st) };
+    }
+
+    #[test]
+    fn p25_has_its_own_error_code_and_text() {
+        assert_eq!(IAX_ERR_P25, -28);
+        assert_ne!(IAX_ERR_P25, IAX_ERR_PTT_LATCHED);
+        assert_eq!(err_code(&StationError::P25("x".into())), IAX_ERR_P25);
+        let text = unsafe { std::ffi::CStr::from_ptr(iax_error_text(IAX_ERR_P25)) };
+        assert_eq!(text.to_str().expect("utf8"), "p25 error");
+    }
+
+    #[test]
+    fn a_null_station_is_refused_by_every_p25_entry_point() {
+        assert_eq!(
+            unsafe { iax_station_connect_p25(ptr::null_mut(), c"x".as_ptr(), c"y".as_ptr()) },
+            IAX_ERR_NULL
+        );
+        assert_eq!(
+            unsafe { iax_station_p25_disconnect(ptr::null_mut()) },
+            IAX_ERR_NULL
+        );
+        assert_eq!(
+            unsafe { iax_station_p25_state(ptr::null_mut(), ptr::null_mut(), 0) },
+            IAX_ERR_NULL
+        );
+    }
+
+    #[test]
+    fn null_arguments_and_bad_callsigns_are_refused() {
+        let st = station();
+        assert_eq!(
+            unsafe { iax_station_connect_p25(st, ptr::null(), c"N0CALL".as_ptr()) },
+            IAX_ERR_NULL
+        );
+        assert_eq!(
+            unsafe { iax_station_connect_p25(st, c"127.0.0.1".as_ptr(), ptr::null()) },
+            IAX_ERR_NULL
+        );
+        assert_eq!(
+            unsafe { iax_station_connect_p25(st, c"127.0.0.1".as_ptr(), c"".as_ptr()) },
+            IAX_ERR_P25
+        );
+        assert_eq!(
+            unsafe { iax_station_connect_p25(st, c"".as_ptr(), c"N0CALL".as_ptr()) },
+            IAX_ERR_P25
+        );
+        unsafe { iax_station_free(st) };
+    }
+
+    #[test]
+    fn p25_compiled_matches_the_build() {
+        assert_eq!(astar_p25_compiled(), c_int::from(cfg!(feature = "p25")));
+    }
+
+    #[test]
+    fn the_snapshot_carries_the_p25_flags() {
+        let st = station();
+        let s = unsafe { (*st).inner.snapshot() };
+        assert_eq!(s.p25_available, cfg!(feature = "p25"));
+        assert!(!s.p25_active);
+        unsafe { iax_station_free(st) };
+    }
+
+    #[cfg(feature = "p25")]
+    #[test]
+    fn the_state_json_escapes_and_carries_every_key() {
+        let snap = astar_station::P25Snapshot {
+            link_state: "failed",
+            reflector: "a\"b\\c:41000".into(),
+            last_heard: Some("1234567".into()),
+            last_heard_id: Some(1_234_567),
+            talkgroup: Some(10_200),
+            frames_rx: 36,
+            receiving: true,
+            encrypted: true,
+            backend: Some("software"),
+            ptt: false,
+            tx_dbfs: -60.0,
+            rx_dbfs: -18.5,
+        };
+        let text = p25_snapshot_json(&snap).to_string();
+        let v: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        for key in [
+            "link",
+            "reflector",
+            "last_heard",
+            "last_heard_id",
+            "talkgroup",
+            "frames_rx",
+            "receiving",
+            "encrypted",
+            "backend",
+            "ptt",
+            "rx_db",
+        ] {
+            assert!(v.get(key).is_some(), "missing {key} in {text}");
+        }
+        assert_eq!(v["link"], "failed");
+        assert_eq!(v["reflector"], "a\"b\\c:41000");
+        assert_eq!(v["last_heard_id"], 1_234_567);
+        assert_eq!(v["talkgroup"], 10_200);
+        assert_eq!(v["encrypted"], true);
+        assert_eq!(v["backend"], "software");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // EchoLink (calling out only)
 // ---------------------------------------------------------------------------
 
@@ -6680,6 +7081,92 @@ mod stopped_device_tests {
         );
         assert_eq!(
             unsafe { iax_station_mic_stopped(ptr::null_mut(), buf.as_mut_ptr(), buf.len()) },
+            IAX_ERR_NULL
+        );
+    }
+}
+
+#[cfg(all(test, feature = "m17"))]
+mod monitor_ffi_tests {
+    //! The speaker monitor across the ABI, on a `NullBackend` station linked
+    //! over M17 to a fake reflector on `127.0.0.1`. Hermetic: no device is
+    //! opened and every datagram stays on loopback.
+    use std::ffi::{CStr, CString};
+
+    use super::ptt_ffi_loopback_tests::{link, null_backend_station};
+    use super::{
+        IAX_ERR_NULL, IAX_OK, iax_station_free, iax_station_monitor_state,
+        iax_station_set_monitor_device, iax_station_set_monitor_gain,
+        iax_station_set_monitor_muted,
+    };
+    use astar_station::MONITOR_SAME_DEVICE;
+
+    #[test]
+    fn ffi_monitor_state_writes_reason() {
+        let st = null_backend_station();
+        let mut buf = [0 as std::ffi::c_char; 128];
+
+        // Off by default, and an Off state writes an empty reason.
+        buf[0] = b'x'.cast_signed();
+        assert_eq!(
+            unsafe { iax_station_monitor_state(st, buf.as_mut_ptr(), buf.len()) },
+            0
+        );
+        assert_eq!(buf[0], 0, "no reason while off");
+
+        // The NullBackend's only output is `out:null`, which the call's bus
+        // takes: a monitor there is refused, with the reason in `buf`.
+        let dev = CString::new("out:null").unwrap();
+        assert_eq!(
+            unsafe { iax_station_set_monitor_device(st, dev.as_ptr()) },
+            IAX_OK
+        );
+        assert_eq!(unsafe { iax_station_set_monitor_gain(st, 0.5) }, IAX_OK);
+        assert_eq!(unsafe { iax_station_set_monitor_muted(st, true) }, IAX_OK);
+        link(st);
+        assert_eq!(
+            unsafe { iax_station_monitor_state(st, buf.as_mut_ptr(), buf.len()) },
+            2,
+            "unavailable"
+        );
+        let reason = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_str().unwrap();
+        assert_eq!(reason, MONITOR_SAME_DEVICE);
+
+        // A NULL buffer with len 0 still reports the state.
+        assert_eq!(
+            unsafe { iax_station_monitor_state(st, std::ptr::null_mut(), 0) },
+            2
+        );
+
+        // NULL device turns it off.
+        assert_eq!(
+            unsafe { iax_station_set_monitor_device(st, std::ptr::null()) },
+            IAX_OK
+        );
+        assert_eq!(
+            unsafe { iax_station_monitor_state(st, buf.as_mut_ptr(), buf.len()) },
+            0
+        );
+        unsafe { iax_station_free(st) };
+    }
+
+    #[test]
+    fn monitor_entry_points_refuse_a_null_station() {
+        let null = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { iax_station_set_monitor_device(null, std::ptr::null()) },
+            IAX_ERR_NULL
+        );
+        assert_eq!(
+            unsafe { iax_station_set_monitor_gain(null, 1.0) },
+            IAX_ERR_NULL
+        );
+        assert_eq!(
+            unsafe { iax_station_set_monitor_muted(null, false) },
+            IAX_ERR_NULL
+        );
+        assert_eq!(
+            unsafe { iax_station_monitor_state(null, std::ptr::null_mut(), 0) },
             IAX_ERR_NULL
         );
     }

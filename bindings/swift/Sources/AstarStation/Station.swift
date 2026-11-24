@@ -149,6 +149,16 @@ public enum VoiceFormat: UInt32, Sendable, CustomStringConvertible {
 
 // MARK: - Value types returned by the poll surface
 
+/// What the speaker monitor is doing (`Station.monitorState()`).
+public enum MonitorStatus: Equatable, Sendable {
+    /// No monitor device is chosen, or no call's output is open.
+    case off
+    /// The monitor is playing the output's audio.
+    case playing
+    /// A monitor device is chosen but cannot play; the reason, in words.
+    case unavailable(String)
+}
+
 /// Latest call state from `Station.snapshot()`.
 ///
 /// Secret-free by construction: there is deliberately no secret/password field.
@@ -318,6 +328,17 @@ public struct Snapshot: Sendable, Equatable {
     /// RECEIVE ONLY. There is no DMR transmit path: a key-down is refused,
     /// not queued, so a UI must not offer a PTT affordance while this is set.
     public let dmrActive: Bool
+    /// `true` when P25 Phase 1 receive is compiled in. P25's vocoder is
+    /// software IMBE and needs no dongle, so this is the same answer as
+    /// ``Station/p25Compiled``.
+    public let p25Available: Bool
+    /// `true` while a P25 link is live, including one that ended
+    /// ``P25State/Link/failed`` and has not been disconnected — mutually
+    /// exclusive with every other network.
+    ///
+    /// RECEIVE ONLY. There is no P25 transmit path: a key-down is refused,
+    /// not queued, so a UI must not offer a PTT affordance while this is set.
+    public let p25Active: Bool
     /// `true` when the library was built with EchoLink, so the `echolink…`
     /// calls do something. EchoLink needs no hardware, so nothing else goes
     /// into it.
@@ -564,6 +585,97 @@ public struct NXDNState: Equatable, Sendable {
         receiving = obj["receiving"] as? Bool ?? false
         backend = (obj["backend"] as? String).flatMap(Backend.init(rawValue:))
         ptt = obj["ptt"] as? Bool ?? false
+    }
+}
+
+/// The P25-shaped state of a live link, from ``Station/p25State()``.
+///
+/// Everything network-agnostic — the call status, the meters — lives on
+/// ``Station/Snapshot``. P25 takes no password, so there is nothing secret
+/// here: an address, numbers, counters and a level.
+public struct P25State: Equatable, Sendable {
+    /// State of the link to the reflector. The same vocabulary
+    /// ``NXDNState/Link`` uses. A link that heard nothing for 120 s, or hit a
+    /// receive error, stays ``failed`` until ``Station/p25Disconnect()``, so
+    /// the app can say the link was lost.
+    public enum Link: String, Sendable {
+        case idle, linking, linked, unlinking, failed
+    }
+
+    /// Which vocoder is decoding. Always ``software``: P25 Phase 1 IMBE has
+    /// no dongle path.
+    public enum Backend: String, Sendable {
+        case software
+    }
+
+    public let link: Link
+    /// The reflector as `host:port`, with the default port filled in.
+    public let reflector: String
+    /// The most recently heard talker's radio ID, as text, or `nil` until
+    /// one transmits. P25 voice carries no callsign. Persists past the end
+    /// of a transmission; read ``receiving`` for "talking now".
+    ///
+    /// Attacker-controlled: render it as text, never as markup.
+    public let lastHeard: String?
+    /// That same radio ID, as a number.
+    public let lastHeardID: UInt32?
+    /// The talkgroup read from the traffic, or `nil` until one is heard. A
+    /// label only: astar never sends it and never filters on it.
+    public let talkgroup: UInt32?
+    /// Voice records received since the link came up: a liveness counter.
+    public let framesRx: UInt64
+    /// `true` while a transmission is in progress.
+    public let receiving: Bool
+    /// `true` while the call in progress is encrypted. It is muted: astar
+    /// never decrypts. The talker is still shown.
+    public let encrypted: Bool
+    /// The vocoder decoding this link, or `nil` for a link opened without
+    /// audio (or a backend this binding does not recognise).
+    public let backend: Backend?
+    /// ALWAYS `false`: P25 is receive-only and a key is refused.
+    public let ptt: Bool
+    /// The receive level in dBFS.
+    public let rxDb: Float
+
+    /// Construct one directly, for previews and client tests.
+    public init(
+        link: Link, reflector: String = "", lastHeard: String? = nil,
+        lastHeardID: UInt32? = nil, talkgroup: UInt32? = nil, framesRx: UInt64 = 0,
+        receiving: Bool = false, encrypted: Bool = false, backend: Backend? = nil,
+        ptt: Bool = false, rxDb: Float = -60
+    ) {
+        self.link = link
+        self.reflector = reflector
+        self.lastHeard = lastHeard
+        self.lastHeardID = lastHeardID
+        self.talkgroup = talkgroup
+        self.framesRx = framesRx
+        self.receiving = receiving
+        self.encrypted = encrypted
+        self.backend = backend
+        self.ptt = ptt
+        self.rxDb = rxDb
+    }
+
+    /// Decode from the C-ABI's JSON. Returns `nil` for the `{}` no-link
+    /// document. An unrecognised `link` lands as ``Link/failed``, as
+    /// ``NXDNState`` does: the safe direction, offering nothing on the link.
+    init?(json: String) {
+        guard let data = json.data(using: .utf8),
+            let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let linkString = obj["link"] as? String
+        else { return nil }
+        link = Link(rawValue: linkString) ?? .failed
+        reflector = obj["reflector"] as? String ?? ""
+        lastHeard = obj["last_heard"] as? String
+        lastHeardID = (obj["last_heard_id"] as? NSNumber)?.uint32Value
+        talkgroup = (obj["talkgroup"] as? NSNumber)?.uint32Value
+        framesRx = (obj["frames_rx"] as? NSNumber)?.uint64Value ?? 0
+        receiving = obj["receiving"] as? Bool ?? false
+        encrypted = obj["encrypted"] as? Bool ?? false
+        backend = (obj["backend"] as? String).flatMap(Backend.init(rawValue:))
+        ptt = obj["ptt"] as? Bool ?? false
+        rxDb = (obj["rx_db"] as? NSNumber)?.floatValue ?? -60
     }
 }
 
@@ -1896,6 +2008,49 @@ public final class Station {
         try check(iax_station_set_output_gain(handle, gain))
     }
 
+    /// Choose the speaker monitor's device: a listen-only copy of what goes
+    /// to the output device, played on this one. Named the way `setDevices`
+    /// names the output (a device name from `listDevices`); `nil` or `""`
+    /// turns the monitor off. The choice outlives calls.
+    ///
+    /// Throws when the device cannot be resolved or opened right now. The
+    /// choice is kept either way, and `monitorState()` says why it is not
+    /// playing.
+    public func setMonitorDevice(_ device: String?) throws {
+        try check(
+            withOptionalCString(device) { ptr in
+                iax_station_set_monitor_device(handle, ptr)
+            }
+        )
+    }
+
+    /// Set the speaker monitor's volume (clamped `0.0...4.0`, default 1.0).
+    /// Applies live and to every later call.
+    public func setMonitorGain(_ gain: Float) throws {
+        try check(iax_station_set_monitor_gain(handle, gain))
+    }
+
+    /// Mute or unmute the speaker monitor (default unmuted). Live only: the
+    /// stream stays open, so unmuting is instant.
+    public func setMonitorMuted(_ muted: Bool) throws {
+        try check(iax_station_set_monitor_muted(handle, muted))
+    }
+
+    /// What the speaker monitor is doing. `.off` with no device chosen or no
+    /// call's output open; `.unavailable` carries the reason in words.
+    public func monitorState() -> MonitorStatus {
+        var buf = [CChar](repeating: 0, count: 512)
+        let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+            iax_station_monitor_state(handle, ptr.baseAddress, UInt(ptr.count))
+        }
+        switch rc {
+        case IAX_MONITOR_OFF: return .off
+        case IAX_MONITOR_PLAYING: return .playing
+        case IAX_MONITOR_UNAVAILABLE: return .unavailable(String(cString: buf))
+        default: return .unavailable(StationError.from(rc, detail: "").text)
+        }
+    }
+
     /// Toggle RX/output compression on the live/next call (iax-a4e7 PHASE 1):
     /// automatic leveling of the RECEIVED audio, reusing the mic-path
     /// compressor (makeup gain included) on the output bus, applied BEFORE
@@ -2836,6 +2991,60 @@ public final class Station {
         return NXDNState(json: String(cString: buf))
     }
 
+    /// Link to a P25Reflector and decode the audio on it (P25 Phase 1).
+    ///
+    /// `host` is `host[:port]`; a bare host gets port 41000. `callsign` is
+    /// this station's own, 1–10 printable ASCII characters. There is no
+    /// talkgroup argument: a P25Reflector is one talkgroup, and its poll
+    /// carries none.
+    ///
+    /// No dongle: the vocoder is software IMBE, so this does not probe
+    /// hardware. It still must not run on the main thread, because it
+    /// resolves the host.
+    ///
+    /// RECEIVE ONLY. A key-down is refused, not queued, so do not offer PTT
+    /// while this link is live. Encrypted calls are muted, never decrypted.
+    ///
+    /// Throws `IAX_ERR_P25` (-28) for an empty host, a malformed port, a bad
+    /// callsign, a resolve or bind failure, or a build without P25, and
+    /// `IAX_ERR_ALREADY_CONNECTED` when another session is live.
+    public func connectP25(host: String, callsign: String) throws {
+        try check(
+            host.withCString { hostPtr in
+                callsign.withCString { callsignPtr in
+                    iax_station_connect_p25(handle, hostPtr, callsignPtr)
+                }
+            }
+        )
+    }
+
+    /// Disconnect the live P25 link, if any, including a failed one.
+    /// Idempotent — a no-op while idle.
+    public func p25Disconnect() throws {
+        try check(iax_station_p25_disconnect(handle))
+    }
+
+    /// The live P25 link's own state, or `nil` when none is active.
+    public func p25State() throws -> P25State? {
+        let needed = iax_station_p25_state(handle, nil, 0)
+        if needed < 0 { throw StationError.from(needed, detail: lastErrorDetail()) }
+        if needed == 0 { return nil }
+        // +1 for the NUL the C-ABI writes.
+        var buf = [CChar](repeating: 0, count: Int(needed) + 1)
+        let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+            iax_station_p25_state(handle, ptr.baseAddress, UInt(ptr.count))
+        }
+        if rc < 0 { throw StationError.from(rc, detail: lastErrorDetail()) }
+        return P25State(json: String(cString: buf))
+    }
+
+    /// Whether this build of the engine carries P25 Phase 1 receive. Shipped
+    /// builds do; one made with `ASTAR_P25_SOFT_IMBE=0 just xcframework` does
+    /// not.
+    public static var p25Compiled: Bool {
+        astar_p25_compiled() != 0
+    }
+
     /// Link to a DMR master's talkgroup and decode the audio on it.
     ///
     /// `system` is a network SLUG — `tgif`, `brandmeister`, … — not a
@@ -3339,6 +3548,8 @@ public final class Station {
             nxdnActive: out.nxdn_active,
             dmrAvailable: out.dmr_available,
             dmrActive: out.dmr_active,
+            p25Available: out.p25_available,
+            p25Active: out.p25_active,
             echolinkAvailable: out.echolink_available,
             echolinkActive: out.echolink_active,
             echolinkLoggedIn: out.echolink_logged_in,

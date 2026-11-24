@@ -7,7 +7,7 @@ icon: lucide/cpu
 D-Star, System Fusion, NXDN and DMR carry their voice as AMBE, which astar
 decodes on a USB **vocoder stick**: a DVMEGA DVstick 30, or a ThumbDV / DV3000.
 Before astar will use a stick, you add it once in **Settings → Vocoders**.
-D-Star can also use the **software vocoder** built into astar instead. This page explains both: which vocoder each mode uses, why you
+P25 uses a software vocoder and no stick. D-Star can also use the **software vocoder** built into astar instead. This page explains both: which vocoder each mode uses, why you
 have to add a stick, how to add and remove one, and which sticks work.
 
 ## Which vocoder each mode uses
@@ -40,6 +40,11 @@ refused until you choose **Dongle**.
 **System Fusion, NXDN and DMR** read **Dongle only**. Their codec is AMBE+2,
 which is still covered by US patent 8,359,197 until 2028-05-20, so astar has
 no software vocoder for them, and the choice is not offered.
+
+**P25** has no choice to make. Its voice, IMBE, is decoded in software on your
+Mac, so no stick is needed, and the row reads **Software (IMBE)**. DVSI's sticks
+cannot do P25's full-rate voice. P25 is receive only and still in testing; see
+[Listening to P25 reflectors](p25.md).
 
 The choice is kept in this Mac's preferences under `vocoder.dstar`. Like the
 stick list, it is never included in an exported config.

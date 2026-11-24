@@ -133,17 +133,62 @@ identified as changed, as LGPL-2.1 section 2 requires.
   (repository: <https://github.com/scriptjunkie/codec2>)
 * Codec 2, by David Rowe: <https://www.rowetel.com/codec2.html>
 
-### App-store distribution is a separate, unresolved question
+### App-store distribution: decided 2026-11-21
 
-LGPL's relink requirement is difficult to satisfy on a platform where a
-recipient cannot rebuild and install their own binary. The exception in section 1
-does not reach it, because Codec 2 is not Rob's copyright to grant permissions
-over. astar's plan for app-store-distributable M17 is a cleanly-licensed Codec 2
-implementation — tracked as `iax-e5d9` in `docs/BACKLOG.md`.
+Rob decided on 2026-11-21 that astar's App Store builds carry both LGPL
+vocoders: Codec 2 (M17, this section) and the software D-Star vocoder
+(section 9).
+
+The decision rests on a discussion on the `digitalvoice` list
+(<https://groups.google.com/g/digitalvoice/c/XoYeEGE4sLk>, September–October
+2026), about Codec 2 in a third-party iPhone and Android app:
+
+* **Bruce Perens (6 October 2026)** accepted app-store distribution
+  ("I think we have to live with it"). He spoke of LGPL code generally ("the
+  LGPL terms", "the LGPL part"), not of Codec 2 alone and not of one licence
+  version. He set two conditions:
+  * users must "be able to re-link your application if they fix a bug in the
+    LGPL part";
+  * the source should be served for download, complete enough to rebuild the
+    binary bit-identically.
+* **Mooneer Salem (K6AQ)** of the FreeDV project agreed, saying he was not
+  a lawyer.
+
+Perens owns Codec 2's `pack.c`, and he is the author of the D-Star vocoder,
+so his statement speaks for his own code in both. The rest of Codec 2 is
+David Rowe's, and Salem spoke for the FreeDV project, which maintains it.
+Nobody on the thread discussed LGPL-3.0's "installation information" terms
+by name. Rob takes Perens' general statement as covering them, because the
+relink path below includes installing the rebuilt app.
+
+astar's store builds must therefore:
+
+* **Serve the complete corresponding source.** Each store release links to a
+  source download that astar itself serves: the public repository at the
+  release's tag, which includes `vendor/codec2` and
+  `vendor/ham-digital-modes-ambe`. That source must build the same binary.
+* **Keep each LGPL vocoder relinkable.** In the store builds, each vocoder
+  lives in its own replaceable library or framework, not merged into the
+  app's binary. A user can then rebuild it from source, re-link it, and
+  install the result. On iPhone that means re-signing the app with their own
+  developer identity, and the app's documentation explains how.
+* **Carry the notices and the licence texts** (LGPL-2.1 for Codec 2,
+  LGPL-3.0 for the D-Star vocoder) in the app's licences screen, together
+  with the written offers in this section and section 9.
+
+A cleanly-licensed Codec 2 (`iax-e5d9` in `docs/BACKLOG.md`) is no longer
+needed for the store. It stays as a fallback in case Apple or the copyright
+holders object. The research is in Rob's notes,
+`superpowers/notes/astar/2026-11-21-lgpl-app-store-m17.md` and
+`2026-11-21-codec2-non-lgpl-feasibility.md`.
 
 This does **not** affect astar's current distribution: the macOS release is
 distributed directly, signed and notarized, from the project's own releases
 page, where the published source fully satisfies the relink requirement.
+
+The App Store build also carries the GPL-3.0-or-later P25 IMBE vocoder
+(`vendor/imbe-vocoder`), under section 15's terms and the risk Rob accepted
+there, not under the LGPL conditions in this section.
 
 ## 3. nnnoiseless / RNNoise (BSD-3-Clause) — notices
 
@@ -535,8 +580,12 @@ above, at that release's tag, from the same place the binaries are offered —
 the arrangement GPL-3.0 section 6(d) describes, and the one section 2 relies on
 for Codec 2. No part of astar is withheld.
 
-The App Store question in section 2 applies here too, and section 1's
-exception does not reach this code, because it is not Rob's copyright.
+Section 2's 2026-11-21 App Store decision covers this vocoder too. Its author,
+Bruce Perens, accepted app-store distribution of LGPL code, provided the
+source is served and the LGPL part can be re-linked. In astar's store builds,
+then, this vocoder ships as its own replaceable library, on the terms listed
+there. Section 1's exception does not reach this code, because it is not
+Rob's copyright.
 
 **Modifications.** The vendored copy is upstream's `src/ambe/` unchanged
 except that the AMBE+2 directories are removed, with a new `lib.rs` and
@@ -887,3 +936,165 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## 15. The P25 IMBE vocoder (GPL-3.0-or-later) — feature `p25-soft-imbe`, in the Apple apps (macOS and iPhone)
+
+P25 Phase 1 is the digital voice mode US public-safety radios use, and the one
+P25 reflectors carry. Its voice codec is DVSI's full-rate **IMBE**: every 20 ms
+of speech becomes one 88-bit frame of model parameters (pitch, which frequency
+bands are voiced, and the spectral amplitudes), and the decoder rebuilds speech
+from those parameters.
+
+astar decodes IMBE in software with **Pavel Yazev's fixed-point
+`imbe_vocoder`**, the author's own implementation of the TIA-102.BABA standard.
+It comes from OP25 (<https://github.com/boatbod/op25>, directory
+`op25/gr-op25_repeater/lib/imbe_vocoder/`, pinned at commit
+`38a37491df4532d932f9f1d5634617af410cb3c9`), and astar carries it as a Rust
+port, held bit for bit to the C++ original by committed golden vectors. The
+port is a derivative work, so it keeps Yazev's licence.
+
+| Component | Where | Licence |
+|---|---|---|
+| `imbe-vocoder` (Pavel Yazev; Rust port by Rob Ludwick) | `vendor/imbe-vocoder` | `GPL-3.0-or-later` |
+
+There is no dongle path for P25. DVSI documents "APCO Project 25 Full Rate:
+NO" for every AMBE-3000 and AMBE-3003 part, which covers the ThumbDV and every
+DVstick astar drives; full rate needs DVSI's separate "-P25" models. So Rob
+decided on 2026-11-21 that P25 uses this software vocoder only.
+
+**Where it is built in.** It is reached only through the `p25-soft-imbe` Cargo
+feature (of `astar-codec`, re-exported by `astar-console`, `astar-station` and
+`astar-sys`) and through the network feature `p25`, which requires it at every
+level:
+
+* **the Apple apps, macOS and iPhone,** link it statically:
+  `bindings/swift/build-xcframework.sh` turns `p25` on unless
+  `ASTAR_P25_SOFT_IMBE=0`, and the iPhone App Store build carries it too (see
+  "App stores" below);
+* **a plain `cargo build`** of any astar crate does not, because neither
+  feature is a cargo default anywhere;
+* **astar-server and astar-netrec** do not carry it in any build, their
+  `release` sets included.
+
+`ci/guard-p25-imbe.sh` checks all three, along with the rules below.
+
+**Why GPL code can sit in an AGPL program.** GPL-3.0 section 13 lets a GPL-3.0
+work be combined with an AGPL-3.0 work, and AGPL-3.0 section 13 allows the
+reverse. Each part keeps its own licence: the island stays GPL-3.0-or-later,
+and astar stays AGPL-3.0-only. Its `Cargo.toml` hard-codes its licence rather
+than inheriting the workspace's, and the GPL-3.0 text ships beside it as
+`vendor/imbe-vocoder/COPYING`. OP25 does not ship the COPYING file its
+headers refer to, so astar adds it.
+
+### The complete source ships with it
+
+The GPL asks that whoever receives a binary can get its **Corresponding
+Source**: the complete source needed to rebuild it, the library included. astar
+meets that by serving the source the way section 9 does for the D-Star vocoder.
+Only section 9's source-serving applies here; its App Store relinking
+conditions are for LGPL code, and this island's App Store position is under
+"App stores" below:
+
+* Source: <https://github.com/rcludwick/astar>. The vocoder's own source is in
+  that repository, at `vendor/imbe-vocoder`, with `COPYING` and a
+  `VENDORED.md` that records the upstream commit and every porting decision.
+* Every release is tagged, so the exact source for a given binary is
+  `git checkout v<version>`.
+* To change it and rebuild: edit `vendor/imbe-vocoder` (or point
+  `imbe-vocoder` in the root `Cargo.toml` at your own copy), then run
+  `just xcframework && just dmg`. `just imbe-check` runs the port's tests,
+  including the golden vectors. Build instructions:
+  <https://rcludwick.github.io/astar>.
+
+No upstream C++ is committed. `vendor/imbe-vocoder/tools/make-golden.sh`
+fetches OP25 at the pinned commit into a temporary directory to record the
+golden vectors, and only those vector files are kept.
+
+### Patents
+
+The patents on IMBE belong to Digital Voice Systems (DVSI). These are the ones
+found, from Google Patents, with their status on 2026-11-21:
+
+| Patent | What it covers | Priority | Expired |
+|---|---|---|---|
+| 5,226,084 | Speech quantisation and error correction: **core IMBE** | 1990-12-05 | 2010-12-05 |
+| 5,247,579 | Methods for speech transmission: **core** | 1990-12-05 | 2010-12-05 |
+| 5,491,772 | Same family: **core** | 1990-12-05 | 2013-02-13 |
+| 5,630,011 | Quantisation of harmonic amplitudes: **core** | 1990-12-05 | 2014-05-13 |
+| 5,517,511 / 5,870,405 | Transmission over a noisy channel (FEC, bit priority) | 1992-11-30 | 2013 / 2012 |
+| 5,081,681 / 5,664,051 | Phase synthesis | 1989 / 1990 | 2012 / 2014 |
+| 5,195,166, 5,216,747, 5,226,108 | Voiced synthesis, V/UV and pitch estimation | 1990-09-20 | 2010 |
+| 5,715,365, 5,826,222 | Excitation parameter estimation | 1994–95 | 2015 |
+| 5,701,390, 5,754,974 | Regenerated phase, spectral magnitudes | 1995 | 2015 |
+| 6,131,084, 6,161,089, 6,199,037 | AMBE quantisation | 1997 | 2017 |
+| 7,970,606 / 8,315,860 | Interoperable (enhanced full-rate) vocoder | 2002-11-13 | 2025 / 2022 |
+| **8,359,197** | **Half-rate vocoder (AMBE+2)** | 2003-04-01 | **Active until 2028-05-20** |
+| 8,036,886 | Pulsed-speech parameter estimation | 2006 | Active until 2029-10-02 |
+| 8,265,937, 11,990,144, 12,254,895, 12,451,151 | SCBA mask enhancement, data in voice frames, speaker-mask compensation, tone frames | 2008–2022 | Active |
+
+What that table means for astar:
+
+* **US 8,359,197 is AMBE+2 only.** It is the half-rate patent. Its own
+  background describes the "standard 'full-rate' 7200 bps APCO Project 25
+  vocoder … TIA-102BABA" as the prior art it improves on, and full-rate IMBE
+  dates from the early 1990s, a decade before its 2003 priority date. It is
+  why P25 Phase 2, DMR, NXDN and System Fusion, which are all AMBE+2, stay
+  hardware-only, and why the island contains no AMBE+2 code.
+* **The other active patents are add-ons.** They cover features a baseline
+  TIA-102.BABA codec does not implement: a later encoder-analysis technique
+  (8,036,886), which the 2009 Yazev encoder predates, mask enhancement,
+  data-in-voice and tone frames. The island implements none of them.
+* **The standard's own patent list could not be checked.** TIA-102.BABA is
+  paywalled. The nearest primary source, TIA/EIA/IS-69.5 (EDACS IMBE, 1998),
+  says DVSI claims patent rights in IMBE but lists no numbers, so the numbers
+  above come from Google Patents.
+
+**Conclusion:** no unexpired patent was found that plausibly reads on a
+baseline full-rate IMBE encoder or decoder. This is engineering research, not
+a legal opinion.
+
+### Why not `blip25-mbe`
+
+`blip25-mbe` is an MIT-licensed Rust crate with both IMBE and AMBE+2, so it
+looks like the easier choice. astar refuses it because of where its code came
+from. Its own `PATENT_NOTICE.md` says it is "provided for research and
+educational purposes only", and that its analysis and synthesis core "was
+recovered by reverse engineering a compiled reference vocoder image — x86
+disassembly transliterated to fixed-point Rust, constants recovered from the
+binary's data section", which "applies to both codecs' audio output, including
+full-rate IMBE". Code transliterated from DVSI's binary is DVSI's code in
+another language, and an MIT licence on it cannot change that.
+
+### No encryption
+
+P25 radios can encrypt a call, and a P25 voice superframe says which algorithm
+it uses (its ALGID). astar never decrypts. P25 in astar contains no cipher and
+no key handling, and neither the island nor `crates/astar-p25` links any
+cryptography library, so P25 adds nothing to the app's export-compliance
+declaration to Apple. An encrypted call is muted from its ALGID: the talker is
+still shown, but none of its audio is decoded, played or recorded. The guard
+checks the dependency graph for crypto crates and the P25 code for decryption.
+
+### App stores
+
+Section 1's App Store permission is Rob's to give only for his own code. It
+cannot cover this island, whose copyright belongs to Pavel Yazev and OP25's
+contributors.
+
+The Free Software Foundation holds that the GPL's terms and Apple's App Store
+terms are incompatible: the App Store's usage rules are the kind of "further
+restrictions" GPL-3.0 section 10 forbids. VLC was removed from the App Store
+in 2011, after one of its contributors objected. That was a GPLv2 case, under
+GPLv2 section 6, which forbids the same further restrictions; GPL-3.0 section
+10 carries the same conflict. Nobody from OP25
+has given astar permission to distribute this code through an app store.
+
+Rob decided on 2026-11-21 to ship P25 in the iPhone App Store build anyway,
+with the full source public, and accepts the risk: a copyright holder may
+object, and Apple may then remove the app. If that happens, P25 is pulled from
+the iPhone build, or this port is replaced there by a clean-room IMBE
+implementation (backlog `p25-clean-imbe`).
+
+None of this affects the signed Mac DMG, which is distributed directly from
+the project's own releases page with the published source beside it, or the
+Android build.

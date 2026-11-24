@@ -13,6 +13,39 @@ pre-release to the patch number, which sorts wrongly: `0.1.10beta` is newer
 than `0.1.9beta` and a string comparison says the opposite. Shipped versions
 are left as they were spelled.
 
+## 0.1.25-beta — 2026-11-23
+
+Two new things to listen with: P25 reflectors, in testing, and a monitor
+speaker for when astar's output goes to a radio.
+
+### Added
+
+- **P25 reflectors, receive only, in testing.** The P25 rows in the
+  reflector directory can now be dialled. Pick one, connect, and you hear
+  the talkgroup, with the talker's radio ID on the call card. P25 voice is
+  decoded on your Mac by a software IMBE vocoder, so no dongle is needed.
+  It is marked **In testing**: it has passed astar's own tests against a
+  local P25 parrot but has not yet been heard on a real reflector, so its
+  loudness may need adjusting. You can't transmit on P25 yet: the PTT button
+  says so on a P25 link. Encrypted calls are never decoded: astar stays
+  silent and shows "Encrypted" on the talker line. If a reflector stops
+  answering, the card says "P25 link lost" with a Reconnect button. See
+  [P25](https://rcludwick.github.io/astar/macos/p25/).
+- **Monitor speaker.** If astar's output goes to a USB radio interface, you
+  can now also hear the same audio on the Mac's speakers or headphones.
+  Pick a device in Quick settings → Speaker → **Monitor**, or in an audio
+  config; it has its own volume, and a speaker button in the call controls
+  mutes it. Your own microphone is never in it, and if the monitor device
+  is unplugged the radio keeps playing. See
+  [Hardware](https://rcludwick.github.io/astar/macos/hardware/#monitor-speaker).
+
+### Changed
+
+- **Licensing for the coming phone apps.** `LICENSE-EXCEPTIONS.md` now
+  records how the Codec 2 (M17) and D-Star vocoders may ship in app stores,
+  under the LGPL conditions Bruce Perens set out, and adds the P25 IMBE
+  vocoder (GPL-3.0-or-later) as section 15.
+
 ## 0.1.24-beta — 2026-11-20
 
 A quiet release on the outside: the groundwork for sending pictures, and a

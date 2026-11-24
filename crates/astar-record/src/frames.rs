@@ -36,6 +36,10 @@ pub enum CaptureMode {
     Codec2_3200,
     Nxdn,
     Dmr72,
+    /// P25 Phase 1 IMBE: 11 bytes, the 88-bit frame as the `P25Reflector`
+    /// wire carries it (`MMDVMHost`'s packing), decoded by the software
+    /// vocoder.
+    P25,
     /// `EchoLink` GSM. Nothing emits it on this branch (see `record-echolink-gsm`).
     Gsm,
 }
@@ -49,6 +53,7 @@ impl CaptureMode {
             CaptureMode::Codec2_3200 => "codec2-3200",
             CaptureMode::Nxdn => "nxdn",
             CaptureMode::Dmr72 => "dmr72",
+            CaptureMode::P25 => "p25",
             CaptureMode::Gsm => "gsm",
         }
     }
@@ -59,6 +64,7 @@ impl CaptureMode {
             CaptureMode::Dstar | CaptureMode::Dmr72 => 9,
             CaptureMode::YsfDmr | CaptureMode::Nxdn => 7,
             CaptureMode::Codec2_3200 => 8,
+            CaptureMode::P25 => 11,
             CaptureMode::Gsm => 33,
         }
     }
@@ -77,6 +83,7 @@ impl CaptureMode {
         match self {
             CaptureMode::Codec2_3200 => "codec2",
             CaptureMode::Gsm => "gsm",
+            CaptureMode::P25 => "imbe",
             _ => "AMBE3000",
         }
     }
@@ -128,6 +135,7 @@ mod tests {
             (CaptureMode::Nxdn, "nxdn", 7, 1, "AMBE3000"),
             (CaptureMode::Dmr72, "dmr72", 9, 1, "AMBE3000"),
             (CaptureMode::Gsm, "gsm", 33, 1, "gsm"),
+            (CaptureMode::P25, "p25", 11, 1, "imbe"),
         ];
         for (m, dir, bytes, per, prod) in table {
             assert_eq!(m.dir_name(), dir);

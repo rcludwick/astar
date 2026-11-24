@@ -43,7 +43,7 @@ public enum DirectorySearchNetwork: Hashable, Sendable {
     }
 
     /// The app network that dials a result from this filter, or `nil` when
-    /// astar has no network for it (P25, URF, a network this build has never
+    /// astar has no network for it (URF, a network this build has never
     /// heard of).
     public var appNetwork: Network? {
         switch self {

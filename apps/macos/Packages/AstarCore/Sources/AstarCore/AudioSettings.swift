@@ -17,6 +17,13 @@ public struct AudioSettings: Equatable {
     /// UI attenuation). The persisted default stays unity; existing stored
     /// values are never migrated.
     public var outputGain: Float
+    /// Speaker monitor device: a listen-only copy of the output audio on a
+    /// second device, by name. `nil` = monitor off. Never the same device as
+    /// `output` (see `MonitorPickerModel.reconcile`). Mute is live-only and
+    /// deliberately not stored.
+    public var monitor: String?
+    /// Speaker monitor volume multiplier (`0.0...4.0`, default unity).
+    public var monitorGain: Float
     /// Mic voice compression (dynamics) toggle.
     public var compression: Bool
     /// Compression strength (0…1), passed to the engine when `compression` is on.
@@ -124,12 +131,15 @@ public struct AudioSettings: Equatable {
         voxEnabled: Bool = false, txDisabled: Bool = false,
         fullDuplex: Bool = false, voxThresholdDBFS: Float = VoxThreshold.defaultDBFS,
         voxHangtimeMS: Int = 500, micProfileID: String? = nil,
-        txTimeoutSeconds: Int = 120
+        txTimeoutSeconds: Int = 120,
+        monitor: String? = nil, monitorGain: Float = 1.0
     ) {
         self.input = input
         self.output = output
         self.inputGain = inputGain
         self.outputGain = outputGain
+        self.monitor = monitor
+        self.monitorGain = monitorGain
         self.compression = compression
         self.compressionLevel = compressionLevel
         self.denoiseStrength = denoiseStrength
@@ -163,6 +173,8 @@ public final class UserDefaultsAudioSettingsStore: AudioSettingsStore {
         static let output = "audio.output"
         static let inputGain = "audio.inputGain"
         static let outputGain = "audio.outputGain"
+        static let monitor = "audio.monitor"
+        static let monitorGain = "audio.monitorGain"
         static let compression = "audio.compression"
         static let compressionLevel = "audio.compressionLevel"
         static let denoiseStrength = "audio.denoiseStrength"
@@ -237,7 +249,10 @@ public final class UserDefaultsAudioSettingsStore: AudioSettingsStore {
                 ? defaults.integer(forKey: Key.voxHangtime) : 500,
             micProfileID: defaults.string(forKey: Key.micProfileID),
             txTimeoutSeconds: Self.loadTxTimeoutSeconds(
-                defaults.object(forKey: Key.txTimeoutSeconds))
+                defaults.object(forKey: Key.txTimeoutSeconds)),
+            monitor: defaults.string(forKey: Key.monitor),
+            monitorGain: defaults.object(forKey: Key.monitorGain) != nil
+                ? min(max(defaults.float(forKey: Key.monitorGain), 0), 4) : 1.0
         )
     }
 
@@ -272,6 +287,12 @@ public final class UserDefaultsAudioSettingsStore: AudioSettingsStore {
         defaults.set(settings.output, forKey: Key.output)
         defaults.set(settings.inputGain, forKey: Key.inputGain)
         defaults.set(settings.outputGain, forKey: Key.outputGain)
+        if let monitor = settings.monitor {
+            defaults.set(monitor, forKey: Key.monitor)
+        } else {
+            defaults.removeObject(forKey: Key.monitor)
+        }
+        defaults.set(settings.monitorGain, forKey: Key.monitorGain)
         defaults.set(settings.compression, forKey: Key.compression)
         defaults.set(settings.compressionLevel, forKey: Key.compressionLevel)
         defaults.set(settings.denoiseStrength, forKey: Key.denoiseStrength)

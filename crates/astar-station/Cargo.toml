@@ -14,20 +14,20 @@ workspace = true
 [dependencies]
 # `serde` on astar-iax so the secret-free LinkRoster serializes to JSON for
 # the link C-ABI (iax-1075).
-astar-iax = { path = "../astar-iax", version = "0.1.24-beta", default-features = false, features = ["serde"] }
-astar-iax-core = { path = "../astar-iax-core", version = "0.1.24-beta" }
+astar-iax = { path = "../astar-iax", version = "0.1.25-beta", default-features = false, features = ["serde"] }
+astar-iax-core = { path = "../astar-iax-core", version = "0.1.25-beta" }
 # `default-features = false`: astar-console's own default pulls in its
 # `m17` feature. This crate mirrors that default via its OWN `m17` feature
 # below (`m17 = ["astar-console/m17"]`) so `--no-default-features` on
 # THIS crate actually disables M17 end-to-end, instead of astar-console
 # silently building with it anyway.
-astar-console = { path = "../astar-console", version = "0.1.24-beta", default-features = false }
+astar-console = { path = "../astar-console", version = "0.1.25-beta", default-features = false }
 # In-band DTMF tone generator (iax-68eb) for `Station::send_dtmf`.
-astar-codec = { path = "../astar-codec", version = "0.1.24-beta" }
+astar-codec = { path = "../astar-codec", version = "0.1.25-beta" }
 # `serde` so the secret-free MicProfile serializes to JSON for the
 # characterize / set-mic-profile FFI (iax-5fb6 / iax-2095).
-astar-audio = { path = "../astar-audio", version = "0.1.24-beta", default-features = false, features = ["serde"] }
-astar-asl3 = { path = "../astar-asl3", version = "0.1.24-beta" }
+astar-audio = { path = "../astar-audio", version = "0.1.25-beta", default-features = false, features = ["serde"] }
+astar-asl3 = { path = "../astar-asl3", version = "0.1.25-beta" }
 # DMR's network taxonomy (iax-d4f7): `DmrNetwork::from_slug`, `dialable` and
 # `Timeslot`. NOT optional and NOT behind the `dmr` feature, unlike every
 # other network's protocol crate here — `Station::dmr_connect` resolves the
@@ -36,17 +36,23 @@ astar-asl3 = { path = "../astar-asl3", version = "0.1.24-beta" }
 # feature off. A crate that carries a taxonomy plus one `sha2` is cheap
 # enough to compile either way; a consent gate that only exists in some
 # builds is not.
-astar-dmr = { path = "../astar-dmr", version = "0.1.24-beta" }
+astar-dmr = { path = "../astar-dmr", version = "0.1.25-beta" }
+# P25 Phase 1 protocol primitives. NOT optional and NOT behind the `p25`
+# feature, for the reason `astar-dmr` above is not: `Station::p25_connect`
+# validates the callsign and the address BEFORE its `#[cfg]` block, so those
+# refusals hold identically with the feature off. Pure `std`, AGPL, no
+# third-party crates and no crypto, so it costs nothing either way.
+astar-p25 = { path = "../astar-p25", version = "0.1.25-beta" }
 # `Station::echolink_login` wraps the password in `Zeroizing` the moment it
 # arrives, in every build, so it is not optional.
 zeroize.workspace = true
 # Call recording (`Station::record_start`/`record_stop`/`record_state`): the
 # recorder thread, its FLAC writer and the codec-frame captures.
-astar-record = { path = "../astar-record", version = "0.1.24-beta" }
+astar-record = { path = "../astar-record", version = "0.1.25-beta" }
 # SSTV pictures decoded from what the operator hears (`Station::sstv_*`):
 # receive only, saved as PNG beside a `pictures.jsonl` index. Behind the
 # `sstv` feature below, as are `serde` and `serde_json`, which only it uses.
-astar-sstv = { path = "../astar-sstv", version = "0.1.24-beta", optional = true }
+astar-sstv = { path = "../astar-sstv", version = "0.1.25-beta", optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 # The SSTV encoder, for `Station::send_picture`. Behind the `sstv-tx`
@@ -59,27 +65,27 @@ claxon = "=0.4.3"
 serde_json = { workspace = true }
 # `pull-backend`: tests/sstv_packets.rs pulls the output bus on a real clock,
 # so heard audio reaches the SSTV decoder with no sound device.
-astar-audio = { path = "../astar-audio", version = "0.1.24-beta", features = ["test-backend", "serde", "pull-backend"] }
-astar-iax-core = { path = "../astar-iax-core", version = "0.1.24-beta" }
+astar-audio = { path = "../astar-audio", version = "0.1.25-beta", features = ["test-backend", "serde", "pull-backend"] }
+astar-iax-core = { path = "../astar-iax-core", version = "0.1.25-beta" }
 # Forces the LGPL `codec2-static` backend on for every TEST/bench build of
 # this crate (mirrors astar-console's own dev-dependency override — see
 # that crate's Cargo.toml for the full licensing note) so the M17 station
 # tests always have a working Codec 2 instance without depending on a system
 # libcodec2 being installed. Never part of any default feature set.
-astar-codec = { path = "../astar-codec", version = "0.1.24-beta", features = ["codec2-static"] }
+astar-codec = { path = "../astar-codec", version = "0.1.25-beta", features = ["codec2-static"] }
 # M17 wire-frame parsing (StreamPacket/decode_callsign) for the m17_station
 # test's PTT-frame assertion.
-astar-m17 = { path = "../astar-m17", version = "0.1.24-beta" }
+astar-m17 = { path = "../astar-m17", version = "0.1.25-beta" }
 # D-Star DSVT/RfHeader framing (iax-a9d4 Task 6) for the dstar_station test's
 # canned-stream fixtures. Zero dependencies of its own (pure decode/encode +
 # a loopback reflector), so — unlike the AMBE codec deps — this is always
 # cheap to compile in as a dev-dependency, regardless of `--features dstar`.
-astar-dstar = { path = "../astar-dstar", version = "0.1.24-beta" }
-astar-http = { path = "../astar-http", version = "0.1.24-beta", features = ["testing"] }
+astar-dstar = { path = "../astar-dstar", version = "0.1.25-beta" }
+astar-http = { path = "../astar-http", version = "0.1.25-beta", features = ["testing"] }
 # Every test build refuses EchoLink traffic to anything but loopback, and
 # the tests drive the fake directory and fake station.
-astar-console = { path = "../astar-console", version = "0.1.24-beta", features = ["echolink-loopback-only"] }
-astar-echolink = { path = "../astar-echolink", version = "0.1.24-beta", features = ["loopback-fakes"] }
+astar-console = { path = "../astar-console", version = "0.1.25-beta", features = ["echolink-loopback-only"] }
+astar-echolink = { path = "../astar-echolink", version = "0.1.25-beta", features = ["loopback-fakes"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 # This crate's own `test-hooks` feature, switched on for its integration tests
@@ -88,9 +94,9 @@ tracing-subscriber.workspace = true
 # watchdog can be watched firing. A
 # dev-dependency never reaches a normal build, so no shipped binary (the app's
 # xcframework, astar-server, astar-cli) ever has the hook.
-astar-station = { path = ".", version = "0.1.24-beta", features = ["test-hooks"] }
+astar-station = { path = ".", version = "0.1.25-beta", features = ["test-hooks"] }
 # Decodes what the peer received in `tests/sstv_tx.rs`.
-astar-sstv = { path = "../astar-sstv", version = "0.1.24-beta" }
+astar-sstv = { path = "../astar-sstv", version = "0.1.25-beta" }
 
 [[test]]
 name = "sstv_tx"
@@ -171,6 +177,14 @@ nxdn = ["astar-console/nxdn"]
 # refusals all run either way, off the unconditional `astar-dmr` dependency
 # above.
 dmr = ["astar-console/dmr"]
+# LICENSING + PATENTS: the software P25 IMBE vocoder (GPL-3.0-or-later,
+# LICENSE-EXCEPTIONS.md section 15), re-exposed from astar-console. Not a
+# cargo default. P25 Phase 1 only.
+p25-soft-imbe = ["astar-console/p25-soft-imbe"]
+# P25 Phase 1 (receive only): re-exposes astar-console's `p25` feature. Not
+# in `default`. It requires `p25-soft-imbe`, because the software IMBE
+# vocoder is P25's only vocoder (Rob, 2026-11-21).
+p25 = ["astar-console/p25", "p25-soft-imbe"]
 # Link Codec 2 into the binary instead of relying on a system libcodec2 found
 # at runtime (astar-8c4d). NOT default, and it must never become one — see the
 # licensing note in `astar-codec/Cargo.toml`. The shipped macOS app turns this

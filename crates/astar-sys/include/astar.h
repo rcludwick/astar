@@ -333,6 +333,14 @@
 #define IAX_ERR_PTT_LATCHED -27
 
 /**
+ * P25 error: an empty reflector address or a malformed port, a callsign the
+ * wire cannot carry (empty, longer than 10, or not printable ASCII), a
+ * resolve or bind failure, a refused key (P25 is receive-only), or the `p25`
+ * feature not being compiled in. Read `iax_station_last_error` for which.
+ */
+#define IAX_ERR_P25 -28
+
+/**
  * Number of log-spaced dBFS bins [`iax_station_mic_spectrum`] writes when
  * monitoring (iax-e73e). Size the `out` array to (at least) this; a larger
  * buffer is fine (the extra entries are left untouched). A literal here so
@@ -395,6 +403,23 @@
  * whole time-out, so every source was stopped and latched.
  */
 #define IAX_PTT_FORCED_TX_TIMEOUT 2
+
+/**
+ * [`iax_station_monitor_state`]: no monitor device chosen, or no call's
+ * output open.
+ */
+#define IAX_MONITOR_OFF 0
+
+/**
+ * [`iax_station_monitor_state`]: the monitor is playing.
+ */
+#define IAX_MONITOR_PLAYING 1
+
+/**
+ * [`iax_station_monitor_state`]: a monitor device is chosen but cannot play;
+ * the reason is written to the caller's buffer.
+ */
+#define IAX_MONITOR_UNAVAILABLE 2
 
 /**
  * Top-level operating mode. Mirrors `astar_station::OperatingMode`.
@@ -1165,6 +1190,24 @@ typedef struct {
    */
   bool dmr_active;
   /**
+   * `true` when P25 Phase 1 receive is compiled in (the `p25` feature).
+   * P25's vocoder is software IMBE and needs no dongle, so nothing else
+   * goes into it; it is the same answer as [`astar_p25_compiled`].
+   */
+  bool p25_available;
+  /**
+   * `true` while a P25 link is live, including one that ended `failed`
+   * and has not been disconnected (so a UI can say the link was lost).
+   * Mutually exclusive with every other network (see
+   * [`iax_station_connect_p25`]).
+   *
+   * RECEIVE ONLY: there is no P25 transmit path, so a key is refused
+   * rather than queued and a UI must not offer PTT while this is set.
+   *
+   * Feature-INDEPENDENT, exactly as [`Self::dmr_active`] is.
+   */
+  bool p25_active;
+  /**
    * `true` when this library was built with its `echolink` feature, so
    * the `iax_station_echolink_*` calls do something. `EchoLink` needs no
    * hardware, so nothing else goes into it.
@@ -1778,6 +1821,40 @@ int iax_station_set_input_gain(IaxStation *st, float gain);
  * 100%-400% headroom for boosting a quiet station, iax-a4e7).
  */
 int iax_station_set_output_gain(IaxStation *st, float gain);
+
+/**
+ * Choose the speaker monitor's device: a listen-only copy of the output,
+ * played on a second device. `device` is named as `iax_station_set_devices`
+ * names the output (a device-name substring); NULL or `""` turns the monitor
+ * off. The choice outlives calls. Returns [`IAX_OK`], [`IAX_ERR_NULL`] (NULL
+ * `st`), [`IAX_ERR_AUDIO`] when the device cannot be resolved or opened right
+ * now (the choice is kept; see [`iax_station_monitor_state`] and
+ * [`iax_station_last_error`]), or [`IAX_ERR_PANIC`].
+ */
+int iax_station_set_monitor_device(IaxStation *st, const char *device);
+
+/**
+ * Set the speaker monitor's volume (clamped `[0.0, 4.0]`, default 1.0; NaN
+ * reads as 0). Applies live. Returns [`IAX_OK`], [`IAX_ERR_NULL`] (NULL
+ * `st`), or [`IAX_ERR_PANIC`].
+ */
+int iax_station_set_monitor_gain(IaxStation *st, float gain);
+
+/**
+ * Mute or unmute the speaker monitor (default unmuted). Live only. Returns
+ * [`IAX_OK`], [`IAX_ERR_NULL`] (NULL `st`), or [`IAX_ERR_PANIC`].
+ */
+int iax_station_set_monitor_muted(IaxStation *st, bool muted);
+
+/**
+ * What the speaker monitor is doing: [`IAX_MONITOR_OFF`] (0),
+ * [`IAX_MONITOR_PLAYING`] (1) or [`IAX_MONITOR_UNAVAILABLE`] (2), or a
+ * negative `IAX_ERR_*`. When unavailable, the reason is written to `buf` of
+ * `len` bytes (NUL-terminated, truncate-safe); otherwise `buf` gets an empty
+ * string. `buf` may be NULL when `len == 0`. A device name or error text —
+ * secret-free.
+ */
+int iax_station_monitor_state(IaxStation *st, char *buf, uintptr_t len);
 
 /**
  * Toggle RX/output compression on the live/next call (iax-a4e7 PHASE 1):
@@ -2856,6 +2933,74 @@ int iax_station_dmr_disconnect(IaxStation *st);
  * Returns [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
  */
 int iax_station_dmr_state(IaxStation *st, char *buf, uintptr_t len);
+
+/**
+ * `1` when this library was built with P25 Phase 1 receive (its `p25`
+ * feature, which carries the software IMBE vocoder), `0` when not. P25 needs
+ * no hardware, so this is also what [`IaxState::p25_available`] reports.
+ */
+int astar_p25_compiled(void);
+
+/**
+ * Link to a `P25Reflector` and decode the audio on it (P25 Phase 1).
+ *
+ * `host` is `host[:port]` (an IPv6 literal in brackets); a bare host gets
+ * the `P25Reflector` default port, 41000. `callsign` is this station's own,
+ * 1–10 printable ASCII characters, sent in the poll. There is no talkgroup
+ * argument: a `P25Reflector` is one talkgroup and its poll carries none, so
+ * there is nothing to send.
+ *
+ * No dongle: P25's vocoder is the software IMBE decoder, so this never opens
+ * a serial port or probes a `ThumbDV`. Encrypted calls are muted, never
+ * decrypted.
+ *
+ * **RECEIVE ONLY.** A key-down is REFUSED with [`IAX_ERR_P25`], not queued,
+ * so a UI must not offer PTT while this link is live.
+ *
+ * `host` and `callsign` are required (NULL/non-UTF-8 → [`IAX_ERR_NULL`] /
+ * [`IAX_ERR_UTF8`]). Returns [`IAX_OK`], [`IAX_ERR_ALREADY_CONNECTED`] (any
+ * other network is live), [`IAX_ERR_P25`] (read `iax_station_last_error`),
+ * or [`IAX_ERR_PANIC`].
+ *
+ * NOTE: this resolves `host` and binds a socket, so it can block on DNS.
+ * Call it off any UI thread.
+ */
+int iax_station_connect_p25(IaxStation *st, const char *host, const char *callsign);
+
+/**
+ * Disconnect the live P25 link, if any, including one that ended `failed`.
+ * Idempotent — a no-op while idle. Returns [`IAX_OK`], [`IAX_ERR_NULL`], or
+ * [`IAX_ERR_PANIC`].
+ */
+int iax_station_p25_disconnect(IaxStation *st);
+
+/**
+ * Write the live P25 link's state as JSON into the caller buffer `buf` of
+ * `len` bytes (NUL-terminated, truncate-safe; same contract as
+ * [`iax_station_dstar_state`] — returns the byte length the full JSON needs,
+ * excluding the NUL, so a `len == 0` call is a sizing query).
+ *
+ * ```json
+ * {"link":"linked","reflector":"p25.example.net:41000","last_heard":"1234567",
+ *  "last_heard_id":1234567,"talkgroup":10200,"frames_rx":36,"receiving":true,
+ *  "encrypted":false,"backend":"software","ptt":false,"rx_db":-18.5}
+ * ```
+ *
+ * `link` is one of `idle`/`linking`/`linked`/`unlinking`/`failed`. A link
+ * that heard nothing for 120 s, or hit a receive error, stays `failed` until
+ * [`iax_station_p25_disconnect`], so a UI can say the link was lost.
+ *
+ * `last_heard` is the talker's radio ID rendered as a string (P25 voice
+ * carries no callsign); `last_heard_id` is the same number. `talkgroup` is
+ * read from the traffic and is a label only. Both persist past the end of a
+ * transmission; `receiving` says whether one is in progress. `encrypted` is
+ * `true` while the call in progress is encrypted: it is muted, and astar
+ * never decrypts. `ptt` is always `false`.
+ *
+ * Writes `{}` when no link is active or the `p25` feature isn't compiled in.
+ * Returns [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
+ */
+int iax_station_p25_state(IaxStation *st, char *buf, uintptr_t len);
 
 /**
  * Start logging in to the `EchoLink` directory as `callsign`.

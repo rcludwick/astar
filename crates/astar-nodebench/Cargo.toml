@@ -19,25 +19,25 @@ serde.workspace = true
 serde_json.workspace = true
 ureq = "2"
 # `nodebench serve`: the same HTTP server astar-server's control channel uses.
-astar-http = { path = "../astar-http", version = "0.1.24-beta" }
+astar-http = { path = "../astar-http", version = "0.1.25-beta" }
 # `nodebench soak`: Ctrl-C stops a soak and still writes its summary.
 ctrlc = { version = "3", features = ["termination"] }
 # Config overlays: parse the rig's astar-server node.toml, change keys, re-emit.
 toml = "0.8"
 # `test-support` exposes `dial_raw_with_profile`, so the IAX probe can present
 # CALLING_NUMBER the way an app_rpt node does on a link.
-astar-iax = { path = "../astar-iax", version = "0.1.24-beta", features = ["test-support"] }
-astar-iax-core = { path = "../astar-iax-core", version = "0.1.24-beta" }
+astar-iax = { path = "../astar-iax", version = "0.1.25-beta", features = ["test-support"] }
+astar-iax-core = { path = "../astar-iax-core", version = "0.1.25-beta" }
 # `test-backend`: `NullBackend`, the SSTV station's silent microphone.
-astar-audio = { path = "../astar-audio", version = "0.1.24-beta", features = ["test-backend"] }
+astar-audio = { path = "../astar-audio", version = "0.1.25-beta", features = ["test-backend"] }
 # `outside`: read the PNG the outside SSTV decoder writes.
 png = { workspace = true }
 # `sstv_station_to_node`: a headless station that sends an SSTV picture.
 # astar-nodebench is the one crate allowed to turn on `sstv-tx`
 # (ci/guard-sstv.sh); no shipped build depends on it.
-astar-station = { path = "../astar-station", version = "0.1.24-beta", default-features = false, features = ["sstv-tx", "sstv"] }
+astar-station = { path = "../astar-station", version = "0.1.25-beta", default-features = false, features = ["sstv-tx", "sstv"] }
 # The SSTV decoder the app uses (slowrx), for the bench's own decode.
-astar-sstv = { path = "../astar-sstv", version = "0.1.24-beta" }
+astar-sstv = { path = "../astar-sstv", version = "0.1.25-beta" }
 # The `sstv` fork's own decoder with its de-jitter in front, the bench's
 # third decode (vendor/sstv; decode only).
 sstv = { workspace = true, features = ["std", "dejitter"] }
@@ -49,8 +49,8 @@ sstv = { workspace = true, features = ["std", "dejitter"] }
 # build.
 sstv = { workspace = true, features = ["std", "encode"] }
 # The speech comparison's codec-realism test: a ulaw round trip of the phrase.
-astar-codec = { path = "../astar-codec", version = "0.1.24-beta" }
-astar-http = { path = "../astar-http", version = "0.1.24-beta", features = ["testing"] }
+astar-codec = { path = "../astar-codec", version = "0.1.25-beta" }
+astar-http = { path = "../astar-http", version = "0.1.25-beta", features = ["testing"] }
 
 [lints]
 workspace = true

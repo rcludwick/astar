@@ -15,8 +15,8 @@ testing = []
 
 [dependencies]
 ab_glyph = "=0.2.32"
-astar-netarchive = { path = "../astar-netarchive", version = "0.1.24-beta" }
-astar-secrets = { path = "../astar-secrets", version = "0.1.24-beta" }
+astar-netarchive = { path = "../astar-netarchive", version = "0.1.25-beta" }
+astar-secrets = { path = "../astar-secrets", version = "0.1.25-beta" }
 bytes = { workspace = true }
 claxon = "=0.4.3"
 jiff = { workspace = true }
@@ -30,8 +30,8 @@ webpki-roots = "1"
 tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", "simd"] }
 
 [dev-dependencies]
-astar-netarchive = { path = "../astar-netarchive", version = "0.1.24-beta", features = ["fixture"] }
-astar-record = { path = "../astar-record", version = "0.1.24-beta" }
+astar-netarchive = { path = "../astar-netarchive", version = "0.1.25-beta", features = ["fixture"] }
+astar-record = { path = "../astar-record", version = "0.1.25-beta" }
 png = "=0.18.1"
 # The loopback RTMPS test's self-signed certificate.
 rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "pem"] }

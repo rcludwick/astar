@@ -27,6 +27,11 @@ public struct Setup: Codable, Equatable, Identifiable {
     public var inputGain: Float?
     /// Tuned speaker (output) volume for this rig; `nil` = don't override.
     public var outputGain: Float?
+    /// Speaker monitor device for this rig; `nil` = monitor off. Applying a
+    /// setup without one turns the monitor off.
+    public var monitorDevice: String?
+    /// Speaker monitor volume for this rig; `nil` = unity.
+    public var monitorGain: Float?
     /// Mic voice compression for this rig; `nil` = don't override.
     public var compression: Bool?
     /// Mic compression strength (0…1) for this rig; `nil` = don't override.
@@ -78,7 +83,8 @@ public struct Setup: Codable, Equatable, Identifiable {
         voxEnabled: Bool? = nil, voxThreshold: Float? = nil,
         fullDuplex: Bool? = nil, serial: SerialLineSpec? = nil,
         micProfileID: String? = nil,
-        bluetoothPTT: BluetoothPTTSpec? = nil
+        bluetoothPTT: BluetoothPTTSpec? = nil,
+        monitorDevice: String? = nil, monitorGain: Float? = nil
     ) {
         self.id = id
         self.name = name
@@ -97,6 +103,8 @@ public struct Setup: Codable, Equatable, Identifiable {
         self.serial = serial
         self.micProfileID = micProfileID
         self.bluetoothPTT = bluetoothPTT
+        self.monitorDevice = monitorDevice
+        self.monitorGain = monitorGain
     }
 
     // MARK: Coding
@@ -108,7 +116,7 @@ public struct Setup: Codable, Equatable, Identifiable {
         case id, name, hardwareProfileID, inputDevice, outputDevice
         case inputGain, outputGain, compression, compressionLevel, txTrim
         case noiseReduction, voxEnabled, fullDuplex, serial, micProfileID
-        case bluetoothPTT
+        case bluetoothPTT, monitorDevice, monitorGain
         case voxThreshold = "voxThresholdRMS"
         case legacyVoxThreshold = "voxThreshold"
     }
@@ -137,6 +145,8 @@ public struct Setup: Codable, Equatable, Identifiable {
         serial = try c.decodeIfPresent(SerialLineSpec.self, forKey: .serial)
         micProfileID = try c.decodeIfPresent(String.self, forKey: .micProfileID)
         bluetoothPTT = try c.decodeIfPresent(BluetoothPTTSpec.self, forKey: .bluetoothPTT)
+        monitorDevice = try c.decodeIfPresent(String.self, forKey: .monitorDevice)
+        monitorGain = try c.decodeIfPresent(Float.self, forKey: .monitorGain)
     }
 
     /// Never writes the old key: an older astar reading this config sees no
@@ -151,6 +161,8 @@ public struct Setup: Codable, Equatable, Identifiable {
         try c.encodeIfPresent(outputDevice, forKey: .outputDevice)
         try c.encodeIfPresent(inputGain, forKey: .inputGain)
         try c.encodeIfPresent(outputGain, forKey: .outputGain)
+        try c.encodeIfPresent(monitorDevice, forKey: .monitorDevice)
+        try c.encodeIfPresent(monitorGain, forKey: .monitorGain)
         try c.encodeIfPresent(compression, forKey: .compression)
         try c.encodeIfPresent(compressionLevel, forKey: .compressionLevel)
         try c.encodeIfPresent(txTrim, forKey: .txTrim)

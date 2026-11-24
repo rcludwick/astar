@@ -12,7 +12,7 @@ inline. All 129 issues (107 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (50)
+## Open items (52)
 
 ### astar-b02hw — Rob's hardware checks for the B02PTT button, before the release that ships it
 *P1 high · task · labels: macos, ptt, bluetooth, hardware, test, cx:3*
@@ -181,6 +181,22 @@ Scope:
   * meet the accessibility bar.
   iOS may simply be the existing SwiftUI app, since `apps/macos` already
   targets it. If so, the toolkit choice covers Linux, Windows and Android.
+  **Decided 2026-11-20 (Rob) for the phones:** iOS is the existing SwiftUI
+  app, and Android is the same views through Skip, on the condition that a
+  release build keeps up with the live meters on a real phone. The design
+  and the spike report are in the notes site
+  (`superpowers/designs/astar/2026-11-20-mobile-clients-design.md`,
+  `superpowers/notes/astar/2026-11-20-skip-spike-report.md`). Windows and
+  Linux are still open: a desktop spike will try the Android screens through
+  Compose Multiplatform. The same day Rob raised the Mac app's floor to
+  macOS 14 and the iPhone floor to iOS 17, because Skip's Android views can
+  only observe `@Observable`; that change has not been made yet.
+  **Measured and decided 2026-11-20:** Skip as built failed the condition on
+  a Pixel 11 Pro XL (87 to 91% late frames); a hybrid passed (under 0.2%).
+  So on Android the parts that animate continuously (meters, level graph,
+  spectrum) are drawn directly in Compose and fed from shared Swift, and
+  everything else is the shared SwiftUI. A mid-range phone is still to be
+  measured before release.
 * **Feature parity is measured against `docs/FEATURES.md`.** Every row the Mac
   has, the new client has, before Iced is removed.
 * **Retire `apps/gui`** (crate `astar-gui`) only once the replacement reaches
@@ -204,6 +220,80 @@ becomes a parity requirement on the new client rather than Iced work, so close
 them against this item when the replacement lands, not before. The Android
 audio spike (astar-6a8e) and the iOS audio spike (astar-44c3) are
 prerequisites, not duplicates.
+
+### astar-pttcancel — Does the Mac's Hold to Talk unkey when the press is cancelled, not released?
+*P2 medium · bug · labels: macos, ptt, safety, cx:2*
+
+Raised 2026-11-20 by the reviews of the phone spike builds, where the same
+pattern was a real fault: a touch cancelled by the system left the
+transmitter keyed with no finger down. **Not verified on the Mac.** Check
+first, then fix only what is real.
+
+The Mac's on-screen button (`pttButton`, `apps/macos/Sources/MenuPopover.swift`,
+about line 1981) keys in a `DragGesture`'s `onChanged` and unkeys in its
+`onEnded`. SwiftUI does not call `onEnded` when a gesture is cancelled. So
+the unkey depends on nothing else cancelling the press. Cases to try by
+hand, mouse button held on Hold to Talk in each:
+
+* the popover or window closes (Escape, or the app is hidden with ⌘H);
+* another app comes to the front (⌘Tab);
+* the call ends from the far side, so `.disabled(session.status != .answered)`
+  flips under the press;
+* the Mac sleeps or the screen locks.
+
+For each, note whether the engine unkeys and whether the view's `keyed` flag
+clears. A stuck flag alone is the mild form: `setKeyed` returns early when
+`keyed` already matches, so the next press does nothing until a release. A
+keyed engine with no button held is the serious form, bounded only by the
+transmit time-out.
+
+If any case fails: track the press with `@GestureState`, which resets on
+cancel, and unkey on `onDisappear`, on the app resigning active, and when
+the status leaves answered. The decision "must this unkey?" is a pure
+function with exact-value tests; the phone spike wrote one
+(`PhoneKeyPolicy`, on the `work/mobile-spike` branch, never merged) that
+can be the model. Nothing in the fix may ever key. The `astar-uiclone`
+clients owe the same behaviour.
+
+### astar-car — astar in the car: Apple CarPlay and Android Auto
+*P3 low · feature · labels: ios, android, carplay, android-auto, ui, safety, design*
+
+Asked 2026-11-20 (Rob), while the phone clients were being designed. Once
+the iPhone and Android apps exist, show astar on the car's screen: Apple
+CarPlay for iPhone and Android Auto for Android. It depends on the phone
+apps (`astar-uiclone`; the design is in the notes site at
+`superpowers/designs/astar/2026-11-20-mobile-clients-design.md`), which
+leaves both out of its first stages on purpose.
+
+Needs its own design before any code. What that design has to settle:
+
+* **What each platform allows.** Neither lets an app draw its own screen.
+  CarPlay offers fixed templates per app category, and each category needs
+  an entitlement Apple grants on request, so the first step is finding
+  which category a ham-radio voice client fits (audio, communication, or
+  none) and applying. Android Auto has its own categories and review. The
+  "same look on every platform" rule cannot hold on a car screen, so the
+  design says what stays the same: the wording, the order of things and
+  the states.
+* **What the car screen shows.** At least: the connected node and whether
+  it is receiving, favourites and recents to connect to, and disconnect.
+  Nothing that needs reading or typing while driving.
+* **Transmit, and it is a safety question.** The standing rule holds: only
+  a person starts a transmit, and nothing remote or automatic keys. Decide
+  whether the car offers any way to key at all (a steering-wheel button, an
+  on-screen hold, the Bluetooth PTT button only), under the same global
+  transmit time-out. A voice assistant must never key. Listening only is an
+  acceptable first version.
+* **Audio.** The car is one more audio route. A phone call, navigation
+  prompt or the car taking the audio stops any transmit at once, as on the
+  phone.
+* **Local law.** Operating a radio while driving is restricted in some
+  places. The docs page says so plainly and leaves the choice to the
+  operator.
+
+Tests: the car screens are driven by the same fake station as the phone
+screens, and no test keys or connects anywhere but `127.0.0.1`. Docs and
+`docs/FEATURES.md` rows land with the code, per platform.
 
 ### astar-guidv — the Iced client has no digital voice at all
 *P2 medium · feature · labels: gui, cross-platform, dstar, ysf, cx:8*
@@ -567,6 +657,8 @@ off-main-thread contract; `network_picker` fn lifetime style (dial.rs).
 ### astar-44c3 — iOS audio spike (M1 gate): own AVAudioSession + prove parrot loopback on a real device
 *P1 high · task · labels: cx:3, ios*
 
+**Updated 2026-11-20:** this is now Task 7 of the mobile stage 0 plan (notes site, `superpowers/plans/astar/2026-11-20-mobile-stage0-spikes.md`; design `superpowers/designs/astar/2026-11-20-mobile-clients-design.md`). The Skip spike that day also found that an iPhone build linking `AstarCore` failed on a missing IOKit symbol (`_IOIteratorNext`), which points at the USB serial code reaching the iOS engine slice; `ASTAR_SYS_FEATURES` in `bindings/swift/build-xcframework.sh` (spike branch only) leaves it out. This spike should confirm or clear that for the real app before anything else.
+
 **Design:** GATES all iOS UI work. iOS builds+links but duplex audio is unproven: the engine is cpal-backed and NOTHING configures an AVAudioSession, which iOS requires before RemoteIO grants the mic (docs/design/ios-client.md §3). First approach, no Rust change: in astar iOS app layer configure AVAudioSession (.playAndRecord, mode .voiceChat, .defaultToSpeaker/.allowBluetooth), setActive(true) BEFORE constructing/connecting the Station; handle interruptions + route changes. Then dial parrot 55553 and confirm the loopback is AUDIBLE on a real iPhone (mic capture + speaker playback). Needs a real device + Apple Developer team for signing — the simulator cannot validate the RemoteIO mic path. If RemoteIO misbehaves vs a live session (sample-rate/buffer negotiation, BT SCO, route changes) escalate to the astar-lib iOS-audio ticket. Part of astar-1f8d.
 
 ### astar-734b — Vendor scripts trust stale xcframework caches (VENDOR_REV lies)
@@ -616,8 +708,10 @@ Follow-up to au-a360. Sign + notarize + staple the DMG for public distribution. 
 
 **Design:** End-of-phase-1 Windows pass: full operating-set surface including tray/popover shell, WT credentials, and UCI150 serial PTT on the vendor CH34x Windows driver. Design: docs/superpowers/specs/2026-07-01-gui-rs-parity-roadmap-design.md
 
-### astar-6a8e — android: audio spike (M1 gate) - Oboe + foreground service + parrot loopback
+### astar-6a8e — android: audio spike (M1 gate) - AAudio through cpal + foreground service + parrot loopback
 *P2 medium · task · labels: android, cx:3*
+
+**Updated 2026-11-20, and this replaces the paragraph below where they disagree:** the Android client is built with Skip (the Mac app's SwiftUI views and `AstarCore` compiled for Android and drawn with Jetpack Compose), not a Kotlin view layer over UniFFI. Rob accepted that route on 2026-11-20 on one condition, which this spike checks first: a release build must show under 5% late frames over 30 seconds of the live meters on a real phone. The Skip spike already showed the engine and `AstarCore` build and run on Android and hold a call on the device's own loopback, with audio switched off. What is left here is audio: `cpal`'s AAudio backend needs the app's Java context handed to native code (who supplies it under Skip is the open question), the microphone permission, and a foreground service that keeps receive audio alive in the background. Plan: Task 8 of `superpowers/plans/astar/2026-11-20-mobile-stage0-spikes.md` in the notes site; findings so far in `superpowers/notes/astar/2026-11-20-skip-spike-report.md`.
 
 **Design:** Sibling gate to the iOS spike astar-44c3. Android pairs with iOS, not desktop: Kotlin/Compose view layer over the same Rust core, UniFFI already targets Kotlin. Spike proves low-latency duplex audio via Oboe/AAudio plus a foreground service keeping the connection and RX audio alive in background, demonstrated with parrot loopback on a real device. Mobile parity becomes its own roadmap once a spike passes. Design: docs/superpowers/specs/2026-07-01-gui-rs-parity-roadmap-design.md
 

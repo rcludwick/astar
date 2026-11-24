@@ -155,6 +155,10 @@
         @State private var expanded = false
         @State private var inputGain = 0.90
         @State private var outputGain = 1.0
+        @State private var monitorGain = 1.0
+        /// Set when a change of Output cleared this config's monitor, because
+        /// Output became the monitor's own device.
+        @State private var monitorTurnedOff = false
         @State private var voxThreshold = Double(VoxThreshold.defaultDBFS)
         @FocusState private var nameFocused: Bool
 
@@ -194,6 +198,7 @@
             .onAppear {
                 inputGain = Double(setup.inputGain ?? 0.90)
                 outputGain = Double(setup.outputGain ?? 1.0)
+                monitorGain = Double(setup.monitorGain ?? 1.0)
                 voxThreshold = Double(setup.voxThreshold ?? VoxThreshold.defaultDBFS)
                 if setups.focusNewID == setup.id {
                     expanded = true
@@ -289,6 +294,7 @@
                 devicePicker("Input", devices: inputs, selection: inputBinding)
                 micProfileRow
                 devicePicker("Output", devices: outputs, selection: outputBinding)
+                monitorPicker
                 // astar-9d41 — the full explanation, once per card, under both
                 // pickers. The per-picker outline and triangle say WHICH
                 // control is affected; this says what it means and how to fix
@@ -502,6 +508,7 @@
                             {
                                 s.outputDevice = paired
                             }
+                            reconcileMonitor(&s)
                         }, live: { applyDevicesLive($0) })
                 })
         }
@@ -510,7 +517,50 @@
             Binding(
                 get: { setup.outputDevice },
                 set: { v in
-                    edit({ $0.outputDevice = v }, live: { applyDevicesLive($0) })
+                    edit(
+                        { s in
+                            s.outputDevice = v
+                            reconcileMonitor(&s)
+                        }, live: { applyDevicesLive($0) })
+                })
+        }
+
+        /// The speaker monitor never shares the output's device: clear it when
+        /// the output becomes it, and say so under the Monitor row.
+        private func reconcileMonitor(_ s: inout Setup) {
+            guard s.monitorDevice != nil,
+                MonitorPickerModel.reconcile(monitor: s.monitorDevice, newOutput: s.outputDevice)
+                    == nil
+            else { return }
+            s.monitorDevice = nil
+            monitorTurnedOff = true
+        }
+
+        /// The monitor this config really plays: `nil` when none is saved, or
+        /// when the saved one is its own Output's device (an imported or
+        /// hand-edited config), which `SetupController.apply` turns off too.
+        private var effectiveMonitor: String? {
+            MonitorPickerModel.reconcile(
+                monitor: setup.monitorDevice, newOutput: setup.outputDevice)
+        }
+
+        /// A saved monitor that is this config's own Output, so it is off.
+        private var monitorSameAsOutput: Bool {
+            setup.monitorDevice != nil && effectiveMonitor == nil
+        }
+
+        private var monitorBinding: Binding<String?> {
+            Binding(
+                get: { effectiveMonitor },
+                set: { v in
+                    if v != nil { monitorTurnedOff = false }
+                    edit(
+                        { $0.monitorDevice = v },
+                        live: { _ in
+                            try? session.selectMonitor(v)
+                            session.refreshMonitorState()
+                        })
+                    persistAudio { $0.monitor = v }
                 })
         }
 
@@ -597,6 +647,15 @@
             persistAudio { $0.outputGain = Float(outputGain) }
         }
 
+        private func commitMonitorGain() {
+            edit(
+                { $0.monitorGain = Float(monitorGain) },
+                live: { _ in
+                    try? session.setMonitorGain(Float(monitorGain))
+                })
+            persistAudio { $0.monitorGain = Float(monitorGain) }
+        }
+
         private func commitVoxThreshold() {
             edit(
                 { $0.voxThreshold = Float(voxThreshold) },
@@ -608,7 +667,9 @@
         /// Apply + persist device selection when this is the active config (keeps the
         /// quick-config / launch state in sync).
         private func applyDevicesLive(_ s: Setup) {
-            try? session.selectDevices(input: s.inputDevice, output: s.outputDevice)
+            // The session clears a monitor on the new output's device itself
+            // (saved and live); `reconcileMonitor` has already said so here.
+            _ = try? session.selectDevices(input: s.inputDevice, output: s.outputDevice)
             persistAudio {
                 $0.input = s.inputDevice
                 $0.output = s.outputDevice
@@ -663,16 +724,93 @@
             }
         }
 
+        /// The Monitor row: "Off" first, then every output except this
+        /// config's Output. A volume slider follows, under Vol, while a
+        /// device is chosen.
+        @ViewBuilder
+        private var monitorPicker: some View {
+            let choices = AudioDeviceList.selectable(
+                from: MonitorPickerModel.choices(
+                    outputs: outputs, currentOutput: setup.outputDevice))
+            // A saved monitor that is unplugged still needs a row, or the
+            // picker would show a blank selection.
+            let missing = effectiveMonitor.flatMap { choices.contains($0) ? nil : $0 }
+            let unavailable = monitorUnavailableReason
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    label("Monitor")
+                    Picker("Monitor", selection: monitorBinding) {
+                        Text("Off").tag(String?.none)
+                        if !choices.isEmpty || missing != nil { Divider() }
+                        ForEach(choices, id: \.self) { name in
+                            Text(name).tag(String?.some(name))
+                        }
+                        if let missing {
+                            Text("\(missing) (not connected)").tag(String?.some(missing))
+                        }
+                    }
+                    .labelsHidden()
+                    .help(Self.monitorHelp)
+                    .accessibilityHint(Self.monitorHelp)
+                    if isActive && effectiveMonitor != nil && session.monitorMuted {
+                        MonitorMutedTag()
+                    }
+                    if unavailable != nil {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                            .font(.caption)
+                            .help(unavailable ?? "")
+                            .accessibilityLabel("Monitor unavailable")
+                    }
+                }
+                if monitorTurnedOff || monitorSameAsOutput {
+                    Text("Monitor turned off: it was the same device as the output.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, Self.labelWidth + 8)
+                } else if let unavailable {
+                    Text("Monitor unavailable: \(unavailable)")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, Self.labelWidth + 8)
+                }
+            }
+            // The monitor's volume, directly under its picker, the same place
+            // Quick settings puts it.
+            if effectiveMonitor != nil {
+                gainSlider(
+                    "Volume", tint: .green, range: 0...4, value: $monitorGain,
+                    subordinate: true, accessibilityLabel: "Monitor volume"
+                ) { commitMonitorGain() }
+            }
+        }
+
+        private static let monitorHelp =
+            "Plays a copy of what goes to Output on a second device, such as this Mac's "
+            + "speaker. Your own microphone is never in it."
+
+        /// Why the monitor cannot play, shown only on the active config: the
+        /// engine's state is about the rig that is applied, not this card.
+        private var monitorUnavailableReason: String? {
+            guard isActive, effectiveMonitor != nil,
+                case .unavailable(let reason) = session.monitorState
+            else { return nil }
+            return reason
+        }
+
         private func gainSlider(
             _ title: String, tint: Color, range: ClosedRange<Double> = 0...2,
-            value: Binding<Double>,
+            value: Binding<Double>, subordinate: Bool = false,
+            accessibilityLabel: String? = nil,
             commit: @escaping () -> Void
         ) -> some View {
             HStack(spacing: 8) {
-                label(title)
+                if subordinate { sublabel(title) } else { label(title) }
                 Slider(value: value, in: range) { editing in if !editing { commit() } }
                     .tint(tint)
-                    .accessibilityLabel(title)
+                    .accessibilityLabel(accessibilityLabel ?? title)
                     .accessibilityValue(AccessibilityValueFormatter.percent(value.wrappedValue))
                 Text(value.wrappedValue, format: .percent.precision(.fractionLength(0)))
                     .font(.caption.monospacedDigit())
@@ -684,6 +822,15 @@
         private func label(_ text: String) -> some View {
             Text(text)
                 .foregroundStyle(.secondary)
+                .frame(width: Self.labelWidth, alignment: .leading)
+        }
+
+        /// A sub-row label (the Monitor's Volume under its picker): a step
+        /// quieter than `label`, so it reads as belonging to the row above.
+        private func sublabel(_ text: String) -> some View {
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
                 .frame(width: Self.labelWidth, alignment: .leading)
         }
     }

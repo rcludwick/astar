@@ -21,8 +21,10 @@ mod m17_monitor_status;
 pub mod metering;
 #[cfg(feature = "nxdn")]
 pub mod nxdn;
-#[cfg(any(feature = "ysf", feature = "nxdn", feature = "dmr"))]
+#[cfg(any(feature = "ysf", feature = "nxdn", feature = "dmr", feature = "p25"))]
 mod over_tap;
+#[cfg(feature = "p25")]
+pub mod p25;
 pub mod parrot;
 pub mod session;
 pub mod state;
@@ -63,6 +65,8 @@ pub use m17_monitor_status::{M17MonitorEdge, M17MonitorStatus};
 pub use metering::{Gain, Level, MeteringBackend, peak_to_dbfs};
 #[cfg(feature = "nxdn")]
 pub use nxdn::{NxdnConfig, NxdnLink, NxdnSnapshot};
+#[cfg(feature = "p25")]
+pub use p25::{P25Config, P25Link, P25Snapshot};
 pub use parrot::{LocalParrot, ParrotPhase, ParrotShared, calibrate_mic};
 #[cfg(feature = "dmr")]
 pub use session::dmr_available;
@@ -72,7 +76,8 @@ pub use session::nxdn_available;
 pub use session::ysf_available;
 pub use session::{
     AnswerPolicy, ConsoleConfig, ConsoleError, ConsoleSession, LinkConnectSpec, LinkKeyResolver,
-    PictureTarget, RecordTaps, RegisterOutcome, list_devices, m17_available, resolve_device,
+    PictureTarget, RecordTaps, RegisterOutcome, list_devices, m17_available, p25_available,
+    resolve_device,
 };
 #[cfg(feature = "dstar")]
 pub use session::{dstar_available, dstar_available_with};

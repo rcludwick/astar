@@ -1,7 +1,6 @@
 # P25 — design
 
-**Status:** designed, not built. Client item follows `astar-b8e4`'s shape; no
-engine item exists yet.
+**Status:** Receive built (2026-11-21): software IMBE in `vendor/imbe-vocoder`; the gating experiment answered no for the DVSI sticks; design and results in the notes site, `designs/astar/2026-11-21-p25-receive-design.md` and `notes/astar/2026-11-21-p25-gating.md`. Ships in 0.1.25-beta as "In testing", receive only. Transmit: backlog `p25-transmit`; the node: `astar-server-p25`.
 **Read first:** `docs/design/adding-a-network.md`.
 
 ## The one question that decides this
@@ -20,6 +19,8 @@ AMBE-3000 is an AMBE+2 part; it is configured for D-Star's AMBE 2020 by
 Whether it will also select **IMBE** is exactly the unknown.
 
 ### The gating experiment
+
+*Superseded: the experiment ran, and the DVSI sticks cannot do P25 full rate. See the status line above.*
 
 Cheap, and it must happen before any P25 code is written:
 
@@ -45,7 +46,7 @@ Three options, in order of preference:
 * **Different hardware.** A DVSI part that does IMBE, gated on its own
   capability flag. A second dongle class is a real support burden; worth it only
   if P25 demand justifies it.
-* **A software IMBE decoder.** The obvious candidate is `mbelib`, and it is
+* **A software IMBE decoder.** *(Superseded: Rob decided on 2026-11-21 to build one, as a GPL island; see the status line.)* The obvious candidate is `mbelib`, and it is
   **legally grey** — the algorithms are patented and its distribution status is
   contested. astar's position on this is already settled for D-Star: hardware
   only, no software AMBE, full stop. Applying a different standard to IMBE would undo that

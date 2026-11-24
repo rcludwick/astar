@@ -153,6 +153,28 @@ nxdn-parrot port tg="31313":
 nxdn-listen host callsign radio_id tg *args:
     cargo run --release -p astar-cli --features nxdn -- nxdn-listen {{host}} --callsign {{callsign}} --radio-id {{radio_id}} --tg {{tg}} {{args}}
 
+# P25's hardware-free half. Grows as later tasks land.
+p25-test:
+    cargo test -p astar-p25
+    cargo test -p astar-console --features p25
+    cargo test -p astar-station --features p25 --test p25_station
+    cargo test -p astar-cli --features p25
+
+# A self-hosted P25 parrot on 127.0.0.1:<port>. It relays a live over
+# to every other linked client and replays it to its sender 2 s after it ends,
+# as G4KLX's P25Parrot does. It never dials anything.
+#
+#     just p25-parrot                                   # terminal 1
+#     just p25-listen 127.0.0.1:42011 KC0ABC            # terminal 2
+p25-parrot port="42011":
+    cargo run -p astar-p25 --example p25_parrot -- --port {{port}}
+
+# Link a P25Reflector and decode the voice on it. RECEIVE ONLY: no PTT,
+# because astar has no P25 transmit path yet. Needs no dongle.
+# Add --wav /tmp/p25.wav to capture instead of play.
+p25-listen host callsign *args:
+    cargo run --release -p astar-cli --features p25 -- p25-listen {{host}} --callsign {{callsign}} {{args}}
+
 # DMR's hardware-free half: the protocol crate, the block codes, the codec
 # layer, the session and the facade. `astar-dmr` and `astar-codec::dmr` are
 # already covered by `just ci`; the feature-gated halves are not.
@@ -200,11 +222,13 @@ cbindgen:
     ./scripts/check-cbindgen.sh
     ./scripts/check-cbindgen-serial.sh
 
-# The thirteen merge invariants CI's `guard` stage enforces: no armed hardware /
+# The fourteen merge invariants CI's `guard` stage enforces: no armed hardware /
 # live-network opt-in, no git dependencies (ambe-thumbdv stays vendored, with
 # its licences), no invented install channel, an AGPL SPDX header on every
 # first-party rs/swift/sh/py file, no LGPL code in a default build (Codec 2
-# stays opt-in; the software D-Star vocoder stays opt-in and D-Star only), no async runtime / voice stack in a default build (the
+# stays opt-in; the software D-Star vocoder stays opt-in and D-Star only), no
+# GPL code in a default build (the P25 IMBE vocoder stays opt-in, P25 Phase 1
+# only, app-only, no AMBE+2 and no crypto), no async runtime / voice stack in a default build (the
 # discord feature stays opt-in), a dependency-free Bluetooth PTT core that the
 # node never links, with CoreBluetooth confined to one app file and no
 # characteristic writes, no tiny_http anywhere (every HTTP server
@@ -222,6 +246,7 @@ guards:
     ./ci/guard-spdx-headers.sh
     ./ci/guard-codec2-licensing.sh
     ./ci/guard-dstar-soft-ambe.sh
+    ./ci/guard-p25-imbe.sh
     ./ci/guard-discord-feature.sh
     ./ci/guard-ble-ptt.sh
     ./ci/guard-no-tiny-http.sh
@@ -493,7 +518,7 @@ mutants-ble-ptt:
 # is gated by `just discord-check` / ci.yml's `discord` job, not here.
 # guard-ble-ptt.sh is in the chain for the same reason: the Bluetooth PTT core
 # staying dependency-free and out of the node is a safety property.
-ci: fmt-check clippy test cbindgen version-check release-test deploy-verify-test public-check dns-check auth-check http-check gsm-check soft-ambe-check
+ci: fmt-check clippy test cbindgen version-check release-test deploy-verify-test public-check dns-check auth-check http-check gsm-check soft-ambe-check imbe-check p25-check
     ./ci/guard-discord-feature.sh
     ./ci/guard-no-tiny-http.sh
     ./ci/guard-echolink.sh
@@ -502,7 +527,8 @@ ci: fmt-check clippy test cbindgen version-check release-test deploy-verify-test
     ./ci/guard-ble-ptt.sh
     ./ci/guard-sstv.sh --self-test
     ./ci/guard-sstv.sh
-    @echo "✓ ci: fmt + clippy + test + cbindgen + version-check + release-test + deploy-verify-test + public-check + dns-check + auth-check + http-check + gsm-check + soft-ambe-check + discord-guard + tiny-http-guard + echolink-guard + packet-log-guard + netrec-guard + ble-ptt-guard + sstv-guard passed"
+    ./ci/guard-p25-imbe.sh
+    @echo "✓ ci: fmt + clippy + test + cbindgen + version-check + release-test + deploy-verify-test + public-check + dns-check + auth-check + http-check + gsm-check + soft-ambe-check + imbe-check + p25-check + discord-guard + tiny-http-guard + echolink-guard + packet-log-guard + netrec-guard + ble-ptt-guard + sstv-guard + p25-imbe-guard passed"
 
 # astar-server's opt-in public-tls (HTTPS, ACME, Porkbun) and stream-mp3 (LAME)
 # features, which a default-features `just clippy`/`just test` never compiles. Unlike discord it
@@ -538,6 +564,27 @@ soft-ambe-check:
     cargo test -p astar-netrec --features release
     ./ci/guard-dstar-soft-ambe.sh
     @echo "✓ soft-ambe-check: clippy + tests with --features dstar-soft-ambe passed"
+
+# The P25 IMBE vocoder island (GPL-3.0-or-later), excluded from the workspace
+# so fmt/clippy --workspace never see it; tested here instead, against golden
+# vectors from the C++ original, so CI needs no C++ compiler and no network.
+imbe-check:
+    CARGO_TARGET_DIR=target/imbe-vocoder cargo fmt --manifest-path vendor/imbe-vocoder/Cargo.toml -- --check
+    CARGO_TARGET_DIR=target/imbe-vocoder cargo clippy --manifest-path vendor/imbe-vocoder/Cargo.toml --all-targets -- -D warnings
+    CARGO_TARGET_DIR=target/imbe-vocoder cargo test --manifest-path vendor/imbe-vocoder/Cargo.toml
+
+# P25 receive (feature `p25`, needs `p25-soft-imbe`, both off by default),
+# which a default `just clippy`/`just test` never compiles. Later tasks add
+# their crates' tests here.
+p25-check:
+    cargo clippy -p astar-codec -p astar-p25 -p astar-console -p astar-station -p astar-sys -p astar-cli --all-targets --features astar-codec/p25-soft-imbe,astar-console/p25,astar-station/p25,astar-sys/p25,astar-cli/p25 -- -D warnings
+    cargo test -p astar-codec --features p25-soft-imbe --lib -- p25
+    cargo test -p astar-console --features p25 -- p25
+    cargo test -p astar-station --features p25 --test p25_station
+    cargo test -p astar-sys --features p25 --lib p25
+    cargo test -p astar-cli --features p25 -- p25
+    ./ci/guard-p25-imbe.sh
+    @echo "✓ p25-check passed"
 
 # The feature combinations `just ci` never builds: clippy for every crate with
 # --all-features and with each feature alone (no defaults), full tests for

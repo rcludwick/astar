@@ -107,6 +107,15 @@ build_slice() {
   if [ "${ASTAR_DSTAR_SOFT_AMBE:-1}" = "1" ]; then
     codec_features+=(--features dstar-soft-ambe)
   fi
+  # P25 Phase 1 receive with the software IMBE vocoder (vendor/imbe-vocoder,
+  # GPL-3.0-or-later, LICENSE-EXCEPTIONS.md section 15). Built in by default;
+  # ASTAR_P25_SOFT_IMBE=0 leaves both the network and the codec out, and the
+  # app then lists P25 rows without offering to dial them. Rob decided on
+  # 2026-11-21 to ship it in the iPhone App Store build too, accepting the
+  # risk recorded in LICENSE-EXCEPTIONS.md section 15.
+  if [ "${ASTAR_P25_SOFT_IMBE:-1}" = "1" ]; then
+    codec_features+=(--features p25)
+  fi
   ( cd "$REPO" && env "${dep_env[@]}" cargo build -p astar-sys --target "$target" $cargo_profile_flag "${codec_features[@]}" )
   echo "$REPO/target/$target/$profile_dir/$LIB_NAME"
 }

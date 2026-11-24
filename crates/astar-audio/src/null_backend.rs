@@ -19,13 +19,17 @@ use crate::stream::{AudioBackend, InputSink, OutputSource, StreamConfig, StreamH
 
 /// A backend that touches no hardware: it advertises synthetic input devices
 /// (just `in:null` unless [`NullBackend::with_inputs`] names others) and one
-/// synthetic output (`out:null`), and opens streams that drop silently.
+/// synthetic output (`out:null` unless [`NullBackend::with_outputs`] names
+/// others), and opens streams that drop silently.
 /// Construct with [`NullBackend::new`].
 #[derive(Debug, Clone)]
 pub struct NullBackend {
     /// The input device names this backend advertises, in order. The first is
     /// the default input.
     inputs: Vec<String>,
+    /// The output device names this backend advertises, in order. The first
+    /// is the default output.
+    outputs: Vec<String>,
 }
 
 impl NullBackend {
@@ -43,7 +47,17 @@ impl NullBackend {
     pub fn with_inputs(names: &[&str]) -> Self {
         Self {
             inputs: names.iter().map(|n| (*n).to_string()).collect(),
+            outputs: vec!["out:null".to_string()],
         }
+    }
+
+    /// Advertise each of `names` as an output device instead of the single
+    /// `out:null`. Lets a test pick a second output (the speaker monitor's
+    /// device, say) with no hardware. The first name is the default output.
+    #[must_use]
+    pub fn with_outputs(mut self, names: &[&str]) -> Self {
+        self.outputs = names.iter().map(|n| (*n).to_string()).collect();
+        self
     }
 }
 
@@ -84,7 +98,7 @@ impl AudioBackend for NullBackend {
             .iter()
             .map(|name| dev(Direction::Input, name))
             .collect();
-        devs.push(dev(Direction::Output, "out:null"));
+        devs.extend(self.outputs.iter().map(|name| dev(Direction::Output, name)));
         Ok(devs)
     }
 
@@ -93,7 +107,9 @@ impl AudioBackend for NullBackend {
     }
 
     fn default_output(&self) -> Option<DeviceInfo> {
-        Some(dev(Direction::Output, "out:null"))
+        self.outputs
+            .first()
+            .map(|name| dev(Direction::Output, name))
     }
 
     fn open_input(

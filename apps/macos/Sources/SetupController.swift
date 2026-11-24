@@ -139,6 +139,14 @@
                     try? session.setOutputGain(g)
                     a.outputGain = g
                 }
+                // The speaker monitor: a setup with none turns it off, and one
+                // naming the output device itself would play twice, so it is off too.
+                let monitor = MonitorPickerModel.reconcile(
+                    monitor: setup.monitorDevice, newOutput: setup.outputDevice)
+                try? session.selectMonitor(monitor)
+                a.monitor = monitor
+                a.monitorGain = setup.monitorGain ?? 1.0
+                try? session.setMonitorGain(a.monitorGain)
                 audioStore.save(a)
                 // Restore mic processing + VOX + full duplex (the session setters
                 // persist these themselves, preserving the devices/gains saved above).
@@ -258,6 +266,8 @@
             s.outputDevice = a.output
             s.inputGain = a.inputGain
             s.outputGain = a.outputGain
+            s.monitorDevice = a.monitor
+            s.monitorGain = a.monitorGain
             s.compression = a.compression
             s.compressionLevel = a.compressionLevel
             s.txTrim = a.txTrim
@@ -280,6 +290,21 @@
             else { return }
             s.inputDevice = input
             s.outputDevice = output
+            // A monitor on the new output's device would play it twice.
+            s.monitorDevice = MonitorPickerModel.reconcile(
+                monitor: s.monitorDevice, newOutput: output)
+            store.save(s)
+            refresh()
+        }
+
+        /// The Quick settings Monitor row. A monitor device is a device, so it
+        /// saves into the active config at once, like `setActiveDevices`;
+        /// its volume waits for "Save changes", like the other gains.
+        func setActiveMonitor(_ device: String?) {
+            guard let id = selectedID, id != Self.systemDefaultID,
+                var s = store.all().first(where: { $0.id == id })
+            else { return }
+            s.monitorDevice = device
             store.save(s)
             refresh()
         }

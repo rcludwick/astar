@@ -40,7 +40,8 @@ pub enum OperatingMode {
 // A plain poll/render DTO, not a control-flow state machine — the bools are
 // independently-meaningful UI flags (ptt/remote_ptt/m17_available/m17_active/
 // dstar_available/dstar_active/ysf_available/ysf_active/nxdn_available/
-// nxdn_active/dmr_available/dmr_active/echolink_available/echolink_active/
+// nxdn_active/dmr_available/dmr_active/p25_available/p25_active/
+// echolink_available/echolink_active/
 // echolink_logged_in),
 // not a hidden enum in disguise.
 #[allow(clippy::struct_excessive_bools)]
@@ -235,6 +236,13 @@ pub struct ConsoleState {
     /// refuses remote keying while a digital-voice link holds the dongle,
     /// and must be able to read that without compiling the feature.
     pub dmr_active: bool,
+    /// `true` when this build carries P25 (the `p25` feature). P25 needs no
+    /// dongle, so this is the build's answer alone. Feature-independent.
+    pub p25_available: bool,
+    /// `true` while an [`crate::session::ConsoleSession`]'s P25 link is
+    /// live. Feature-independent for the same reason [`Self::dmr_active`]
+    /// is.
+    pub p25_active: bool,
     /// `true` when this build carries `EchoLink` (the `echolink` feature).
     /// `EchoLink` needs no hardware, so this is the build's answer alone.
     pub echolink_available: bool,
@@ -291,6 +299,8 @@ impl Default for ConsoleState {
             nxdn_active: false,
             dmr_available: false,
             dmr_active: false,
+            p25_available: false,
+            p25_active: false,
             echolink_available: false,
             echolink_active: false,
             echolink_logged_in: false,

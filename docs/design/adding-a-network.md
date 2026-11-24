@@ -69,10 +69,10 @@ NXDN and DMR are AMBE+2 on the same chip, the same serial transport and the same
 driver: a different RATEP word plus that network's frame packing. Do not plan a
 new vocoder integration for them; plan a RATEP table.
 
-P25 Phase 1 is IMBE, a different rate again — **verify against the chip before
-promising it**, rather than assuming the family extends. See
-`p25-network.md`, which makes that verification the gating step and records what
-to do if the answer is no.
+P25 Phase 1 is IMBE, a different rate again. The gating experiment found that the
+DVSI sticks cannot do P25 full rate, so P25 is decoded in software by
+`vendor/imbe-vocoder` (a GPL island, no dongle) and is receive only. See
+`p25-network.md` for the result and the built design.
 
 Per-network designs: `ysf-network.md`, `nxdn-network.md`, `p25-network.md`,
 `dmr-networks.md`.

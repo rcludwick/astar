@@ -155,6 +155,69 @@ public enum NXDNDial {
     }
 }
 
+/// P25's address grammar: `host[:port]`, optionally followed by a talkgroup
+/// — `host[:port]/TG` or `host[:port] TG`.
+///
+/// The same shape as `NXDNDial`, with one difference that matters: here the
+/// talkgroup is a LABEL, not part of the target. A P25Reflector relays one
+/// talkgroup and links a client by callsign alone, so nothing astar sends
+/// names a talkgroup, and a bare `host:port` is a complete target. The
+/// talkgroup, when typed, is kept only so the status line can show it.
+///
+/// P25 talkgroups are 24-bit on the wire's link-control word, so the label
+/// runs 1…16 777 215.
+public enum P25Dial {
+    /// The port P25Reflector listens on by default, and the one the engine
+    /// adds to a bare host.
+    public static let defaultPort: UInt16 = 41000
+
+    /// The largest talkgroup a 24-bit field can carry.
+    public static let maxTalkgroup: UInt32 = 16_777_215
+
+    /// Classify `host[:port]`, with an optional talkgroup after a `/` or a
+    /// space. `nil` for anything that does not fit.
+    ///
+    /// A separator followed by something that is not a talkgroup number is a
+    /// REJECTION, as in `NXDNDial`: `XLX836 A` is a D-Star dial that happens
+    /// to look like a hostname, and silently dropping the ` A` would link the
+    /// operator to whatever DNS made of `XLX836`.
+    public static func parse(_ raw: String) -> (host: String, port: UInt16, talkgroup: UInt32?)? {
+        let text = raw.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty else { return nil }
+
+        var addressPart = Substring(text)
+        var talkgroup: UInt32?
+        if let separator = text.firstIndex(where: { $0 == "/" || $0 == " " }) {
+            addressPart = text[..<separator]
+            let rest = text[text.index(after: separator)...]
+                .trimmingCharacters(in: .whitespaces)
+            guard let parsed = talkgroupLabel(rest) else { return nil }
+            talkgroup = parsed
+        }
+
+        let parts = addressPart.split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count <= 2 else { return nil }
+        let host = String(parts[0])
+        guard !host.isEmpty, !host.contains(where: \.isWhitespace) else { return nil }
+
+        if parts.count == 2 {
+            guard let port = UInt16(parts[1]), port > 0 else { return nil }
+            return (host: host, port: port, talkgroup: talkgroup)
+        }
+        return (host: host, port: defaultPort, talkgroup: talkgroup)
+    }
+
+    /// `text` as a talkgroup label, or `nil` when it is not a number in
+    /// 1…16 777 215. Shared by the address grammar and by directory rows,
+    /// whose id is the talkgroup when it is a number at all.
+    public static func talkgroupLabel(_ text: String) -> UInt32? {
+        guard !text.isEmpty, text.allSatisfy({ $0.isASCII && $0.isNumber }),
+            let parsed = UInt32(text), parsed > 0, parsed <= maxTalkgroup
+        else { return nil }
+        return parsed
+    }
+}
+
 /// D-Star's address grammar: the shared one, on the DExtra port.
 ///
 /// The design doc used to say there is no `DStarDial` type, and while D-Star

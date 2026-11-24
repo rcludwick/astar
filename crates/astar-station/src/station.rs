@@ -10,7 +10,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError, Weak
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use astar_audio::AudioBackend;
+use astar_audio::{AudioBackend, MonitorState};
 use astar_console::{
     CallStatus, ConsoleConfig, ConsoleSession, ConsoleState, HeardEntry, LinkConnectSpec,
     M17MonitorEdge, M17MonitorStatus, OperatingMode, RecordTaps, RegisterOutcome,
@@ -1382,6 +1382,7 @@ impl Station {
         self.dstar_disconnect();
         self.ysf_disconnect();
         self.nxdn_disconnect();
+        self.p25_disconnect();
         self.dmr_disconnect();
         // The EchoLink call, if any; the directory login stays up.
         self.echolink_disconnect();
@@ -3063,6 +3064,124 @@ impl Station {
         self.session.lock().unwrap().nxdn_state()
     }
 
+    /// Link to a `P25Reflector` and decode the audio on it (P25 Phase 1,
+    /// receive only).
+    ///
+    /// `host` is `host[:port]`; a bare host gets the `P25Reflector` default,
+    /// 41000. `callsign` is this station's own, 1–10 printable ASCII
+    /// characters, sent in the poll. There is no talkgroup argument: a
+    /// `P25Reflector` is one talkgroup and its poll carries none, so the
+    /// talkgroup an app shows is a label only.
+    ///
+    /// No dongle: P25's vocoder is the software IMBE decoder, so this never
+    /// opens a serial port or probes a `ThumbDV`, and reads no vocoder trust.
+    ///
+    /// **Receive only.** [`Station::set_ptt`] refuses a key-down while a P25
+    /// link is live. Encrypted calls are muted, never decrypted.
+    ///
+    /// Mutually exclusive with an IAX2 call and with every other network.
+    ///
+    /// # Blocking
+    /// Name resolution and the socket bind run with the session mutex NOT
+    /// held, as `nxdn_connect` does, so snapshot polls keep answering.
+    ///
+    /// # Errors
+    /// [`StationError::P25`] for an empty or blank host (surrounding
+    /// whitespace is trimmed first), a malformed port, a callsign
+    /// the wire cannot carry, a resolve or bind failure, and when the `p25`
+    /// feature isn't compiled in. [`StationError::AlreadyConnected`] while
+    /// another network is live.
+    pub fn p25_connect(&self, host: &str, callsign: &str) -> Result<(), StationError> {
+        // Validated BEFORE the `#[cfg]` block, so the refusals hold
+        // identically with the feature off, and no lane is opened for a
+        // connect that cannot succeed. The host is trimmed once here, so a
+        // pasted " host " neither slips past the blank check nor fails later
+        // as a resolve error.
+        let host = host.trim();
+        if host.is_empty() {
+            return Err(StationError::P25(
+                "reflector address must not be empty".into(),
+            ));
+        }
+        if let Err(e) = astar_p25::Callsign::new(callsign) {
+            return Err(StationError::P25(format!("callsign {e}")));
+        }
+        #[cfg(feature = "p25")]
+        {
+            let host = astar_p25::wire::with_default_port(host)
+                .map_err(|e| StationError::P25(e.to_string()))?;
+            let (input, output) = self.selected_devices();
+            let cfg = astar_console::P25Config {
+                host,
+                callsign: callsign.to_string(),
+            };
+            // Step 1, under the lock: open and reserve the ONE audio lane.
+            // The reservation is the mutual-exclusion token for the gap
+            // before the adopt below. P25 reads no vocoder trust, so this is
+            // the plain route without the trust copy.
+            let audio = self
+                .session
+                .lock()
+                .unwrap()
+                .open_voice_route(input.as_deref(), output.as_deref(), || {
+                    (self.make_backend)()
+                })
+                .map_err(map_console_err)?;
+
+            // Step 2, OFF the session mutex: resolve, bind, spawn.
+            let link = match astar_console::P25Link::connect_with_audio(&cfg, audio) {
+                Ok(l) => l,
+                Err(e) => {
+                    // Give the lane back, or the station stays reserved.
+                    // Dropped off the lock: a CoreAudio stream drop can stall.
+                    let handles = self.session.lock().unwrap().release_voice_route();
+                    drop(handles);
+                    return Err(map_console_err(e));
+                }
+            };
+
+            // Step 3: re-take the lock only to install, re-checking
+            // exclusion (the adopt releases the route itself on refusal).
+            self.session
+                .lock()
+                .unwrap()
+                .p25_adopt(link)
+                .map_err(map_console_err)
+        }
+        #[cfg(not(feature = "p25"))]
+        {
+            Err(StationError::P25("p25 support not compiled".into()))
+        }
+    }
+
+    /// Disconnect the live P25 link, if any. No-op when none is active (and
+    /// when the `p25` feature isn't compiled in). A link that ended in
+    /// `failed` is cleared too.
+    pub fn p25_disconnect(&self) {
+        self.ptt_call_ended();
+        #[cfg(feature = "p25")]
+        {
+            self.session.lock().unwrap().p25_disconnect();
+        }
+    }
+
+    /// `true` when P25 receive is compiled in. P25 needs no hardware, so
+    /// this is the same answer as [`crate::p25_compiled`].
+    #[must_use]
+    pub fn p25_available(&self) -> bool {
+        astar_console::p25_available()
+    }
+
+    /// A poll-cheap snapshot of the live P25 link, or `None`. A link that
+    /// lost its reflector (120 s with nothing heard, or a receive error)
+    /// stays here with `link_state == "failed"` until disconnected. Only
+    /// compiled when the `p25` feature is enabled.
+    #[cfg(feature = "p25")]
+    #[must_use]
+    pub fn p25_state(&self) -> Option<astar_console::P25Snapshot> {
+        self.session.lock().unwrap().p25_state()
+    }
+
     /// Link to a DMR master's talkgroup and decode the audio on it
     /// (iax-d4f7).
     ///
@@ -4607,6 +4726,47 @@ impl Station {
         self.session.lock().unwrap().set_output_gain(gain);
     }
 
+    /// Choose the speaker monitor's device: a listen-only copy of what goes
+    /// to the output device, played on this one. Named the same way as
+    /// [`Station::set_devices`]'s output (a device-name substring from
+    /// [`Station::list_devices`]); `None` or an empty string turns it off.
+    /// The choice outlives calls: the monitor plays whenever an output bus is
+    /// open.
+    ///
+    /// # Errors
+    /// [`StationError::Audio`] when the device cannot be resolved or opened
+    /// right now. The choice is kept, and [`Station::monitor_state`] reports
+    /// [`MonitorState::Unavailable`] with the reason.
+    pub fn set_monitor_device(&self, device: Option<String>) -> Result<(), StationError> {
+        let change = self.session.lock().unwrap().set_monitor_device(device);
+        // The session lock is released: dropping a closed stream here cannot
+        // stall anything that waits on it.
+        drop(change.closed);
+        change
+            .opened
+            .map_err(|e| StationError::Audio(e.to_string()))
+    }
+
+    /// Set the speaker monitor's volume (clamped `[0.0, 4.0]`, default 1.0;
+    /// `NaN` reads as 0). Applies live and to every later call.
+    pub fn set_monitor_gain(&self, gain: f32) {
+        self.session.lock().unwrap().set_monitor_gain(gain);
+    }
+
+    /// Mute or unmute the speaker monitor (default unmuted). Live only: the
+    /// stream stays open, so unmuting is instant.
+    pub fn set_monitor_muted(&self, muted: bool) {
+        self.session.lock().unwrap().set_monitor_muted(muted);
+    }
+
+    /// What the speaker monitor is doing: [`MonitorState::Off`] with no device
+    /// chosen or no call's output open, [`MonitorState::Playing`], or
+    /// [`MonitorState::Unavailable`] with the reason.
+    #[must_use]
+    pub fn monitor_state(&self) -> MonitorState {
+        self.session.lock().unwrap().monitor_state()
+    }
+
     /// Toggle mic voice compression on the live/next call (WT/console path).
     /// Takes effect immediately on an active call's capture lane.
     pub fn set_compression(&self, on: bool) {
@@ -5065,6 +5225,7 @@ impl Drop for Station {
         self.dstar_disconnect();
         self.ysf_disconnect();
         self.nxdn_disconnect();
+        self.p25_disconnect();
         self.dmr_disconnect();
         // Hang up every EchoLink station and log off the directory. The
         // login is taken out under the session lock and logged off after it
@@ -5130,6 +5291,7 @@ fn map_console_err(e: astar_console::ConsoleError) -> StationError {
         C::Ysf(m) => StationError::Ysf(m),
         C::Nxdn(m) => StationError::Nxdn(m),
         C::Dmr(m) => StationError::Dmr(m),
+        C::P25(m) => StationError::P25(m),
         C::NoCaptureDevice => StationError::Audio("no capture device: cannot transmit".into()),
     }
 }

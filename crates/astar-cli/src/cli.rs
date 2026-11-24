@@ -24,6 +24,8 @@ COMMANDS:
     nxdn-listen    Link to an NXDNReflector talkgroup and decode RX audio
                    (receive only; requires a ThumbDV dongle and
                    `--features nxdn`).
+    p25-listen     Link to a P25Reflector and decode RX audio (receive only;
+                   no dongle needed; built with `--features p25`).
     dmr-listen     Log in to a DMR master, join a talkgroup on a timeslot,
                    and decode RX audio (receive only; requires a ThumbDV
                    dongle and `--features dmr`). The master password comes
@@ -224,6 +226,42 @@ it unset nothing is opened and the connect fails with \"No trusted vocoder\". Li
 then a \"▶ <id>\" line per received transmission — a numeric id, not a
 callsign, because NXDN carries no callsign on the wire for anyone but the
 polling client itself. Ctrl-C unlinks cleanly.
+";
+
+/// `p25-listen` usage. Only compiled with `--features p25`.
+#[cfg(feature = "p25")]
+pub const P25_LISTEN_USAGE: &str = "\
+astar-cli p25-listen — link to a P25Reflector and decode RX audio
+
+USAGE:
+    astar-cli p25-listen [OPTIONS] <host[:port]> [tg] --callsign <CS>
+
+ARGS:
+    <host[:port]>   Reflector host, or host:port. 41000 is used when none is
+                     given. A name that resolves to IPv6 first (such as
+                     `localhost` on macOS) may miss an IPv4-only reflector;
+                     use 127.0.0.1 for a local one.
+    [tg]            A talkgroup number, 1-16777215, printed on the link line
+                     as a label. It is never sent: a P25Reflector relays
+                     everything it hears and has no rooms.
+
+OPTIONS:
+    --callsign <CS>     This station's callsign, at most 10 characters
+                         (required). It rides in the poll.
+    --port <u16>        Reflector UDP port. Equivalent to host:port; giving
+                         both is an error if they disagree.
+    --wav <path>        Write decoded audio as an 8 kHz s16 mono WAV file at
+                         <path> instead of playing it on the default output
+                         device.
+    -h, --help          Print this help and exit.
+
+RECEIVE ONLY. This command has no PTT; astar has no P25 transmit path.
+
+Needs no dongle: P25 voice is decoded by a software IMBE vocoder. P25 has no
+password. Links, prints \"linked <host>:<port> (backend: software)\", then a
+\"▶ <id>\" line per received transmission, a numeric radio id and not a
+callsign, because P25 carries none. A transmission that is encrypted is
+announced and muted: astar never decrypts. Ctrl-C unlinks cleanly.
 ";
 
 /// `dmr-listen` usage. Only compiled with `--features dmr`.

@@ -210,6 +210,14 @@ final class FakeStation: StationDriving {
     }
     func setInputGain(_ gain: Float) throws { inputGainCalls.append(gain) }
     func setOutputGain(_ gain: Float) throws { outputGainCalls.append(gain) }
+    private(set) var monitorDeviceCalls: [String?] = []
+    private(set) var monitorGainCalls: [Float] = []
+    private(set) var monitorMutedCalls: [Bool] = []
+    var monitorStatusToReturn: MonitorStatus = .off
+    func setMonitorDevice(_ device: String?) throws { monitorDeviceCalls.append(device) }
+    func setMonitorGain(_ gain: Float) throws { monitorGainCalls.append(gain) }
+    func setMonitorMuted(_ muted: Bool) throws { monitorMutedCalls.append(muted) }
+    func monitorState() -> MonitorStatus { monitorStatusToReturn }
     func setCompression(_ on: Bool) throws { compressionCalls.append(on) }
     func setCompressionLevel(_ level: Float) throws { compressionLevelCalls.append(level) }
     func setTxTrim(_ gain: Float) throws { txTrimCalls.append(gain) }
@@ -559,6 +567,27 @@ final class FakeStation: StationDriving {
     }
     func dmrState() throws -> DMRState? { dmrStateValue }
 
+    // P25. Only the address and the callsign go to the engine: the
+    // talkgroup is a label and never reaches it, which is exactly what a
+    // test must be able to see.
+    private(set) var connectP25Calls: [(host: String, callsign: String)] = []
+    private(set) var p25Disconnects = 0
+    /// When set, `connectP25` throws — the engine refusing the dial.
+    var p25ConnectError: Error?
+    /// What `p25State()` reports; `nil` is "no link", the idle answer.
+    var p25StateValue: P25State?
+    func connectP25(host: String, callsign: String) throws {
+        waitForGateIfSet()
+        if let p25ConnectError { throw p25ConnectError }
+        connectP25Calls.append((host, callsign))
+        callLog.append("connectP25")
+    }
+    func p25Disconnect() throws {
+        p25Disconnects += 1
+        callLog.append("p25Disconnect")
+    }
+    func p25State() throws -> P25State? { p25StateValue }
+
     // EchoLink. The login's password is recorded here, in a fake, because
     // this is the only layer ever allowed to hold one.
     private(set) var echolinkLoginCalls: [(callsign: String, password: String, servers: [String])] =
@@ -715,6 +744,9 @@ private struct ThrowingStation: StationDriving {
     ) throws { throw Boom() }
     func dmrDisconnect() throws { throw Boom() }
     func dmrState() throws -> DMRState? { throw Boom() }
+    func connectP25(host: String, callsign: String) throws { throw Boom() }
+    func p25Disconnect() throws { throw Boom() }
+    func p25State() throws -> P25State? { throw Boom() }
     func echolinkLogin(callsign: String, password: String, servers: [String]) throws {
         throw Boom()
     }

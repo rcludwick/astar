@@ -97,7 +97,8 @@ pub use astar_asl3::{Asl3Error, PortalCredentials};
 #[cfg(feature = "device-audio")]
 pub use astar_audio::CpalBackend;
 pub use astar_audio::{
-    CharacterizeOpts, DenoiseChain, DenoiseStatus, DeviceInfo, MicProfile, NotchSpec, SPECTRUM_BINS,
+    CharacterizeOpts, DenoiseChain, DenoiseStatus, DeviceInfo, MONITOR_SAME_DEVICE, MicProfile,
+    MonitorState, NotchSpec, SPECTRUM_BINS,
 };
 // The monitor's status and edge types are feature-independent in
 // astar-console, so a consumer (astar-server) names them in every build.
@@ -122,6 +123,18 @@ pub use astar_console::{AmbeBackend, DstarLinkState, DstarSnapshotState};
 // taking `astar-console` as a direct dependency.
 #[cfg(feature = "dmr")]
 pub use astar_console::DmrSnapshot;
+// The P25 state surface returned by [`Station::p25_state`], re-exported for
+// the same reason: `astar-sys` renders it and builds one in a test.
+#[cfg(feature = "p25")]
+pub use astar_console::P25Snapshot;
+
+/// `true` when this build carries P25 Phase 1 receive (the `p25` feature,
+/// which brings the software IMBE vocoder with it). P25 needs no hardware,
+/// so this is also exactly what [`Station::p25_available`] answers.
+#[must_use]
+pub fn p25_compiled() -> bool {
+    astar_console::p25_available()
+}
 // The parts of [`EchoLinkState`], re-exported for the same reason: the C
 // ABI renders them and builds them in its tests.
 /// The sentence an `EchoLink` call carries in its `notice` once the 10-minute

@@ -197,6 +197,59 @@ public final class CallSession: ObservableObject {
     /// a connect hang is owed which round trip stalled.
     @Published public private(set) var dmrLink: DMRState.Link?
 
+    /// Whether the engine was built with P25: mirrors the snapshot's
+    /// `p25Available` flag. Gates the P25 picker segment
+    /// (`Network.available(…, p25:)`) and every P25 dial.
+    ///
+    /// A BUILD fact, not a hardware one, like `m17Available`: P25 Phase 1
+    /// voice is IMBE, which astar decodes in software, and no DVSI stick
+    /// astar supports can do IMBE at all. When it is `false` the directory
+    /// still lists P25 rows, and nothing dials them.
+    @Published public private(set) var p25Available = false
+
+    /// The radio ID of the most recently heard P25 transmission, or `nil`.
+    ///
+    /// **Last heard, not talking now** — it persists past end-of-transmission
+    /// (`p25Receiving` says whether one is in progress). Cleared when the
+    /// link ends.
+    ///
+    /// **Attacker-controlled**: it is whatever the transmitting station put
+    /// on the wire. Render it as text, never as markup.
+    @Published public private(set) var p25LastHeard: String?
+
+    /// `true` while a P25 transmission is in progress, encrypted or not. The
+    /// voice records say so directly; this is not inferred from audio level.
+    @Published public private(set) var p25Receiving = false
+
+    /// `true` while the over IN PROGRESS is encrypted — the engine's own
+    /// flag, which it clears when the over ends. astar never decrypts: an
+    /// encrypted over is muted, so while this is set `receiving` stays off
+    /// (nothing is playing) and the talker line says why.
+    @Published public private(set) var p25Encrypted = false
+
+    /// Whether the most recent P25 over was encrypted — `p25Encrypted`,
+    /// latched past the end of the over and released when the next one
+    /// starts. What keeps "Encrypted" on the last-heard line after the
+    /// engine has cleared its flag, so a silent talker line still says why
+    /// nothing was heard.
+    private var p25LastOverEncrypted = false
+
+    /// The talkgroup the dial named, kept for display only, or `nil` when the
+    /// dial named none (a typed `host:port`, or a directory row whose id is
+    /// not a number). A P25Reflector relays one talkgroup and nothing astar
+    /// sends names it, so this is a LABEL and never reaches the engine.
+    @Published public private(set) var p25Talkgroup: UInt32?
+
+    /// The P25 link's state, or `nil` when no link is live.
+    @Published public private(set) var p25Link: P25State.Link?
+
+    /// The P25 target whose link was LOST — it timed out with nothing heard,
+    /// or a receive error ended it — or `nil`. Set on the poll that sees the
+    /// link go `failed`, so the popover can say "P25 link lost" rather than
+    /// a bare "Call ended", and offer to dial the same target again. Cleared
+    /// by the next dial, on any network.
+    @Published public private(set) var p25LostTarget: String?
+
     // MARK: EchoLink state (the logic is in CallSession+EchoLink.swift)
 
     /// Whether the engine was built with EchoLink: mirrors the snapshot's
@@ -420,6 +473,12 @@ public final class CallSession: ObservableObject {
     /// on the wire. Render it as text, never as markup.
     @Published public private(set) var lastHeard: String?
 
+    /// A short qualifier for `lastHeard`, or `nil`: today only "Encrypted",
+    /// when the most recent P25 over was encrypted and so muted. It stays
+    /// after that over ends and goes when the next one starts. The popover
+    /// appends it to the talker line; it never names a key or an algorithm.
+    @Published public private(set) var lastHeardNote: String?
+
     /// The last few stations heard on the live digital link, newest first.
     ///
     /// The list behind `lastHeard`: same source, same rules, more than one
@@ -468,6 +527,13 @@ public final class CallSession: ObservableObject {
     /// it by itself; this is set only once that has failed, so a call is
     /// never silently deaf.
     @Published public private(set) var audioDeviceWarning: String?
+    /// What the speaker monitor is doing, refreshed on the poll tick that
+    /// drives the level meters (publish-on-change). `.playing` is the
+    /// monitor stream's state, not the call's: never read it as "in a call".
+    @Published public internal(set) var monitorState: MonitorStatus = .off
+    /// Whether the speaker monitor is muted. Live-only: never saved, and the
+    /// engine starts unmuted.
+    @Published public internal(set) var monitorMuted = false
 
     /// The USB serials of the vocoder sticks this Mac trusts (Settings →
     /// Vocoders), as last handed to the station. Read from
@@ -1055,7 +1121,7 @@ public final class CallSession: ObservableObject {
     /// callsign has been told something false about who is connecting.
     public static func requiresCallsign(_ network: Network) -> Bool {
         network == .m17 || network == .dstar || network == .ysf || network == .nxdn
-            || network == .dmr
+            || network == .dmr || network == .p25
     }
 
     /// The operator's DMR radio ID — the numeric half of the identity model.
@@ -1167,7 +1233,8 @@ public final class CallSession: ObservableObject {
     /// driver (e.g. the macOS-only serial UCI150 interface) key the call without
     /// `AstarCore` importing that driver — keeping the core multiplatform and
     /// IOKit-free. Called inside `poll()` after the snapshot is read, with the
-    /// snapshot's `remotePTT` + `rxDB`. Return a non-nil `Bool` to press or
+    /// snapshot's `remotePTT` (false during a muted encrypted P25 over, the
+    /// same flag `receiving` reads) + `rxDB`. Return a non-nil `Bool` to press or
     /// release the `.serial` PTT source (true = key, false = unkey); return `nil`
     /// for "no change this tick" so the call's PTT is left untouched. Errors from the underlying
     /// driver are the driver's concern — it should return `nil` (and tear itself
@@ -1176,7 +1243,7 @@ public final class CallSession: ObservableObject {
 
     /// Store used to persist mic-processing + VOX prefs from their setters
     /// (read-modify-write so device/gain fields are preserved).
-    private let audioStore: AudioSettingsStore
+    let audioStore: AudioSettingsStore
     /// Node directory: a successful connect auto-records the dialed node as a
     /// recent (see `poll()`). Injected so tests can use an in-memory store.
     private let directoryStore: NodeDirectoryStore
@@ -1403,6 +1470,22 @@ public final class CallSession: ObservableObject {
         reflectorIndex.resolveDial(raw, network: network)
     }
 
+    /// Why a directory row the feed marks dialable cannot be dialled from
+    /// this build, or `nil` when nothing stands in the way.
+    ///
+    /// Today only P25 answers: a build without it still LISTS every P25
+    /// reflector — hiding them would make a growing directory look like a
+    /// shrinking one — and refuses to dial them, with the honest reason. The
+    /// hardware-gated networks keep their own refusals at dial time, where
+    /// the fix (a dongle) is something the operator can act on.
+    public func directoryRefusal(for entry: DirectoryEntry) -> String? {
+        guard entry.isDialable else { return nil }
+        if entry.network == .p25, !p25Available {
+            return ConnectError.p25Unavailable.errorDescription
+        }
+        return nil
+    }
+
     /// Whether the dial field's text is a *complete* target for `network` —
     /// what gates the Connect button, and the same decision `connect` will
     /// make when it runs.
@@ -1423,6 +1506,9 @@ public final class CallSession: ObservableObject {
         // dial row says why under the field (`echolinkDialProblem`) and
         // offers a refresh, so the button is never off for no visible reason.
         if network == .echolink { return (try? echolinkTarget(raw)) != nil }
+        // P25 is a build fact: in a build without it nothing dials P25, so
+        // Connect stays off rather than offering a dial `connect` refuses.
+        if network == .p25, !p25Available { return false }
         if let reflectorNetwork = network.reflectorNetwork {
             switch resolveReflector(raw, network: reflectorNetwork) {
             case .ready: return true
@@ -1439,6 +1525,8 @@ public final class CallSession: ObservableObject {
         // address with none is a target with the room missing, and Connect
         // stays off rather than dialling something that could never link.
         case .nxdn: return NXDNDial.parse(raw)?.talkgroup != nil
+        // A bare `host:port` is a whole P25 target: the talkgroup is a label.
+        case .p25: return P25Dial.parse(raw) != nil
         // Unreachable — answered above, before the directory is consulted.
         case .dmr, .echolink: return false
         case .allstar, .hamlink: return DialTarget.parse(raw) != nil
@@ -1621,6 +1709,30 @@ public final class CallSession: ObservableObject {
             } else if nxdnLink != nil || nxdnLastHeard != nil || nxdnReceiving {
                 clearNXDNState()
             }
+            if p25Available != snap.p25Available { p25Available = snap.p25Available }
+            // Same arrangement as NXDN's above, for the same reason: P25's own
+            // fields cost an ABI crossing and a JSON parse, so they are asked
+            // for only while a link is live.
+            if snap.p25Active {
+                let state = try? station.p25State()
+                if p25LastHeard != state?.lastHeard { p25LastHeard = state?.lastHeard }
+                if p25Receiving != (state?.receiving ?? false) {
+                    p25Receiving = state?.receiving ?? false
+                }
+                if p25Encrypted != (state?.encrypted ?? false) {
+                    p25Encrypted = state?.encrypted ?? false
+                }
+                // Latch: set by an encrypted over, released only when a new
+                // over is in progress and not (yet) known to be encrypted.
+                if p25Encrypted {
+                    p25LastOverEncrypted = true
+                } else if p25Receiving {
+                    p25LastOverEncrypted = false
+                }
+                if p25Link != state?.link { p25Link = state?.link }
+            } else if p25Link != nil || p25LastHeard != nil || p25Receiving || p25Encrypted {
+                clearP25State()
+            }
             if dmrAvailable != snap.dmrAvailable { dmrAvailable = snap.dmrAvailable }
             // Same arrangement as NXDN's above, for the same reason: DMR's own
             // fields cost an ABI crossing and a JSON parse, so they are asked
@@ -1658,6 +1770,10 @@ public final class CallSession: ObservableObject {
             // use, so a moving jitter estimate redraws one caption and not
             // the popover.
             meters.update(quality: snap.rxQuality)
+            // The speaker monitor's state, on the same tick as the meters,
+            // so a monitor device that fails mid-call is named under its
+            // picker. Publish-on-change, like everything else here.
+            refreshMonitorState()
 
             // Half-duplex RX suppression (astar-eaab). When NOT full-duplex and
             // the local transmit is keyed, hard-mute RX so the operator doesn't
@@ -1762,6 +1878,26 @@ public final class CallSession: ObservableObject {
                 setActiveCallNetwork(nil)
                 clearNXDNState()
             }
+            // And for P25. A link that FAILED — 120 s with nothing heard, or a
+            // receive error — stays in the engine, holding the voice lane,
+            // until it is disconnected; nothing else will, so this edge does.
+            // It also remembers the target, so the popover can say the link
+            // was lost (not merely that a call ended) and offer it again.
+            if activeCallNetwork == .p25, snap.status == .hangup || snap.status == .idle,
+                lastPolledStatus != .hangup, lastPolledStatus != .idle
+            {
+                if p25Link == .failed, let target = dialedNode {
+                    p25LostTarget = target
+                    // The lost link is the message; "didn't answer" would be
+                    // wrong for a link that was up, and is no truer for one
+                    // that never came up.
+                    dialAwaitingAnswer = false
+                    lastDialFailure = Self.p25LinkLostMessage
+                    try? station.p25Disconnect()
+                }
+                setActiveCallNetwork(nil)
+                clearP25State()
+            }
             // And for DMR — a master that dropped the login, or a dongle
             // pulled out mid-listen, never reaches `disconnect()`.
             if activeCallNetwork == .dmr, snap.status == .hangup || snap.status == .idle,
@@ -1784,8 +1920,12 @@ public final class CallSession: ObservableObject {
             // "Receiving" = far end keyed (when the node reports it) OR live rx
             // audio activity (the reliable signal for most AllStar nodes). The
             // gate runs every tick so its hangover advances.
+            // An encrypted P25 over is keyed but muted: nothing plays, so the
+            // RX meter and the menu-bar star must not say something is.
+            // `p25Encrypted` is mirrored above, in this same poll.
+            let farKeyed = snap.remotePTT && !p25Encrypted
             let nowReceiving =
-                snap.remotePTT || rxActivityGate.update(level: snap.rxDB, now: Date())
+                farKeyed || rxActivityGate.update(level: snap.rxDB, now: Date())
             if receiving != nowReceiving { receiving = nowReceiving }
 
             // Software VOX: feed the mic level to the gate and press/release the
@@ -1816,7 +1956,10 @@ public final class CallSession: ObservableObject {
             // …) off this same snapshot, on the main thread, satisfying the
             // station's single-thread contract. A non-nil result is a keying
             // edge to forward; `nil` means "leave PTT alone this tick".
-            if let pttSourceTick, let on = pttSourceTick(snap.remotePTT, snap.rxDB) {
+            // It gets `farKeyed`, not the raw `remotePTT`: during a muted
+            // encrypted P25 over the far end is keyed but nothing plays, and
+            // nothing may key or count as receiving off that.
+            if let pttSourceTick, let on = pttSourceTick(farKeyed, snap.rxDB) {
                 keyStation(on, source: .serial)
             }
         }
@@ -1911,6 +2054,12 @@ public final class CallSession: ObservableObject {
         /// dongle as ``dstarUnavailable``, and a separate case so the message
         /// can name the network the operator actually chose.
         case dmrUnavailable
+        /// The P25 dial field's text names nothing in the directory and does
+        /// not parse as `host[:port]`, with or without a talkgroup.
+        case badP25Target
+        /// P25 was dialled in a build without it. A build fact, so the
+        /// message says so rather than asking for hardware.
+        case p25Unavailable
         /// An AMBE network was dialled while this Mac trusts no vocoder
         /// stick. The engine would refuse too; saying so here lets the popover
         /// offer the way out — Settings → Vocoders — instead of telling the
@@ -2010,6 +2159,12 @@ public final class CallSession: ObservableObject {
                 return
                     "DMR needs a ThumbDV vocoder dongle attached — "
                     + "astar has no software AMBE decoder."
+            case .badP25Target:
+                return
+                    "Enter a P25 talkgroup from the directory, or an address as host:port "
+                    + "(for example p25.example:41000)."
+            case .p25Unavailable:
+                return "This build of astar doesn't include P25."
             case .noTrustedVocoder(let network):
                 return VocoderSetupPrompt.noTrustedVocoderMessage(for: network)
             case .missingDMRRadioID:
@@ -2081,6 +2236,8 @@ public final class CallSession: ObservableObject {
             try connectNXDN(target: node)
         case .dmr:
             try connectDMR(target: node)
+        case .p25:
+            try connectP25(target: node)
         case .echolink:
             try connectEchoLink(target: node)
         }
@@ -2484,6 +2641,98 @@ public final class CallSession: ObservableObject {
             })
     }
 
+    /// Turn the P25 dial field's text into a host, port and talkgroup label —
+    /// **directory first, address second**, the same order and the same
+    /// reason as `nxdnTarget`.
+    ///
+    /// Unlike NXDN's, the talkgroup here is only a LABEL: a P25Reflector
+    /// relays one talkgroup and links a client by callsign alone. So a row
+    /// whose id is not a number (a parrot, a named reflector) is still
+    /// dialable, with no label, and a typed `host:port` needs none.
+    private func p25Target(_ target: String) throws -> (
+        host: String, port: UInt16, talkgroup: UInt32?
+    ) {
+        switch resolveReflector(target, network: .p25) {
+        case .ready(let reflector):
+            return (
+                host: reflector.host, port: reflector.port,
+                talkgroup: P25Dial.talkgroupLabel(reflector.entry.id)
+            )
+        case .needsModule(let entry):
+            // Unreachable for P25 — `addressesModule` is false for this
+            // network — but stated rather than silently treated as dialable.
+            throw ConnectError.needsModule(entry.id)
+        case .notDialable(let entry):
+            throw ConnectError.reflectorNotDialable(entry.id)
+        case .notInDirectory:
+            guard let parsed = P25Dial.parse(target) else {
+                throw ConnectError.badP25Target
+            }
+            return parsed
+        }
+    }
+
+    /// The `.p25` arm of `connect(node:network:)`.
+    ///
+    /// Structured exactly like `connectNXDN` — validate before touching any
+    /// state, claim the single-flight dial slot, generation-gate every write
+    /// after the engine call — minus the radio ID, which P25's reflector
+    /// protocol does not carry. The talkgroup stays on this side: it is
+    /// published for the status line and never sent.
+    ///
+    /// Receive only: nothing here arms a transmit path, and none exists to
+    /// arm. The engine call BLOCKS for a name lookup and the link handshake,
+    /// so every caller runs this off the main thread.
+    private func connectP25(target: String) throws {
+        let parsed = try p25Target(target)
+        let callsign = operatorCallsign.trimmingCharacters(in: .whitespaces)
+        guard !callsign.isEmpty else {
+            throw ConnectError.missingCallsign
+        }
+        guard p25Available else { throw ConnectError.p25Unavailable }
+        let generation = try claimDial(for: .p25)
+        try? station.disconnect()
+        setDialedNode(target)
+        recordedRecentForCall = false
+        dialAwaitingAnswer = false
+        setLastDialFailure(nil)
+        do {
+            try station.connectP25(host: "\(parsed.host):\(parsed.port)", callsign: callsign)
+        } catch {
+            testPostEngineCallHook?()
+            releaseDial(
+                generation: generation,
+                onCurrent: { setDialedNode(nil) },
+                onStale: {})
+            throw error
+        }
+        testPostEngineCallHook?()
+        releaseDial(
+            generation: generation, dialed: (.p25, target),
+            onCurrent: {
+                setP25Talkgroup(parsed.talkgroup)
+                setActiveCallNetwork(.p25)
+            },
+            // A disconnect superseded us while the link was coming up: the
+            // link we just made is nobody's. Tear it down.
+            onStale: {
+                try? station.p25Disconnect()
+                try? station.disconnect()
+            })
+    }
+
+    /// Forget a lost P25 link: the operator has moved to another network.
+    /// Clears `p25LostTarget` and, when it is the lost-link line, the dial
+    /// failure — never a failure some other dial left.
+    public func dismissP25LinkLost() {
+        if p25LostTarget != nil { p25LostTarget = nil }
+        if lastDialFailure == Self.p25LinkLostMessage { lastDialFailure = nil }
+    }
+
+    /// The popover's line for a P25 link that was lost after it was dialled.
+    public static let p25LinkLostMessage =
+        "P25 link lost — the reflector stopped answering."
+
     /// Turn the DMR dial field's text into a complete target —
     /// **directory first, address second**, the same order and the same
     /// reason as `m17Target`, `dstarTarget`, `ysfTarget` and `nxdnTarget`.
@@ -2824,7 +3073,7 @@ public final class CallSession: ObservableObject {
 
     /// Whether the live network can transmit at all.
     ///
-    /// `false` for NXDN and for DMR, both of which astar can hear but not yet
+    /// `false` for NXDN, DMR and P25, all of which astar can hear but not yet
     /// key into. Kept as a computed property over a LIST rather than a
     /// constant because the list is what changes: it held Fusion until
     /// 2026-09-06 and holds these two now. The two places that consult it —
@@ -2837,7 +3086,7 @@ public final class CallSession: ObservableObject {
 
     /// The networks astar can hear and not yet key into. A transmit task for
     /// one of them removes it from here and nothing else changes.
-    private static let receiveOnlyNetworks: Set<Network> = [.nxdn, .dmr]
+    private static let receiveOnlyNetworks: Set<Network> = [.nxdn, .dmr, .p25]
 
     /// Listen-only is on, or the live network is receive-only: nothing this
     /// session forwards can key the radio. The UI says "won't transmit" from it.
@@ -3001,6 +3250,10 @@ public final class CallSession: ObservableObject {
             if activeCallNetwork == .dmr {
                 try? station.dmrDisconnect()
                 clearDMRState()
+            }
+            if activeCallNetwork == .p25 {
+                try? station.p25Disconnect()
+                clearP25State()
             }
             // Hanging up EchoLink ends the call and keeps the login.
             if activeCallNetwork == .echolink {
@@ -3308,6 +3561,31 @@ public final class CallSession: ObservableObject {
         refreshLastHeard()
     }
 
+    /// Drop the last-heard P25 fields, on every path a link can end by — for
+    /// the same reason `clearNXDNState` exists: an id left on screen after the
+    /// link is gone is a claim about the present that is no longer true. The
+    /// talkgroup label goes with them; `p25LostTarget` does not, because it
+    /// describes how the link ended and outlives it on purpose.
+    private func clearP25State() {
+        p25LastHeard = nil
+        p25Receiving = false
+        p25Encrypted = false
+        p25LastOverEncrypted = false
+        p25Link = nil
+        if p25Talkgroup != nil { p25Talkgroup = nil }
+        if !heardHistory.isEmpty { heardHistory = [] }
+        refreshLastHeard()
+    }
+
+    /// Main-thread setter for the talkgroup label a dial publishes.
+    private func setP25Talkgroup(_ value: UInt32?) {
+        if Thread.isMainThread {
+            p25Talkgroup = value
+        } else {
+            DispatchQueue.main.async { [weak self] in self?.p25Talkgroup = value }
+        }
+    }
+
     /// Drop the last-heard DMR fields, on every path a link can end by — for
     /// the same reason `clearNXDNState` exists: an id left on screen after the
     /// link is gone is a claim about the present that is no longer true.
@@ -3356,7 +3634,7 @@ public final class CallSession: ObservableObject {
     private func refreshHeardHistory(snapshot snap: CallSnapshot) {
         let linkIsLive =
             snap.m17Active || snap.dstarActive || snap.ysfActive || snap.nxdnActive
-            || snap.dmrActive || snap.echolinkActive
+            || snap.dmrActive || snap.p25Active || snap.echolinkActive
         guard linkIsLive, let network = activeCallNetwork?.rawValue else {
             if !heardHistory.isEmpty { heardHistory = [] }
             return
@@ -3391,19 +3669,30 @@ public final class CallSession: ObservableObject {
         case .m17: value = m17Talker
         case .nxdn: value = nxdnLastHeard
         case .dmr: value = dmrLastHeard
+        case .p25: value = p25LastHeard
         case .echolink: value = echolinkTalker
         case .allstar, .hamlink, nil: value = nil
         }
         if lastHeard != value { lastHeard = value }
+        let note: String? =
+            activeCallNetwork == .p25 && p25LastOverEncrypted && value != nil ? "Encrypted" : nil
+        if lastHeardNote != note { lastHeardNote = note }
     }
 
     /// Record (or clear) the dialed node. `@Published`, so hop to the main thread —
     /// `connect` runs on a background worker.
     public func setDialedNode(_ node: String?) {
+        // Any new dial, on any network, supersedes a lost P25 link: the
+        // popover's "P25 link lost" describes the call that just ended, not
+        // whatever is dialled next.
         if Thread.isMainThread {
             dialedNode = node
+            if node != nil, p25LostTarget != nil { p25LostTarget = nil }
         } else {
-            DispatchQueue.main.async { [weak self] in self?.dialedNode = node }
+            DispatchQueue.main.async { [weak self] in
+                self?.dialedNode = node
+                if node != nil, self?.p25LostTarget != nil { self?.p25LostTarget = nil }
+            }
         }
     }
 
@@ -4157,6 +4446,9 @@ public final class CallSession: ObservableObject {
     public func applyAudioSettings(_ settings: AudioSettings) {
         try? station.setDevices(input: settings.input, output: settings.output)
         try? station.setInputGain(settings.inputGain)
+        try? station.setMonitorDevice(
+            MonitorPickerModel.reconcile(monitor: settings.monitor, newOutput: settings.output))
+        try? station.setMonitorGain(settings.monitorGain)
         // Remember the user's intended RX gain (the value to restore after a
         // half-duplex mute). Only push it through now if RX isn't currently
         // suppressed; if it is, keep it muted and let the unkey edge restore it.
@@ -4275,6 +4567,15 @@ public func connectFailureMessage(for error: Error, node: String) -> String {
         }
         return "Couldn’t call \(node) on EchoLink — check that you’re logged in "
             + "and the station is listed."
+    case -28:  // IAX_ERR_P25 — a refused callsign, a bad address, or a
+        // reflector that would not link. The engine says which in its detail
+        // ("callsign longer than 10 characters"), and that is what the
+        // operator needs; `iax_error_text(-28)` alone is "p25 error".
+        let why = engineDetail(stationError)
+        if !why.isEmpty {
+            return "Couldn’t connect to \(node): \(why)."
+        }
+        return "Couldn’t connect to \(node) on P25 — check the address and your callsign."
     case -19:  // IAX_ERR_DSTAR — every D-Star connect failure, and the most
         // likely one by far is the dongle. The engine DOES classify these
         // precisely ("ThumbDV at /dev/cu.usbserial-… is busy — another

@@ -24,12 +24,26 @@ mod dmr_listen;
 mod dstar_listen;
 #[cfg(feature = "nxdn")]
 mod nxdn_listen;
+#[cfg(feature = "p25")]
+mod p25_listen;
 mod parrot;
 mod ptt;
 mod register;
-#[cfg(any(feature = "dstar", feature = "ysf", feature = "nxdn", feature = "dmr"))]
+#[cfg(any(
+    feature = "dstar",
+    feature = "ysf",
+    feature = "nxdn",
+    feature = "dmr",
+    feature = "p25"
+))]
 mod vocoder;
-#[cfg(any(feature = "dmr", feature = "dstar", feature = "nxdn", feature = "ysf"))]
+#[cfg(any(
+    feature = "dmr",
+    feature = "dstar",
+    feature = "nxdn",
+    feature = "ysf",
+    feature = "p25"
+))]
 mod wav_backend;
 #[cfg(feature = "ysf")]
 mod ysf_listen;
@@ -65,6 +79,10 @@ fn main() -> ExitCode {
         "nxdn-listen" => nxdn_listen::run(args),
         #[cfg(not(feature = "nxdn"))]
         "nxdn-listen" => Err("nxdn-listen requires building with --features nxdn".to_string()),
+        #[cfg(feature = "p25")]
+        "p25-listen" => p25_listen::run(args),
+        #[cfg(not(feature = "p25"))]
+        "p25-listen" => Err("p25-listen requires building with --features p25".to_string()),
         // The master password is read HERE, from the environment, and moved
         // into `run`. It is never an argument: every process on the machine
         // can read another's command line, and a shell keeps it in history.

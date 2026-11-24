@@ -109,6 +109,14 @@ public struct CallSnapshot: Equatable {
     /// Whether the live session is a DMR link. Mutually exclusive with every
     /// other network at the engine. Receive only: no PTT while it is set.
     public var dmrActive: Bool
+    /// Whether the engine was built with P25. A BUILD fact, like
+    /// `m17Available`: P25 Phase 1 voice is IMBE, which astar decodes in
+    /// software, so no dongle goes into it.
+    public var p25Available: Bool
+    /// Whether the live session is a P25 link. Mutually exclusive with every
+    /// other network at the engine. Receive only: no PTT while it is set. A
+    /// link that ended `failed` keeps this set until it is disconnected.
+    public var p25Active: Bool
     /// Whether the engine was built with EchoLink, so the `echolink…` calls
     /// do something. A BUILD fact, like `m17Available`: EchoLink voice is GSM
     /// in software and needs no hardware. Defaults `false` so pre-existing
@@ -165,6 +173,7 @@ public struct CallSnapshot: Equatable {
         ysfAvailable: Bool = false, ysfActive: Bool = false,
         nxdnAvailable: Bool = false, nxdnActive: Bool = false,
         dmrAvailable: Bool = false, dmrActive: Bool = false,
+        p25Available: Bool = false, p25Active: Bool = false,
         echolinkAvailable: Bool = false, echolinkActive: Bool = false,
         echolinkLoggedIn: Bool = false,
         speakerStopped: String? = nil, micStopped: String? = nil,
@@ -204,6 +213,8 @@ public struct CallSnapshot: Equatable {
         self.nxdnActive = nxdnActive
         self.dmrAvailable = dmrAvailable
         self.dmrActive = dmrActive
+        self.p25Available = p25Available
+        self.p25Active = p25Active
         self.echolinkAvailable = echolinkAvailable
         self.echolinkActive = echolinkActive
         self.echolinkLoggedIn = echolinkLoggedIn

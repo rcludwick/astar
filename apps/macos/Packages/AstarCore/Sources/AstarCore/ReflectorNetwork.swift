@@ -9,9 +9,9 @@ import Foundation
 /// Deliberately NOT `Network`. `Network` answers "where can astar place the
 /// next call", and its cases are the app's own picker segments; this answers
 /// "what did the publisher say this row is", and the publisher covers networks
-/// astar will never dial (P25, NXDN). Folding the two together would either
-/// pollute the picker with un-dialable segments or throw away rows the
-/// directory is supposed to list-but-refuse.
+/// astar does not dial (URF, and whatever a later directory adds). Folding
+/// the two together would either pollute the picker with un-dialable segments
+/// or throw away rows the directory is supposed to list-but-refuse.
 ///
 /// `other` is the whole point: a network hamcall-db adds after this build
 /// shipped must still decode, still be searchable, and still be reportable to
@@ -115,6 +115,7 @@ extension Network {
         case .ysf: return .ysf
         case .nxdn: return .nxdn
         case .dmr: return .dmr
+        case .p25: return .p25
         case .allstar, .hamlink, .echolink: return nil
         }
     }
@@ -125,7 +126,7 @@ extension Network {
     /// case for it.
     ///
     /// The inverse of `reflectorNetwork`, and deliberately partial: the
-    /// directory covers networks astar cannot dial (P25, URF), and
+    /// directory covers networks astar cannot dial (URF), and
     /// `nil` for those is the honest answer rather than a fallback to
     /// something dialable. Used where a directory row has to reach the network
     /// picker — the search sheet browsing past the selected network.
@@ -136,7 +137,8 @@ extension Network {
         case .ysf: return .ysf
         case .nxdn: return .nxdn
         case .dmr: return .dmr
-        case .p25, .urf, .other: return nil
+        case .p25: return .p25
+        case .urf, .other: return nil
         }
     }
 }

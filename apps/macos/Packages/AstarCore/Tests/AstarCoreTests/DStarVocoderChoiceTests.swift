@@ -66,6 +66,19 @@ final class DStarVocoderChoiceTests: XCTestCase {
         XCTAssertTrue(VocoderModeRow.ambePlus2Reason.contains("2028-05-20"))
     }
 
+    // MARK: - P25: software only
+
+    func testP25ReasonNamesIMBEAndNoDongle() {
+        XCTAssertTrue(VocoderModeRow.p25Reason.contains("IMBE"))
+        XCTAssertTrue(VocoderModeRow.p25Reason.contains("no dongle option"))
+        XCTAssertEqual(VocoderModeRow.p25Title, "P25")
+        XCTAssertEqual(VocoderModeRow.p25Software, "Software (IMBE)")
+        XCTAssertTrue(VocoderModeRow.p25NotInBuild.contains("can’t be dialled"))
+        XCTAssertFalse(
+            VocoderModeRow.allCases.map(\.title).contains("P25"),
+            "P25 has no vocoder choice, so it is not one of the choosable rows")
+    }
+
     // MARK: - The view-model
 
     func testTheViewModelDefaultsToTheDongle() {

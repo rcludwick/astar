@@ -1,0 +1,17 @@
+[package]
+name = "astar-p25"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "P25 Phase 1 protocol primitives: P25Reflector datagrams, the 18 LDU voice records, and a client link FSM."
+
+[lints]
+workspace = true
+
+# No dependencies, on purpose: pure `std`. In particular no crypto crate of
+# any kind. P25 encryption is never decrypted; encrypted calls are muted from
+# the ALGID a layer up.
+[dependencies]

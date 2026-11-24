@@ -52,6 +52,7 @@ pub mod filter;
 pub mod meter;
 pub mod mixer;
 pub mod monitor;
+pub mod monitor_out;
 #[cfg(any(test, feature = "test-backend"))]
 pub mod null_backend;
 #[cfg(feature = "pull-backend")]
@@ -80,6 +81,7 @@ pub use mixer::{
     RxJitterConfig, RxJitterSettings,
 };
 pub use monitor::MicMonitor;
+pub use monitor_out::MonitorOutput;
 #[cfg(any(test, feature = "test-backend"))]
 pub use null_backend::NullBackend;
 #[cfg(feature = "pull-backend")]
@@ -88,7 +90,10 @@ pub use resample::{AntiAliasResampler, Resampler1, resample_offline};
 pub use rnnoise::{
     DenoiseChain, DenoiseMode, DenoiseStatus, RNNOISE_FRAME, RNNOISE_RATE, RnnoiseStage,
 };
-pub use router::{AudioRouter, CallAudio, HeardConsumer, MicId, OutputId, StoppedDevice};
+pub use router::{
+    AudioRouter, CallAudio, HeardConsumer, MONITOR_SAME_DEVICE, MicId, MonitorChange, MonitorState,
+    OutputId, StoppedDevice,
+};
 pub use signal_report::{Grade, SignalReport, analyze_signal, render_report, signal_report_text};
 pub use spectrum::{SPECTRUM_BINS, SpectrumAnalyzer};
 #[cfg(feature = "device-audio")]

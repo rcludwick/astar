@@ -133,6 +133,8 @@ def test_new_snapshot_idle_ptt_event_free() -> None:
         assert isinstance(snap.ysf_available, bool)
         assert isinstance(snap.nxdn_available, bool)
         assert isinstance(snap.dmr_available, bool)
+        assert snap.p25_active is False, f"got {snap.p25_active}"
+        assert isinstance(snap.p25_available, bool)
         # A fresh station is not logged in to EchoLink and has no call up.
         assert snap.echolink_active is False, f"got {snap.echolink_active}"
         assert snap.echolink_logged_in is False, f"got {snap.echolink_logged_in}"

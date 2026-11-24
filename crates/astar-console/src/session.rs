@@ -43,6 +43,8 @@ use crate::m17::{
 use crate::metering::Gain;
 #[cfg(feature = "nxdn")]
 use crate::nxdn::{NxdnConfig, NxdnLink, NxdnSnapshot};
+#[cfg(feature = "p25")]
+use crate::p25::{P25Config, P25Link, P25Snapshot};
 use crate::state::{CallStatus, ConsoleState};
 #[cfg(feature = "ysf")]
 use crate::ysf::{YsfConfig, YsfLink, YsfSnapshot};
@@ -207,6 +209,13 @@ pub enum ConsoleError {
     /// [`crate::nxdn::NxdnLink`] classifying a callsign, radio-id, resolve
     /// or bind failure.
     Nxdn(String),
+    /// A P25 link could not be opened or used: raised by
+    /// [`crate::p25::P25Link`] classifying a callsign, resolve or bind
+    /// failure, and by the receive-only refusal of a key-down.
+    ///
+    /// Present whether or not the `p25` feature is compiled in, as
+    /// [`Self::Dmr`] is.
+    P25(String),
     /// An `EchoLink` login or call could not be started: a plain sentence,
     /// secret-free like every other variant here. The password never reaches
     /// it.
@@ -232,6 +241,7 @@ impl std::fmt::Display for ConsoleError {
             Self::Ysf(msg) => write!(f, "ysf: {msg}"),
             Self::Dmr(msg) => write!(f, "dmr: {msg}"),
             Self::Nxdn(msg) => write!(f, "nxdn: {msg}"),
+            Self::P25(msg) => write!(f, "p25: {msg}"),
             Self::EchoLink(msg) => write!(f, "echolink: {msg}"),
             Self::NoCaptureDevice => write!(f, "no capture device: cannot transmit"),
         }
@@ -367,6 +377,18 @@ pub struct ConsoleSession {
     /// survives to reach it — and pushed to the router on engine build and on
     /// every change, so it applies mid-call without reconnecting.
     rx_jitter: Arc<astar_audio::RxJitterSettings>,
+    /// The speaker monitor's device, as the operator named it (a device-name
+    /// substring, the same form as `ConsoleConfig::output_device`); `None` =
+    /// off. Held here so it survives reconnects and engine rebuilds, and
+    /// resolved to a device id whenever it is handed to the router.
+    monitor_device: Option<String>,
+    /// Speaker-monitor volume (f32 bits, `0.0..=4.0`, default 1.0). Same
+    /// lifetime as `monitor_device`; pushed to the router on engine build and
+    /// on change.
+    monitor_gain: Arc<AtomicU32>,
+    /// Speaker-monitor mute (default off), held and pushed like
+    /// `monitor_gain`.
+    monitor_muted: Arc<AtomicBool>,
     /// VOX pre-roll / look-back length in ms (default 0 = disabled, clamped to
     /// `0..=250`), persisted across reconnects and pushed to the router on
     /// connect / on change (iax-2733). astar opts in from its VOX edge.
@@ -444,6 +466,11 @@ pub struct ConsoleSession {
     /// arrangement, and same reason, as [`Self::ysf`].
     #[cfg(feature = "nxdn")]
     nxdn: Option<NxdnLink>,
+    /// The live P25 link, if any. Read through [`Self::p25_state`], never
+    /// mirrored into [`ConsoleState`] beyond the two flags — same
+    /// arrangement, and same reason, as [`Self::nxdn`].
+    #[cfg(feature = "p25")]
+    p25: Option<P25Link>,
     /// The live DMR link, if any. Read through [`Self::dmr_state`], never
     /// mirrored into [`ConsoleState`] beyond the two flags — same
     /// arrangement, and same reason, as [`Self::nxdn`].
@@ -609,6 +636,9 @@ impl ConsoleSession {
             rx_compress: Arc::new(AtomicBool::new(false)),
             rx_compress_level: Arc::new(AtomicU32::new(0.90_f32.to_bits())),
             rx_jitter: Arc::new(astar_audio::RxJitterSettings::default()),
+            monitor_device: None,
+            monitor_gain: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+            monitor_muted: Arc::new(AtomicBool::new(false)),
             vox_preroll_ms: Arc::new(AtomicU32::new(0)),
             calibrated: Arc::new(Mutex::new(None)),
             state: ConsoleState::default(),
@@ -626,6 +656,8 @@ impl ConsoleSession {
             ysf: None,
             #[cfg(feature = "nxdn")]
             nxdn: None,
+            #[cfg(feature = "p25")]
+            p25: None,
             #[cfg(feature = "dmr")]
             dmr: None,
             #[cfg(feature = "echolink")]
@@ -771,6 +803,10 @@ impl ConsoleSession {
         if let Some(n) = self.nxdn.as_ref() {
             out.push(n.frame_tap().contended_counter());
         }
+        #[cfg(feature = "p25")]
+        if let Some(p) = self.p25.as_ref() {
+            out.push(p.frame_tap().contended_counter());
+        }
         #[cfg(feature = "dmr")]
         if let Some(d) = self.dmr.as_ref() {
             out.push(d.frame_tap().contended_counter());
@@ -801,6 +837,10 @@ impl ConsoleSession {
         #[cfg(feature = "nxdn")]
         if let Some(n) = self.nxdn.as_ref() {
             n.frame_tap().set(self.record_taps.frames.clone());
+        }
+        #[cfg(feature = "p25")]
+        if let Some(p) = self.p25.as_ref() {
+            p.frame_tap().set(self.record_taps.frames.clone());
         }
         #[cfg(feature = "dmr")]
         if let Some(d) = self.dmr.as_ref() {
@@ -850,6 +890,8 @@ impl ConsoleSession {
         out.extend(self.ysf.as_ref().map(YsfLink::packet_slot));
         #[cfg(feature = "nxdn")]
         out.extend(self.nxdn.as_ref().map(NxdnLink::packet_slot));
+        #[cfg(feature = "p25")]
+        out.extend(self.p25.as_ref().map(P25Link::packet_slot));
         #[cfg(feature = "dmr")]
         out.extend(self.dmr.as_ref().map(DmrLink::packet_slot));
         #[cfg(feature = "echolink")]
@@ -881,7 +923,8 @@ impl ConsoleSession {
             feature = "m17",
             feature = "ysf",
             feature = "nxdn",
-            feature = "dmr"
+            feature = "dmr",
+            feature = "p25"
         ))]
         let digital = JitterSample {
             underruns: self.voice_route_underruns(),
@@ -917,6 +960,12 @@ impl ConsoleSession {
                 .as_ref()
                 .map(|n| (n.packet_call(), digital.clone())),
         );
+        #[cfg(feature = "p25")]
+        out.extend(
+            self.p25
+                .as_ref()
+                .map(|p| (p.packet_call(), digital.clone())),
+        );
         #[cfg(feature = "dmr")]
         out.extend(
             self.dmr
@@ -947,6 +996,7 @@ impl ConsoleSession {
         feature = "ysf",
         feature = "nxdn",
         feature = "dmr",
+        feature = "p25",
         feature = "echolink"
     ))]
     fn voice_route_underruns(&self) -> Option<u64> {
@@ -998,6 +1048,7 @@ impl ConsoleSession {
             || self.dstar_is_active()
             || self.ysf_is_active()
             || self.nxdn_is_active()
+            || self.p25_is_active()
             || self.dmr_is_active()
             || self.echolink_is_active()
     }
@@ -1410,6 +1461,7 @@ impl ConsoleSession {
             || self.dstar_is_active()
             || self.ysf_is_active()
             || self.nxdn_is_active()
+            || self.p25_is_active()
             || self.dmr_is_active()
             || self.echolink_is_active()
         {
@@ -1518,6 +1570,7 @@ impl ConsoleSession {
             || self.dstar_is_active()
             || self.ysf_is_active()
             || self.nxdn_is_active()
+            || self.p25_is_active()
             || self.dmr_is_active()
             || self.echolink_is_active()
             || self.voice_route.is_some()
@@ -1859,6 +1912,7 @@ impl ConsoleSession {
                         && !self.dstar_is_active()
                         && !self.ysf_is_active()
                         && !self.nxdn_is_active()
+                        && !self.p25_is_active()
                         && !self.dmr_is_active()
                         && !self.echolink_is_active()
                         && self.voice_route.is_none()
@@ -1887,6 +1941,7 @@ impl ConsoleSession {
             || self.dstar_is_active()
             || self.ysf_is_active()
             || self.nxdn_is_active()
+            || self.p25_is_active()
             || self.dmr_is_active()
             || self.echolink_is_active()
             || self.voice_route.is_some()
@@ -2017,6 +2072,7 @@ impl ConsoleSession {
             || self.dstar_is_active()
             || self.ysf_is_active()
             || self.nxdn_is_active()
+            || self.p25_is_active()
             || self.dmr_is_active()
             || self.echolink_is_active()
             || self.voice_route.is_some()
@@ -2201,6 +2257,7 @@ impl ConsoleSession {
             Some("D-Star") => Err(ConsoleError::Dstar(NO_PICTURE.into())),
             Some("System Fusion") => Err(ConsoleError::Ysf(NO_PICTURE.into())),
             Some("NXDN") => Err(ConsoleError::Nxdn(NO_PICTURE.into())),
+            Some("P25") => Err(ConsoleError::P25(NO_PICTURE.into())),
             Some("DMR") => Err(ConsoleError::Dmr(NO_PICTURE.into())),
             // No call, or (never today) a name not listed: refuse, never key.
             None | Some(_) => Err(ConsoleError::NotConnected),
@@ -2221,6 +2278,13 @@ impl ConsoleSession {
         #[cfg(feature = "nxdn")]
         if on && self.nxdn.is_some() {
             return Err(ConsoleError::Nxdn("transmit is not built yet".into()));
+        }
+        // P25, for the identical reason and at the identical point: it is
+        // receive only (`crate::p25`'s Transmit section, backlog
+        // `p25-transmit`).
+        #[cfg(feature = "p25")]
+        if on && self.p25.is_some() {
+            return Err(ConsoleError::P25("transmit is not built yet".into()));
         }
         // DMR, for the identical reason and at the identical point. It
         // matters more here than it did for NXDN: a DMR master routes by the
@@ -2302,6 +2366,15 @@ impl ConsoleSession {
                 .note(if on { "LocalKey" } else { "LocalUnkey" }, String::new());
             return Ok(());
         }
+        // P25 reaches this branch only on a key-UP, exactly as NXDN does.
+        #[cfg(feature = "p25")]
+        if let Some(link) = self.p25.as_ref() {
+            link.set_ptt(on);
+            self.state.ptt = on;
+            self.tracer
+                .note(if on { "LocalKey" } else { "LocalUnkey" }, String::new());
+            return Ok(());
+        }
         // DMR reaches this branch only on a key-UP, exactly as NXDN does:
         // the key-DOWN was refused at the top of this function.
         #[cfg(feature = "dmr")]
@@ -2358,7 +2431,7 @@ impl ConsoleSession {
 
     /// The network the live call is on, as a person would name it:
     /// `"AllStarLink"` for an IAX2 call, `"EchoLink"`, `"M17"`, `"D-Star"`,
-    /// `"System Fusion"`, `"NXDN"` or `"DMR"`; `None` with no call. A sender
+    /// `"System Fusion"`, `"NXDN"`, `"DMR"` or `"P25"`; `None` with no call. A sender
     /// that only some networks can carry (an SSTV picture) reads this to
     /// refuse the others by name. The sessions are mutually exclusive, so at
     /// most one of them is live.
@@ -2374,6 +2447,8 @@ impl ConsoleSession {
             Some("NXDN")
         } else if self.dmr_is_active() {
             Some("DMR")
+        } else if self.p25_is_active() {
+            Some("P25")
         } else if self.echolink_is_active() {
             Some("EchoLink")
         } else {
@@ -2553,6 +2628,12 @@ impl ConsoleSession {
             self.state.rx_level_db = -60.0;
             self.state.input_level_db = -60.0;
             self.state.vox_level_db = -60.0;
+            return Ok(());
+        }
+        #[cfg(feature = "p25")]
+        if self.p25.is_some() {
+            // Exactly `p25_disconnect`: the link, the route and the mirror.
+            self.p25_disconnect();
             return Ok(());
         }
         #[cfg(feature = "dmr")]
@@ -3413,6 +3494,7 @@ impl ConsoleSession {
             || self.dstar.is_some()
             || self.ysf_is_active()
             || self.nxdn_is_active()
+            || self.p25_is_active()
             || self.dmr_is_active()
             || self.echolink_is_active()
             || self.voice_route.is_some()
@@ -3456,6 +3538,7 @@ impl ConsoleSession {
             || self.dstar.is_some()
             || self.ysf_is_active()
             || self.nxdn_is_active()
+            || self.p25_is_active()
             || self.dmr_is_active()
             || self.echolink_is_active()
             || self.voice_route.is_none()
@@ -3599,6 +3682,7 @@ impl ConsoleSession {
             || self.dstar_is_active()
             || self.ysf.is_some()
             || self.nxdn_is_active()
+            || self.p25_is_active()
             || self.dmr_is_active()
             || self.echolink_is_active()
             || self.voice_route.is_some()
@@ -3636,6 +3720,7 @@ impl ConsoleSession {
             || self.dstar_is_active()
             || self.ysf.is_some()
             || self.nxdn_is_active()
+            || self.p25_is_active()
             || self.dmr_is_active()
             || self.echolink_is_active()
             || self.voice_route.is_none()
@@ -3768,6 +3853,7 @@ impl ConsoleSession {
             || self.dstar_is_active()
             || self.ysf_is_active()
             || self.nxdn.is_some()
+            || self.p25_is_active()
             || self.dmr_is_active()
             || self.echolink_is_active()
             || self.voice_route.is_some()
@@ -3803,6 +3889,7 @@ impl ConsoleSession {
             || self.dstar_is_active()
             || self.ysf_is_active()
             || self.nxdn.is_some()
+            || self.p25_is_active()
             || self.dmr_is_active()
             || self.echolink_is_active()
             || self.voice_route.is_none()
@@ -3876,6 +3963,134 @@ impl ConsoleSession {
         Some(st)
     }
 
+    /// Link to a `P25Reflector` and play the audio on it. The
+    /// console-side counterpart of [`Self::nxdn_connect`], step for step:
+    /// the route is the reservation, the mutual exclusion and the pref push,
+    /// all at once.
+    ///
+    /// P25 needs no dongle: the decoder is the software IMBE vocoder, so
+    /// there is no vocoder trust list to consult and no probe to run.
+    ///
+    /// Receive only. [`Self::set_ptt`] refuses a key-down while this link is
+    /// live; see [`crate::p25`]'s Transmit section.
+    ///
+    /// # Errors
+    /// [`ConsoleError::AlreadyConnected`] from [`Self::open_voice_route`]
+    /// while anything else holds the lane;
+    /// [`ConsoleError::Device`]/[`ConsoleError::Audio`] if the output device
+    /// cannot be resolved or opened; otherwise whatever
+    /// [`P25Link::connect_with_audio`] returns.
+    #[cfg(feature = "p25")]
+    pub fn p25_connect(
+        &mut self,
+        backend: Box<dyn AudioBackend>,
+        cfg: &P25Config,
+        input: Option<&str>,
+        output: Option<&str>,
+    ) -> Result<(), ConsoleError> {
+        let audio = self.open_voice_route(input, output, || backend)?;
+        match P25Link::connect_with_audio(cfg, audio) {
+            Ok(link) => self.p25_adopt(link),
+            Err(e) => {
+                // The route opened but the link did not: give the lanes
+                // back, or the station stays reserved forever.
+                let handles = self.release_voice_route();
+                drop(handles);
+                Err(e)
+            }
+        }
+    }
+
+    /// An embedder-facing query: *would a P25 connect be refused right
+    /// now?* Exactly the gate [`Self::open_voice_route`] runs, so it also
+    /// refuses while an IAX2 link is up in the Manager's call table.
+    ///
+    /// # Errors
+    /// [`ConsoleError::AlreadyConnected`] while anything else is live.
+    #[cfg(feature = "p25")]
+    pub fn p25_can_connect(&self) -> Result<(), ConsoleError> {
+        self.can_open_voice_route()
+    }
+
+    /// Install an already-constructed [`P25Link`], re-checking exclusion.
+    /// Same rule, same reason, as [`Self::nxdn_adopt`]: the link must arrive
+    /// with the route already reserved on its behalf, and on refusal it is
+    /// disconnected and the route released.
+    ///
+    /// # Errors
+    /// [`ConsoleError::AlreadyConnected`] when an IAX2 call or another
+    /// digital session is live, or when no route was reserved.
+    #[cfg(feature = "p25")]
+    pub fn p25_adopt(&mut self, link: P25Link) -> Result<(), ConsoleError> {
+        if self.active.is_some()
+            || self.m17_is_active()
+            || self.dstar_is_active()
+            || self.ysf_is_active()
+            || self.nxdn_is_active()
+            || self.dmr_is_active()
+            || self.p25.is_some()
+            || self.echolink_is_active()
+            || self.voice_route.is_none()
+        {
+            link.disconnect();
+            let handles = self.release_voice_route();
+            drop(handles);
+            return Err(ConsoleError::AlreadyConnected);
+        }
+        link.frame_tap().set(self.record_taps.frames.clone());
+        self.p25 = Some(link);
+        self.apply_packet_tap();
+        Ok(())
+    }
+
+    /// Disconnect the live P25 link, if any. No-op when none is active.
+    #[cfg(feature = "p25")]
+    pub fn p25_disconnect(&mut self) {
+        // Everything inside the `if let`, as `nxdn_disconnect` has it: an
+        // unconditional release would close the lanes out from under
+        // another network that legitimately holds them.
+        if let Some(link) = self.p25.take() {
+            link.disconnect();
+            let handles = self.release_voice_route();
+            drop(handles);
+            // The mirror stops running once `self.p25` is `None`, so reset
+            // every field it writes.
+            self.state.status = CallStatus::Idle;
+            self.state.remote_ptt = false;
+            self.state.ptt = false;
+            self.state.rtt_ms = None;
+            self.state.rx_level_db = -60.0;
+            self.state.tx_level_db = -60.0;
+            self.state.input_level_db = -60.0;
+            self.state.vox_level_db = -60.0;
+        }
+    }
+
+    /// `true` while a P25 link is live. Always `false` when the `p25`
+    /// feature isn't compiled in.
+    #[allow(clippy::unused_self)]
+    fn p25_is_active(&self) -> bool {
+        #[cfg(feature = "p25")]
+        {
+            self.p25.is_some()
+        }
+        #[cfg(not(feature = "p25"))]
+        {
+            false
+        }
+    }
+
+    /// A poll-cheap snapshot of the live P25 link, or `None`, with the
+    /// console's levels composed in as [`Self::nxdn_state`] does.
+    #[cfg(feature = "p25")]
+    #[must_use]
+    pub fn p25_state(&self) -> Option<P25Snapshot> {
+        let mut st = self.p25.as_ref().map(P25Link::snapshot)?;
+        st.tx_dbfs = self.state.tx_level_db;
+        st.rx_dbfs = self.state.rx_level_db;
+        Some(st)
+    }
+
     /// Link to a DMR master's talkgroup and decode the audio on it
     /// (iax-d4f7). The console-side counterpart of [`Self::nxdn_connect`],
     /// step for step: the route is the reservation, the mutual exclusion AND
@@ -3940,6 +4155,7 @@ impl ConsoleSession {
             || self.dstar_is_active()
             || self.ysf_is_active()
             || self.nxdn_is_active()
+            || self.p25_is_active()
             || self.dmr.is_some()
             || self.echolink_is_active()
             || self.voice_route.is_some()
@@ -3976,6 +4192,7 @@ impl ConsoleSession {
             || self.dstar_is_active()
             || self.ysf_is_active()
             || self.nxdn_is_active()
+            || self.p25_is_active()
             || self.dmr.is_some()
             || self.echolink_is_active()
             || self.voice_route.is_none()
@@ -4134,6 +4351,98 @@ impl ConsoleSession {
             let r = mgr.router();
             r.set_output_gain(route.out(), clamped);
         }
+    }
+
+    /// Choose the speaker monitor's device: a device-name substring, the same
+    /// form the output device takes (`ConsoleConfig::output_device`); `None`
+    /// or an empty string turns it off. The choice is held across reconnects
+    /// and pushed to the router now (when an engine exists) and on every
+    /// engine build.
+    ///
+    /// The returned [`astar_audio::MonitorChange`] carries the monitor stream
+    /// this closed, if any: drop it with no lock held (a `CoreAudio` stream
+    /// drop can stall). Its `opened` is the error from resolving or opening
+    /// the device right now; the choice is kept either way and
+    /// [`Self::monitor_state`] reports it.
+    pub fn set_monitor_device(&mut self, device: Option<String>) -> astar_audio::MonitorChange {
+        self.monitor_device = device
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty());
+        self.apply_monitor_device()
+    }
+
+    /// Hand the held monitor choice to the router, resolved to a device id.
+    /// A name that does not resolve to exactly one output is passed as given,
+    /// so the router reports it as unavailable rather than the choice being
+    /// dropped. A no-op without an engine.
+    fn apply_monitor_device(&mut self) -> astar_audio::MonitorChange {
+        let Some(mgr) = self.manager.as_mut() else {
+            return astar_audio::MonitorChange {
+                closed: None,
+                opened: Ok(()),
+            };
+        };
+        let id = self.monitor_device.as_deref().map(|q| {
+            mgr.devices()
+                .ok()
+                .and_then(|devs| find_device(&devs, q, Direction::Output).ok())
+                .unwrap_or_else(|| q.to_string())
+        });
+        mgr.router_mut().set_monitor(id.as_deref())
+    }
+
+    /// The speaker monitor's chosen device, as given to
+    /// [`Self::set_monitor_device`]; `None` = off.
+    #[must_use]
+    pub fn monitor_device(&self) -> Option<&str> {
+        self.monitor_device.as_deref()
+    }
+
+    /// Set the speaker monitor's volume: clamped to `0.0..=4.0`, `NaN` reads
+    /// as `0.0` (the router's rule). Applies live and to every later call.
+    pub fn set_monitor_gain(&self, gain: f32) {
+        let g = if gain.is_nan() {
+            0.0
+        } else {
+            gain.clamp(0.0, 4.0)
+        };
+        self.monitor_gain.store(g.to_bits(), Ordering::Relaxed);
+        if let Some(mgr) = self.manager.as_ref() {
+            mgr.router().set_monitor_gain(g);
+        }
+    }
+
+    /// The speaker monitor's volume (1.0 = unity by default).
+    #[must_use]
+    pub fn monitor_gain(&self) -> f32 {
+        f32::from_bits(self.monitor_gain.load(Ordering::Relaxed))
+    }
+
+    /// Mute or unmute the speaker monitor. Live and immediate; the stream
+    /// stays open, so unmuting is instant.
+    pub fn set_monitor_muted(&self, muted: bool) {
+        self.monitor_muted.store(muted, Ordering::Relaxed);
+        if let Some(mgr) = self.manager.as_ref() {
+            mgr.router().set_monitor_muted(muted);
+        }
+    }
+
+    /// Whether the speaker monitor is muted.
+    #[must_use]
+    pub fn monitor_muted(&self) -> bool {
+        self.monitor_muted.load(Ordering::Relaxed)
+    }
+
+    /// What the speaker monitor is doing. [`astar_audio::MonitorState::Off`]
+    /// without an engine, with no device chosen, or while no output bus is
+    /// open.
+    #[must_use]
+    pub fn monitor_state(&self) -> astar_audio::MonitorState {
+        self.manager
+            .as_ref()
+            .map_or(astar_audio::MonitorState::Off, |m| {
+                m.router().monitor_state()
+            })
     }
 
     /// Copy the live-call TX spectrum (iax-2b09) of the active network call into
@@ -4366,6 +4675,10 @@ impl ConsoleSession {
         if let Some(s) = &self.nxdn {
             return s.heard();
         }
+        #[cfg(feature = "p25")]
+        if let Some(s) = &self.p25 {
+            return s.heard();
+        }
         #[cfg(feature = "dmr")]
         if let Some(s) = &self.dmr {
             return s.heard();
@@ -4590,6 +4903,7 @@ impl ConsoleSession {
             && !self.dstar_is_active()
             && !self.ysf_is_active()
             && !self.nxdn_is_active()
+            && !self.p25_is_active()
             && !self.dmr_is_active()
             && !self.echolink_is_active();
         if !idle {
@@ -4670,6 +4984,20 @@ impl ConsoleSession {
                     .router_mut()
                     .set_heard_tap(astar_audio::HeardConsumer::Sstv, self.sstv_tap.clone());
             }
+            // The speaker monitor's settings are router-wide and outlive the
+            // engine: replay them onto the fresh router. Nothing is open on a
+            // fresh router, so the change closes no stream.
+            {
+                let r = self.manager.as_ref().expect("just set").router();
+                r.set_monitor_gain(f32::from_bits(self.monitor_gain.load(Ordering::Relaxed)));
+                r.set_monitor_muted(self.monitor_muted.load(Ordering::Relaxed));
+            }
+            let change = self.apply_monitor_device();
+            debug_assert!(
+                change.closed.is_none(),
+                "a fresh router has no monitor open"
+            );
+            drop(change);
             // Replay any pending announce config pushed before the Manager existed.
             if let Some(cfg) = self.pending_announce.clone() {
                 self.manager
@@ -5079,6 +5407,31 @@ impl ConsoleSession {
         self.state.nxdn_active = self.nxdn_is_active();
         self.state.nxdn_available = nxdn_available(&self.vocoder_trust);
 
+        // P25, mirrored exactly as NXDN is and for the same reason: one
+        // connection state machine off `status`, whatever the network.
+        // `remote_ptt` is "an over is in progress", encrypted or not.
+        #[cfg(feature = "p25")]
+        if let Some(link) = self.p25.as_ref() {
+            let snap = link.snapshot();
+            self.state.remote_ptt = snap.receiving;
+            // Always `false`: P25 is receive only.
+            self.state.ptt = snap.ptt;
+            // Fully qualified: the bare `LinkState` in this scope is M17's.
+            self.state.status = match link.link_state() {
+                astar_p25::LinkState::Idle => CallStatus::Idle,
+                astar_p25::LinkState::Linking => CallStatus::Dialing,
+                astar_p25::LinkState::Linked => CallStatus::Answered,
+                astar_p25::LinkState::Unlinking => CallStatus::Hangup {
+                    reason: "p25 unlinking".into(),
+                },
+                astar_p25::LinkState::Failed => CallStatus::Hangup {
+                    reason: "p25 link lost".into(),
+                },
+            };
+        }
+        self.state.p25_active = self.p25_is_active();
+        self.state.p25_available = p25_available();
+
         // DMR, mirrored exactly as the four branches above are and for the
         // same reason: a front-end drives ONE connection state machine off
         // `status`, whatever the network. Without this a live DMR link
@@ -5427,6 +5780,14 @@ pub fn nxdn_available(trust: &astar_codec::vocoder_trust::VocoderTrust) -> bool 
         let _ = trust;
         false
     }
+}
+
+/// `true` when this build carries P25 (the `p25` feature). P25 needs no
+/// hardware: its decoder is the software IMBE vocoder, so this is the
+/// build's answer alone.
+#[must_use]
+pub fn p25_available() -> bool {
+    cfg!(feature = "p25")
 }
 
 /// `true` when DMR voice is available: the `dmr` feature is compiled in AND a
@@ -5790,6 +6151,65 @@ mod tests {
             (s.input_gain() - 4.0).abs() < 1e-6,
             "above 4 clamped to 4.0"
         );
+    }
+
+    #[test]
+    fn monitor_prefs_reach_a_fresh_engine_and_a_live_one() {
+        let two_outputs = || -> Box<dyn AudioBackend> {
+            Box::new(NullBackend::new().with_outputs(&["out:null", "out:mon"]))
+        };
+        let mut s = ConsoleSession::new();
+        assert_eq!(s.monitor_state(), astar_audio::MonitorState::Off);
+        // Chosen before any engine exists: held on the session.
+        let change = s.set_monitor_device(Some("mon".to_string()));
+        assert!(change.closed.is_none());
+        assert!(change.opened.is_ok());
+        s.set_monitor_gain(0.25);
+        s.set_monitor_muted(true);
+        assert_eq!(s.monitor_device(), Some("mon"));
+        assert!((s.monitor_gain() - 0.25).abs() < 1e-6);
+        assert!(s.monitor_muted());
+
+        // The engine is built: the router gets all three, the device as the
+        // id the substring resolves to.
+        s.ensure_engine(two_outputs);
+        let r = s.manager.as_ref().expect("engine").router();
+        assert!((r.monitor_gain() - 0.25).abs() < 1e-6);
+        assert!(r.monitor_muted());
+        // No bus yet: a chosen monitor reads Off.
+        assert_eq!(s.monitor_state(), astar_audio::MonitorState::Off);
+
+        // Changes reach the live router too.
+        s.set_monitor_gain(2.0);
+        s.set_monitor_muted(false);
+        let r = s.manager.as_ref().expect("engine").router();
+        assert!((r.monitor_gain() - 2.0).abs() < 1e-6);
+        assert!(!r.monitor_muted());
+
+        // Gain clamps the way the router does.
+        s.set_monitor_gain(9.0);
+        assert!((s.monitor_gain() - 4.0).abs() < 1e-6);
+        s.set_monitor_gain(f32::NAN);
+        assert!(s.monitor_gain().abs() < 1e-6);
+    }
+
+    #[cfg(feature = "m17")]
+    #[test]
+    fn monitor_plays_on_the_resolved_device_during_a_route() {
+        let target = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind silent target");
+        let addr = target.local_addr().expect("local addr");
+        let mut s = ConsoleSession::new();
+        let _ = s.set_monitor_device(Some("out:mon".to_string()));
+        s.m17_connect(
+            Box::new(NullBackend::new().with_outputs(&["out:null", "out:mon"])),
+            m17_cfg(addr),
+            None,
+            None,
+        )
+        .expect("m17 connect");
+        assert_eq!(s.monitor_state(), astar_audio::MonitorState::Playing);
+        s.m17_disconnect();
+        assert_eq!(s.monitor_state(), astar_audio::MonitorState::Off);
     }
 
     #[test]
@@ -6994,6 +7414,190 @@ mod tests {
         assert!(s.ysf_state().is_none());
         reflector.shutdown();
     }
+    // ── P25 wiring ──────────────────────────────────────────────────────
+
+    /// A P25 link to a loopback reflector on `127.0.0.1`, riding the lane
+    /// the console opened for it.
+    #[cfg(feature = "p25")]
+    fn loopback_p25(audio: astar_audio::CallAudio) -> (astar_p25::ReflectorHandle, P25Link) {
+        let r =
+            astar_p25::Reflector::bind("127.0.0.1:0".parse().expect("v4")).expect("bind reflector");
+        let addr = r.local_addr();
+        let handle = r.run();
+        // The real software decoder: it needs no hardware, and these tests
+        // never send it a frame.
+        let link = P25Link::connect_with_audio(
+            &P25Config {
+                host: addr.to_string(),
+                callsign: "N0CALL".to_string(),
+            },
+            audio,
+        )
+        .expect("connect the link");
+        (handle, link)
+    }
+
+    /// P25 is receive only, and the refusal lands BEFORE the capture gate:
+    /// on a route with no capture device the gate would refuse first with
+    /// `NoCaptureDevice`, so seeing `P25` proves the microphone is never
+    /// asked to open. A key-UP is not refused.
+    #[cfg(feature = "p25")]
+    #[test]
+    fn a_p25_key_down_is_refused_and_leaves_the_capture_gate_closed() {
+        let mut s = ConsoleSession::new();
+        let audio = s
+            .open_voice_route(Some("no such device"), None, null)
+            .expect("the bus opens; a missing capture device is not fatal");
+        let (reflector, link) = loopback_p25(audio);
+        s.p25_adopt(link).expect("adopt");
+
+        match s.set_ptt(true) {
+            Err(ConsoleError::P25(msg)) => {
+                assert!(msg.contains("transmit"), "the refusal says why: {msg:?}");
+            }
+            other => panic!("a P25 key-down must be refused before the gate, got {other:?}"),
+        }
+        assert!(!s.state.ptt, "a refused key never mirrors as keyed");
+        assert!(!s.snapshot().ptt);
+        assert!(
+            matches!(s.key_for_picture(), Err(ConsoleError::P25(_))),
+            "P25 cannot carry a picture"
+        );
+        s.set_ptt(false).expect("a key-up is not refused");
+        assert!(!s.state.ptt);
+
+        s.p25_disconnect();
+        reflector.shutdown();
+    }
+
+    /// `p25_can_connect` is the voice route's own gate, so an IAX2 link in
+    /// the Manager's call table (which never sets `active`) refuses it too:
+    /// the iax-a7b2 case.
+    #[cfg(feature = "p25")]
+    #[test]
+    fn p25_can_connect_refuses_while_an_iax2_link_is_up() {
+        let mut s = ConsoleSession::new();
+        assert!(s.p25_can_connect().is_ok(), "nothing is live yet");
+        s.link_connect(loopback_link_spec("55553", LinkMode::Transceive), null())
+            .expect("the dial pools a link over the null backend");
+        assert!(matches!(
+            s.p25_can_connect(),
+            Err(ConsoleError::AlreadyConnected)
+        ));
+        s.link_disconnect("55553").expect("tear the link down");
+        assert!(s.p25_can_connect().is_ok(), "free again");
+    }
+
+    #[cfg(feature = "p25")]
+    #[test]
+    fn the_p25_snapshot_maps_linked_to_answered_and_sets_p25_active() {
+        let mut s = ConsoleSession::new();
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        let (reflector, link) = loopback_p25(audio);
+        s.p25_adopt(link).expect("adopt");
+        assert_eq!(s.active_network(), Some("P25"));
+        assert!(s.has_connection());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut snap = s.snapshot();
+        while snap.status != CallStatus::Answered && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            snap = s.snapshot();
+        }
+        assert_eq!(snap.status, CallStatus::Answered);
+        assert!(snap.p25_active);
+        assert!(snap.p25_available);
+        let st = s.p25_state().expect("a live link");
+        assert_eq!(st.link_state, "linked");
+        assert_eq!(st.backend, Some("software"));
+        assert!(
+            (st.rx_dbfs - snap.rx_level_db).abs() < 1e-6,
+            "the levels are the console's"
+        );
+        // Every other network is refused while P25 holds the lane.
+        assert!(matches!(
+            s.p25_can_connect(),
+            Err(ConsoleError::AlreadyConnected)
+        ));
+        #[cfg(feature = "nxdn")]
+        assert!(matches!(
+            s.nxdn_can_connect(),
+            Err(ConsoleError::AlreadyConnected)
+        ));
+        #[cfg(feature = "ysf")]
+        assert!(matches!(
+            s.ysf_can_connect(),
+            Err(ConsoleError::AlreadyConnected)
+        ));
+        #[cfg(feature = "dstar")]
+        assert!(matches!(
+            s.dstar_can_connect(),
+            Err(ConsoleError::AlreadyConnected)
+        ));
+        #[cfg(feature = "dmr")]
+        assert!(matches!(
+            s.dmr_can_connect(),
+            Err(ConsoleError::AlreadyConnected)
+        ));
+        s.p25_disconnect();
+        reflector.shutdown();
+    }
+
+    #[cfg(feature = "p25")]
+    #[test]
+    fn p25_disconnect_resets_the_mirror_and_releases_the_route() {
+        let mut s = ConsoleSession::new();
+        let audio = s.open_voice_route(None, None, null).expect("route");
+        let (reflector, link) = loopback_p25(audio);
+        s.p25_adopt(link).expect("adopt");
+        let _ = s.snapshot();
+        s.p25_disconnect();
+        let snap = s.snapshot();
+        assert_eq!(snap.status, CallStatus::Idle);
+        assert!(!snap.p25_active);
+        assert!(!snap.remote_ptt);
+        assert!(s.p25_state().is_none());
+        assert_eq!(s.active_network(), None);
+        assert!(s.p25_can_connect().is_ok(), "the route came back");
+        assert!(s.open_voice_route(None, None, null).is_ok());
+        reflector.shutdown();
+    }
+
+    /// Adopting without a reserved route is refused, and the link is torn
+    /// down rather than leaked.
+    #[cfg(feature = "p25")]
+    #[test]
+    fn p25_adopt_requires_a_reserved_route() {
+        let mut s = ConsoleSession::new();
+        let (rx_tx, _rx_rx) = std::sync::mpsc::channel::<astar_audio::RxFrame>();
+        let (_tx_tx, tx_rx) = std::sync::mpsc::channel::<Vec<i16>>();
+        let audio = astar_audio::CallAudio {
+            tx_frames: tx_rx,
+            rx_frames: rx_tx,
+            preroll_lead: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        };
+        let (reflector, link) = loopback_p25(audio);
+        assert!(matches!(
+            s.p25_adopt(link),
+            Err(ConsoleError::AlreadyConnected)
+        ));
+        assert!(s.p25_state().is_none());
+        reflector.shutdown();
+    }
+
+    #[test]
+    fn p25_available_reports_the_build() {
+        assert_eq!(p25_available(), cfg!(feature = "p25"));
+        assert_eq!(
+            ConsoleSession::new().snapshot().p25_available,
+            cfg!(feature = "p25")
+        );
+        assert_eq!(
+            ConsoleError::P25("x".into()).to_string(),
+            "p25: x",
+            "the Display form"
+        );
+    }
+
     // ── NXDN wiring (iax-b9c2 Task 5) ───────────────────────────────────
 
     /// A link that needs no dongle, riding the lane the console opened for

@@ -25,7 +25,8 @@ pub const HEARD_CAPACITY: usize = 8;
 pub struct HeardEntry {
     /// The callsign as heard on the wire, trimmed.
     pub callsign: String,
-    /// The app's `Network.rawValue`: `"m17"`, `"dstar"`, `"ysf"`, `"nxdn"`, `"dmr"`.
+    /// The app's `Network.rawValue`: `"m17"`, `"dstar"`, `"ysf"`, `"nxdn"`, `"dmr"`,
+    /// `"p25"`.
     pub network: &'static str,
     /// How long ago this station was LAST heard, measured at snapshot time:
     /// their most recent frame on the AMBE links, or the end of their over
@@ -49,7 +50,9 @@ struct Heard {
 /// How often it is touched depends on where the network puts the talker's
 /// name. The AMBE links (YSF, NXDN, DMR) carry it in every frame's header
 /// and already wrote their one-name last-heard slot per frame, so they note
-/// per frame too. M17 and D-Star note twice per stream — at its first packet
+/// per frame too. P25 names its talker once per superframe (record `0x66`)
+/// and notes them on every voice record after that, for the same reason.
+/// M17 and D-Star note twice per stream — at its first packet
 /// and at its end — which keeps a callsign decode and a mutex off their
 /// 20 ms receive path while still giving [`HeardEntry::age_ms`] the same
 /// meaning everywhere. Nothing here ever touches decoded audio.

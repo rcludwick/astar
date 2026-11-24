@@ -102,6 +102,7 @@ IAX_ERR_ECHOLINK = -24
 IAX_ERR_NOT_LEASED = -25  # renew on a source that holds no lease
 IAX_ERR_INVALID = -26  # an argument out of range (time-out, lease TTL, source id)
 IAX_ERR_PTT_LATCHED = -27  # press on a latched source: release it first
+IAX_ERR_P25 = -28  # P25: bad address/callsign, link failure, refused key, or not compiled
 
 # PTT source ids (mirror IAX_PTT_*). The radio is on air while any unlatched
 # source holds; this binding's set_ptt() is PTT_LEGACY.
@@ -289,6 +290,8 @@ class _IaxState(ctypes.Structure):
         ("nxdn_active", c_bool),  # an NXDN link is live (receive-only: never offer PTT)
         ("dmr_available", c_bool),  # dmr feature + a ThumbDV attached now (iax-d4f7)
         ("dmr_active", c_bool),  # a DMR link is live (receive-only: never offer PTT)
+        ("p25_available", c_bool),  # p25 feature compiled in (no hardware needed)
+        ("p25_active", c_bool),  # a P25 link is live (receive-only: never offer PTT)
         ("echolink_available", c_bool),  # this library was built with EchoLink
         ("echolink_active", c_bool),  # an EchoLink call or node-leg station is up
         ("echolink_logged_in", c_bool),  # logged in to the EchoLink directory
@@ -379,6 +382,8 @@ class Snapshot:
     nxdn_active: bool  # an NXDN link is currently live (receive-only: never key)
     dmr_available: bool  # dmr feature compiled in AND a ThumbDV attached now
     dmr_active: bool  # a DMR link is currently live (receive-only: never key)
+    p25_available: bool  # p25 feature compiled in (software IMBE, no dongle)
+    p25_active: bool  # a P25 link is live, or failed and not yet disconnected (receive-only)
     echolink_available: bool  # this library was built with its echolink feature
     echolink_active: bool  # an EchoLink call or node-leg station is up
     echolink_logged_in: bool  # logged in to the EchoLink directory
@@ -1177,6 +1182,8 @@ class Station:
             nxdn_active=bool(out.nxdn_active),
             dmr_available=bool(out.dmr_available),
             dmr_active=bool(out.dmr_active),
+            p25_available=bool(out.p25_available),
+            p25_active=bool(out.p25_active),
             echolink_available=bool(out.echolink_available),
             echolink_active=bool(out.echolink_active),
             echolink_logged_in=bool(out.echolink_logged_in),

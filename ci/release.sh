@@ -244,6 +244,7 @@ echo "     zensical.toml                    the footer version chip"
 echo "     Cargo.lock                       via cargo update -w"
 if [ "$SKIP_REFLECTORS" = 0 ]; then
   echo "     apps/macos/Resources/reflectors.json  via just reflectors"
+  echo "     apps/macos/Resources/allstar.json     via just reflectors"
 fi
 
 if [ "$DRY_RUN" = 1 ]; then
@@ -332,6 +333,11 @@ else
   just reflectors || fail_after_edits "just reflectors failed (network?)"
   # The snapshot is tracked, so a later failure has to name it in the undo.
   CHANGED_LIST="$CHANGED_LIST apps/macos/Resources/reflectors.json"
+  # `just reflectors` refreshes the AllStar node directory too; until
+  # 0.1.24-beta the release built the DMG from the fresh copy but left it
+  # out of the commit, so the tag and the shipped app disagreed.
+  [ -f apps/macos/Resources/allstar.json ] &&
+    CHANGED_LIST="$CHANGED_LIST apps/macos/Resources/allstar.json"
 fi
 
 # ---------------------------------------------------------------------------
@@ -376,6 +382,10 @@ done || fail_after_stage "git add of a crate manifest failed"
 if [ "$SKIP_REFLECTORS" = 0 ] && [ -f apps/macos/Resources/reflectors.json ]; then
   git add apps/macos/Resources/reflectors.json ||
     fail_after_stage "git add of the reflector snapshot failed"
+fi
+if [ "$SKIP_REFLECTORS" = 0 ] && [ -f apps/macos/Resources/allstar.json ]; then
+  git add apps/macos/Resources/allstar.json ||
+    fail_after_stage "git add of the AllStar directory snapshot failed"
 fi
 
 # Each of the three can fail on its own, and each leaves the tree in a

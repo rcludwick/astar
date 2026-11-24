@@ -67,6 +67,20 @@ public enum Network: String, CaseIterable, Codable, Sendable {
     /// talkgroup number names nothing on its own (TG 91 is a different room
     /// on every network that has one). `DmrDial` is where that is enforced.
     case dmr
+    /// P25 Phase 1 reflector linking, over G4KLX's P25Reflector protocol.
+    ///
+    /// Availability is a BUILD fact, like ``m17`` and ``echolink``: P25
+    /// Phase 1 voice is IMBE, which astar decodes in software, and no DVSI
+    /// stick astar supports can do IMBE at all. So the segment appears
+    /// whenever the engine was built with P25, dongle or no dongle.
+    ///
+    /// RECEIVE ONLY today, and IN TESTING (0.1.25-beta): the engine decodes
+    /// a reflector's clear calls and mutes encrypted ones, and has no
+    /// transmit path. See `CallSession.canTransmit` and `isInTesting`.
+    ///
+    /// The talkgroup a directory row names is a label only: a P25Reflector
+    /// relays one talkgroup, and nothing astar sends names it.
+    case p25
     /// EchoLink: calling one station, link, repeater or conference by node
     /// number or callsign, after logging in to the EchoLink directory.
     ///
@@ -88,7 +102,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
     /// not about the build.
     public static func available(
         m17: Bool, dstar: Bool = false, ysf: Bool = false, nxdn: Bool = false,
-        dmr: Bool = false, echolink: Bool = false
+        dmr: Bool = false, p25: Bool = false, echolink: Bool = false
     ) -> [Network] {
         var networks: [Network] = [.allstar]
         if m17 { networks.append(.m17) }
@@ -96,6 +110,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         if ysf { networks.append(.ysf) }
         if nxdn { networks.append(.nxdn) }
         if dmr { networks.append(.dmr) }
+        if p25 { networks.append(.p25) }
         if echolink { networks.append(.echolink) }
         return networks
     }
@@ -106,11 +121,12 @@ public enum Network: String, CaseIterable, Codable, Sendable {
     /// mirrors `available(m17:)`'s flag.
     public static func resolve(
         _ raw: String?, m17: Bool, dstar: Bool = false, ysf: Bool = false, nxdn: Bool = false,
-        dmr: Bool = false, echolink: Bool = false
+        dmr: Bool = false, p25: Bool = false, echolink: Bool = false
     ) -> Network {
         guard let raw, let network = Network(rawValue: raw),
             available(
-                m17: m17, dstar: dstar, ysf: ysf, nxdn: nxdn, dmr: dmr, echolink: echolink
+                m17: m17, dstar: dstar, ysf: ysf, nxdn: nxdn, dmr: dmr, p25: p25,
+                echolink: echolink
             ).contains(network)
         else { return .allstar }
         return network
@@ -126,6 +142,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         case .ysf: return "Fusion"
         case .nxdn: return "NXDN"
         case .dmr: return "DMR"
+        case .p25: return "P25"
         case .echolink: return "EchoLink"
         }
     }
@@ -141,6 +158,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         case .ysf: return "YSF"
         case .nxdn: return "NXDN"
         case .dmr: return "DMR"
+        case .p25: return "P25"
         case .echolink: return "ECHO"
         }
     }
@@ -157,6 +175,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         // Stacked planes: a DMR master carries two timeslots, and the target
         // names which one — the only network here where that is true.
         case .dmr: return "square.stack.3d.up"
+        case .p25: return "waveform.path"
         // Two people and a wave: EchoLink is a call to another station, not
         // a room on a reflector.
         case .echolink: return "person.2.wave.2"
@@ -188,6 +207,10 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         // which is the only way to reach a network the directory does not
         // list, TGIF included.
         case .dmr: return "Talkgroup, or system:host:port/talkgroup"
+        // The talkgroup is the directory's name for a row, and an address
+        // needs none: a P25Reflector serves one talkgroup, so `host:port`
+        // alone reaches it.
+        case .p25: return "Talkgroup, or host:port"
         // Either names a station in the directory's list: the callsign as it
         // is listed (`KX7ABC-L`, `*ECHOTEST*`), or the node number.
         case .echolink: return "Callsign or node number"
@@ -219,7 +242,7 @@ public enum Network: String, CaseIterable, Codable, Sendable {
             // `-` of a `-L`/`-R` suffix, and the stars around a conference
             // name. No space, no `/` and no `.` — nothing here is an address.
             return c.isASCII && (c.isLetter || c.isNumber || "-*".contains(c))
-        case .m17, .dstar, .ysf, .nxdn:
+        case .m17, .dstar, .ysf, .nxdn, .p25:
             // `host[:port]/module` or `host[:port] module`
             // (`ReflectorAddressDial`) — unlike the node networks, the space
             // is part of the grammar (the alternate separator), not something
@@ -246,9 +269,16 @@ public enum Network: String, CaseIterable, Codable, Sendable {
         case .allstar, .hamlink: return false
         // EchoLink names the far station in the call itself, and that
         // station is who is talking when the far end keys up.
-        case .m17, .dstar, .ysf, .nxdn, .dmr, .echolink: return true
+        // P25 carries the talker's radio ID in its link-control words.
+        case .m17, .dstar, .ysf, .nxdn, .dmr, .p25, .echolink: return true
         }
     }
+
+    /// Whether this network ships marked "In testing" — working, but new
+    /// enough that the picker and the status line say so rather than let it
+    /// pass for a settled network. P25 is the one today (Rob, 2026-11-23:
+    /// it ships in 0.1.25-beta in testing and receive only).
+    public var isInTesting: Bool { self == .p25 }
 
     /// Whether the DTMF dialpad disclosure applies — an AllStar concern;
     /// reflector networks will bring their own sections later.

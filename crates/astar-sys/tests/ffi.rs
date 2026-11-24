@@ -136,6 +136,8 @@ fn snapshot_fills_idle_state() {
         nxdn_active: true,
         dmr_available: true,
         dmr_active: true,
+        p25_available: true,
+        p25_active: true,
         echolink_available: false,
         echolink_active: true,
         echolink_logged_in: true,
@@ -172,6 +174,10 @@ fn snapshot_fills_idle_state() {
     // iax-d4f7: and for DMR. `dmr_available` is skipped for the same reason
     // again — one dongle, one probe, one answer.
     assert!(!state.dmr_active);
+    // P25: never live on a new station, and `p25_available` is only the
+    // build's feature, so it is pinned exactly (no hardware goes into it).
+    assert!(!state.p25_active);
+    assert_eq!(state.p25_available, cfg!(feature = "p25"));
     // Bluetooth PTT: a new station holds nothing, has latched nothing, has
     // never been forced off, and runs on the two-minute transmit time-out.
     // Every value is pre-poisoned above, so each assertion proves a write.
@@ -276,6 +282,8 @@ fn null_guards_return_err_null() {
         nxdn_active: false,
         dmr_available: false,
         dmr_active: false,
+        p25_available: false,
+        p25_active: false,
         echolink_available: false,
         echolink_active: false,
         echolink_logged_in: false,
@@ -443,6 +451,8 @@ fn mint_token_without_portal_is_portal_err() {
         nxdn_active: false,
         dmr_available: false,
         dmr_active: false,
+        p25_available: false,
+        p25_active: false,
         echolink_available: false,
         echolink_active: false,
         echolink_logged_in: false,
@@ -2235,6 +2245,8 @@ fn echolink_flags_are_false_on_a_fresh_station() {
         nxdn_active: false,
         dmr_available: false,
         dmr_active: false,
+        p25_available: false,
+        p25_active: false,
         // Pre-poisoned, to prove the snapshot overwrites them.
         echolink_available: !cfg!(feature = "echolink"),
         echolink_active: true,
@@ -2999,15 +3011,21 @@ fn bluetooth_press_without_lease_is_invalid() {
 /// `dtmf_total`, `dmr_active` and `mic_stopped` are pinned, so a field
 /// inserted mid-struct fails at its own line. The VOX loudness `f32`
 /// appended after them lands in that padding (164..168), so the size holds.
+///
+/// P25's two flags then went in right after `dmr_active` (134 and 135),
+/// moving the `EchoLink` and stopped-device run to 136..141. The `u32`s
+/// start at 144, `vox_db` sits at 168, and the size pads to 176.
 #[test]
 fn iax_state_size_grows_by_exactly_the_six_ptt_fields() {
     use std::mem::{offset_of, size_of};
-    const SIZE_BEFORE_PTT_FIELDS: usize = 140;
+    const SIZE_BEFORE_PTT_FIELDS: usize = 144;
     assert_eq!(iax_state_size(), size_of::<IaxState>());
-    assert_eq!(iax_state_size(), SIZE_BEFORE_PTT_FIELDS + 24 + 4);
+    assert_eq!(iax_state_size(), SIZE_BEFORE_PTT_FIELDS + 24 + 8);
     assert_eq!(offset_of!(IaxState, dtmf_total), 120);
     assert_eq!(offset_of!(IaxState, dmr_active), 133);
-    assert_eq!(offset_of!(IaxState, mic_stopped), 138);
+    assert_eq!(offset_of!(IaxState, p25_available), 134);
+    assert_eq!(offset_of!(IaxState, p25_active), 135);
+    assert_eq!(offset_of!(IaxState, mic_stopped), 140);
     let first = offset_of!(IaxState, ptt_sources);
     assert_eq!(first, SIZE_BEFORE_PTT_FIELDS);
     assert_eq!(offset_of!(IaxState, ptt_latched), first + 4);

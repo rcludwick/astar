@@ -26,7 +26,7 @@ astar-ysf = { path = "../astar-ysf" }
 # `nxdn.rs` — two 49-bit AMBE+2 frames per 14-byte block, at bit offsets 0
 # and 49 — was read out of other people's implementations, so it is exactly
 # the code that must be under test on every `just ci` run.
-astar-nxdn = { path = "../astar-nxdn", version = "0.1.24-beta" }
+astar-nxdn = { path = "../astar-nxdn", version = "0.1.25-beta" }
 # DMR protocol primitives. Same reasoning as `astar-ysf` and `astar-nxdn`
 # above: pure protocol, no licensing question, and deliberately NOT behind a
 # feature. `dmr.rs`'s rate word and 72-bit frame layout were read out of
@@ -34,7 +34,7 @@ astar-nxdn = { path = "../astar-nxdn", version = "0.1.24-beta" }
 # AMBE-3000 answers a wrongly-configured link with confident noise rather
 # than an error — so that byte layout must be under test on every `just ci`
 # run, not behind a flag nobody turns on.
-astar-dmr = { path = "../astar-dmr", version = "0.1.24-beta" }
+astar-dmr = { path = "../astar-dmr", version = "0.1.25-beta" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 codec2 = { workspace = true, optional = true }
@@ -44,6 +44,9 @@ ambe-thumbdv = { path = "../../vendor/ambe-thumbdv", optional = true }
 # Vendored LGPL-3.0-or-later D-Star AMBE vocoder (Bruce Perens) — see
 # vendor/ham-digital-modes-ambe/VENDORED.md and LICENSE-EXCEPTIONS.md §9.
 ham-digital-modes-ambe = { workspace = true, optional = true }
+# Vendored GPL-3.0-or-later P25 IMBE vocoder (Pavel Yazev, ported to Rust) —
+# see vendor/imbe-vocoder/VENDORED.md and LICENSE-EXCEPTIONS.md §15.
+imbe-vocoder = { workspace = true, optional = true }
 # GSM 06.10 full-rate (EchoLink's voice codec, and IAX2's GSM format):
 # pure-Rust, MIT, `#![deny(unsafe_code)]`, no build script. Pinned exactly —
 # the 0.0.6–0.0.8 releases carried a libgsm-derived licence and are yanked,
@@ -85,6 +88,20 @@ ambe-hw = ["dep:ambe-thumbdv"]
 # `cargo tree -p astar-codec` (no ham-digital-modes-ambe) vs
 # `--features dstar-soft-ambe`.
 dstar-soft-ambe = ["ambe-hw", "dep:ham-digital-modes-ambe"]
+# LICENSING + PATENTS: the software IMBE vocoder for P25 PHASE 1 ONLY
+# (Pavel Yazev's fixed-point imbe_vocoder from OP25, ported to Rust,
+# GPL-3.0-or-later; vendor/imbe-vocoder). Rob, 2026-11-21: software IMBE
+# only, because no DVSI stick astar supports can do P25 full rate, and every
+# patent that reads on full-rate IMBE has expired (LICENSE-EXCEPTIONS.md §15).
+# Not a cargo default, for the reason codec2-static and dstar-soft-ambe are
+# not: a plain `cargo build` links no GPL code. The macOS app turns it on
+# through the network feature `p25` (build-xcframework.sh, unless
+# ASTAR_P25_SOFT_IMBE=0); astar-server and astar-netrec do not carry it.
+# P25 Phase 2 is AMBE+2 (US 8,359,197 until 2028-05-20) and is not here:
+# the vendored crate contains no AMBE+2 code. Verify with
+# `cargo tree -p astar-codec` (no imbe-vocoder) vs
+# `--features p25-soft-imbe`, and ci/guard-p25-imbe.sh.
+p25-soft-imbe = ["dep:imbe-vocoder"]
 
 [dev-dependencies]
 # `tests/gsm_etsi.rs` checks the ETSI vectors against ETSI-SHA256SUMS.

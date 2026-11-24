@@ -1,0 +1,37 @@
+[package]
+# NOTE (astar): this crate is a Rust port of Pavel Yazev's P25 IMBE vocoder
+# (the `imbe_vocoder` directory of OP25, GPL-3.0-or-later; see VENDORED.md).
+# `license`, `version`, `edition` and `repository` are deliberately
+# hard-coded, never inherited from the workspace: this crate is a
+# GPL-3.0-or-later island inside an AGPL-3.0-only workspace, and
+# `license.workspace = true` would silently relicense it. It is also listed in
+# the workspace's `exclude` and has its own empty `[workspace]` below, so it
+# builds with its own edition and none of astar's lints; `just imbe-check`
+# formats, lints and tests it instead.
+name = "imbe-vocoder"
+# astar's own version of the port; the upstream commit it follows is in
+# VENDORED.md.
+version = "0.1.0"
+description = "P25 Phase 1 full-rate IMBE vocoder: a bit-exact Rust port of Pavel Yazev's fixed-point imbe_vocoder from OP25"
+authors = ["Pavel Yazev", "Rob Ludwick (Rust port)"]
+license = "GPL-3.0-or-later"
+edition = "2024"
+repository = "https://github.com/boatbod/op25"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+# No dependencies: the vocoder uses `core` arithmetic only.
+
+# astar: an empty workspace table makes this crate its own workspace root, so
+# Cargo never adopts it into an enclosing workspace (see VENDORED.md).
+[workspace]
+
+# astar: the no-panic sweeps decode 200,000 hostile frames. Optimising the
+# test build keeps them to seconds; overflow checks and debug assertions stay
+# on (the dev and test profiles' default), so an arithmetic overflow anywhere
+# in the port still fails them. This applies only when the island is built
+# on its own (`just imbe-check`), never to astar's own builds.
+[profile.test]
+opt-level = 2

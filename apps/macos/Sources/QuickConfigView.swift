@@ -45,6 +45,12 @@
         @State private var selectedOutput: String?
         @State private var inputGain: Double = 0.90
         @State private var outputGain: Double = 1.0
+        /// The speaker monitor's device (`nil` = Off) and volume.
+        @State private var selectedMonitor: String?
+        @State private var monitorGain: Double = 1.0
+        /// Set when a change of Out cleared the monitor, because Out became
+        /// the monitor's own device; cleared when a monitor is chosen again.
+        @State private var monitorTurnedOff = false
         @State private var deviceError: String?
         /// True while a VOX "Test" is running: the mic monitor is held open and the
         /// Audio Level bar streams the live mic magnitude. Toggled by the Test button;
@@ -208,6 +214,11 @@
                         persistGains()
                     }
                     .padding(.bottom, 8)
+                    // The speaker monitor: a listen-only copy of what goes to
+                    // Out, on a second device. Under Out and its volume, so
+                    // the two outputs read as a pair.
+                    monitorRow
+                        .padding(.bottom, 8)
                     switchRow("RX compression", isOn: rxCompressionBinding)
                     if session.rxCompression {
                         HStack(spacing: 8) {
@@ -315,6 +326,7 @@
             .onAppear {
                 load()
                 trackDeviceReadiness()
+                session.refreshMonitorState()
             }
             .onDisappear { deviceMonitor.stopTrackingReadiness() }
             // Probing during a call would be waste: the engine holds the
@@ -610,13 +622,96 @@
             }
         }
 
+        /// The Monitor row: "Off" first, then every output except Out's
+        /// device, and a volume slider while a device is chosen. Unlike In
+        /// and Out it stays live during a call: the engine opens and closes
+        /// the monitor's stream on its own, without touching the call's.
+        @ViewBuilder
+        private var monitorRow: some View {
+            let choices = AudioDeviceList.selectable(
+                from: MonitorPickerModel.choices(
+                    outputs: deviceMonitor.outputs, currentOutput: selectedOutput))
+            // A saved monitor that is unplugged still needs a row, or the
+            // picker would show a blank selection.
+            let missing = selectedMonitor.flatMap { choices.contains($0) ? nil : $0 }
+            let unavailable = monitorUnavailableReason
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    label("Monitor")
+                    Picker("Monitor", selection: $selectedMonitor) {
+                        Text("Off").tag(String?.none)
+                        if !choices.isEmpty || missing != nil { Divider() }
+                        ForEach(choices, id: \.self) { name in
+                            Text(name).tag(String?.some(name))
+                        }
+                        if let missing {
+                            Text("\(missing) (not connected)").tag(String?.some(missing))
+                        }
+                    }
+                    .labelsHidden()
+                    .onChange(of: selectedMonitor) { _ in applyMonitor() }
+                    .help(Self.monitorHelp)
+                    .accessibilityHint(Self.monitorHelp)
+                    if selectedMonitor != nil && session.monitorMuted {
+                        MonitorMutedTag()
+                    }
+                    if unavailable != nil {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                            .font(.caption)
+                            .help(unavailable ?? "")
+                            .accessibilityLabel("Monitor unavailable")
+                    }
+                }
+                // One caption at most, in the same slot as Out's notes.
+                if monitorTurnedOff {
+                    Text("Monitor turned off: it was the same device as the output.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if let unavailable {
+                    Text("Monitor unavailable: \(unavailable)")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if selectedMonitor != nil {
+                gainSlider(
+                    "Volume", tint: .green, range: 0...4, value: $monitorGain,
+                    subordinate: true, accessibilityLabel: "Monitor volume"
+                ) {
+                    try? session.setMonitorGain(Float($0))
+                    persistGains()
+                }
+                .padding(.top, 4)
+            }
+        }
+
+        private static let monitorHelp =
+            "Plays a copy of what goes to Out on a second device, such as this Mac's "
+            + "speaker. Your own microphone is never in it."
+
+        /// The reason the chosen monitor cannot play, or `nil`. Read from the
+        /// state the meters' poll tick refreshes.
+        private var monitorUnavailableReason: String? {
+            guard selectedMonitor != nil, case .unavailable(let reason) = session.monitorState
+            else { return nil }
+            return reason
+        }
+
+        /// A gain slider with its percent readout. `subordinate` gives it the
+        /// grey sub-row label (the Monitor's Volume under its picker), and
+        /// `accessibilityLabel` names it when the visible title alone is
+        /// ambiguous.
         private func gainSlider(
             _ title: String, tint: Color, range: ClosedRange<Double> = 0...2,
-            value: Binding<Double>,
+            value: Binding<Double>, subordinate: Bool = false,
+            accessibilityLabel: String? = nil,
             apply: @escaping (Double) -> Void
         ) -> some View {
             HStack(spacing: 8) {
-                label(title)
+                if subordinate { sublabel(title) } else { label(title) }
                 Slider(value: value, in: range) { editing in
                     if !editing { apply(value.wrappedValue) }
                 }
@@ -624,7 +719,7 @@
                 // astar-a9c3 F3: unlabeled sliders read as a bare percent-of-range
                 // to VoiceOver — name it and report the same value the visible
                 // readout shows, in words.
-                .accessibilityLabel(title)
+                .accessibilityLabel(accessibilityLabel ?? title)
                 .accessibilityValue(AccessibilityValueFormatter.percent(value.wrappedValue))
                 Text(value.wrappedValue, format: .percent.precision(.fractionLength(0)))
                     .font(.caption.monospacedDigit())
@@ -937,6 +1032,8 @@
             selectedOutput = s.output
             inputGain = Double(s.inputGain)
             outputGain = Double(s.outputGain)
+            selectedMonitor = s.monitor
+            monitorGain = Double(s.monitorGain)
         }
 
         /// Re-read the persisted devices + gains after a Setup applied them.
@@ -946,6 +1043,8 @@
             selectedOutput = s.output
             inputGain = Double(s.inputGain)
             outputGain = Double(s.outputGain)
+            selectedMonitor = s.monitor
+            monitorGain = Double(s.monitorGain)
             deviceError = nil
         }
 
@@ -974,7 +1073,15 @@
 
         private func applyDevices() {
             do {
-                try session.selectDevices(input: selectedInput, output: selectedOutput)
+                // `true` means Out is now the monitor's own device, so the
+                // session turned the monitor off (saved and live). Say why.
+                if try session.selectDevices(input: selectedInput, output: selectedOutput) {
+                    selectedMonitor = nil
+                    monitorTurnedOff = true
+                    AccessibilityAnnouncer.post(
+                        "Monitor turned off: it was the same device as the output.",
+                        priority: .medium)
+                }
                 // re-assert filter on the new lane
                 session.applyMicProfile(id: session.micProfileID)
                 deviceError = nil
@@ -994,7 +1101,28 @@
             var s = store.load()
             s.inputGain = Float(inputGain)
             s.outputGain = Float(outputGain)
+            s.monitorGain = Float(monitorGain)
             store.save(s)
+        }
+
+        /// Apply the Monitor picker live, save it, and write it into the
+        /// active config, the way `applyDevices` does for In and Out.
+        ///
+        /// A selection that already matches the saved one is a re-sync
+        /// (load, a config applied elsewhere, or the session clearing the
+        /// monitor itself), not a pick, so it only refreshes the state.
+        private func applyMonitor() {
+            if selectedMonitor != nil { monitorTurnedOff = false }
+            var s = store.load()
+            if s.monitor != selectedMonitor {
+                // A device that cannot open right now still counts as chosen;
+                // the engine keeps it and `monitorState` says why it is silent.
+                try? session.selectMonitor(selectedMonitor)
+                s.monitor = selectedMonitor
+                store.save(s)
+                setups.setActiveMonitor(selectedMonitor)
+            }
+            session.refreshMonitorState()
         }
     }
 

@@ -18,6 +18,7 @@ use astar_record::tap::{PcmChunk, Tap, TapSlot};
 
 use crate::meter::peak;
 use crate::mixer::{Mixer, RxFrame, RxJitterConfig, RxJitterSettings};
+use crate::monitor_out::{MONITOR_TAP_CAPACITY, MonitorOutput};
 use crate::spectrum::SpectrumAnalyzer;
 use crate::{
     AudioBackend, AudioError, Compressor, CompressorParams, DenoiseChain, DenoiseMode,
@@ -173,18 +174,108 @@ pub enum HeardConsumer {
     Record,
     /// The SSTV picture decoder.
     Sstv,
+    /// The speaker monitor: a listen-only copy played on a second device
+    /// ([`AudioRouter::set_monitor`]).
+    Monitor,
 }
 
 impl HeardConsumer {
     /// How many consumers there are (the length of a bus's slot array).
-    pub const COUNT: usize = 2;
+    pub const COUNT: usize = 3;
     /// Every consumer, in slot order.
-    pub const ALL: [Self; Self::COUNT] = [Self::Record, Self::Sstv];
+    pub const ALL: [Self; Self::COUNT] = [Self::Record, Self::Sstv, Self::Monitor];
 
     const fn index(self) -> usize {
         match self {
             Self::Record => 0,
             Self::Sstv => 1,
+            Self::Monitor => 2,
+        }
+    }
+}
+
+/// What the speaker monitor is doing ([`AudioRouter::monitor_state`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MonitorState {
+    /// No monitor device is chosen, or none is open because no output bus
+    /// is (it opens with the next one).
+    Off,
+    /// The monitor stream is open and playing the output's audio.
+    Playing,
+    /// A monitor device is chosen but cannot play: why, in words.
+    Unavailable(String),
+}
+
+/// What [`AudioRouter::set_monitor`] did.
+#[must_use = "drop `closed` outside your locks; check `opened`"]
+pub struct MonitorChange {
+    /// The monitor stream the change closed, if one was open. Dropping or
+    /// stopping it closes the stream, which can stall briefly on `CoreAudio`,
+    /// so a caller holding a lock carries it out first.
+    pub closed: Option<Box<dyn StreamHandle>>,
+    /// `Ok` when the new choice opened, or will open with the next bus, or
+    /// was refused as the output's own device (see
+    /// [`AudioRouter::monitor_state`]). An error from resolving or opening
+    /// the device otherwise.
+    pub opened: Result<(), AudioError>,
+}
+
+/// Two stream handles closed as one: the last output bus and the speaker
+/// monitor that closes with it ([`AudioRouter::close_output`]).
+struct HandleBundle {
+    main: Box<dyn StreamHandle>,
+    extra: Box<dyn StreamHandle>,
+}
+
+impl StreamHandle for HandleBundle {
+    fn stop(self: Box<Self>) {
+        self.main.stop();
+        self.extra.stop();
+    }
+    fn pause(&self) -> Result<(), AudioError> {
+        let extra = self.extra.pause();
+        self.main.pause().and(extra)
+    }
+    fn resume(&self) -> Result<(), AudioError> {
+        let extra = self.extra.resume();
+        self.main.resume().and(extra)
+    }
+    fn failure(&self) -> Option<String> {
+        self.main.failure()
+    }
+}
+
+/// Why a monitor that would share its device with an output is not opened.
+pub const MONITOR_SAME_DEVICE: &str = "same device as the output";
+
+/// The router's speaker-monitor state: the chosen device, the controls the
+/// audio thread reads, and the open stream, if any.
+struct MonitorSlot {
+    /// The chosen device (a device id, as outputs take it); `None` is off.
+    device: Option<String>,
+    /// Monitor gain (f32 bits, `0.0..=4.0`, default 1.0), shared with every
+    /// [`MonitorOutput`] this router opens so it survives a reopen.
+    gain: Arc<AtomicU32>,
+    /// Monitor mute, shared the same way.
+    muted: Arc<AtomicBool>,
+    /// The open monitor stream.
+    handle: Option<Box<dyn StreamHandle>>,
+    /// Why the chosen monitor is not open, when it could not be.
+    refused: Option<String>,
+    /// The config of the last output bus opened, which the monitor reuses
+    /// when it is chosen mid-call.
+    config: Option<StreamConfig>,
+}
+
+impl Default for MonitorSlot {
+    fn default() -> Self {
+        Self {
+            device: None,
+            gain: Arc::new(AtomicU32::new(1.0_f32.to_bits())),
+            muted: Arc::new(AtomicBool::new(false)),
+            handle: None,
+            refused: None,
+            config: None,
         }
     }
 }
@@ -270,6 +361,8 @@ pub struct AudioRouter {
     /// a bus or lane opened later gets them too.
     heard_taps: [Option<Tap<PcmChunk>>; HeardConsumer::COUNT],
     sent_tap: Option<Tap<PcmChunk>>,
+    /// The speaker monitor.
+    monitor: MonitorSlot,
 }
 
 impl AudioRouter {
@@ -283,8 +376,9 @@ impl AudioRouter {
             outputs: HashMap::new(),
             rx_jitter: Arc::new(RxJitterSettings::default()),
             shrink_hold: Arc::new(AtomicBool::new(false)),
-            heard_taps: [None, None],
+            heard_taps: [None, None, None],
             sent_tap: None,
+            monitor: MonitorSlot::default(),
         }
     }
 
@@ -732,12 +826,29 @@ impl AudioRouter {
     /// the handle comes back rather than being dropped here). `None` if the
     /// bus isn't open OR still has a lane on it — a bus shared with another
     /// call must not be pulled from under it.
+    ///
+    /// Closing the last bus also closes the speaker monitor's stream; the
+    /// returned handle then carries both, and dropping or stopping it closes
+    /// both. Its `failure` is the bus's.
     #[must_use]
     pub fn close_output(&mut self, out: &OutputId) -> Option<Box<dyn StreamHandle>> {
         if self.bus_call_count(out) != 0 {
             return None;
         }
-        self.outputs.remove(out).map(|slot| slot.handle)
+        let handle = self.outputs.remove(out).map(|slot| slot.handle)?;
+        self.reap_failed_monitor();
+        if self.outputs.is_empty() {
+            // The monitor plays only while some bus does. Its stream goes
+            // back with the bus's, in one handle, so the caller drops both
+            // outside its locks.
+            if let Some(monitor) = self.close_monitor_stream() {
+                return Some(Box::new(HandleBundle {
+                    main: handle,
+                    extra: monitor,
+                }));
+            }
+        }
+        Some(handle)
     }
 
     /// Open the output bus for `out` if it isn't already open.
@@ -747,6 +858,9 @@ impl AudioRouter {
     /// every later call without a speaker. One still carrying a call is left
     /// alone — reopening it would drop that call's mixer lane.
     fn ensure_output(&mut self, out: &OutputId, config: StreamConfig) -> Result<(), AudioError> {
+        // Before the bus copies the heard taps, so a new bus never gets a
+        // dead monitor's tap.
+        self.reap_failed_monitor();
         if let Some(slot) = self.outputs.get(out) {
             if slot.handle.failure().is_none() || self.bus_call_count(out) != 0 {
                 return Ok(());
@@ -754,6 +868,17 @@ impl AudioRouter {
             self.outputs.remove(out);
         }
         let out_dev = self.resolve(out.as_str(), Direction::Output)?;
+        if self.monitor.device.as_deref() == Some(out_dev.id.as_str()) {
+            // The bus is taking the monitor's device: the monitor gives way
+            // before the bus opens, so the device never has both streams.
+            // Stopped here rather than handed back, because nothing on this
+            // path returns a handle, and this call is about to block on
+            // opening the same device anyway.
+            if let Some(monitor) = self.close_monitor_stream() {
+                monitor.stop();
+            }
+            self.monitor.refused = Some(MONITOR_SAME_DEVICE.to_string());
+        }
         let mixer = Arc::new(Mutex::new(
             Mixer::new()
                 .with_settings(Arc::clone(&self.rx_jitter))
@@ -784,7 +909,179 @@ impl AudioRouter {
                 heard,
             },
         );
+        self.monitor.config = Some(config);
+        // The monitor opens with the bus. Its failure is its own: it is
+        // recorded in the monitor's state and never fails the bus.
+        let _ = self.open_monitor_stream();
         Ok(())
+    }
+
+    /// Choose the speaker monitor's device (a device id, as outputs take
+    /// it); `None` turns the monitor off. The monitor plays a listen-only
+    /// copy of every output bus's heard audio on that device.
+    ///
+    /// Opens the stream now if any output bus is open, otherwise when the
+    /// next bus opens; it closes when the last bus closes. If `device` is
+    /// the device of an open bus, the monitor is not opened and its state
+    /// is `Unavailable("same device as the output")`.
+    ///
+    /// The returned [`MonitorChange`] carries the monitor stream this call
+    /// closed, to be dropped outside the caller's locks (as with
+    /// [`Self::close_output`]), and whether the new choice opened: an error
+    /// from resolving or opening the device when it opens now. The choice is
+    /// kept either way, and the state reports the error as
+    /// [`MonitorState::Unavailable`].
+    pub fn set_monitor(&mut self, device: Option<&str>) -> MonitorChange {
+        let unchanged = self.monitor.device.as_deref() == device;
+        let healthy = self
+            .monitor
+            .handle
+            .as_ref()
+            .is_some_and(|h| h.failure().is_none());
+        if unchanged && (healthy || device.is_none()) {
+            return MonitorChange {
+                closed: None,
+                opened: Ok(()),
+            };
+        }
+        let closed = self.close_monitor_stream();
+        self.monitor.device = device.map(str::to_string);
+        let opened = self.open_monitor_stream();
+        MonitorChange { closed, opened }
+    }
+
+    /// Set the monitor's volume: `0.0..=4.0` (clamped; NaN reads as 0),
+    /// default 1.0. Applies live and to every later monitor stream.
+    pub fn set_monitor_gain(&self, gain: f32) {
+        let g = if gain.is_nan() {
+            0.0
+        } else {
+            gain.clamp(0.0, 4.0)
+        };
+        self.monitor.gain.store(g.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The monitor's volume, as clamped.
+    #[must_use]
+    pub fn monitor_gain(&self) -> f32 {
+        f32::from_bits(self.monitor.gain.load(Ordering::Relaxed))
+    }
+
+    /// Mute or unmute the monitor (default unmuted). A muted monitor keeps
+    /// its stream open and keeps draining, so unmuting is instant.
+    pub fn set_monitor_muted(&self, muted: bool) {
+        self.monitor.muted.store(muted, Ordering::Relaxed);
+    }
+
+    /// Whether the monitor is muted.
+    #[must_use]
+    pub fn monitor_muted(&self) -> bool {
+        self.monitor.muted.load(Ordering::Relaxed)
+    }
+
+    /// What the monitor is doing. A monitor stream that stopped for good (its
+    /// device unplugged) reads as [`MonitorState::Unavailable`] with the
+    /// stream's reason; the output buses are untouched by it.
+    ///
+    /// Noticing a failed stream here also takes its tap off every open bus,
+    /// so no bus keeps building chunks for a receiver nobody drains.
+    #[must_use]
+    pub fn monitor_state(&self) -> MonitorState {
+        if self.monitor_failed() {
+            for slot in self.outputs.values() {
+                slot.heard[HeardConsumer::Monitor.index()].set(None);
+            }
+        }
+        if self.monitor.device.is_none() {
+            return MonitorState::Off;
+        }
+        if let Some(why) = &self.monitor.refused {
+            return MonitorState::Unavailable(why.clone());
+        }
+        match &self.monitor.handle {
+            Some(h) => h
+                .failure()
+                .map_or(MonitorState::Playing, MonitorState::Unavailable),
+            None => MonitorState::Off,
+        }
+    }
+
+    /// Open the monitor stream if a device is chosen, a bus is open and the
+    /// stream is not already playing. Records any refusal or failure in
+    /// `monitor.refused`.
+    fn open_monitor_stream(&mut self) -> Result<(), AudioError> {
+        let Some(device) = self.monitor.device.clone() else {
+            return Ok(());
+        };
+        let Some(config) = self.monitor.config.filter(|_| !self.outputs.is_empty()) else {
+            return Ok(());
+        };
+        if let Some(h) = &self.monitor.handle {
+            if h.failure().is_none() {
+                return Ok(());
+            }
+            // Stopped for good: a new bus is a chance to try again. The dead
+            // stream has no device left to release, so it stops at once.
+            if let Some(dead) = self.close_monitor_stream() {
+                dead.stop();
+            }
+        }
+        self.monitor.refused = None;
+        let dev = match self.resolve(&device, Direction::Output) {
+            Ok(dev) => dev,
+            Err(e) => {
+                self.monitor.refused = Some(e.to_string());
+                return Err(e);
+            }
+        };
+        if self.outputs.keys().any(|o| o.as_str() == dev.id.as_str()) {
+            self.monitor.refused = Some(MONITOR_SAME_DEVICE.to_string());
+            return Ok(());
+        }
+        let (tap, rx) = astar_record::tap::tap_channel(MONITOR_TAP_CAPACITY);
+        let source = MonitorOutput::new(
+            config.sample_rate,
+            rx,
+            Arc::clone(&self.monitor.gain),
+            Arc::clone(&self.monitor.muted),
+        );
+        match self.backend.open_output(&dev, config, Box::new(source)) {
+            Ok(handle) => {
+                self.monitor.handle = Some(handle);
+                self.set_heard_tap(HeardConsumer::Monitor, Some(tap));
+                Ok(())
+            }
+            Err(e) => {
+                self.monitor.refused = Some(e.to_string());
+                Err(e)
+            }
+        }
+    }
+
+    /// Close the monitor stream and remove its tap; the chosen device stays.
+    /// Hands back the stream's handle rather than stopping it, so a caller
+    /// can drop it outside its locks.
+    #[must_use]
+    fn close_monitor_stream(&mut self) -> Option<Box<dyn StreamHandle>> {
+        self.set_heard_tap(HeardConsumer::Monitor, None);
+        self.monitor.refused = None;
+        self.monitor.handle.take()
+    }
+
+    /// Whether the monitor stream is open but has stopped for good.
+    fn monitor_failed(&self) -> bool {
+        self.monitor
+            .handle
+            .as_ref()
+            .is_some_and(|h| h.failure().is_some())
+    }
+
+    /// Take a failed monitor's tap off every bus and out of the taps later
+    /// buses get. The dead handle stays, so the state keeps its reason.
+    fn reap_failed_monitor(&mut self) {
+        if self.monitor_failed() {
+            self.set_heard_tap(HeardConsumer::Monitor, None);
+        }
     }
 
     /// Open the mic lane for `mic` if it isn't already open.
@@ -3935,11 +4232,13 @@ mod tests {
 
     #[test]
     fn heard_taps_fan_out_to_record_and_sstv() {
-        let (mut bus, _call) = busy_bus(5);
+        let (mut bus, _call) = busy_bus(7);
         let (record_tap, record) = astar_record::tap::tap_channel(16);
         let (sstv_tap, sstv) = astar_record::tap::tap_channel(16);
+        let (monitor_tap, monitor) = astar_record::tap::tap_channel(16);
         bus.heard_tap(HeardConsumer::Record).set(Some(record_tap));
         bus.heard_tap(HeardConsumer::Sstv).set(Some(sstv_tap));
+        bus.heard_tap(HeardConsumer::Monitor).set(Some(monitor_tap));
         let mut fed = Vec::new();
         for _ in 0..5 {
             let mut out = [0.0_f32; 160];
@@ -3947,12 +4246,16 @@ mod tests {
             assert_eq!(n, 160);
             fed.push(quantised(&out[..n]));
         }
-        let record = drain(&record);
-        let sstv = drain(&sstv);
-        assert_eq!(record.len(), 5);
-        assert_eq!(record, sstv, "both consumers hear the same chunks");
+        let recorded = drain(&record);
+        let decoded = drain(&sstv);
+        assert_eq!(recorded.len(), 5);
+        assert_eq!(recorded, decoded, "both consumers hear the same chunks");
+        assert_eq!(recorded, drain(&monitor), "and so does the monitor");
         assert_eq!(
-            record.iter().map(|c| c.samples.clone()).collect::<Vec<_>>(),
+            recorded
+                .iter()
+                .map(|c| c.samples.clone())
+                .collect::<Vec<_>>(),
             fed,
             "and they are what the device was fed"
         );
@@ -3960,6 +4263,23 @@ mod tests {
             bus.chunks_built, 5,
             "one chunk built per read, not per slot"
         );
+
+        // The monitor's slot is its own: clearing it leaves the others
+        // hearing, and clearing them leaves it hearing.
+        bus.heard_tap(HeardConsumer::Monitor).set(None);
+        let mut out = [0.0_f32; 160];
+        assert_eq!(crate::OutputSource::read(&mut bus, &mut out), 160);
+        assert_eq!(drain(&record).len(), 1);
+        assert_eq!(drain(&sstv).len(), 1);
+        assert!(drain(&monitor).is_empty(), "the monitor was cleared");
+        let (monitor_tap, monitor) = astar_record::tap::tap_channel(16);
+        bus.heard_tap(HeardConsumer::Monitor).set(Some(monitor_tap));
+        bus.heard_tap(HeardConsumer::Record).set(None);
+        bus.heard_tap(HeardConsumer::Sstv).set(None);
+        assert_eq!(crate::OutputSource::read(&mut bus, &mut out), 160);
+        assert_eq!(drain(&record), []);
+        assert_eq!(drain(&sstv), []);
+        assert_eq!(drain(&monitor).len(), 1, "the monitor alone still hears");
     }
 
     #[test]
@@ -4398,5 +4718,351 @@ mod tests {
             .expect("second call joins");
         assert_eq!(*opened.lock().unwrap(), vec!["output"]);
         assert_eq!(router.bus_call_count(&out), 2);
+    }
+
+    // ---- Speaker monitor ----------------------------------------------------
+
+    /// Two outputs (`out:test`, the main one, and `out:mon`, the monitor),
+    /// with every opened source kept per device so a test can pull either,
+    /// and a failure cell per device so a test can stop one.
+    #[derive(Clone, Default)]
+    struct MonBackend {
+        sources: Arc<Mutex<HashMap<String, Box<dyn OutputSource>>>>,
+        failures: Arc<Mutex<HashMap<String, FailureCell>>>,
+        opened: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl MonBackend {
+        fn pull(&self, device: &str, n: usize) -> Vec<f32> {
+            let mut out = vec![0.0_f32; n];
+            if let Some(src) = self.sources.lock().unwrap().get_mut(device) {
+                src.read(&mut out);
+            }
+            out
+        }
+        fn fail(&self, device: &str, why: &str) {
+            *self.failures.lock().unwrap()[device].lock().unwrap() = Some(why.into());
+        }
+        fn opened(&self) -> Vec<String> {
+            self.opened.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::AudioBackend for MonBackend {
+        fn devices(&self) -> Result<Vec<crate::DeviceInfo>, AudioError> {
+            let dev = |dir, tag: &str| crate::DeviceInfo {
+                id: crate::DeviceId::new(tag.to_string()),
+                name: tag.to_string(),
+                direction: dir,
+                channels: 1,
+                native_sample_rates: vec![8_000],
+            };
+            Ok(vec![
+                dev(Direction::Input, "in:test"),
+                dev(Direction::Output, "out:test"),
+                dev(Direction::Output, "out:mon"),
+            ])
+        }
+        fn default_input(&self) -> Option<crate::DeviceInfo> {
+            None
+        }
+        fn default_output(&self) -> Option<crate::DeviceInfo> {
+            None
+        }
+        fn open_input(
+            &self,
+            _d: &crate::DeviceInfo,
+            _c: StreamConfig,
+            _sink: Box<dyn InputSink>,
+            _overruns: Arc<AtomicU64>,
+        ) -> Result<Box<dyn StreamHandle>, AudioError> {
+            Ok(Box::new(FlagHandle {
+                failure: FailureCell::default(),
+            }))
+        }
+        fn open_output(
+            &self,
+            d: &crate::DeviceInfo,
+            _c: StreamConfig,
+            s: Box<dyn OutputSource>,
+        ) -> Result<Box<dyn StreamHandle>, AudioError> {
+            let id = d.id.as_str().to_string();
+            self.opened.lock().unwrap().push(id.clone());
+            self.sources.lock().unwrap().insert(id.clone(), s);
+            let failure = FailureCell::default();
+            self.failures
+                .lock()
+                .unwrap()
+                .insert(id, Arc::clone(&failure));
+            Ok(Box::new(FlagHandle { failure }))
+        }
+    }
+
+    fn mon_router() -> (AudioRouter, MonBackend) {
+        let backend = MonBackend::default();
+        (AudioRouter::new(Box::new(backend.clone())), backend)
+    }
+
+    /// 20 ms of audio with no zero sample, so silence in the monitor's
+    /// output can only be its own.
+    fn nonzero_frame(k: usize) -> Vec<i16> {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        (0..160)
+            .map(|i| 1_000 + ((k * 160 + i) * 37 % 4_000) as i16)
+            .collect()
+    }
+
+    #[test]
+    fn monitor_gets_exactly_the_bus_samples() {
+        let (mut router, backend) = mon_router();
+        router.set_monitor(Some("out:mon")).opened.unwrap();
+        router.set_monitor_gain(0.5);
+        let (record_tap, record) = astar_record::tap::tap_channel(1_024);
+        router.set_heard_tap(HeardConsumer::Record, Some(record_tap));
+        let (call, _, _) = router
+            .open_monitor_call(&OutputId::new("out:test"), StreamConfig::default())
+            .expect("bus opens");
+        assert_eq!(router.monitor_state(), MonitorState::Playing);
+        let mut played = Vec::new();
+        for k in 0..200 {
+            call.rx_frames
+                .send(RxFrame::from(nonzero_frame(k)))
+                .unwrap();
+            backend.pull("out:test", 160);
+            played.extend(backend.pull("out:mon", 160));
+        }
+        let fed: Vec<f32> = drain(&record)
+            .into_iter()
+            .flat_map(|c| c.samples)
+            .map(|s| f32::from(s) / 32_767.0)
+            .collect();
+        // Silence is only ever the ring starting up or running dry; every
+        // sample the bus fed the device is non-zero.
+        let heard: Vec<f32> = played.into_iter().filter(|&s| s != 0.0).collect();
+        assert!(
+            heard.len() > 100 * 160,
+            "the monitor played {} samples",
+            heard.len()
+        );
+        for (i, (m, f)) in heard.iter().zip(&fed).enumerate() {
+            assert!(
+                (m - f * 0.5).abs() <= 1.0 / 32_767.0,
+                "sample {i}: monitor {m}, bus {f} x 0.5"
+            );
+        }
+    }
+
+    #[test]
+    fn monitor_failure_leaves_main_output_untouched() {
+        let run = |with_monitor: bool| {
+            let (mut router, backend) = mon_router();
+            if with_monitor {
+                router.set_monitor(Some("out:mon")).opened.unwrap();
+            }
+            let (call, _, _) = router
+                .open_monitor_call(&OutputId::new("out:test"), StreamConfig::default())
+                .expect("bus opens");
+            if with_monitor {
+                backend.fail("out:mon", "device unplugged");
+            }
+            let mut main = Vec::new();
+            for k in 0..50 {
+                call.rx_frames
+                    .send(RxFrame::from(nonzero_frame(k)))
+                    .unwrap();
+                main.extend(backend.pull("out:test", 160));
+            }
+            (main, router.monitor_state(), router.output_count())
+        };
+        let (plain, plain_state, _) = run(false);
+        let (monitored, state, outputs) = run(true);
+        assert_eq!(plain_state, MonitorState::Off);
+        assert_eq!(monitored, plain, "the main output is unchanged");
+        assert_eq!(state, MonitorState::Unavailable("device unplugged".into()));
+        assert_eq!(outputs, 1, "the main bus is still open");
+    }
+
+    #[test]
+    fn monitor_on_same_device_as_output_is_refused() {
+        // Chosen while the bus is open.
+        let (mut router, backend) = mon_router();
+        let _call = router
+            .open_monitor_call(&OutputId::new("out:test"), StreamConfig::default())
+            .expect("bus opens");
+        router.set_monitor(Some("out:test")).opened.unwrap();
+        assert_eq!(
+            router.monitor_state(),
+            MonitorState::Unavailable("same device as the output".into())
+        );
+        assert_eq!(backend.opened(), ["out:test"], "nothing opened twice");
+
+        // Chosen before the bus opens.
+        let (mut router, backend) = mon_router();
+        router.set_monitor(Some("out:test")).opened.unwrap();
+        let _call = router
+            .open_monitor_call(&OutputId::new("out:test"), StreamConfig::default())
+            .expect("bus opens");
+        assert_eq!(
+            router.monitor_state(),
+            MonitorState::Unavailable("same device as the output".into())
+        );
+        assert_eq!(backend.opened(), ["out:test"], "nothing opened twice");
+    }
+
+    #[test]
+    fn the_monitor_opens_with_the_first_bus_and_closes_with_the_last() {
+        let (mut router, backend) = mon_router();
+        router.set_monitor(Some("out:mon")).opened.unwrap();
+        assert_eq!(
+            router.monitor_state(),
+            MonitorState::Off,
+            "no bus, no stream"
+        );
+        assert_eq!(backend.opened(), Vec::<String>::new());
+        let out = OutputId::new("out:test");
+        let (_call, _, mix_id) = router
+            .open_monitor_call(&out, StreamConfig::default())
+            .expect("bus opens");
+        assert_eq!(backend.opened(), ["out:test", "out:mon"]);
+        assert_eq!(router.monitor_state(), MonitorState::Playing);
+
+        router.remove_from_bus(&out, mix_id);
+        let closed = router.close_output(&out).expect("the bus closes");
+        // One handle carries both streams; its failure is the bus's.
+        backend.fail("out:mon", "monitor gone");
+        assert_eq!(closed.failure(), None);
+        backend.fail("out:test", "bus gone");
+        assert_eq!(closed.failure(), Some("bus gone".into()));
+        drop(closed);
+        assert_eq!(
+            router.monitor_state(),
+            MonitorState::Off,
+            "closed with the last bus"
+        );
+        assert!(
+            router.heard_taps[HeardConsumer::Monitor.index()].is_none(),
+            "and its tap is gone"
+        );
+
+        // The next call opens it again.
+        let _again = router
+            .open_monitor_call(&out, StreamConfig::default())
+            .expect("bus reopens");
+        assert_eq!(
+            backend.opened(),
+            ["out:test", "out:mon", "out:test", "out:mon"]
+        );
+        assert_eq!(router.monitor_state(), MonitorState::Playing);
+
+        // And turning it off closes it at once.
+        let change = router.set_monitor(None);
+        change.opened.unwrap();
+        assert!(change.closed.is_some(), "the closed stream is handed back");
+        assert_eq!(router.monitor_state(), MonitorState::Off);
+        assert!(router.heard_taps[HeardConsumer::Monitor.index()].is_none());
+    }
+
+    #[test]
+    fn choosing_the_monitor_mid_call_opens_it_now() {
+        let (mut router, backend) = mon_router();
+        let _call = router
+            .open_monitor_call(&OutputId::new("out:test"), StreamConfig::default())
+            .expect("bus opens");
+        router.set_monitor(Some("out:mon")).opened.unwrap();
+        assert_eq!(backend.opened(), ["out:test", "out:mon"]);
+        assert_eq!(router.monitor_state(), MonitorState::Playing);
+    }
+
+    #[test]
+    fn a_monitor_device_that_does_not_exist_is_unavailable() {
+        let (mut router, _backend) = mon_router();
+        let _call = router
+            .open_monitor_call(&OutputId::new("out:test"), StreamConfig::default())
+            .expect("bus opens");
+        assert!(router.set_monitor(Some("out:gone")).opened.is_err());
+        assert!(matches!(
+            router.monitor_state(),
+            MonitorState::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn monitor_gain_clamps() {
+        let (router, _backend) = mon_router();
+        assert!(
+            (router.monitor_gain() - 1.0).abs() < f32::EPSILON,
+            "unity by default"
+        );
+        router.set_monitor_gain(9.0);
+        assert!((router.monitor_gain() - 4.0).abs() < f32::EPSILON);
+        router.set_monitor_gain(-1.0);
+        assert!(router.monitor_gain().abs() < f32::EPSILON);
+        router.set_monitor_gain(f32::NAN);
+        assert!(
+            router.monitor_gain().abs() < f32::EPSILON,
+            "NaN reads as silent"
+        );
+        assert!(!router.monitor_muted());
+        router.set_monitor_muted(true);
+        assert!(router.monitor_muted());
+    }
+
+    #[test]
+    fn a_bus_opening_on_the_monitors_device_closes_the_monitor() {
+        let (mut router, backend) = mon_router();
+        router.set_monitor(Some("out:mon")).opened.unwrap();
+        let _first = router
+            .open_monitor_call(&OutputId::new("out:test"), StreamConfig::default())
+            .expect("bus opens");
+        assert_eq!(router.monitor_state(), MonitorState::Playing);
+        let _second = router
+            .open_monitor_call(&OutputId::new("out:mon"), StreamConfig::default())
+            .expect("a bus opens on the monitor's device");
+        assert_eq!(
+            router.monitor_state(),
+            MonitorState::Unavailable(MONITOR_SAME_DEVICE.into())
+        );
+        assert!(router.heard_taps[HeardConsumer::Monitor.index()].is_none());
+        assert_eq!(backend.opened(), ["out:test", "out:mon", "out:mon"]);
+    }
+
+    #[test]
+    fn a_failed_monitor_loses_its_tap_once_noticed() {
+        let out = OutputId::new("out:test");
+        let monitor_slot_set = |router: &AudioRouter| {
+            router.outputs[&out].heard[HeardConsumer::Monitor.index()].is_set()
+        };
+
+        // Noticed by `monitor_state`.
+        let (mut router, backend) = mon_router();
+        router.set_monitor(Some("out:mon")).opened.unwrap();
+        let _call = router
+            .open_monitor_call(&out, StreamConfig::default())
+            .expect("bus opens");
+        assert!(monitor_slot_set(&router));
+        backend.fail("out:mon", "device unplugged");
+        assert_eq!(
+            router.monitor_state(),
+            MonitorState::Unavailable("device unplugged".into())
+        );
+        assert!(!monitor_slot_set(&router), "the bus's slot is cleared");
+
+        // Noticed by the next bus open, which also keeps it from new buses.
+        let (mut router, backend) = mon_router();
+        router.set_monitor(Some("out:mon")).opened.unwrap();
+        let _first = router
+            .open_monitor_call(&out, StreamConfig::default())
+            .expect("bus opens");
+        backend.fail("out:mon", "device unplugged");
+        let _second = router
+            .open_monitor_call(&out, StreamConfig::default())
+            .expect("a second call joins the bus");
+        assert!(!monitor_slot_set(&router), "the bus's slot is cleared");
+        assert!(router.heard_taps[HeardConsumer::Monitor.index()].is_none());
+        assert_eq!(
+            router.monitor_state(),
+            MonitorState::Unavailable("device unplugged".into()),
+            "the reason is kept"
+        );
     }
 }

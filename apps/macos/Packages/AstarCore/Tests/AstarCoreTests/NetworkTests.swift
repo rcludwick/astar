@@ -167,6 +167,46 @@ final class NetworkTests: XCTestCase {
         XCTAssertTrue(Network.dmr.isDigitalVoice, "a DMRD frame names who keyed up")
     }
 
+    // MARK: - P25
+
+    /// P25 needs no hardware — IMBE runs in software — so its segment is a
+    /// build fact, and it sits after DMR.
+    func testP25IsAvailableOnlyWhenTheEngineSaysSo() {
+        XCTAssertFalse(Network.available(m17: false).contains(.p25))
+        XCTAssertEqual(Network.available(m17: false, p25: true), [.allstar, .p25])
+        XCTAssertEqual(
+            Network.available(
+                m17: true, dstar: true, ysf: true, nxdn: true, dmr: true, p25: true,
+                echolink: true),
+            [.allstar, .m17, .dstar, .ysf, .nxdn, .dmr, .p25, .echolink])
+        XCTAssertEqual(Network.resolve("p25", m17: false), .allstar)
+        XCTAssertEqual(Network.resolve("p25", m17: false, p25: true), .p25)
+    }
+
+    func testP25DirectoryRowsMatchTheP25Network() {
+        XCTAssertEqual(Network.matching(.p25), .p25)
+        XCTAssertEqual(Network.p25.reflectorNetwork, .p25)
+        XCTAssertEqual(DirectorySearchNetwork.reflector(.p25).appNetwork, .p25)
+    }
+
+    func testP25IsDigitalVoice() {
+        XCTAssertTrue(Network.p25.isDigitalVoice, "a P25 over names who keyed up")
+        XCTAssertFalse(Network.p25.showsDialpad)
+        XCTAssertEqual(Network.p25.displayName, "P25")
+        XCTAssertEqual(Network.p25.badge, "P25")
+        XCTAssertEqual(Network.p25.symbol, "waveform.path")
+        XCTAssertEqual(Network.p25.dialPlaceholder, "Talkgroup, or host:port")
+        for text in ["p25.example:41000/10200", "p25.example 10200"] {
+            XCTAssertTrue(text.allSatisfy(Network.p25.admitsDialCharacter), "\(text) is typeable")
+        }
+        XCTAssertFalse(Network.p25.admitsDialCharacter("_"))
+    }
+
+    /// P25 ships in 0.1.25-beta marked in testing, and nothing else does.
+    func testOnlyP25IsMarkedInTesting() {
+        XCTAssertEqual(Network.allCases.filter(\.isInTesting), [.p25])
+    }
+
     // MARK: - EchoLink
 
     /// EchoLink needs no hardware, so its segment is a build fact, and it is

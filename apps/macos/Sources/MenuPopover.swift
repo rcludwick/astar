@@ -81,14 +81,16 @@
             Network.available(
                 m17: session.m17Available, dstar: session.dstarAvailable,
                 ysf: session.ysfAvailable, nxdn: session.nxdnAvailable,
-                dmr: session.dmrAvailable, echolink: session.echolinkAvailable)
+                dmr: session.dmrAvailable, p25: session.p25Available,
+                echolink: session.echolinkAvailable)
         }
 
         private var selectedNetwork: Network {
             Network.resolve(
                 networkRaw, m17: session.m17Available, dstar: session.dstarAvailable,
                 ysf: session.ysfAvailable, nxdn: session.nxdnAvailable,
-                dmr: session.dmrAvailable, echolink: session.echolinkAvailable)
+                dmr: session.dmrAvailable, p25: session.p25Available,
+                echolink: session.echolinkAvailable)
         }
 
         /// The network picker's binding, and the one place a network change
@@ -114,6 +116,13 @@
                     guard raw != networkRaw else { return }
                     networkRaw = raw
                     node = ""
+                    // A lost P25 link is the P25 dial area's news. Moving to
+                    // another network is the operator moving on: the title,
+                    // the dot, the line and the Reconnect row go with it.
+                    if raw != Network.p25.rawValue, session.p25LostTarget != nil {
+                        if errorText == CallSession.p25LinkLostMessage { errorText = nil }
+                        session.dismissP25LinkLost()
+                    }
                 }
             )
         }
@@ -169,6 +178,7 @@
                 || (isInCall && session.activeCallNetwork == .m17)
                 || (isInCall && availableNetworks.count > 1
                     && session.activeCallNetwork != nil)
+                || (isInCall && session.activeCallNetwork?.isInTesting == true)
         }
 
         var body: some View {
@@ -389,6 +399,12 @@
                                 .controlSize(.small)
                                 .padding(.horizontal, 6)
                             }
+                        }
+
+                        // A lost P25 link: the line above says so, and this
+                        // dials the same target again in one press.
+                        if !isInCall, let lost = session.p25LostTarget {
+                            p25ReconnectRow(lost)
                         }
 
                         if !isInCall, vocoders.suggestsAdding, !vocoderHintDismissed {
@@ -800,6 +816,14 @@
                                     .accessibilityLabel("Network")
                                     .accessibilityValue(network.displayName)
                             }
+                            // A network that ships in testing says so on the
+                            // card for as long as the call lasts, not only in
+                            // the picker it was chosen from.
+                            if isInCall, let network = session.activeCallNetwork,
+                                network.isInTesting
+                            {
+                                InTestingTag(network: network)
+                            }
                         }
                     }
                     if let dialedNode = session.dialedNode, isInCall {
@@ -876,11 +900,27 @@
 
         /// The network picker in one of its two shapes; `connectControls` picks
         /// whichever fits the row.
-        private func networkPicker<S: PickerStyle>(_ style: S) -> some View {
+        ///
+        /// A network that ships in testing (P25) carries the words in the
+        /// pop-up's item, where there is room for them, and in its spoken
+        /// name in both shapes. A segment has room for neither a second line
+        /// nor a capsule, so the segmented shape shows the tag beside the
+        /// picker instead, while that network is selected — see
+        /// `inTestingDialNote`.
+        private func networkPicker<S: PickerStyle>(_ style: S, inMenu: Bool = false)
+            -> some View
+        {
             Picker("Network", selection: networkSelection) {
                 ForEach(availableNetworks, id: \.rawValue) { network in
-                    Label(network.displayName, systemImage: network.symbol)
-                        .tag(network.rawValue)
+                    Label(
+                        inMenu && network.isInTesting
+                            ? "\(network.displayName) (in testing)" : network.displayName,
+                        systemImage: network.symbol
+                    )
+                    .tag(network.rawValue)
+                    .accessibilityLabel(
+                        network.isInTesting
+                            ? "\(network.displayName), in testing" : network.displayName)
                 }
             }
             .pickerStyle(style)
@@ -906,8 +946,14 @@
                     ViewThatFits(in: .horizontal) {
                         networkPicker(.segmented)
                         networkPicker(.segmented).controlSize(.small)
-                        networkPicker(.menu)
+                        networkPicker(.menu, inMenu: true)
                     }
+                }
+                // What a network in testing is and is not, said where it is
+                // picked: the tag, and in one line what to expect of it.
+                if !isInCall, selectedNetwork.isInTesting {
+                    inTestingDialNote
+                        .transition(.opacity.combined(with: .move(edge: .top)))
                 }
                 // M17 callsign prompt (astar-c2e5 Task 9): M17 sends this
                 // verbatim in every frame, so ask once, up front, only when
@@ -1513,6 +1559,18 @@
         /// nothing, which is the whole requirement; the rows are keyed by
         /// offset because a callsign is neither unique nor trustworthy as
         /// identity.
+        /// The talker line's first row, with the qualifier after it when there
+        /// is one. "Encrypted" (P25 only today) means the over was muted, and
+        /// it is the only thing on screen that says why the speaker stayed
+        /// silent while the talker line moved — so it carries a lock, which
+        /// reads at a glance where one more word in caption2 would not.
+        /// Verbatim: the header holds a talker the far end chose.
+        private func talkerHeader(_ header: String, note: String?) -> Text {
+            guard let note else { return Text(verbatim: header) }
+            return Text(verbatim: header + " · ") + Text(Image(systemName: "lock.fill"))
+                + Text(verbatim: " " + note)
+        }
+
         @ViewBuilder
         private var talkerLine: some View {
             if let talker = session.lastHeard {
@@ -1525,9 +1583,11 @@
                 let rest = current == nil ? rows : Array(rows.dropFirst())
                 VStack(alignment: .leading, spacing: 1) {
                     let headerAge = current.map { HeardAge.label(ms: $0.ageMs) }
-                    Text(
-                        headerAge.map { "Last heard \(talker) · \($0)" }
-                            ?? "Last heard \(talker)"
+                    let spoken =
+                        headerAge.map { HeardAge.spoken(callsign: talker, age: $0) } ?? talker
+                    talkerHeader(
+                        headerAge.map { "Last heard \(talker) · \($0)" } ?? "Last heard \(talker)",
+                        note: session.lastHeardNote
                     )
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -1535,7 +1595,8 @@
                     .truncationMode(.tail)
                     .accessibilityLabel("Last heard")
                     .accessibilityValue(
-                        headerAge.map { HeardAge.spoken(callsign: talker, age: $0) } ?? talker)
+                        session.lastHeardNote.map { "\(spoken), \($0.lowercased()), muted" }
+                            ?? spoken)
                     // Slow data is typed by whoever is transmitting on the
                     // reflector — attacker-controlled text from astar's point
                     // of view. `Text` renders it verbatim and interprets
@@ -1949,6 +2010,7 @@
                 }
                 RecordButton()
                 PacketCaptureButton()
+                MonitorMuteButton()
                 // Every control in this row wears `callControlChrome`, which
                 // fixes one height for all of them (this button's natural one).
                 Button(role: .destructive, action: disconnect) {
@@ -2339,6 +2401,56 @@
         /// launch before the directory has loaded.
         private var resolvedReflectorLine: String? { reflectorResolution.statusLine }
 
+        /// The P25 dial area's note: the "In testing" tag, then what to expect
+        /// — it listens and does not transmit, and it needs no vocoder stick,
+        /// which is worth saying because every other digital mode but M17
+        /// does.
+        private var inTestingDialNote: some View {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                InTestingTag(network: selectedNetwork)
+                Text(inTestingDialCaption)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(
+                "\(selectedNetwork.displayName) is in testing. \(inTestingDialCaption)")
+        }
+
+        /// The dial note's sentence, named after the selected network so the
+        /// visible text and the spoken one can never disagree.
+        private var inTestingDialCaption: String {
+            "Receive only for now. No dongle needed — astar decodes "
+                + "\(selectedNetwork.displayName) on this Mac."
+        }
+
+        /// Offer the lost P25 target again. Puts it back in the field on P25
+        /// and dials it, the same path the Connect button takes — so every
+        /// check Connect makes (callsign, availability, single-flight) still
+        /// applies.
+        private func p25ReconnectRow(_ target: String) -> some View {
+            HStack(spacing: 8) {
+                Button {
+                    // `networkRaw` directly, not `networkSelection`, so the
+                    // switch does not clear the field it is about to fill.
+                    networkRaw = Network.p25.rawValue
+                    node = target
+                    connect()
+                } label: {
+                    Label("Reconnect to \(target)", systemImage: "arrow.clockwise")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .disabled(!session.p25Available || session.isConnecting)
+                .help("Dial \(target) on P25 again")
+                .accessibilityLabel("Reconnect")
+                .accessibilityValue(target)
+            }
+            .controlSize(.small)
+            .padding(.horizontal, 6)
+        }
+
         /// What the dial field's text resolves to in the directory, for the
         /// line under the field AND the module picker beside it. One read, so
         /// the sentence and the control that completes it cannot disagree
@@ -2373,10 +2485,11 @@
                 case .address(let value):
                     dispatchConnect(node: value, network: network, address: value)
                 }
-            case .m17, .dstar, .ysf, .nxdn, .dmr:
+            case .m17, .dstar, .ysf, .nxdn, .dmr, .p25:
                 // Every reflector network resolves its target engine-side
                 // (`CallSession.connect(node:network:)` → `m17Target` /
-                // `dstarTarget` / `ysfTarget` / `nxdnTarget` / `dmrTarget`,
+                // `dstarTarget` / `ysfTarget` / `nxdnTarget` / `dmrTarget` /
+                // `p25Target`,
                 // directory first and address second) — this is
                 // only the same "unreachable via the disabled button, but
                 // refuse it on Enter too" guard as above.
@@ -2530,6 +2643,9 @@
         // MARK: - Presentation
 
         private var statusTitle: String {
+            // A P25 link that timed out or hit a receive error ended on its
+            // own; "Call ended" would read as if someone hung up.
+            if !isInCall, session.p25LostTarget != nil { return "P25 link lost" }
             switch session.status {
             case .idle: return "Not connected"
             case .dialing: return "Connecting…"
@@ -2539,12 +2655,37 @@
         }
 
         private var statusColor: Color {
+            if !isInCall, session.p25LostTarget != nil { return .orange }
             switch session.status {
             case .idle: return .secondary.opacity(0.5)
             case .dialing: return .orange
             case .answered: return .green
             case .hangup: return .secondary.opacity(0.5)
             }
+        }
+    }
+
+    /// The "In testing" capsule: the same family as the status card's codec
+    /// and network badges — caption2, semibold, a secondary capsule — with a
+    /// test-tube symbol so it does not read as another network name. Secondary
+    /// rather than orange on purpose: it is information, not a warning, and
+    /// orange is this popover's colour for something to fix.
+    struct InTestingTag: View {
+        let network: Network
+
+        var body: some View {
+            Label("In testing", systemImage: "testtube.2")
+                .labelStyle(.titleAndIcon)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(Color.secondary)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1)
+                .background(Color.secondary.opacity(0.15), in: Capsule())
+                .fixedSize()
+                .help(
+                    "\(network.displayName) is new in this release and still being tested. "
+                        + "It receives only.")
+                .accessibilityLabel("\(network.displayName) in testing")
         }
     }
 

@@ -666,6 +666,78 @@ final class StationTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(DStarState(json: odd)).link, .failed)
     }
 
+    // MARK: - P25 (receive only)
+
+    func testP25StateDecodesTheEngineJSON() throws {
+        let json = #"{"link":"linked","reflector":"127.0.0.1:41000","last_heard":"1234567","last_heard_id":1234567,"talkgroup":10200,"frames_rx":36,"receiving":true,"encrypted":false,"backend":"software","ptt":false,"rx_db":-18.5}"#
+        let s = try XCTUnwrap(P25State(json: json))
+        XCTAssertEqual(s.link, .linked)
+        XCTAssertEqual(s.reflector, "127.0.0.1:41000")
+        XCTAssertEqual(s.lastHeard, "1234567")
+        XCTAssertEqual(s.lastHeardID, 1_234_567)
+        XCTAssertEqual(s.talkgroup, 10_200)
+        XCTAssertEqual(s.framesRx, 36)
+        XCTAssertTrue(s.receiving)
+        XCTAssertFalse(s.encrypted)
+        XCTAssertEqual(s.backend, .software)
+        XCTAssertFalse(s.ptt, "P25 is receive-only: ptt is always false")
+        XCTAssertEqual(s.rxDb, -18.5, accuracy: 0.001)
+    }
+
+    func testP25StateTreatsMissingOptionalsAsNil() throws {
+        let json = #"{"link":"linking","reflector":"127.0.0.1:41000","last_heard":null,"last_heard_id":null,"talkgroup":null,"frames_rx":0,"receiving":false,"encrypted":false,"backend":null,"ptt":false,"rx_db":-60.0}"#
+        let s = try XCTUnwrap(P25State(json: json))
+        XCTAssertEqual(s.link, .linking)
+        XCTAssertNil(s.lastHeard, "JSON null must decode as nil, not the string \"null\"")
+        XCTAssertNil(s.lastHeardID)
+        XCTAssertNil(s.talkgroup)
+        XCTAssertNil(s.backend)
+    }
+
+    func testP25StateDecodesAnUnknownLinkToTheSafeCase() throws {
+        let json = #"{"link":"quantum","reflector":"x:41000","frames_rx":0,"receiving":false,"ptt":false}"#
+        XCTAssertEqual(try XCTUnwrap(P25State(json: json)).link, .failed)
+    }
+
+    func testP25StateKeepsAFailedLink() throws {
+        // A link lost after 120 s stays `failed` so the app can say so.
+        let json = #"{"link":"failed","reflector":"x:41000","frames_rx":12,"receiving":false,"encrypted":false,"ptt":false,"rx_db":-60.0}"#
+        let s = try XCTUnwrap(P25State(json: json))
+        XCTAssertEqual(s.link, .failed)
+        XCTAssertEqual(s.framesRx, 12)
+    }
+
+    func testP25StateCarriesTheEncryptedFlag() throws {
+        let json = #"{"link":"linked","reflector":"x:41000","frames_rx":3,"receiving":true,"encrypted":true,"ptt":false,"rx_db":-60.0}"#
+        XCTAssertTrue(try XCTUnwrap(P25State(json: json)).encrypted)
+    }
+
+    func testEmptyP25StateJSONIsNil() {
+        XCTAssertNil(P25State(json: "{}"), "the no-link document decodes as nil")
+    }
+
+    func testFreshStationHasNoP25Link() throws {
+        let station = try Station()
+        XCTAssertNil(try station.p25State())
+        let snap = try station.snapshot()
+        XCTAssertFalse(snap.p25Active)
+        XCTAssertEqual(snap.p25Available, Station.p25Compiled)
+    }
+
+    func testP25DisconnectIsIdempotentWhileIdle() throws {
+        let station = try Station()
+        XCTAssertNoThrow(try station.p25Disconnect())
+        XCTAssertNoThrow(try station.p25Disconnect())
+    }
+
+    func testConnectP25RefusesAnEmptyCallsign() throws {
+        let station = try Station()
+        XCTAssertThrowsError(try station.connectP25(host: "127.0.0.1", callsign: "")) { error in
+            XCTAssertEqual((error as? StationError)?.code, -28)
+            XCTAssertEqual((error as? StationError)?.text, "p25 error")
+        }
+    }
+
     // MARK: - NXDN (iax-b9c2)
 
     func testNXDNStateDecodesTheEngineJSON() throws {

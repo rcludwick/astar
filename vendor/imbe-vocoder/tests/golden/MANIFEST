@@ -1,0 +1,8 @@
+upstream: https://github.com/boatbod/op25
+commit: 38a37491df4532d932f9f1d5634617af410cb3c9
+directory: op25/gr-op25_repeater/lib/imbe_vocoder
+compiler: c++ -std=c++11 -O0
+compiler-version: Apple clang version 21.0.0 (clang-2100.4.1.1)
+date: 2026-11-21 20:24 UTC
+sha256 decode.bin: 3f05c76bb7f1b62d4ca289bf773cff4e86c76f821d9d83e5c534b12e275909ba
+sha256 encode.bin: b53f82446506c30ea58ad980a212ee7ee053c6e267e9a4a6b08796b404facff2

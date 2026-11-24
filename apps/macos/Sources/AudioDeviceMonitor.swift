@@ -50,7 +50,13 @@
         /// it before someone dials.
         private static let readinessInterval: TimeInterval = 3
 
-        private let session: CallSession
+        // `nonisolated(unsafe)` because `refresh()` runs off the main actor
+        // and reads it on `queue`. That code only calls `inputs()` and
+        // `outputs()`, plain FFI enumerations that are safe from any thread;
+        // everything else on the session is touched on the main actor. The
+        // property is a `let`, so there is no write to race with.
+        // `CallSession` cannot be `Sendable`, so this is the honest marking.
+        nonisolated(unsafe) private let session: CallSession
         // Enumeration runs here, never on the main thread. The CoreAudio listener
         // block is also delivered on this queue.
         private let queue = DispatchQueue(
@@ -142,7 +148,15 @@
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     if self.inputs != ins { self.inputs = ins }
-                    if self.outputs != outs { self.outputs = outs }
+                    if self.outputs != outs {
+                        self.outputs = outs
+                        // A monitor device that was missing when chosen stays
+                        // unavailable until it is set again, so set it again.
+                        self.session.reapplyMonitor()
+                        // The pane polling the monitor's state may be paused
+                        // (Settings), so refresh it here, where it can change.
+                        self.session.refreshMonitorState()
+                    }
                 }
             }
         }
@@ -217,12 +231,15 @@
 
         private static func name(of id: AudioDeviceID) -> String {
             var a = addr(kAudioObjectPropertyName)
-            var size = UInt32(MemoryLayout<CFString?>.size)
-            var cf: CFString?
+            // CoreAudio hands back a retained CFString. Reading it into an
+            // `Unmanaged` slot, not a `CFString?`, keeps Swift from writing
+            // raw bytes over a managed reference; the +1 is taken here.
+            var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+            var cf: Unmanaged<CFString>?
             guard AudioObjectGetPropertyData(id, &a, 0, nil, &size, &cf) == noErr,
-                let s = cf as String?
+                let cf
             else { return "" }
-            return s
+            return cf.takeRetainedValue() as String
         }
 
         private static func hasStreams(_ id: AudioDeviceID, input: Bool) -> Bool {

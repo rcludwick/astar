@@ -37,6 +37,12 @@ pub mod vocoder_choice;
 #[cfg(feature = "dstar-soft-ambe")]
 pub(crate) mod ambe_soft;
 
+/// P25 Phase 1 voice: the software IMBE vocoder (`p25-soft-imbe`, off by
+/// default; GPL-3.0-or-later, `LICENSE-EXCEPTIONS.md` §15). P25 Phase 1
+/// only: there is no dongle path and no AMBE+2.
+#[cfg(feature = "p25-soft-imbe")]
+pub mod p25;
+
 /// Vocoder trust and enrolment: which AMBE sticks may be opened. Always
 /// compiled, so configuration can carry it in every build.
 pub mod vocoder_trust;

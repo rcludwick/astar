@@ -12,7 +12,54 @@ inline. All 228 issues (164 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (200)
+## Open items (208)
+
+### iax-dv33deaf — Enrolling a DVstick 33 can leave it deaf until it is unplugged
+*P2 medium · bug · labels: dstar, ambe, hardware, cx:2*
+
+Found 2026-11-21 during the P25 gating probe (notes site,
+`superpowers/notes/astar/2026-11-21-p25-gating.md`). The three DVstick 33s
+stopped answering after a probe that sent the AMBE reset packet at 460 800
+baud. A DVstick 33 runs at 921 600, and at the wrong baud the packet's `0x00`
+bytes read as a serial break, which unamblify's notes say leaves a 33 deaf
+until it is unplugged. That the probe caused it is likely, not proven: the
+sticks may have been deaf already.
+
+`ambe_thumbdv::enrol::probe_with` (`vendor/ambe-thumbdv/src/enrol.rs`) does
+the same thing: it tries `PROBE_BAUDS` (460 800, then 230 400) and sends the
+reset at each, so enrolling a DVstick 33 in astar would deafen it the same
+way. Fix: probe 921 600 first with a query that contains no `0x00` run (a
+PRODID query), and send a reset only at a baud the stick has already answered
+on. Pin it with a test on the transport fake that asserts no reset is written
+before a successful query at that baud.
+
+### iax-ctdebug — The call-token default differs between debug and release builds, so debug-only tests miss it
+*P2 medium · bug · labels: iax, test, security, cx:2*
+
+Found 2026-11-20 by the mobile spike's loopback call (notes site,
+`superpowers/notes/astar/2026-11-20-skip-spike-report.md`).
+`IncomingCallPolicy::default()` (`crates/astar-iax/src/listener.rs`, about
+line 178) sets `calltoken` to `Never` when `cfg!(debug_assertions)` is on and
+to `Always` otherwise. So a listener built in debug accepts a bare NEW, and
+the same listener built in release answers it with a CALLTOKEN challenge and
+waits for the caller to send the token back.
+
+`just ci` builds in debug. A test that sends a hand-built NEW and never
+answers a token, as `crates/astar-station/tests/node_loopback.rs` does, is
+green there and is expected to fail under `cargo test --release`. That is
+inferred from the code and from the spike, whose copy of that test timed out
+in release until its caller answered the token; the workspace test itself has
+not been run in release.
+
+Two things to settle:
+
+* **Is the debug default meant to be weaker?** If it is only a test
+  convenience, the tests should ask for `Never` by name and the default
+  should be `Always` in every build, so debug and release behave the same.
+* **Pin the policy in each test** that sends a bare NEW, and add one test
+  that runs the token round trip, so both paths are covered whatever the
+  profile. Then run the suite once with `--release` and fix what else falls
+  out.
 
 ### iax-linktot — Link keying through the bridge has no transmit time-out
 *P1 high · safety · labels: server, keying, allstar, cx:3*
@@ -3798,3 +3845,32 @@ These matter only if the fork's decoder is ever to be used in astar or the fixes
 
 On the `clean` relay profile, where the relay adds no delay, frames of a picture sent by `sstv_station_to_node` still reached the node up to 47–111 ms late in some runs, and the node's jitter buffer slipped because of it (`harness/nodebench/RIG.md`, "SSTV through the node"). The bench cannot yet say whether that lateness comes from the sender (the station's own send timing) or from the host's path into the podman VM (gvproxy on the Mac). The IAX2 run loop already counts the largest gap between two frames it sends (`tx_max_gap_ms` in `crates/astar-iax/src/runtime.rs`, logged as `max_send_gap_ms`). Reporting that figure for each bench cell would settle it: a small send gap beside a late arrival puts the lateness on the path, and a large one puts it on the sender.
 
+### astar-server-monitor — a monitor device for astar-server
+*P3 normal · feature · labels: server, audio, monitor*
+
+The macOS app can play a listen-only copy of the output on a second device (Quick settings → Monitor; `docs/site/macos/hardware.md#monitor-speaker`). astar-server has no equivalent. Add an `[audio]` `monitor = "<device>"` setting to `node.toml` that opens the named device through the engine's monitor and plays the same copy, with the same rules: the device must differ from the output, the node's own microphone is not included, and a device that cannot be opened is reported rather than fatal. Add its gain and the settings page row, and document it under astar-server → Configuration. The `docs/FEATURES.md` row for Monitor speaker names this item.
+
+### astar-monitor-idle-close — the monitor keeps its device open after an IAX2 hangup
+*P3 normal · bug · labels: audio, monitor, allstar*
+
+An AllStarLink (IAX2) hangup leaves the output bus open, so the monitor keeps playing silence and holds the monitor device open. A Bluetooth or USB speaker used as the monitor therefore never goes to sleep. Either close the monitor when no bus carries a call lane, or have the IAX2 manager close the bus on hangup. Check that a new call reopens the monitor, and that the mute state survives.
+
+### p25-transmit — P25 transmit
+*P3 normal · feature · labels: p25, transmit*
+
+P25 is receive only in 0.1.25-beta. The IMBE encoder already exists in `vendor/imbe-vocoder` and is tested. Transmit needs real link-control parity in `astar_p25::ldu::superframe`, a radio ID argument added to the C ABI then (not before), a parrot round trip on 127.0.0.1 first, and the removal of `.p25` from `receiveOnlyNetworks`. Rob keys on the air, never an agent.
+
+### astar-server-p25 — P25 on the node
+*P3 normal · feature · labels: p25, server*
+
+P25 does not reach astar-server in the first round. The server's `release` set gains `p25`, `ci/guard-p25-imbe.sh`'s check 3 flips for astar-server, `key_refusal` gains `p25_active` once P25 can transmit, and the `docs/FEATURES.md` row's server column becomes yes.
+
+### p25-clean-imbe — a clean-room IMBE under astar's own licence
+*P3 normal · feature · labels: p25, licensing*
+
+P25 voice uses a GPL-3.0-or-later port of OP25's IMBE vocoder (`vendor/imbe-vocoder`, `LICENSE-EXCEPTIONS.md` section 15). Write a clean-room IMBE encoder and decoder from TIA-102.BABA under astar's own licence, to replace the GPL port. It must be bit-exact against the island's golden vectors.
+
+### p25-level-check — measure the P25 receive level against real traffic
+*P3 normal · investigation · labels: p25, audio*
+
+`RX_TRIM_DB` is 0.0 until it has been measured against real DVSI-encoded P25 traffic. The candidate +5 dB was measured through Yazev's own encoder, which may not match what radios send. Once Rob can link to a real reflector, compare P25's loudness with NXDN's and set the trim from that.

@@ -113,6 +113,7 @@ you are looking at.
 | **D-Star** *(dongle or software vocoder)* | XLX/XRF reflectors over DExtra. Voice is AMBE, which runs on a **hardware vocoder dongle**, so the network appears in the picker only while one you have added in [Settings → Vocoders](vocoders.md) is attached — or always, when you choose D-Star's built-in software vocoder there. See [Digital voice](hardware.md#digital-voice). |
 | **System Fusion** *(needs a dongle)* | YSF reflectors, receive and transmit. Voice is AMBE+2, which only the dongle can run. |
 | **NXDN** *(needs a dongle; receive only)* | A talkgroup on an NXDNReflector. Set your NXDN ID in Settings → NXDN. |
+| **P25** *(in testing; receive only, no dongle)* | A reflector, listen only, decoded in software. See [Listening to P25 reflectors](p25.md). |
 | **DMR** *(needs a dongle; receive only)* | A talkgroup and timeslot on one network's master. Set your DMR radio ID in Settings → DMR. |
 
 ## Audio and PTT hardware

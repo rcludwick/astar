@@ -287,6 +287,34 @@ public protocol StationDriving {
     /// parses JSON. Poll the snapshot for meters; call this at UI rate.
     func dmrState() throws -> DMRState?
 
+    // MARK: P25
+
+    /// Link to a P25Reflector and decode the audio on it, mutually exclusive
+    /// with every other network. Mirrors `Station.connectP25(host:callsign:)`
+    /// 1:1 — `host` is `host:port` (a bare host gets 41000).
+    ///
+    /// No talkgroup and no radio ID: a P25Reflector relays one talkgroup and
+    /// identifies a client by callsign, so the talkgroup a directory row
+    /// names is a label for the operator, never something sent.
+    ///
+    /// RECEIVE ONLY: there is no P25 transmit path, so nothing should offer
+    /// PTT while a link is live.
+    ///
+    /// SOFTWARE, so a BUILD fact rather than a hardware one: callers gate on
+    /// `CallSnapshot.p25Available`. No dongle is opened. Blocks for a name
+    /// lookup and the link handshake; call it off the main thread.
+    func connectP25(host: String, callsign: String) throws
+    /// Disconnect the live P25 link, if any. Idempotent — a no-op while idle.
+    func p25Disconnect() throws
+    /// The live P25 link's own state — link stage, the last talker heard,
+    /// whether a transmission is in progress and whether it is encrypted — or
+    /// `nil` when none is active. A link that ended `failed` stays here until
+    /// it is disconnected.
+    ///
+    /// Costlier than `readSnapshot()`: it crosses the ABI with a buffer and
+    /// parses JSON. Poll the snapshot for meters; call this at UI rate.
+    func p25State() throws -> P25State?
+
     // MARK: EchoLink
 
     /// Start logging in to the EchoLink directory as `callsign`, trying
@@ -336,6 +364,13 @@ public protocol StationDriving {
     /// (iax-a4e7); the Quick-settings UI only offers `1.0...4.0` — the
     /// internal half-duplex mute still uses this API directly with `0`.
     func setOutputGain(_ gain: Float) throws
+
+    // Speaker monitor: a listen-only copy of the output on a second device.
+    // Mirror `Station`'s methods 1:1. `nil` device turns the monitor off.
+    func setMonitorDevice(_ device: String?) throws
+    func setMonitorGain(_ gain: Float) throws
+    func setMonitorMuted(_ muted: Bool) throws
+    func monitorState() -> MonitorStatus
 
     // Mic processing toggles. Mirror `Station`'s methods 1:1; take effect on the
     // live (and next) call's capture lane.
@@ -395,6 +430,14 @@ public protocol StationDriving {
 }
 
 extension StationDriving {
+    /// Stations with no engine (and test fakes that do not care) have no
+    /// monitor: the setters do nothing and the state reads off. The real
+    /// `Station` implements all four.
+    public func setMonitorDevice(_ device: String?) throws {}
+    public func setMonitorGain(_ gain: Float) throws {}
+    public func setMonitorMuted(_ muted: Bool) throws {}
+    public func monitorState() -> MonitorStatus { .off }
+
     /// Fakes that do not care accept the length and do nothing with it. The
     /// real `Station` implements it.
     public func setVoxPrerollMs(_ ms: UInt32) throws {}

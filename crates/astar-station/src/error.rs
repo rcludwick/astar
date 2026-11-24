@@ -72,6 +72,13 @@ pub enum StationError {
     /// while a DMR link is live (see `astar_console::dmr`'s Transmit
     /// section).
     Dmr(String),
+    /// A P25 Phase 1 error — secret-free, human-readable. Returned when the
+    /// `p25` feature isn't compiled in (`"p25 support not compiled"`), when
+    /// the reflector address or callsign is not one the wire can carry, and
+    /// for a resolve or bind failure during connect. Receive only:
+    /// `Station::set_ptt` refuses a key-down while a P25 link is live (see
+    /// `astar_console::p25`'s module docs). P25 takes no password.
+    P25(String),
     /// An `EchoLink` error — secret-free, human-readable, and as with
     /// [`Self::Dmr`] that is load-bearing: `EchoLink` logs in with a
     /// password, and no message this variant carries interpolates one.
@@ -134,6 +141,7 @@ impl std::fmt::Display for StationError {
             Self::Ysf(msg) => write!(f, "ysf error: {msg}"),
             Self::Nxdn(msg) => write!(f, "nxdn error: {msg}"),
             Self::Dmr(msg) => write!(f, "dmr error: {msg}"),
+            Self::P25(msg) => write!(f, "p25 error: {msg}"),
             Self::EchoLink(msg) => write!(f, "echolink error: {msg}"),
             Self::Record(msg) => write!(f, "recording: {msg}"),
             Self::NotLeased => write!(f, "ptt source holds no lease"),

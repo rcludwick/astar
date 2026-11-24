@@ -24,8 +24,22 @@ extension CallSession {
 
     /// Select capture/playback devices. A `nil` direction keeps the system
     /// default for that direction.
-    public func selectDevices(input: String?, output: String?) throws {
+    ///
+    /// The speaker monitor must never share the output's device: if the new
+    /// output is the saved monitor device, the monitor is cleared (saved and on
+    /// the station) and this returns `true`, so the UI can say "Monitor turned
+    /// off: it was the same device as the output." Otherwise returns `false`.
+    @discardableResult
+    public func selectDevices(input: String?, output: String?) throws -> Bool {
         try station.setDevices(input: input, output: output)
+        var s = audioStore.load()
+        guard let monitor = s.monitor,
+            MonitorPickerModel.reconcile(monitor: monitor, newOutput: output) == nil
+        else { return false }
+        s.monitor = nil
+        audioStore.save(s)
+        try? station.setMonitorDevice(nil)
+        return true
     }
 
     /// Set the input (TX/mic) gain multiplier (the station clamps to `0...4`).
@@ -46,6 +60,54 @@ extension CallSession {
         desiredOutputGain = gain
         guard !rxMutedForHalfDuplex else { return }
         try station.setOutputGain(gain)
+    }
+
+    /// Choose the speaker monitor's device (`nil` = off). Does not persist:
+    /// the caller saves `AudioSettings.monitor`, as it does for the output.
+    public func selectMonitor(_ device: String?) throws {
+        try station.setMonitorDevice(device)
+    }
+
+    /// Set the speaker monitor's volume (the engine clamps to `0...4`).
+    public func setMonitorGain(_ gain: Float) throws {
+        try station.setMonitorGain(gain)
+    }
+
+    /// Mute or unmute the speaker monitor. Live-only: never saved.
+    public func setMonitorMuted(_ muted: Bool) throws {
+        try station.setMonitorMuted(muted)
+        if monitorMuted != muted { monitorMuted = muted }
+    }
+
+    /// What the monitor is doing. `.playing` means the monitor stream is up,
+    /// NOT that a call is live: an AllStar bus stays open after hangup.
+    public func monitorStatus() -> MonitorStatus {
+        station.monitorState()
+    }
+
+    /// Re-read `monitorStatus()` into the published `monitorState`, only on
+    /// a change. The poll tick calls this; so does the UI right after it
+    /// chooses a monitor device, because the poll pauses off the call pane.
+    public func refreshMonitorState() {
+        let state = station.monitorState()
+        if monitorState != state { monitorState = state }
+    }
+
+    /// Send the saved monitor device to the engine again. A device that was
+    /// missing when chosen stays unavailable until it is set again, so this
+    /// runs whenever the output device list changes. A monitor already
+    /// playing is left alone only while its device is still listed (the engine
+    /// may not have noticed an unplug yet). No saved monitor, or one equal to
+    /// the output, turns the monitor off.
+    public func reapplyMonitor() {
+        let s = audioStore.load()
+        guard let device = MonitorPickerModel.reconcile(monitor: s.monitor, newOutput: s.output)
+        else {
+            try? station.setMonitorDevice(nil)
+            return
+        }
+        if case .playing = station.monitorState(), outputs().contains(device) { return }
+        try? station.setMonitorDevice(device)
     }
 
     /// Send a single DTMF digit on the active call as one fixed-duration in-band
