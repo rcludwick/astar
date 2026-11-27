@@ -3007,11 +3007,26 @@ public final class CallSession: ObservableObject {
         dialAwaitingAnswer = false  // fresh dial: latch re-arms when .dialing is observed
         setLastDialFailure(nil)  // and any stale no-answer message clears
         applyMicProfile(id: micProfileID)
+        // A "node@host[:port]" dial carries both halves itself: the node is
+        // the WT destination (`CALLING_NUMBER`, the node selector) and the
+        // address is where to send the call. `node` stays the full dial
+        // string as `dialedNode` above, so the status label and the recent
+        // it records redial the same way.
+        let destNode: String
+        let dialAddress: String?
+        if case .nodeAtAddress(let target, let at) = DialTarget.parse(node) {
+            destNode = target
+            dialAddress = at
+        } else {
+            destNode = node
+            dialAddress = address
+        }
         do {
-            if let address, !address.isEmpty {
+            if let dialAddress, !dialAddress.isEmpty {
                 NSLog(
-                    "[astar] connect node=%@ addr=%@ path=WT(account, manual addr)", node, address)
-                try station.connectWT(destNode: node, address: address)
+                    "[astar] connect node=%@ addr=%@ path=WT(account, manual addr)", destNode,
+                    dialAddress)
+                try station.connectWT(destNode: destNode, address: dialAddress)
             } else {
                 NSLog("[astar] connect node=%@ path=WT(account, on-air)", node)
                 try station.connectWT(destNode: node)
@@ -4529,8 +4544,13 @@ public func connectFailureMessage(for error: Error, node: String) -> String {
         // that means no live registration (wording per Rob: short and plain);
         // for an address-shaped dial (astar-427f) the registrar was never
         // asked, so "not registered" would mislead — name the address instead.
-        if case .address = DialTarget.parse(node) {
+        switch DialTarget.parse(node) {
+        case .address:
             return "Couldn’t reach \(node)."
+        case .nodeAtAddress(_, let address):
+            return "Couldn’t reach \(address)."
+        case .node, nil:
+            break
         }
         return "Node \(node) is not registered in Allstar."
     case -5:  // IAX_ERR_PORTAL — the portal token mint failed; the fix is on

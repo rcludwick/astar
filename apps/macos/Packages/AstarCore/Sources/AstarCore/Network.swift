@@ -219,13 +219,14 @@ public enum Network: String, CaseIterable, Codable, Sendable {
 
     /// Whether the dial field admits `c` — the per-network input filter.
     /// AllStar keeps the smart-field rules verbatim (astar-427f): ASCII node
-    /// digits, `* #` command dials, and hostname/IP characters — the
+    /// digits, `* #` command dials, hostname/IP characters and the `@` of a
+    /// `node@host[:port]` dial — the
     /// `isASCII` gate matters (drops accented letters etc.), so keep it on
     /// the whole clause, not just the punctuation set.
     public func admitsDialCharacter(_ c: Character) -> Bool {
         switch self {
         case .allstar:
-            return c.isASCII && (c.isLetter || c.isNumber || ".:-*#".contains(c))
+            return c.isASCII && (c.isLetter || c.isNumber || ".:-*#@".contains(c))
         case .hamlink:
             return (c.isASCII && (c.isLetter || c.isNumber)) || ".:-/#".contains(c)
         case .dmr:

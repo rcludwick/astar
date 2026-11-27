@@ -913,6 +913,37 @@ final class CallSessionTests: XCTestCase {
         XCTAssertNil(fake.genericDest, "still WT, not the generic guest path")
     }
 
+    func testNodeAtAddressDialSendsTheNodeAsDestination() throws {
+        // "node@host:port" must send only the node as the WT destination
+        // (CALLING_NUMBER, which the far end's dialplan hands to Rpt()) and
+        // only the address as the dial target. Sending the whole string —
+        // or a bare address — makes a stock ASL3 node look up a node named
+        // after the address and hang up after the greeting.
+        let fake = FakeStation()
+        let session = CallSession(station: fake, hasCredentials: true)
+
+        try session.connect(node: "55553@127.0.0.1:4569", address: "127.0.0.1:4569")
+
+        XCTAssertEqual(fake.connectedNode, "55553")
+        XCTAssertEqual(fake.connectedAddress, "127.0.0.1:4569")
+        XCTAssertTrue(fake.callLog.contains("connectWT(addr)"))
+        XCTAssertEqual(
+            session.dialedNode, "55553@127.0.0.1:4569",
+            "the full dial string stays the label, so its recent redials the same way")
+    }
+
+    func testNodeAtAddressDialWithoutExplicitAddressStillSplits() throws {
+        // A recent or favorite redialed through connect(node:network:)
+        // passes no address; the dial string alone must still route.
+        let fake = FakeStation()
+        let session = CallSession(station: fake, hasCredentials: true)
+
+        try session.connect(node: "55553@127.0.0.1:4569", network: .allstar)
+
+        XCTAssertEqual(fake.connectedNode, "55553")
+        XCTAssertEqual(fake.connectedAddress, "127.0.0.1:4569")
+    }
+
     func testConnectRecordsDialedNode() throws {
         // The session remembers the node it dialed, so surfaces (e.g. the
         // menu-bar right-click menu) can show who we're connected to.

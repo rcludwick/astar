@@ -61,8 +61,9 @@ final class NetworkTests: XCTestCase {
 
     func testAllStarAdmitsExactlyTodaysSmartFieldCharacters() {
         // Verbatim the MenuPopover filter (astar-427f): ASCII letters,
-        // numbers, and ".:-*#" — nothing else. This must NOT change behavior.
-        for c: Character in ["a", "Z", "5", ".", ":", "-", "*", "#"] {
+        // numbers, and ".:-*#" — plus the "@" of a node@host[:port] dial,
+        // which the field must not eat as it's typed. Nothing else.
+        for c: Character in ["a", "Z", "5", ".", ":", "-", "*", "#", "@"] {
             XCTAssertTrue(Network.allstar.admitsDialCharacter(c), "\(c) must be admitted")
         }
         // `é` is dropped — the pre-9b3e MenuPopover filter gates the whole
