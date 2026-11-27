@@ -1919,11 +1919,11 @@ final class CallSessionTests: XCTestCase {
 
     func testAddressDialTakesNonNumericLabelThroughToRecents() throws {
         // The smart dial field (astar-427f) passes the typed address as BOTH
-        // the node label and the dial address. The label is safe off the wire:
-        // the WT dial calls "s" with calling_number = the user's own node, so
-        // the non-numeric string is display/recents-only. On answer it must be
-        // recorded as a recent keyed by the address string (NodeDirectory keys
-        // by string, no numeric assumption).
+        // the node label and the dial address. The address does go out as the
+        // WT destination node, which astar-server ignores but a stock ASL3
+        // node does not (issue #2; the field hints at node@host for those).
+        // On answer it must be recorded as a recent keyed by the address
+        // string (NodeDirectory keys by string, no numeric assumption).
         let fake = FakeStation()
         let directory = MemoryNodeDirectoryStore()
         let session = CallSession(
@@ -2087,6 +2087,30 @@ final class CallSessionTests: XCTestCase {
         XCTAssertFalse(session.directoryAddFavorite(node: "", label: "X"))
         XCTAssertFalse(session.directoryAddFavorite(node: "abc", label: "X"))
         XCTAssertEqual(session.directoryFavorites().map(\.node), ["77777"])
+    }
+
+    func testDirectoryAddFavoriteTakesANodeAtAnAddress() throws {
+        let directory = MemoryNodeDirectoryStore()
+        let session = CallSession(station: FakeStation(), directoryStore: directory)
+
+        XCTAssertTrue(session.directoryAddFavorite(node: "77777@127.0.0.1:4569", label: "Home"))
+        XCTAssertFalse(
+            session.directoryAddFavorite(node: "127.0.0.1:4569", label: "X"),
+            "a bare address names no node")
+        XCTAssertFalse(session.directoryAddFavorite(node: "*377777", label: "X"), "a command")
+        XCTAssertEqual(session.directoryFavorites().map(\.node), ["77777@127.0.0.1:4569"])
+    }
+
+    func testNodeAtAddressLabelSaysAtAndBorrowsThePlainNodesName() throws {
+        let directory = MemoryNodeDirectoryStore()
+        let session = CallSession(station: FakeStation(), directoryStore: directory)
+        XCTAssertEqual(
+            session.connectedTargetLabel(for: "77777@127.0.0.1:4569"),
+            "node 77777 at 127.0.0.1:4569")
+        session.addFavorite(node: "77777", label: "AJ7HR")
+        XCTAssertEqual(
+            session.connectedTargetLabel(for: "77777@127.0.0.1:4569"),
+            "AJ7HR (77777 at 127.0.0.1:4569)")
     }
 
     func testDirectoryAddFavoriteDedupesByNode() throws {
@@ -3241,6 +3265,19 @@ final class CallSessionTests: XCTestCase {
         session.poll()
 
         XCTAssertEqual(session.lastDialFailure, "Node 77777 didn’t answer.")
+    }
+
+    func testNodeAtAddressNoAnswerSaysAt() throws {
+        let fake = FakeStation()
+        let session = CallSession(station: fake, hasCredentials: true)
+        try session.connect(node: "77777@127.0.0.1:4569", network: .allstar)
+        for status: IaxStatus in [.dialing, .hangup] {
+            fake.snapshotToReturn = CallSnapshot(
+                status: status, ptt: false, remotePTT: false,
+                txDB: -60, rxDB: -60, rttMS: nil)
+            session.poll()
+        }
+        XCTAssertEqual(session.lastDialFailure, "Node 77777 at 127.0.0.1:4569 didn’t answer.")
     }
 
     /// A call that answered and later hung up (normal call end) publishes

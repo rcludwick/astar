@@ -46,8 +46,7 @@
         }
 
         private var canAdd: Bool {
-            let node = newNode.trimmingCharacters(in: .whitespaces)
-            return !node.isEmpty && node.allSatisfy(\.isNumber)
+            CallSession.isAddableFavoriteNode(newNode)
         }
 
         var body: some View {
@@ -107,17 +106,20 @@
             }
         }
 
-        /// Name + node + Add. Validates node is non-empty digits; upsert dedupes by
-        /// node, so re-adding an existing number just (re)labels/favorites it.
+        /// Name + node + Add. Validates the node with
+        /// `CallSession.isAddableFavoriteNode` (a number, or node@address);
+        /// upsert dedupes by node, so re-adding an existing one just
+        /// (re)labels/favorites it.
         private var addRow: some View {
             HStack(spacing: 8) {
                 TextField("Name (callsign)", text: $newName)
                     .textFieldStyle(.roundedBorder)
                 TextField("AllStar node", text: $newNode)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 96)
+                    .frame(width: 150)
                     .onSubmit(add)
-                    .accessibilityLabel("AllStar node number")
+                    .help("A node number, or node@address to always dial it at that address")
+                    .accessibilityLabel("AllStar node number, or node at address")
                 Button(action: add) {
                     Label("Add", systemImage: "plus")
                 }

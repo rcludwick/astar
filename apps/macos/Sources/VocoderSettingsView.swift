@@ -192,7 +192,8 @@
         @ViewBuilder
         private var p25Row: some View {
             let label =
-                vocoders.p25Compiled ? VocoderModeRow.p25Software : VocoderModeRow.p25NotInBuildLabel
+                vocoders.p25Compiled
+                ? VocoderModeRow.p25Software : VocoderModeRow.p25NotInBuildLabel
             HStack(spacing: 10) {
                 Text(VocoderModeRow.p25Title)
                     .font(.callout)

@@ -37,6 +37,10 @@ public enum DialTarget: Equatable {
         // (a destination, so no `*`/`#` command characters) and a valid
         // address on the right.
         if text.contains("@") {
+            // No whitespace anywhere inside: `parse` trims the right half, so
+            // without this "55553@ host" would pass and keep its space in the
+            // recents label.
+            guard !text.contains(where: \.isWhitespace) else { return nil }
             let halves = text.split(separator: "@", omittingEmptySubsequences: false)
             guard halves.count == 2, !halves[0].isEmpty,
                 halves[0].allSatisfy({ $0.isASCII && $0.isNumber }),
@@ -61,6 +65,38 @@ public enum DialTarget: Equatable {
             guard isValidHost(parts[0]) else { return nil }
         }
         return .address(text)
+    }
+
+    /// How a dialed AllStar string reads in a sentence: "55553 at
+    /// 192.168.1.50" for a `node@address` dial, the trimmed text unchanged
+    /// for anything else. The `@` form is how it is typed, not how it is said.
+    public static func spoken(_ raw: String) -> String {
+        if case .nodeAtAddress(let node, let address) = parse(raw) {
+            return "\(node) at \(address)"
+        }
+        return raw.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// The node number inside a `node@address` dial, or nil for anything
+    /// else. A favorite saved as plain "55553" still names, and still sets
+    /// the talk timer for, a call dialed as "55553@192.168.1.50".
+    public static func nodeHalf(_ raw: String) -> String? {
+        guard case .nodeAtAddress(let node, _) = parse(raw) else { return nil }
+        return node
+    }
+
+    /// The caption under the AllStar dial field when its text is a bare
+    /// address ("host" or "host:port"), or nil for anything else.
+    ///
+    /// A bare address still dials: astar-server, for one, ignores the
+    /// destination node of an inbound call, so refusing it would cut off a
+    /// dial that works today. But a stock AllStarLink node uses that
+    /// destination to pick which of its nodes takes the call, and with an
+    /// address there it greets the caller and hangs up (issue #2). So the
+    /// field says how to name the node instead of refusing.
+    public static func bareAddressHint(_ raw: String) -> String? {
+        guard case .address(let address) = parse(raw) else { return nil }
+        return "To reach an AllStarLink node, put its number first: node@\(address)."
     }
 
     /// Hostname/IPv4 shape: ASCII alphanumerics, dots, and hyphens; starts and

@@ -287,6 +287,34 @@ see [Favorites and recents](favorites.md).
 
 Listen first, then key up and identify.
 
+### Dialing a node at its address
+
+Normally astar asks AllStarLink where a node is, and dials the address it gets
+back. Sometimes that address is the wrong one from where you sit. The usual
+case is your own node on your home network: AllStarLink knows only your
+router's public address, and many home routers won't pass a call from inside
+the network back in through that public address (the feature that does this is
+called *NAT hairpinning*, and plenty of routers lack it).
+
+For that, type the node number, an `@`, and the address you can reach it at:
+
+| You type | What happens |
+|---|---|
+| `55553` | astar asks AllStarLink where node 55553 is and dials that. |
+| `55553@192.168.1.50` | astar dials node 55553 at 192.168.1.50, on the usual AllStarLink port, 4569. |
+| `55553@mynode.example.com:4570` | astar dials node 55553 at that hostname, on port 4570. |
+
+Both halves matter. The address says where to send the call, and the node
+number tells the node which of its nodes you are calling; one AllStarLink
+server can host several. If you type only an address, astar still dials it, and
+a caption under the field suggests adding the number. A stock AllStarLink node
+answers a call with no node number, plays its greeting and hangs up, because it
+can't find a node to connect you to. (An astar-server node doesn't need the
+number and takes the call either way.)
+
+A node dialed this way is saved in recents and favorites exactly as you typed
+it, so dialing it again goes to the same address.
+
 ## Things worth knowing early
 
 **Where your settings live.** Preferences — devices, gains, VOX, favorites,

@@ -77,6 +77,33 @@ final class DialTargetTests: XCTestCase {
         XCTAssertNil(DialTarget.parse("55553@12345"), "right half must be an address")
         XCTAssertNil(DialTarget.parse("55553@host:0"), "address half is validated")
         XCTAssertNil(DialTarget.parse("55553 @127.0.0.1"), "no inner whitespace")
+        XCTAssertNil(DialTarget.parse("55553@ 127.0.0.1"), "no space after the @ either")
+    }
+
+    func testBareAddressGetsTheNodeAtAddressHint() {
+        XCTAssertEqual(
+            DialTarget.bareAddressHint(" 127.0.0.1:4569 "),
+            "To reach an AllStarLink node, put its number first: node@127.0.0.1:4569.")
+        XCTAssertEqual(
+            DialTarget.bareAddressHint("localhost"),
+            "To reach an AllStarLink node, put its number first: node@localhost.")
+    }
+
+    func testOnlyABareAddressGetsTheHint() {
+        XCTAssertNil(DialTarget.bareAddressHint("55553"), "a node number")
+        XCTAssertNil(DialTarget.bareAddressHint("*355553"), "a command dial")
+        XCTAssertNil(DialTarget.bareAddressHint("55553@127.0.0.1:4569"), "already names a node")
+        XCTAssertNil(DialTarget.bareAddressHint(""), "empty field")
+        XCTAssertNil(DialTarget.bareAddressHint("host:0"), "malformed")
+    }
+
+    func testSpokenAndNodeHalf() {
+        XCTAssertEqual(DialTarget.spoken("77777@127.0.0.1:4569"), "77777 at 127.0.0.1:4569")
+        XCTAssertEqual(DialTarget.spoken(" 77777 "), "77777")
+        XCTAssertEqual(DialTarget.spoken("localhost:4569"), "localhost:4569")
+        XCTAssertEqual(DialTarget.nodeHalf("77777@localhost"), "77777")
+        XCTAssertNil(DialTarget.nodeHalf("77777"))
+        XCTAssertNil(DialTarget.nodeHalf("localhost"))
     }
 
     func testWhitespaceIsTrimmed() {

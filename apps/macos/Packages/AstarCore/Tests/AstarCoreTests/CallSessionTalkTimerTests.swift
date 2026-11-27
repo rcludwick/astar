@@ -85,6 +85,27 @@ final class CallSessionTalkTimerTests: XCTestCase {
             .red)
     }
 
+    func testNodeAtAddressCallUsesThePlainNodesOverride() {
+        // A favorite saved as "77777" with a 60 s limit still sets the limit
+        // for a call dialed as "77777@127.0.0.1:4569".
+        let fake = FakeStation()
+        let directory = UserDefaultsNodeDirectoryStore(scratchDefaults())
+        let session = CallSession(station: fake, directoryStore: directory)
+        session.addFavorite(node: "77777", label: "Repeater")
+        let id = directory.all().first { $0.node == "77777" }!.id
+        session.directorySetTalkTimer(id: id, enabled: true, seconds: 60)
+
+        session.setDialedNode("77777@127.0.0.1:4569")
+        fake.snapshotToReturn = keyedSnapshot(true)
+        session.poll()
+        guard let since = session.keyedSince else { return XCTFail("expected keyedSince") }
+
+        XCTAssertEqual(
+            session.talkTimerPhase(
+                defaultEnabled: true, defaultLimitSeconds: 120, now: since.addingTimeInterval(65)),
+            .red, "past the node's 60 s limit, though the 120 s default has room")
+    }
+
     func testPhaseUsesPerNodeOverride() {
         let fake = FakeStation()
         let directory = UserDefaultsNodeDirectoryStore(scratchDefaults())

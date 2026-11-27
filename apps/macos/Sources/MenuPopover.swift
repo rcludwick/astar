@@ -1063,6 +1063,18 @@
                         .fixedSize(horizontal: false, vertical: true)
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
+                // A bare host:port still dials (astar-server takes it), but a
+                // stock AllStarLink node hangs up on a call that names no node
+                // (issue #2). Say how to name one, without turning Connect off.
+                if selectedNetwork == .allstar, !needsCredentials,
+                    let hint = DialTarget.bareAddressHint(node)
+                {
+                    Text(hint)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
                 // The one place the directory is visible so far
                 // (astar-refl-ship): what the typed name resolved to, and —
                 // when the module is still blank — what is still missing. Not
@@ -2689,7 +2701,8 @@
                 .fixedSize()
                 .help(
                     "\(network.displayName) is new in this release and still being tested. "
-                        + "It receives only.")
+                        + "It receives only."
+                )
                 .accessibilityLabel("\(network.displayName) in testing")
         }
     }

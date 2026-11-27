@@ -69,8 +69,16 @@ starts with a small tag naming its network (*ASL*, *M17*, *DSTAR*, *YSF*,
   timer off for it.
 * The trash button deletes the favorite.
 
-The row at the bottom adds an AllStar node by number. To save a favorite on
-another network, star it beside the dial field, where its target is built.
+The row at the bottom adds an AllStar node by number, or as
+`node@address` to always dial it at that address (see
+[Dialing a node at its address](first-run.md#dialing-a-node-at-its-address)).
+To save a favorite on another network, star it beside the dial field, where
+its target is built.
+
+A call dialed as `node@address` uses the name and talk timer of a favorite
+saved as the plain node number, so `55553@192.168.1.50` shows as your
+"Home node" favorite for `55553` and keeps its time limit. If you set a talk
+timer on the `node@address` favorite itself, that one wins.
 
 ## Moving favorites to another Mac
 

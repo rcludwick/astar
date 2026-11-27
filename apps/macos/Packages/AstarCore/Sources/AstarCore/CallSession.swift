@@ -1823,7 +1823,7 @@ public final class CallSession: ObservableObject {
                 if dialAwaitingAnswer {
                     dialAwaitingAnswer = false
                     if let node = dialedNode {
-                        lastDialFailure = "Node \(node) didn’t answer."
+                        lastDialFailure = "Node \(DialTarget.spoken(node)) didn’t answer."
                     }
                 }
             }
@@ -4233,10 +4233,15 @@ public final class CallSession: ObservableObject {
         // An EchoLink call dialled by number is named by its listed callsign
         // when no favorite has a label for it.
         let fallback = network == .echolink && target != node ? target : nil
-        if let name = name(forNode: target, network: network) ?? fallback {
-            return "\(name) (\(node))"
+        // A node@address dial borrows the plain node's favorite name.
+        let byNodeHalf = network == .allstar ? DialTarget.nodeHalf(node) : nil
+        let shown = network == .allstar ? DialTarget.spoken(node) : node
+        if let name = name(forNode: target, network: network)
+            ?? byNodeHalf.flatMap({ self.name(forNode: $0, network: network) }) ?? fallback
+        {
+            return "\(name) (\(shown))"
         }
-        return "node \(node)"
+        return "node \(shown)"
     }
 
     /// The directory entry for `node` on `network`, or `nil` when not saved —
@@ -4277,7 +4282,17 @@ public final class CallSession: ObservableObject {
         // borrows its limit.
         let network = activeCallNetwork ?? .allstar
         let target = network == .echolink ? echolinkCanonicalTarget(node) : node
-        let entry = directoryEntry(forNode: target, network: network)
+        // A node@address dial falls back to the plain node's favorite, so its
+        // per-node limit still applies. The exact entry wins only when it sets
+        // a limit of its own: answering the call records a recent under the
+        // full string, and that recent inherits everything.
+        let exact = directoryEntry(forNode: target, network: network)
+        let exactOverrides = exact.map { $0.talkTimerEnabled != nil || $0.talkTimerSeconds != nil }
+        let byNodeHalf =
+            network == .allstar
+            ? DialTarget.nodeHalf(node).flatMap { directoryEntry(forNode: $0, network: network) }
+            : nil
+        let entry = exactOverrides == true ? exact : (byNodeHalf ?? exact)
         guard
             let limit = TalkTimer.resolvedLimitSeconds(
                 entry: entry, defaultEnabled: defaultEnabled,
@@ -4287,17 +4302,26 @@ public final class CallSession: ObservableObject {
         return TalkTimer.phase(elapsed: elapsed, limit: TimeInterval(limit))
     }
 
+    /// Whether Settings → Favorites can add `node` as an AllStar favorite: a
+    /// plain node number, or a node at an explicit address
+    /// (`55553@192.168.1.50:4569`). Command dials (`*3…`) and bare addresses
+    /// are dial-field things, not favorites you type in here.
+    public static func isAddableFavoriteNode(_ node: String) -> Bool {
+        let trimmed = node.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty, trimmed.allSatisfy({ $0.isASCII && $0.isNumber }) { return true }
+        if case .nodeAtAddress = DialTarget.parse(trimmed) { return true }
+        return false
+    }
+
     /// Add (or update) an AllStar favorite from the Settings manager: a label
-    /// + node. Validates the node (non-empty digits) and dedupes **by node** —
+    /// + node. Validates the node (`isAddableFavoriteNode`) and dedupes **by node** —
     /// an existing AllStar entry for that number is favorited and relabeled in
     /// place (preserving its id/lastUsed) rather than duplicated. Returns
     /// `true` when saved.
     @discardableResult
     public func directoryAddFavorite(node: String, label: String) -> Bool {
         let trimmedNode = node.trimmingCharacters(in: .whitespaces)
-        guard !trimmedNode.isEmpty, trimmedNode.allSatisfy(\.isNumber) else {
-            return false
-        }
+        guard Self.isAddableFavoriteNode(trimmedNode) else { return false }
         addFavorite(node: trimmedNode, label: label, network: .allstar)
         return true
     }
