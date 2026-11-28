@@ -523,6 +523,9 @@ impl HeadlessStation {
             Arc::clone(&session),
             Box::new(|| Box::new(astar_audio::NullBackend::new())),
         );
+        // The bench sends pictures on purpose, to its own loopback node; a
+        // new station refuses until it is allowed.
+        station.set_picture_sending_allowed(true);
         session
             .lock()
             .map_err(|_| "session poisoned".to_string())?

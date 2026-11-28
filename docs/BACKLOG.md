@@ -12,7 +12,7 @@ inline. All 228 issues (164 of them closed) were exported to
 `docs/issues-archive.jsonl`, which is gitignored and local-only; a committed copy of the
 tracker's final state survives in git history at the migration commit.
 
-## Open items (208)
+## Open items (224)
 
 ### iax-dv33deaf — Enrolling a DVstick 33 can leave it deaf until it is unplugged
 *P2 medium · bug · labels: dstar, ambe, hardware, cx:2*
@@ -1267,6 +1267,17 @@ The assertion was `crates/astar-console/tests/echolink_session.rs:705`,
 one more control packet arrived after the link read `Closed`, which fits the
 in-flight SDES idea but doesn't prove it, as the run didn't show that packet's
 contents. Twenty reruns of the same test binary straight after all passed.
+
+### astar-audio-tap-timing-flake — a router timing test failed once under full `just ci` load
+*P4 lowest · bug · labels: ci, audio, test, flaky, cx:1*
+
+`astar-audio`'s `router::tests::a_full_tap_never_delays_the_audio_thread`
+failed once on 2026-11-23, in a full `just ci` run on `work/sstv-send`: the
+tapped maximum was 28 ms against its 20 ms limit (`crates/astar-audio/src/router.rs:4215`).
+It passed three runs out of three on its own straight afterwards, and the next
+`just ci` was green. It measures wall-clock time, so a loaded machine can push
+it over. If it fails again, keep the output and decide whether the limit or the
+measurement should change.
 
 ### astar-acme-ca-change — switching ACME from staging to production keeps the staging certificate
 *P3 low · bug · labels: server, acme, tls, cx:1*

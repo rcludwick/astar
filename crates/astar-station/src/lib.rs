@@ -41,6 +41,8 @@ mod event;
 mod ptt_arbiter;
 #[cfg(feature = "sstv")]
 mod sstv;
+#[cfg(feature = "sstv-tx")]
+mod sstv_fit;
 #[cfg(feature = "sstv")]
 mod sstv_packets;
 #[cfg(feature = "sstv-tx")]
@@ -79,6 +81,11 @@ pub use sstv::{
     SSTV_INDEX_FILE, SSTV_RECENT_MAX, SstvConfig, SstvContext, SstvFrame, SstvPictureRow, SstvState,
 };
 // Sending SSTV pictures: what `Station::send_picture` takes and returns.
+#[cfg(feature = "sstv-tx")]
+pub use sstv_fit::{
+    DEFAULT_SEND_MODE, MAX_SOURCE_PIXELS, PictureFit, PreparePictureError, SendMode,
+    prepare_picture, send_modes,
+};
 #[cfg(feature = "sstv-tx")]
 pub use sstv_tx::{
     PICTURE_LEAD, PICTURE_PEAK_DBFS, PICTURE_TAIL, PictureSend, SendEnd, SendPictureError,

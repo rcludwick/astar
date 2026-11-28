@@ -63,9 +63,84 @@ pub struct IaxStation {
     /// The input device the most recent snapshot reported stopped, empty
     /// when none — read back by [`iax_station_mic_stopped`].
     mic_stopped: Mutex<String>,
+    /// The `iax_station_picture_*` state: the pending picture, the picture
+    /// on the air or last ended, and the last refusal. In memory only.
+    #[cfg(feature = "sstv-tx")]
+    picture: Mutex<PictureCell>,
+}
+
+/// What the `iax_station_picture_*` functions remember between calls. Only
+/// with `sstv-tx`: without it those functions only refuse.
+#[cfg(feature = "sstv-tx")]
+#[derive(Default)]
+struct PictureCell {
+    /// The picture the last successful [`iax_station_picture_prepare`] made,
+    /// with its index in the mode menu: exactly what the caller previewed,
+    /// and what [`iax_station_picture_send`] sends.
+    pending: Option<(astar_station::SstvPicture, usize)>,
+    /// The picture on the air, or the last one to end, with its mode's name.
+    current: Option<(std::sync::Arc<astar_station::PictureSend>, &'static str)>,
+    /// Why the last send was refused, until the next prepare or send.
+    refused: Option<astar_station::SendPictureError>,
+    /// Bumped by every [`iax_station_picture_prepare`] as it starts: a
+    /// prepare whose number is no longer current when its fit is done was
+    /// overtaken by a newer one, and keeps nothing.
+    generation: u64,
+    /// Test-only: the next prepare stops here after taking its number.
+    #[cfg(feature = "test-hooks")]
+    pause_next: Option<std::sync::Arc<PreparePause>>,
+}
+
+/// Test-only: holds one [`iax_station_picture_prepare`] after it has taken
+/// its number and before it fits its image, so a test can start a second
+/// prepare at exactly that moment. From
+/// [`iax_station_pause_next_prepare_for_test`].
+#[cfg(all(feature = "sstv-tx", feature = "test-hooks"))]
+#[doc(hidden)]
+pub struct PreparePause {
+    reached: std::sync::Barrier,
+    release: std::sync::Barrier,
+}
+
+#[cfg(all(feature = "sstv-tx", feature = "test-hooks"))]
+impl PreparePause {
+    /// Wait until the held prepare has reached the pause.
+    pub fn wait_until_held(&self) {
+        self.reached.wait();
+    }
+
+    /// Let the held prepare go on.
+    pub fn release(&self) {
+        self.release.wait();
+    }
 }
 
 impl IaxStation {
+    /// The handle around `inner`, with every remembered string empty.
+    fn wrap(inner: Station) -> Self {
+        Self {
+            inner,
+            last_incoming: Mutex::new(String::new()),
+            last_link_node: Mutex::new(String::new()),
+            last_error: Mutex::new(String::new()),
+            speaker_stopped: Mutex::new(String::new()),
+            mic_stopped: Mutex::new(String::new()),
+            #[cfg(feature = "sstv-tx")]
+            picture: Mutex::default(),
+        }
+    }
+
+    /// Record `text` for [`iax_station_last_error`] and return `code`: the
+    /// funnel for a failure that is not a `StationError`.
+    #[cfg(feature = "sstv-tx")]
+    fn fail_with(&self, code: c_int, text: &str) -> c_int {
+        if let Ok(mut slot) = self.last_error.lock() {
+            slot.clear();
+            slot.push_str(text);
+        }
+        code
+    }
+
     /// Remember which devices `s` reports stopped, so the string getters
     /// answer for the same snapshot the caller's flags came from.
     fn remember_stopped(&self, s: &astar_station::ConsoleState) {
@@ -651,6 +726,21 @@ pub const IAX_ERR_PTT_LATCHED: c_int = -27;
 /// feature not being compiled in. Read `iax_station_last_error` for which.
 pub const IAX_ERR_P25: c_int = -28;
 
+/// [`iax_station_picture_send`] was refused by the engine: sending pictures
+/// is not allowed, there is no call, the call's network cannot carry a
+/// picture, the picture is longer than the transmit time-out, something is
+/// already on the air, or the engine could not start it. Nothing was keyed.
+/// [`iax_station_picture_state_json`]'s `refused` says which, and
+/// `iax_station_last_error` says it in words.
+pub const IAX_ERR_PICTURE: c_int = -29;
+
+/// [`iax_station_picture_prepare`] was overtaken: another prepare on the same
+/// station started while this one was fitting its image, and that newer one
+/// owns the pending picture. Nothing of this call was kept, and its
+/// `rgb_out`, `w` and `h` were not written. Show the newer call's preview,
+/// not this one's.
+pub const IAX_ERR_SUPERSEDED: c_int = -30;
+
 /// Number of log-spaced dBFS bins [`iax_station_mic_spectrum`] writes when
 /// monitoring (iax-e73e). Size the `out` array to (at least) this; a larger
 /// buffer is fine (the extra entries are left untouched). A literal here so
@@ -934,14 +1024,7 @@ pub unsafe extern "C" fn iax_station_new(cfg: *const IaxConfig) -> *mut IaxStati
             codec_policy,
             ..StationConfig::default()
         };
-        Box::into_raw(Box::new(IaxStation {
-            inner: Station::new(sc),
-            last_incoming: Mutex::new(String::new()),
-            last_link_node: Mutex::new(String::new()),
-            last_error: Mutex::new(String::new()),
-            speaker_stopped: Mutex::new(String::new()),
-            mic_stopped: Mutex::new(String::new()),
-        }))
+        Box::into_raw(Box::new(IaxStation::wrap(Station::new(sc))))
     }))
     .unwrap_or(std::ptr::null_mut())
 }
@@ -1567,6 +1650,12 @@ pub unsafe extern "C" fn iax_station_mic_stopped(
 /// Legacy key still held when the call hangs up is released with no latch,
 /// so the next call's `true` keys. A key held past the transmit time-out
 /// (two minutes unless [`iax_station_set_tx_timeout_ms`] changed it) unkeys.
+///
+/// While a picture is going out ([`iax_station_picture_send`]), a `true`
+/// does not key: it stops the picture, unkeys, and returns
+/// [`IAX_ERR_PTT_LATCHED`]. A client should treat that as "the picture was
+/// stopped", not as an error to show. The press is used up; a `false` and
+/// then a `true` talks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iax_station_set_ptt(st: *mut IaxStation, on: bool) -> c_int {
     if st.is_null() {
@@ -1600,6 +1689,15 @@ fn ptt_source_from_ffi(src: u32) -> Result<PttSource, StationError> {
 /// [`iax_station_ptt_lease_press`], so the engine bounds every Bluetooth
 /// hold. Its release is accepted. An unknown `src` is [`IAX_ERR_INVALID`];
 /// NULL `st` is [`IAX_ERR_NULL`].
+///
+/// While a picture is going out ([`iax_station_picture_send`]), a press of
+/// a hand-operated source ([`IAX_PTT_MANUAL`], [`IAX_PTT_SERIAL`],
+/// [`IAX_PTT_LEGACY`], or [`IAX_PTT_BLUETOOTH`] through its lease press),
+/// latched or not, does not key: it stops the picture, unkeys, and returns
+/// [`IAX_ERR_PTT_LATCHED`]. A client should treat that as "the picture was
+/// stopped", not as an error to show. The source keys again on a fresh
+/// press after a release. A [`IAX_PTT_VOX`] press during a picture returns
+/// [`IAX_OK`] and does nothing at all.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iax_station_ptt_source(st: *mut IaxStation, src: u32, on: bool) -> c_int {
     if st.is_null() {
@@ -1636,7 +1734,9 @@ pub unsafe extern "C" fn iax_station_ptt_stop_all(st: *mut IaxStation) -> c_int 
 /// [`iax_station_ptt_lease_renew`], so a button whose release is lost in the
 /// air still ends unkeyed. Any other `src`, `ttl_ms == 0` or `ttl_ms > 5000`
 /// is [`IAX_ERR_INVALID`] and changes nothing. Otherwise the result is as
-/// [`iax_station_ptt_source`]'s press.
+/// [`iax_station_ptt_source`]'s press, including during a picture: the
+/// press stops it and returns [`IAX_ERR_PTT_LATCHED`], meaning "the
+/// picture was stopped", and arms no lease.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn iax_station_ptt_lease_press(
     st: *mut IaxStation,
@@ -2707,6 +2807,8 @@ pub unsafe extern "C" fn iax_error_text(code: c_int) -> *const c_char {
         IAX_ERR_NOT_LEASED => b"ptt source holds no lease\0",
         IAX_ERR_INVALID => b"invalid argument\0",
         IAX_ERR_PTT_LATCHED => b"ptt source is latched: release it first\0",
+        IAX_ERR_PICTURE => b"picture not sent\0",
+        IAX_ERR_SUPERSEDED => b"replaced by a newer request\0",
         IAX_ERR_IAX => b"iax error\0",
         IAX_ERR_SERIAL => b"serial error\0",
         IAX_ERR_UTF8 => b"argument was not valid utf-8\0",
@@ -2835,6 +2937,7 @@ mod fill_state_tests {
                 reason: Some(ForcedReason::LeaseExpired),
             },
             tx_timeout: Duration::from_secs(300),
+            picture_allowed: false,
         };
         let st = fill_state(&ConsoleState::default(), false, &ptt);
         assert_eq!(st.ptt_sources, 0b0_1010);
@@ -2888,7 +2991,6 @@ mod ptt_ffi_loopback_tests {
     //! goes to loopback.
     use std::mem::MaybeUninit;
     use std::net::{SocketAddr, UdpSocket};
-    use std::sync::Mutex;
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -2927,17 +3029,10 @@ mod ptt_ffi_loopback_tests {
     /// A heap `IaxStation` around a `NullBackend` station, as
     /// `iax_station_new` would build it, so `iax_station_free` owns it.
     pub(super) fn null_backend_station() -> *mut IaxStation {
-        Box::into_raw(Box::new(IaxStation {
-            inner: Station::with_backend_factory(
-                StationConfig::default(),
-                Box::new(|| Box::new(astar_audio::NullBackend::new())),
-            ),
-            last_incoming: Mutex::new(String::new()),
-            last_link_node: Mutex::new(String::new()),
-            last_error: Mutex::new(String::new()),
-            speaker_stopped: Mutex::new(String::new()),
-            mic_stopped: Mutex::new(String::new()),
-        }))
+        Box::into_raw(Box::new(IaxStation::wrap(Station::with_backend_factory(
+            StationConfig::default(),
+            Box::new(|| Box::new(astar_audio::NullBackend::new())),
+        ))))
     }
 
     fn state_of(st: *mut IaxStation) -> IaxState {
@@ -4279,6 +4374,663 @@ pub unsafe extern "C" fn iax_station_sstv_frame(
         }
     }))
     .unwrap_or(IAX_ERR_PANIC)
+}
+
+// ---------------------------------------------------------------------------
+// Sending a picture (SSTV transmit)
+// ---------------------------------------------------------------------------
+//
+// Every function here exists in every build, so the header is the same with
+// and without this library's `sstv-tx` feature. Without it each one returns
+// [`IAX_ERR_UNSUPPORTED`] and writes nothing (a NULL `st` is still
+// [`IAX_ERR_NULL`]), and `iax_station_picture_compiled` is 0. Sending is a
+// transmit action, so a build without it says so rather than doing nothing.
+//
+// The flow: `iax_station_picture_prepare` fits an image to a mode, hands the
+// caller the result to preview, and keeps it as the station's pending
+// picture; `iax_station_picture_send` sends exactly that picture, through
+// the engine's own checks; `iax_station_picture_discard` drops it unsent.
+// Nothing here turns "allowed" on by itself, and nothing here changes the
+// transmit time-out.
+
+/// 1 when this library was built with picture sending (`sstv-tx`), 0 when
+/// every other `iax_station_picture_*` function only refuses.
+#[unsafe(no_mangle)]
+pub extern "C" fn iax_station_picture_compiled() -> c_int {
+    c_int::from(cfg!(feature = "sstv-tx"))
+}
+
+/// Allow (`true`) or stop allowing this station to send pictures. Off on
+/// every new station, kept in memory only, and turned on by nothing but this
+/// call. Turning it off while a picture is going out stops the picture.
+///
+/// Returns [`IAX_OK`], [`IAX_ERR_NULL`], [`IAX_ERR_UNSUPPORTED`] (no
+/// `sstv-tx`), or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_picture_set_allowed(
+    st: *mut IaxStation,
+    allowed: bool,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(feature = "sstv-tx")]
+        {
+            station.inner.set_picture_sending_allowed(allowed);
+            IAX_OK
+        }
+        #[cfg(not(feature = "sstv-tx"))]
+        {
+            let _ = (station, allowed);
+            IAX_ERR_UNSUPPORTED
+        }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Write whether this station may send pictures into `*out`.
+///
+/// Returns [`IAX_OK`], [`IAX_ERR_NULL`] (NULL `st` or `out`),
+/// [`IAX_ERR_UNSUPPORTED`] (no `sstv-tx`; `*out` is not written), or
+/// [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_picture_allowed(st: *mut IaxStation, out: *mut bool) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(feature = "sstv-tx")]
+        {
+            if out.is_null() {
+                return IAX_ERR_NULL;
+            }
+            unsafe { *out = station.inner.picture_sending_allowed() };
+            IAX_OK
+        }
+        #[cfg(not(feature = "sstv-tx"))]
+        {
+            let _ = (station, out);
+            IAX_ERR_UNSUPPORTED
+        }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Write the modes a picture can be sent in, as JSON, into the caller buffer
+/// `buf` of `len` bytes (NUL-terminated, truncate-safe; returns the byte
+/// length the full JSON needs, excluding the NUL, so a `len == 0` call is a
+/// sizing query), as [`iax_station_sstv_state_json`] does:
+///
+/// ```json
+/// {"default":2,"lead_secs":4.0,"modes":[{"height":240,"index":0,"name":"Robot 36",
+///  "seconds":42.0,"width":320}, ...]}
+/// ```
+///
+/// `modes` is in menu order; `index` is what [`iax_station_picture_prepare`]
+/// takes, and `seconds` is the whole time the mode keeps the transmitter
+/// keyed, the silent lead-in and the tail included. `lead_secs` is that
+/// silent lead-in, which every picture starts with before its first tone,
+/// so a client can show "Starting…" for that long without hard-coding it.
+/// `default` is the index to preselect. Returns
+/// [`IAX_ERR_NULL`], [`IAX_ERR_UNSUPPORTED`] (no `sstv-tx`; `buf` is not
+/// written), or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_picture_modes_json(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        let _ = station;
+        #[cfg(feature = "sstv-tx")]
+        {
+            let json = picture::modes_json();
+            unsafe { fill_buf(&json, buf, len) }
+        }
+        #[cfg(not(feature = "sstv-tx"))]
+        {
+            let _ = (buf, len);
+            IAX_ERR_UNSUPPORTED
+        }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Fit an image to mode `mode_index` (from [`iax_station_picture_modes_json`])
+/// and keep the result as this station's pending picture.
+///
+/// `rgba` is `width * height` pixels, 4 bytes each (red, green, blue, alpha;
+/// rows top to bottom), and `rgba_len` must be exactly `width * height * 4`.
+/// `fit` 0 fills the mode's frame, cropping what overhangs; 1 fits the whole
+/// image inside it, with black bars. On success the fitted picture is written
+/// to `rgb_out` as `*w * *h * 3` bytes of RGB, for the caller to preview, and
+/// [`iax_station_picture_send`] will send exactly those pixels.
+///
+/// Every call first drops the pending picture, any refusal and an ended
+/// picture's state, so a failed prepare leaves nothing pending.
+///
+/// Calls may overlap, from any threads. After any prepare returns, either
+/// nothing is pending, or the pending picture is exactly the one whose bytes
+/// the last successful caller received in `rgb_out`. A prepare that starts
+/// while an earlier one is still fitting overtakes it: the earlier one
+/// returns [`IAX_ERR_SUPERSEDED`], keeps nothing and writes nothing, even if
+/// the newer one then fails (in which case nothing is pending). An
+/// [`iax_station_picture_discard`] overtakes a prepare in the same way. So a
+/// preview can never show a picture other than the one
+/// [`iax_station_picture_send`] would send.
+///
+/// Returns [`IAX_OK`]; [`IAX_ERR_NULL`] (NULL `st`, `rgba`, `rgb_out`, `w` or
+/// `h`); [`IAX_ERR_INVALID`] (an unknown `mode_index` or `fit`, `rgb_cap`
+/// smaller than the mode's `width * height * 3`, `rgba_len` not `width *
+/// height * 4`, an empty image, or one over 64 megapixels;
+/// `iax_station_last_error` says which); [`IAX_ERR_SUPERSEDED`] (a newer
+/// prepare overtook this one); [`IAX_ERR_UNSUPPORTED`] (no `sstv-tx`); or
+/// [`IAX_ERR_PANIC`]. `rgb_out`, `*w` and `*h` are written only on
+/// [`IAX_OK`].
+///
+/// NOTE: resampling a large photo takes some milliseconds; call it off any
+/// UI thread.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_picture_prepare(
+    st: *mut IaxStation,
+    rgba: *const u8,
+    rgba_len: usize,
+    width: u32,
+    height: u32,
+    mode_index: u32,
+    fit: u32,
+    rgb_out: *mut u8,
+    rgb_cap: usize,
+    w: *mut u32,
+    h: *mut u32,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(feature = "sstv-tx")]
+        {
+            unsafe {
+                picture::prepare(
+                    station,
+                    picture::PrepareArgs {
+                        rgba,
+                        rgba_len,
+                        width,
+                        height,
+                        mode_index,
+                        fit,
+                        rgb_out,
+                        rgb_cap,
+                        w,
+                        h,
+                    },
+                )
+            }
+        }
+        #[cfg(not(feature = "sstv-tx"))]
+        {
+            let _ = (
+                station, rgba, rgba_len, width, height, mode_index, fit, rgb_out, rgb_cap, w, h,
+            );
+            IAX_ERR_UNSUPPORTED
+        }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Send the pending picture ([`iax_station_picture_prepare`]) on the current
+/// call. Nothing is pending after this, whatever it returns, so a second
+/// send needs a second prepare.
+///
+/// The engine checks, in order, that sending is allowed
+/// ([`iax_station_picture_set_allowed`]), that there is a call on a network
+/// that can carry a picture, that the picture fits in the transmit time-out
+/// (which is never changed for it), and that nothing is already on the air.
+/// A refusal keys nothing and is reported by
+/// [`iax_station_picture_state_json`]'s `refused`. Once it is going out, a
+/// key press, the transmit time-out, the call ending or
+/// [`iax_station_picture_cancel`] stops it.
+///
+/// Returns [`IAX_OK`] (the picture is going out); [`IAX_ERR_INVALID`] (no
+/// picture is pending); [`IAX_ERR_PICTURE`] (the engine refused it); or
+/// [`IAX_ERR_NULL`], [`IAX_ERR_UNSUPPORTED`] (no `sstv-tx`),
+/// [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_picture_send(st: *mut IaxStation) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(feature = "sstv-tx")]
+        {
+            picture::send(station)
+        }
+        #[cfg(not(feature = "sstv-tx"))]
+        {
+            let _ = station;
+            IAX_ERR_UNSUPPORTED
+        }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Stop the picture going out and unkey. Does nothing (and returns
+/// [`IAX_OK`]) when no picture is on the air. The state then reads `ended`,
+/// `cancelled`.
+///
+/// Returns [`IAX_OK`], [`IAX_ERR_NULL`], [`IAX_ERR_UNSUPPORTED`] (no
+/// `sstv-tx`), or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_picture_cancel(st: *mut IaxStation) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(feature = "sstv-tx")]
+        {
+            picture::cancel(station);
+            IAX_OK
+        }
+        #[cfg(not(feature = "sstv-tx"))]
+        {
+            let _ = station;
+            IAX_ERR_UNSUPPORTED
+        }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Drop the pending picture ([`iax_station_picture_prepare`]) without sending
+/// it, for when the person closes the sheet. A prepare still fitting when
+/// this is called keeps nothing either: it returns [`IAX_ERR_SUPERSEDED`].
+/// It does not touch a picture that is going out (stop that with
+/// [`iax_station_picture_cancel`]), nor how the last one ended or was
+/// refused. Does nothing, and returns [`IAX_OK`], when nothing is pending.
+///
+/// Returns [`IAX_OK`], [`IAX_ERR_NULL`], [`IAX_ERR_UNSUPPORTED`] (no
+/// `sstv-tx`), or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_picture_discard(st: *mut IaxStation) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(feature = "sstv-tx")]
+        {
+            picture::discard(station);
+            IAX_OK
+        }
+        #[cfg(not(feature = "sstv-tx"))]
+        {
+            let _ = station;
+            IAX_ERR_UNSUPPORTED
+        }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Write the picture sender's state as JSON into the caller buffer `buf` of
+/// `len` bytes, with the same buffer convention as
+/// [`iax_station_sstv_state_json`]. One of:
+///
+/// ```json
+/// {"state":"idle","pending":false,"allowed":false}
+/// {"state":"sending","mode":"Scottie 2","sent_secs":32.1,"total_secs":77.1,"pending":false,"allowed":true}
+/// {"state":"ended","mode":"Scottie 2","end":"sent","pending":true,"allowed":true}
+/// ```
+///
+/// `pending` is whether a prepared picture is waiting to be sent.
+///
+/// `end` is `"sent"`, `"cancelled"`, `"timed_out"` or `"call_ended"`.
+/// `"timed_out"` covers both the station's transmit time-out and an
+/// `EchoLink` link's own transmit cap. `ended` is reported only until the
+/// next prepare or send, so a client that wants to keep showing how the
+/// last picture ended must remember it itself.
+///
+/// After a refused send the document also carries `"refused"`:
+/// `"not_allowed"`, `"no_call"`, `"wrong_network"` (with `"network"`, as a
+/// person would name it), `"too_long"` (with `"picture_secs"` and
+/// `"timeout_secs"`), `"on_air"` or `"engine"`, until the next prepare or
+/// send. A refusal and a picture still going out coexist: a send refused
+/// while a picture runs reads `"state":"sending"` together with
+/// `"refused":"on_air"`. The text of an `"engine"` refusal is in
+/// [`iax_station_last_error`]. Never waits on a picture starting. Returns [`IAX_ERR_NULL`], [`IAX_ERR_UNSUPPORTED`] (no `sstv-tx`;
+/// `buf` is not written), or [`IAX_ERR_PANIC`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn iax_station_picture_state_json(
+    st: *mut IaxStation,
+    buf: *mut c_char,
+    len: usize,
+) -> c_int {
+    if st.is_null() {
+        return IAX_ERR_NULL;
+    }
+    let station = unsafe { &*st };
+    catch_unwind(AssertUnwindSafe(|| {
+        #[cfg(feature = "sstv-tx")]
+        {
+            let json = picture::state_json(station);
+            unsafe { fill_buf(&json, buf, len) }
+        }
+        #[cfg(not(feature = "sstv-tx"))]
+        {
+            let _ = (station, buf, len);
+            IAX_ERR_UNSUPPORTED
+        }
+    }))
+    .unwrap_or(IAX_ERR_PANIC)
+}
+
+/// Test-only: wrap `station` in a C handle, as [`iax_station_new`] would, so
+/// a test can build a hardware-free station on a loopback call and drive it
+/// through the C functions. A Rust function, not part of the C ABI; free the
+/// handle with [`iax_station_free`].
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+#[must_use]
+pub fn iax_station_from_station_for_test(station: Station) -> *mut IaxStation {
+    Box::into_raw(Box::new(IaxStation::wrap(station)))
+}
+
+/// Test-only: hold the next [`iax_station_picture_prepare`] on `st` after it
+/// has taken its number and before it fits its image, until the returned
+/// pause is released. A Rust function, not part of the C ABI.
+///
+/// # Safety
+/// `st` is a live handle.
+#[cfg(all(feature = "sstv-tx", feature = "test-hooks"))]
+#[doc(hidden)]
+#[must_use]
+pub unsafe fn iax_station_pause_next_prepare_for_test(
+    st: *mut IaxStation,
+) -> std::sync::Arc<PreparePause> {
+    let station = unsafe { &*st };
+    let pause = std::sync::Arc::new(PreparePause {
+        reached: std::sync::Barrier::new(2),
+        release: std::sync::Barrier::new(2),
+    });
+    station
+        .picture
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pause_next = Some(std::sync::Arc::clone(&pause));
+    pause
+}
+
+/// The bodies of the picture functions, built only with `sstv-tx`.
+#[cfg(feature = "sstv-tx")]
+mod picture {
+    use std::ffi::c_int;
+    use std::sync::{Arc, Mutex, MutexGuard};
+    use std::time::Duration;
+
+    use astar_station::{
+        DEFAULT_SEND_MODE, PICTURE_LEAD, PictureFit, PreparePictureError, SendEnd,
+        SendPictureError, Station, StationError, prepare_picture, send_modes,
+    };
+    use serde_json::{Map, Value, json};
+
+    use super::{
+        IAX_ERR_NULL, IAX_ERR_PICTURE, IAX_ERR_SUPERSEDED, IAX_OK, IaxStation, PictureCell,
+    };
+
+    fn lock(m: &Mutex<PictureCell>) -> MutexGuard<'_, PictureCell> {
+        m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Seconds, to a tenth.
+    fn secs(d: Duration) -> f64 {
+        (d.as_secs_f64() * 10.0).round() / 10.0
+    }
+
+    pub(super) fn modes_json() -> String {
+        let modes: Vec<Value> = send_modes()
+            .iter()
+            .enumerate()
+            .map(|(index, m)| {
+                json!({
+                    "index": index,
+                    "name": m.name,
+                    "width": m.width,
+                    "height": m.height,
+                    "seconds": secs(Station::picture_duration(m.mode)),
+                })
+            })
+            .collect();
+        json!({
+            "default": DEFAULT_SEND_MODE,
+            "lead_secs": secs(PICTURE_LEAD),
+            "modes": modes,
+        })
+        .to_string()
+    }
+
+    /// Forget an ended picture, keeping one still on the air (so it can be
+    /// cancelled and its progress read).
+    fn drop_ended(cell: &mut PictureCell) {
+        if cell
+            .current
+            .as_ref()
+            .is_some_and(|(send, _)| send.ended().is_some())
+        {
+            cell.current = None;
+        }
+    }
+
+    /// [`super::iax_station_picture_prepare`]'s arguments.
+    #[derive(Clone, Copy)]
+    pub(super) struct PrepareArgs {
+        pub rgba: *const u8,
+        pub rgba_len: usize,
+        pub width: u32,
+        pub height: u32,
+        pub mode_index: u32,
+        pub fit: u32,
+        pub rgb_out: *mut u8,
+        pub rgb_cap: usize,
+        pub w: *mut u32,
+        pub h: *mut u32,
+    }
+
+    /// # Safety
+    /// The pointers in `a` are NULL or valid for their stated lengths.
+    pub(super) unsafe fn prepare(station: &IaxStation, a: PrepareArgs) -> c_int {
+        // This call's number. A prepare that starts after it bumps the
+        // number, and then this one keeps nothing (see below).
+        let generation = {
+            let mut cell = lock(&station.picture);
+            cell.pending = None;
+            cell.refused = None;
+            drop_ended(&mut cell);
+            cell.generation = cell.generation.wrapping_add(1);
+            cell.generation
+        };
+        #[cfg(feature = "test-hooks")]
+        {
+            let pause = lock(&station.picture).pause_next.take();
+            if let Some(pause) = pause {
+                pause.reached.wait();
+                pause.release.wait();
+            }
+        }
+        let invalid = |why: &'static str| station.fail(&StationError::InvalidArgument(why));
+        if a.rgba.is_null() || a.rgb_out.is_null() || a.w.is_null() || a.h.is_null() {
+            return IAX_ERR_NULL;
+        }
+        let Some((index, mode)) = usize::try_from(a.mode_index)
+            .ok()
+            .and_then(|i| send_modes().get(i).map(|m| (i, m)))
+        else {
+            return invalid("unknown picture mode");
+        };
+        let fit = match a.fit {
+            0 => PictureFit::Fill,
+            1 => PictureFit::Fit,
+            _ => return invalid("fit must be 0 (fill) or 1 (fit)"),
+        };
+        let needed = u64::from(mode.width) * u64::from(mode.height) * 3;
+        if u64::try_from(a.rgb_cap).unwrap_or(u64::MAX) < needed {
+            return invalid("rgb_out is smaller than the mode's width * height * 3");
+        }
+        let rgba = unsafe { std::slice::from_raw_parts(a.rgba, a.rgba_len) };
+        let picture = match prepare_picture(rgba, a.width, a.height, mode.mode, fit) {
+            Ok(p) => p,
+            Err(e) => {
+                return invalid(match e {
+                    PreparePictureError::Empty => "the image is empty",
+                    PreparePictureError::TooLarge { .. } => "the image is over 64 megapixels",
+                    PreparePictureError::WrongLength { .. } => "rgba_len is not width * height * 4",
+                });
+            }
+        };
+        // One lock section for the check, the caller's copy and the store,
+        // so the preview this caller gets is exactly the pending picture.
+        // A newer prepare started while this one was fitting: it owns the
+        // pending slot, and this caller's preview would not be what is sent.
+        let mut cell = lock(&station.picture);
+        if cell.generation != generation {
+            drop(cell);
+            return station.fail_with(
+                IAX_ERR_SUPERSEDED,
+                "a newer prepare on this station replaced this picture",
+            );
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(picture.rgb.as_ptr(), a.rgb_out, picture.rgb.len());
+            *a.w = picture.width;
+            *a.h = picture.height;
+        }
+        cell.pending = Some((picture, index));
+        IAX_OK
+    }
+
+    pub(super) fn send(station: &IaxStation) -> c_int {
+        // Take the pending picture and let go of the lock: the engine call
+        // below may take a moment, and nothing of ours is held during it.
+        let Some((picture, index)) = lock(&station.picture).pending.take() else {
+            return station.fail(&StationError::InvalidArgument(
+                "no picture is prepared to send",
+            ));
+        };
+        let mode = &send_modes()[index];
+        let result = station.inner.send_picture(&picture, mode.mode);
+        let mut cell = lock(&station.picture);
+        match result {
+            Ok(send) => {
+                cell.current = Some((Arc::new(send), mode.name));
+                cell.refused = None;
+                IAX_OK
+            }
+            Err(e) => {
+                drop_ended(&mut cell);
+                let text = e.to_string();
+                cell.refused = Some(e);
+                drop(cell);
+                station.fail_with(IAX_ERR_PICTURE, &text)
+            }
+        }
+    }
+
+    pub(super) fn cancel(station: &IaxStation) {
+        let send = lock(&station.picture)
+            .current
+            .as_ref()
+            .map(|(send, _)| Arc::clone(send));
+        if let Some(send) = send {
+            send.cancel();
+        }
+    }
+
+    /// Drop the pending picture, and overtake a prepare still fitting so it
+    /// keeps nothing either.
+    pub(super) fn discard(station: &IaxStation) {
+        let mut cell = lock(&station.picture);
+        cell.pending = None;
+        cell.generation = cell.generation.wrapping_add(1);
+    }
+
+    fn end_word(end: SendEnd) -> &'static str {
+        match end {
+            SendEnd::Sent => "sent",
+            SendEnd::Cancelled => "cancelled",
+            SendEnd::TimedOut => "timed_out",
+            SendEnd::CallEnded => "call_ended",
+        }
+    }
+
+    fn add_refusal(doc: &mut Map<String, Value>, e: &SendPictureError) {
+        let word = match e {
+            SendPictureError::NotAllowed => "not_allowed",
+            SendPictureError::NoCall => "no_call",
+            SendPictureError::WrongNetwork(network) => {
+                doc.insert("network".into(), json!(network));
+                "wrong_network"
+            }
+            SendPictureError::TooLong { picture, timeout } => {
+                doc.insert("picture_secs".into(), json!(secs(*picture)));
+                doc.insert("timeout_secs".into(), json!(secs(*timeout)));
+                "too_long"
+            }
+            SendPictureError::OnAir => "on_air",
+            // A prepared picture is always its mode's size, so a wrong size
+            // here is the engine's fault, not the caller's.
+            SendPictureError::WrongSize { .. } | SendPictureError::Engine(_) => "engine",
+        };
+        doc.insert("refused".into(), json!(word));
+    }
+
+    pub(super) fn state_json(station: &IaxStation) -> String {
+        let (current, refused, pending) = {
+            let cell = lock(&station.picture);
+            (
+                cell.current
+                    .as_ref()
+                    .map(|(send, name)| (Arc::clone(send), *name)),
+                cell.refused.clone(),
+                cell.pending.is_some(),
+            )
+        };
+        let mut doc = Map::new();
+        match current {
+            None => {
+                doc.insert("state".into(), json!("idle"));
+            }
+            Some((handle, name)) => {
+                doc.insert("mode".into(), json!(name));
+                if let Some(end) = handle.ended() {
+                    doc.insert("state".into(), json!("ended"));
+                    doc.insert("end".into(), json!(end_word(end)));
+                } else {
+                    let (sent, total) = handle.progress();
+                    doc.insert("state".into(), json!("sending"));
+                    doc.insert("sent_secs".into(), json!(secs(sent)));
+                    doc.insert("total_secs".into(), json!(secs(total)));
+                }
+            }
+        }
+        doc.insert("pending".into(), json!(pending));
+        doc.insert(
+            "allowed".into(),
+            json!(station.inner.picture_sending_allowed()),
+        );
+        if let Some(e) = &refused {
+            add_refusal(&mut doc, e);
+        }
+        Value::Object(doc).to_string()
+    }
 }
 
 /// Set extra directories to search for a runtime `libcodec2`, ahead of the

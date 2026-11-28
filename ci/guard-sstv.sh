@@ -26,17 +26,30 @@
 # [sstv-tx]    `sstv-tx` is in no default feature set, and only
 #              astar-nodebench (the bench) may turn it on: no other manifest
 #              names it, which keeps it out of astar-sys (the app's engine),
-#              astar-server's `release` and astar-netrec. Neither the
+#              astar-server's `release` and astar-netrec. The one exception
+#              is astar-sys declaring its own non-default
+#              `sstv-tx = ["astar-station/sstv-tx"]` (the bodies of its
+#              picture functions) and a `[[test]]` requiring it; anything
+#              else there naming it, `default` included, fails. Neither the
 #              justfile's xcframework recipe nor
 #              bindings/swift/build-xcframework.sh names it.
 # [recipes]    A feature can also be asked for on a cargo command line, which
 #              no manifest shows. So `sstv-tx` appears, outside `#` comments,
 #              in no build recipe: the justfile, .gitlab-ci.yml, and the
 #              scripts, workflows and container files under .github/,
-#              deploy/, scripts/, bindings/ and apps/macos/Tools/. The two
-#              allowed lines are one that names astar-nodebench (the bench)
-#              and a `cargo test` / `cargo clippy` of `-p astar-station`
-#              (its own sstv-tx tests). Lines are read one at a time.
+#              deploy/, scripts/, bindings/ and apps/macos/Tools/. The
+#              allowed lines are one that names astar-nodebench (the bench),
+#              a `cargo test` / `cargo clippy` of `-p astar-station` (its own
+#              sstv-tx tests), and exactly `cargo test -p astar-sys
+#              --features sstv-tx --target-dir target/picture-ffi` (the
+#              picture C interface's tests), which may add test-name filters
+#              and arguments after `--` but no other package, feature or
+#              flag, nothing chained after it, no line continuation and no
+#              just `{{...}}` interpolation. The `--target-dir` is required:
+#              without it the test build leaves a static library with
+#              working picture functions in target/debug, which the Swift
+#              package's fallback path links.
+#              Lines are read one at a time.
 # [workspace]  A recipe that feeds a shipped artifact never builds with
 #              `--workspace` (or `--all`): a workspace build unifies features
 #              across members, so the bench's `sstv-tx` would reach the
@@ -45,7 +58,16 @@
 #              both build-xcframework.sh scripts, apps/macos/Tools/build.sh
 #              and make-dmg.sh, and every recipe file under deploy/. A
 #              workspace-wide test, clippy or check (`just ci`) ships
-#              nothing and stays allowed.
+#              nothing and stays allowed. The flag is matched as a token
+#              anywhere on a line outside a comment, so a bash array
+#              (`flags=("--workspace")`) counts.
+# [all-features] Those same shipped recipes never pass `--all-features`
+#              either: it names no feature, so [recipes] cannot see it, yet
+#              on astar-sys it turns `sstv-tx` and the fork's encoder on.
+#              It is matched as a token anywhere on a line outside a comment,
+#              so a bash array (`codec_features=("--all-features")`) counts.
+#              Lint and test runs (`ci/feature-matrix.sh`'s clippy per crate,
+#              `just ci`) are not on that list, so they may keep using it.
 # [leaf]      crates/astar-sstv's normal dependencies name no astar-* crate
 #              except astar-record, so the decoder never reaches anything
 #              that could key a radio.
@@ -57,10 +79,12 @@
 #              `cargo metadata`, so a new crate is checked without anyone
 #              adding it here), each resolved on its own with all features
 #              on, the `sstv` crate (which astar-sstv's de-jitter brings in)
-#              is built without its `encode` or `default` feature. Two
+#              is built without its `encode` or `default` feature. Three
 #              members differ: astar-station is checked with its default
 #              features, since `sstv-tx` is its own feature and all
-#              features would turn it on; astar-nodebench is not checked,
+#              features would turn it on; astar-sys is checked with every
+#              feature but its own `sstv-tx` (its defaults and everything
+#              the xcframework script adds); astar-nodebench is not checked,
 #              since it is the bench, turns `sstv-tx` on by design and
 #              ships nothing. When the check cannot run (the self-test
 #              trees under SSTV_ROOT, no cargo, no Cargo.lock) it prints a
@@ -93,7 +117,7 @@ if [ "${1:-}" = "--self-test" ]; then
     t="$(mktemp -d "$tmp/t.XXXXXX")"
     mkdir -p "$t/vendor/sstv" "$t/crates/astar-sstv/src" "$t/crates/astar-station" \
       "$t/crates/astar-netrec" "$t/crates/astar-nodebench" "$t/crates/astar-server" \
-      "$t/bindings/swift"
+      "$t/crates/astar-sys" "$t/bindings/swift"
     cat > "$t/Cargo.toml" <<'TOML'
 [workspace]
 members = ["crates/*"]
@@ -175,6 +199,24 @@ astar-station = { path = "../astar-station", default-features = false }
 release = ["stream"]
 stream = []
 TOML
+    cat > "$t/crates/astar-sys/Cargo.toml" <<'TOML'
+[package]
+name = "astar-sys"
+
+[dependencies]
+astar-station = { path = "../astar-station" }
+
+[features]
+default = ["dstar", "sstv"]
+dstar = []
+sstv = ["astar-station/sstv"]
+codec2-static = []
+sstv-tx = ["astar-station/sstv-tx"]
+
+[[test]]
+name = "picture_ffi"
+required-features = ["sstv-tx"]
+TOML
     cat > "$t/justfile" <<'JUST'
 # The sstv-tx feature is the bench's alone (a comment may name it).
 xcframework:
@@ -196,7 +238,7 @@ ffi-example:
 server-release target="x86_64-unknown-linux-musl":
     cargo zigbuild --release -p astar-server --no-default-features --features release --target {{target}}
 JUST
-    printf '#!/usr/bin/env bash\ncargo build -p astar-sys --features codec2-static\n' \
+    printf '#!/usr/bin/env bash\ncodec_features=(--features codec2-static)\ncargo build -p astar-sys "${codec_features[@]}"\n' \
       > "$t/bindings/swift/build-xcframework.sh"
     mkdir -p "$t/bindings/swift-serial" "$t/deploy" "$t/.github/workflows" "$t/apps/macos/Tools"
     printf '#!/usr/bin/env bash\ncargo build -p astar-serial-sys\n' \
@@ -340,6 +382,21 @@ sstv = { workspace = true }'
   t=$(clean)
   swap "$t/bindings/swift/build-xcframework.sh" '--features codec2-static' '--features codec2-static,astar-station/sstv-tx'
   expect fail "sstv-tx in build-xcframework.sh" "$t" "[sstv-tx]"
+  t=$(clean)
+  swap "$t/crates/astar-sys/Cargo.toml" 'default = ["dstar", "sstv"]' 'default = ["dstar", "sstv", "sstv-tx"]'
+  expect fail "sstv-tx in astar-sys's default" "$t" "[sstv-tx]"
+  t=$(clean)
+  swap "$t/crates/astar-sys/Cargo.toml" 'codec2-static = []' 'codec2-static = ["sstv-tx"]'
+  expect fail "astar-sys reaching sstv-tx through another feature" "$t" "[sstv-tx]"
+  t=$(clean)
+  swap "$t/crates/astar-sys/Cargo.toml" '[[test]]' '[dev-dependencies]
+astar-station = { path = "../astar-station", features = ["sstv-tx"] }
+
+[[test]]'
+  expect fail "astar-sys naming sstv-tx in a dev-dependency" "$t" "[sstv-tx]"
+  t=$(clean)
+  swap "$t/crates/astar-sys/Cargo.toml" 'required-features = ["sstv-tx"]' 'required-features = ["sstv-tx", "dstar"]'
+  expect fail "an astar-sys test requiring more than sstv-tx" "$t" "[sstv-tx]"
 
   # [recipes]
   t=$(clean)
@@ -365,6 +422,37 @@ sstv = { workspace = true }'
   t=$(clean)
   swap "$t/deploy/build.sh" 'just server-release "$TARGET"' 'just server-release "$TARGET"  # not sstv-tx'
   expect pass "sstv-tx in a trailing comment" "$t"
+  t=$(clean)
+  swap "$t/justfile" '    cargo build --release -p astar-sys' '    cargo test -p astar-sys --features sstv-tx --target-dir target/picture-ffi'
+  expect pass "astar-sys's own picture tests" "$t"
+  t=$(clean)
+  swap "$t/justfile" '    cargo build --release -p astar-sys' '    cargo test -p astar-sys --features sstv-tx --target-dir=target/picture-ffi picture -- --nocapture'
+  expect pass "astar-sys's own picture tests with a filter and arguments" "$t"
+  t=$(clean)
+  swap "$t/justfile" '    cargo build --release -p astar-sys' '    cargo test -p astar-sys --features sstv-tx'
+  expect fail "astar-sys's picture tests into the default target directory" "$t" "[recipes]"
+  t=$(clean)
+  swap "$t/justfile" '    cargo build --release -p astar-sys' '    cargo test -p astar-sys --features sstv-tx --target-dir target'
+  expect fail "astar-sys's picture tests into another target directory" "$t" "[recipes]"
+  t=$(clean)
+  swap "$t/justfile" '    cargo build --release -p astar-sys' '    cargo test -p astar-sys --features sstv-tx --target-dir target/picture-ffi \
+    --release'
+  expect fail "astar-sys's picture tests with a line continuation" "$t" "[recipes]"
+  t=$(clean)
+  swap "$t/justfile" '    cargo build --release -p astar-sys' '    cargo test -p astar-sys --features sstv-tx --target-dir target/picture-ffi {{flags}}'
+  expect fail "astar-sys's picture tests with just interpolation" "$t" "[recipes]"
+  t=$(clean)
+  swap "$t/justfile" '    cargo build --release -p astar-sys' '    cargo build -p astar-sys --features sstv-tx'
+  expect fail "a build of astar-sys with sstv-tx" "$t" "[recipes]"
+  t=$(clean)
+  swap "$t/justfile" '    cargo build --release -p astar-sys' '    cargo test -p astar-sys -p astar-server --features sstv-tx'
+  expect fail "astar-sys's picture tests with another package" "$t" "[recipes]"
+  t=$(clean)
+  swap "$t/justfile" '    cargo build --release -p astar-sys' '    cargo test --release -p astar-sys --features sstv-tx'
+  expect fail "astar-sys's picture tests with another flag" "$t" "[recipes]"
+  t=$(clean)
+  swap "$t/justfile" '    cargo build --release -p astar-sys' '    cargo test -p astar-sys --features sstv-tx && cargo build -p astar-sys'
+  expect fail "astar-sys's picture tests with a command chained on" "$t" "[recipes]"
 
   # [workspace]
   t=$(clean)
@@ -381,6 +469,12 @@ sstv = { workspace = true }'
   swap "$t/bindings/swift/build-xcframework.sh" 'cargo build -p astar-sys' 'cargo build --workspace'
   expect fail "build-xcframework.sh building the workspace" "$t" "[workspace]"
   t=$(clean)
+  swap "$t/bindings/swift/build-xcframework.sh" 'codec_features=(--features codec2-static)' 'codec_features=("--workspace" --features codec2-static)'
+  expect fail "build-xcframework.sh's feature array with --workspace" "$t" "[workspace]"
+  t=$(clean)
+  swap "$t/bindings/swift/build-xcframework.sh" 'codec_features=(--features codec2-static)' 'codec_features=(--all --features codec2-static)'
+  expect fail "build-xcframework.sh's feature array with --all" "$t" "[workspace]"
+  t=$(clean)
   swap "$t/apps/macos/Tools/make-dmg.sh" 'xcodebuild -scheme astar' 'cargo build --workspace --release'
   expect fail "make-dmg.sh building the workspace" "$t" "[workspace]"
   t=$(clean)
@@ -389,6 +483,31 @@ sstv = { workspace = true }'
   t=$(clean)
   swap "$t/justfile" '    cargo build --release -p astar-sys' '    cargo build --release --workspace'
   expect pass "a recipe that ships nothing building the workspace" "$t"
+
+  t=$(clean)
+  swap "$t/bindings/swift/build-xcframework.sh" 'codec_features=(--features codec2-static)' 'codec_features=(--features codec2-static)
+codec_features+=(--features sstv-tx)'
+  expect fail "build-xcframework.sh adding sstv-tx to its feature array" "$t" "[sstv-tx]"
+  t=$(clean)
+  swap "$t/bindings/swift/build-xcframework.sh" 'codec_features=(--features codec2-static)' 'codec_features=(--features astar-station/sstv-tx)'
+  expect fail "build-xcframework.sh's feature array naming astar-station/sstv-tx" "$t" "[recipes]"
+
+  # [all-features]
+  t=$(clean)
+  swap "$t/bindings/swift/build-xcframework.sh" 'codec_features=(--features codec2-static)' 'codec_features=(--all-features)'
+  expect fail "build-xcframework.sh's feature array with --all-features" "$t" "[all-features]"
+  t=$(clean)
+  swap "$t/bindings/swift/build-xcframework.sh" 'codec_features=(--features codec2-static)' 'codec_features=("--all-features")'
+  expect fail "build-xcframework.sh's feature array with a quoted --all-features" "$t" "[all-features]"
+  t=$(clean)
+  swap "$t/bindings/swift/build-xcframework.sh" 'codec_features=(--features codec2-static)' 'codec_features=(--features codec2-static)  # never --all-features'
+  expect pass "--all-features in a comment" "$t"
+  t=$(clean)
+  swap "$t/justfile" 'cargo zigbuild --release -p astar-server --no-default-features --features release' 'cargo zigbuild --release -p astar-server --all-features'
+  expect fail "server-release with --all-features" "$t" "[all-features]"
+  t=$(clean)
+  swap "$t/justfile" '    cargo clippy --workspace --all-targets -- -D warnings' '    cargo clippy -p astar-sys --all-targets --all-features -- -D warnings'
+  expect pass "a lint run with --all-features" "$t"
 
   # [leaf]
   t=$(clean)
@@ -608,11 +727,37 @@ def names_sstv_tx(node):
     return False
 
 
+sys_manifest = os.path.join(root, "crates", "astar-sys", "Cargo.toml")
+
+
+def without_sys_declaration(doc):
+    """astar-sys's manifest less the two mentions it may make: its own
+    non-default `sstv-tx = ["astar-station/sstv-tx"]`, and a `[[test]]`
+    requiring exactly that feature."""
+    doc = dict(doc)
+    feats = dict(doc.get("features") or {})
+    if feats.get("sstv-tx") == ["astar-station/sstv-tx"]:
+        del feats["sstv-tx"]
+    doc["features"] = feats
+    tests = doc.get("test")
+    if isinstance(tests, list):
+        doc["test"] = [
+            {k: v for k, v in t.items() if not (k == "required-features" and v == ["sstv-tx"])}
+            if isinstance(t, dict) else t
+            for t in tests
+        ]
+    return doc
+
+
 for m, doc in parsed.items():
     if m in (station, bench):
         continue
-    if names_sstv_tx({k: v for k, v in doc.items() if k != "package"}):
-        bad("[sstv-tx]", m, "names sstv-tx; only astar-nodebench may turn it on")
+    rest = {k: v for k, v in doc.items() if k != "package"}
+    if m == sys_manifest:
+        rest = without_sys_declaration(rest)
+    if names_sstv_tx(rest):
+        bad("[sstv-tx]", m, "names sstv-tx; only astar-nodebench may turn it on "
+            "(astar-sys may only declare its own non-default sstv-tx)")
 
 justfile = os.path.join(root, "justfile")
 if os.path.exists(justfile):
@@ -686,13 +831,58 @@ for sub in (".github", "deploy", "scripts", "bindings", os.path.join("apps", "ma
                        if is_recipe(os.path.join(dirpath, f)))
 
 STATION_TESTS = re.compile(r"\bcargo\s+(?:\+\S+\s+)?(?:test|clippy|nextest\s+run)\b.*-p\s+astar-station\b")
+
+
+def sys_picture_tests(text):
+    """True only for `cargo test -p astar-sys --features sstv-tx`, with
+    optional test-name filters and `--` arguments, alone on its line."""
+    t = re.sub(r"^\s*(?:-\s+)?(?:run:\s*)?@?", "", text).strip()
+    # No chaining or substitution, no line continuation (the next line would
+    # go unchecked), and no just `{{...}}` interpolation.
+    if re.search(r"[;&|`$()<>\\{}]", t):
+        return False
+    toks = t.split()
+    if toks[:1] != ["cargo"]:
+        return False
+    toks = toks[1:]
+    if toks and toks[0].startswith("+"):
+        toks = toks[1:]
+    if toks[:1] != ["test"]:
+        return False
+    toks = toks[1:]
+    if "--" in toks:
+        toks = toks[: toks.index("--")]
+    values = {"-p": [], "--features": [], "--target-dir": []}
+    alias = {"-p": "-p", "--package": "-p", "-F": "--features", "--features": "--features",
+             "--target-dir": "--target-dir"}
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        if tok in alias:
+            if i + 1 >= len(toks):
+                return False
+            values[alias[tok]].append(toks[i + 1])
+            i += 2
+            continue
+        key, eq, value = tok.partition("=")
+        if eq and key in alias:
+            values[alias[key]].append(value)
+        elif tok.startswith("-"):
+            return False
+        i += 1
+    return (values["-p"] == ["astar-sys"] and values["--features"] == ["sstv-tx"]
+            and values["--target-dir"] == ["target/picture-ffi"])
+
+
 for path in recipes:
     for i, text in code_lines(path):
-        if "sstv-tx" in text and "astar-nodebench" not in text and not STATION_TESTS.search(text):
+        if ("sstv-tx" in text and "astar-nodebench" not in text
+                and not STATION_TESTS.search(text) and not sys_picture_tests(text)):
             bad("[recipes]", path,
                 f"line {i} names sstv-tx; only the bench and astar-station's own tests may: {text.strip()}")
 
-WORKSPACE = re.compile(r"(^|\s)--(workspace|all)(\s|$)")
+WORKSPACE = re.compile(r"(?<![\w-])--(workspace|all)(?![\w-])")
+ALL_FEATURES = re.compile(r"(?<![\w-])--all-features(?![\w-])")
 shipped = [(os.path.join(root, "justfile"), name)
            for name in ("xcframework", "server-release", "app", "dmg")]
 shipped.append((os.path.join(root, ".gitlab-ci.yml"), "server"))
@@ -701,6 +891,9 @@ for path, name in shipped:
         if WORKSPACE.search(text):
             bad("[workspace]", path,
                 f"line {i}: {name!r} feeds a shipped artifact and may not build the whole workspace")
+        if ALL_FEATURES.search(text):
+            bad("[all-features]", path,
+                f"line {i}: {name!r} feeds a shipped artifact and may not use --all-features")
 shipped_files = [os.path.join(root, *p) for p in (
     ("bindings", "swift", "build-xcframework.sh"),
     ("bindings", "swift-serial", "build-xcframework.sh"),
@@ -715,6 +908,9 @@ for path in shipped_files:
         if WORKSPACE.search(text):
             bad("[workspace]", path,
                 f"line {i} builds the whole workspace; a shipped artifact is built with -p")
+        if ALL_FEATURES.search(text):
+            bad("[all-features]", path,
+                f"line {i} uses --all-features, which turns sstv-tx on; name a shipped build's features")
 
 # [leaf]
 leaf = os.path.join(root, "crates", "astar-sstv", "Cargo.toml")
@@ -791,6 +987,19 @@ print("\n".join(sorted(p["name"] for p in d["packages"] if p["id"] in ids)))'); 
         # sstv-tx is astar-station's own feature, so --all-features would
         # turn it on; its default features are what everything else gets.
         astar-station) check_tree "$crate" ;;
+        # astar-sys declares its own non-default sstv-tx: check it with
+        # every other feature, which covers its defaults and the
+        # xcframework script's additions.
+        astar-sys)
+          if sys_features=$(python3 -I -c 'import sys, tomllib
+f = tomllib.load(open(sys.argv[1], "rb")).get("features", {})
+print(",".join(sorted(k for k in f if k not in ("default", "sstv-tx"))))' crates/astar-sys/Cargo.toml); then
+            check_tree "$crate" --features "$sys_features"
+          else
+            echo "FAIL [tree] could not read astar-sys's features"
+            fail=1
+          fi
+          ;;
         *) check_tree "$crate" --all-features ;;
       esac
     done

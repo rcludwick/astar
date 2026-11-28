@@ -3037,3 +3037,164 @@ fn iax_state_size_grows_by_exactly_the_six_ptt_fields() {
     // and the size stays 168.
     assert_eq!(offset_of!(IaxState, vox_db), first + 24);
 }
+
+// --- Sending a picture: the C interface exists in every build ---
+
+/// The nine picture functions, as the header must declare them.
+const PICTURE_FUNCTIONS: [&str; 9] = [
+    "iax_station_picture_compiled",
+    "iax_station_picture_set_allowed",
+    "iax_station_picture_allowed",
+    "iax_station_picture_modes_json",
+    "iax_station_picture_prepare",
+    "iax_station_picture_send",
+    "iax_station_picture_cancel",
+    "iax_station_picture_discard",
+    "iax_station_picture_state_json",
+];
+
+#[test]
+fn the_header_declares_the_nine_picture_functions() {
+    let header = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/include/astar.h"))
+        .expect("the committed header");
+    for name in PICTURE_FUNCTIONS {
+        assert!(
+            header.contains(&format!(" {name}(")),
+            "astar.h does not declare {name}"
+        );
+    }
+    assert!(header.contains("#define IAX_ERR_PICTURE -29"));
+    assert!(header.contains("#define IAX_ERR_SUPERSEDED -30"));
+}
+
+#[test]
+fn the_picture_error_codes_have_their_own_text() {
+    assert_eq!(IAX_ERR_PICTURE, -29);
+    let text = unsafe { CStr::from_ptr(iax_error_text(IAX_ERR_PICTURE)) };
+    assert_eq!(text.to_str().unwrap(), "picture not sent");
+    assert_eq!(IAX_ERR_SUPERSEDED, -30);
+    // Distinct from every other code, P25's included.
+    assert_ne!(IAX_ERR_PICTURE, IAX_ERR_P25);
+    assert_ne!(IAX_ERR_SUPERSEDED, IAX_ERR_P25);
+    let text = unsafe { CStr::from_ptr(iax_error_text(IAX_ERR_SUPERSEDED)) };
+    assert_eq!(text.to_str().unwrap(), "replaced by a newer request");
+}
+
+#[test]
+fn picture_functions_refuse_a_null_station() {
+    let mut allowed = false;
+    let (mut w, mut h) = (0u32, 0u32);
+    unsafe {
+        assert_eq!(
+            iax_station_picture_set_allowed(ptr::null_mut(), true),
+            IAX_ERR_NULL
+        );
+        assert_eq!(
+            iax_station_picture_allowed(ptr::null_mut(), &raw mut allowed),
+            IAX_ERR_NULL
+        );
+        assert_eq!(
+            iax_station_picture_modes_json(ptr::null_mut(), ptr::null_mut(), 0),
+            IAX_ERR_NULL
+        );
+        assert_eq!(
+            iax_station_picture_prepare(
+                ptr::null_mut(),
+                ptr::null(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                ptr::null_mut(),
+                0,
+                &raw mut w,
+                &raw mut h,
+            ),
+            IAX_ERR_NULL
+        );
+        assert_eq!(iax_station_picture_send(ptr::null_mut()), IAX_ERR_NULL);
+        assert_eq!(iax_station_picture_cancel(ptr::null_mut()), IAX_ERR_NULL);
+        assert_eq!(iax_station_picture_discard(ptr::null_mut()), IAX_ERR_NULL);
+        assert_eq!(
+            iax_station_picture_state_json(ptr::null_mut(), ptr::null_mut(), 0),
+            IAX_ERR_NULL
+        );
+    }
+}
+
+/// Without `sstv-tx` every picture function is a stub that says so and
+/// writes nothing, and `iax_station_picture_compiled` is 0.
+#[cfg(not(feature = "sstv-tx"))]
+#[test]
+fn without_sstv_tx_every_picture_function_is_unsupported_and_writes_nothing() {
+    assert_eq!(iax_station_picture_compiled(), 0);
+    let st = new_station();
+    unsafe {
+        assert_eq!(
+            iax_station_picture_set_allowed(st, true),
+            IAX_ERR_UNSUPPORTED
+        );
+        let mut allowed = true;
+        assert_eq!(
+            iax_station_picture_allowed(st, &raw mut allowed),
+            IAX_ERR_UNSUPPORTED
+        );
+        assert!(allowed, "the out-value is not written");
+
+        let mut buf = [0xABu8; 64];
+        assert_eq!(
+            iax_station_picture_modes_json(st, buf.as_mut_ptr().cast(), buf.len()),
+            IAX_ERR_UNSUPPORTED
+        );
+        assert!(buf.iter().all(|&b| b == 0xAB));
+        assert_eq!(
+            iax_station_picture_state_json(st, buf.as_mut_ptr().cast(), buf.len()),
+            IAX_ERR_UNSUPPORTED
+        );
+        assert!(buf.iter().all(|&b| b == 0xAB));
+
+        let rgba = vec![255u8; 320 * 256 * 4];
+        let mut rgb = vec![0xABu8; 320 * 256 * 3];
+        let (mut w, mut h) = (7u32, 9u32);
+        assert_eq!(
+            iax_station_picture_prepare(
+                st,
+                rgba.as_ptr(),
+                rgba.len(),
+                320,
+                256,
+                2,
+                0,
+                rgb.as_mut_ptr(),
+                rgb.len(),
+                &raw mut w,
+                &raw mut h,
+            ),
+            IAX_ERR_UNSUPPORTED
+        );
+        assert!(rgb.iter().all(|&b| b == 0xAB), "rgb_out is not written");
+        assert_eq!((w, h), (7, 9), "the size is not written");
+
+        assert_eq!(iax_station_picture_send(st), IAX_ERR_UNSUPPORTED);
+        assert_eq!(iax_station_picture_cancel(st), IAX_ERR_UNSUPPORTED);
+        assert_eq!(iax_station_picture_discard(st), IAX_ERR_UNSUPPORTED);
+        assert!(!snapshot_of(st).ptt, "nothing keyed");
+        iax_station_free(st);
+    }
+}
+
+/// `IAX_PTT_PICTURE` stays the engine's: the lease press cannot reach it
+/// either (`picture_source_cannot_be_pressed_from_outside` covers the plain
+/// press).
+#[test]
+fn the_picture_source_cannot_be_lease_pressed() {
+    let st = new_station();
+    assert_eq!(
+        unsafe { iax_station_ptt_lease_press(st, IAX_PTT_PICTURE, 1_000) },
+        IAX_ERR_INVALID
+    );
+    let s = snapshot_of(st);
+    assert_eq!((s.ptt_sources, s.ptt_latched), (0, 0));
+    unsafe { iax_station_free(st) };
+}

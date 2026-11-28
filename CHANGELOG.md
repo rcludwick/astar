@@ -13,6 +13,36 @@ pre-release to the patch number, which sorts wrongly: `0.1.10beta` is newer
 than `0.1.9beta` and a string comparison says the opposite. Shipped versions
 are left as they were spelled.
 
+## 0.1.26-beta — 2026-11-27
+
+Dial an AllStarLink node at an address you choose, for the node that
+AllStarLink can't route you to, which is usually your own.
+
+### Added
+
+- **Dial a node at its address: `node@address`.** Normally astar asks
+  AllStarLink where a node is and dials the address it gets back. For your
+  own node on your home network that address is your router's public one,
+  and many routers won't pass a call from inside the network back in
+  through it. Now you can type the node number, an `@` and the address you
+  can reach it at, such as `55553@192.168.1.50` or
+  `55553@mynode.example.com:4570` (port 4569 when you leave it out). The
+  recent and any favorite keep the whole string, so redialing goes to the
+  same address. Settings → Favorites accepts the same form, and a call
+  dialed this way uses the name and talk timer of a favorite saved as the
+  plain node number. Thanks to dbalencar for the report and the fix
+  ([#2](https://github.com/rcludwick/astar/issues/2),
+  [#3](https://github.com/rcludwick/astar/pull/3)).
+
+### Fixed
+
+- **A bare address no longer leaves you guessing why the node hung up.**
+  Typing only `192.168.1.50:4569` used to send the address where the node
+  number belongs, so a stock AllStarLink node played its "connected to
+  node" greeting, failed to find a node named after the address, and hung
+  up. A bare address still dials, because an astar-server node accepts it,
+  but a caption under the field now says to put the node number first.
+
 ## 0.1.25-beta — 2026-11-23
 
 Two new things to listen with: P25 reflectors, in testing, and a monitor

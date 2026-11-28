@@ -649,6 +649,69 @@ fn capture_queued_while_unkeyed_is_never_sent() {
     s.disconnect();
 }
 
+/// Talk into the mic, 20 ms at a time, until the returned flag is cleared.
+fn keep_talking(
+    mic: &Sender<Vec<i16>>,
+) -> (Arc<std::sync::atomic::AtomicBool>, thread::JoinHandle<()>) {
+    let on = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let handle = {
+        let (mic, on) = (mic.clone(), Arc::clone(&on));
+        thread::spawn(move || {
+            let mut phase = 0;
+            while on.load(std::sync::atomic::Ordering::SeqCst) {
+                if mic.send(tone_frame(&mut phase)).is_err() {
+                    return;
+                }
+                thread::sleep(ms(20));
+            }
+        })
+    };
+    (on, handle)
+}
+
+/// A picture keys the call for itself and a key press stops it, so no one
+/// holds a key through one: once a picture has run on a key-down, the mic
+/// stays off the air until the call is unkeyed and keyed again, even when
+/// the unkey and the key fall between two of the link's passes.
+#[test]
+fn no_mic_after_a_picture_until_keyed_again() {
+    let station = FakeStation::start(ECHO_CALL);
+    station.set_echo(false);
+    let (audio, mic, _speaker) = manual_audio();
+    let mut s = call(&station, false, audio);
+    wait_connected(&s);
+    s.set_ptt(true);
+    assert!(wait_for(WAIT, || s.state().ptt), "PTT never applied");
+    let (talking, talker) = keep_talking(&mic);
+
+    // Half a second of silence: 25 frames, so 7 packets (the last padded).
+    let pcm: Arc<[i16]> = vec![0i16; 4_000].into();
+    let tx = s.send_picture_audio(pcm).expect("picture");
+    assert!(wait_for(ms(3_000), || tx.ended().is_some()));
+    assert_eq!(tx.ended(), Some(astar_iax::PictureEnd::Sent));
+    thread::sleep(ms(400));
+    assert!(s.state().ptt, "still keyed after the picture");
+    assert_eq!(
+        station.audio_packets(),
+        7,
+        "the mic went out after the picture, on its key-down"
+    );
+
+    // Unkey and key again at once, before the link's next pass: the mic
+    // comes back.
+    s.set_ptt(false);
+    s.set_ptt(true);
+    assert!(
+        wait_for(WAIT, || station.audio_packets() >= 10),
+        "the mic never came back after a fresh key: {} packets",
+        station.audio_packets()
+    );
+    talking.store(false, std::sync::atomic::Ordering::SeqCst);
+    talker.join().unwrap();
+    s.set_ptt(false);
+    s.disconnect();
+}
+
 #[test]
 fn chat_goes_out_and_replies_come_back() {
     let station = FakeStation::start(ECHO_CALL);

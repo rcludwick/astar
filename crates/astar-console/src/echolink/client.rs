@@ -11,7 +11,7 @@
 //! [`EchoLinkCallState::ptt`] reports what it actually applied.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use astar_audio::CallAudio;
@@ -24,7 +24,7 @@ use astar_record::packet_tap::{PacketCallId, PacketSlot};
 use tracing::warn;
 
 use super::EchoLinkNetwork;
-use super::link::{EchoLinkLink, PeerAudio, PeerShared};
+use super::link::{EchoLinkLink, PeerAudio, PeerShared, PttRequest};
 use crate::{ConsoleError, PictureTarget};
 
 /// The rate an `EchoLink` call's audio runs at, and so the rate a picture's
@@ -82,7 +82,7 @@ pub struct EchoLinkCallState {
 pub struct EchoLinkSession {
     link: EchoLinkLink,
     shared: Arc<PeerShared>,
-    ptt: Arc<AtomicBool>,
+    ptt: Arc<PttRequest>,
     entry: StationEntry,
     packet_slot: PacketSlot,
     /// The last picture handed to the link, so a second one is refused
@@ -111,7 +111,7 @@ impl EchoLinkSession {
                 warn!(error = %e, "echolink: link thread did not start");
                 ConsoleError::EchoLink(NO_THREAD.to_owned())
             })?;
-        let ptt = Arc::new(AtomicBool::new(false));
+        let ptt = Arc::new(PttRequest::default());
         let shared = link
             .add(
                 station.clone(),
@@ -137,7 +137,7 @@ impl EchoLinkSession {
     /// Request PTT on or off; the link applies it on its next pass, and only
     /// while connected.
     pub fn set_ptt(&mut self, on: bool) {
-        self.ptt.store(on, Ordering::Release);
+        self.ptt.set(on);
     }
 
     /// The call's transmit side, for a picture sender: the rate its audio
@@ -147,7 +147,7 @@ impl EchoLinkSession {
     pub fn picture_target(&self) -> Option<PictureTarget> {
         (*lock(&self.shared.state) == QsoState::Connected).then(|| PictureTarget {
             rate: PICTURE_RATE,
-            keyed: self.ptt.load(Ordering::Acquire),
+            keyed: self.ptt.is_on(),
         })
     }
 
@@ -179,7 +179,7 @@ impl EchoLinkSession {
         let total = pcm.len().div_ceil(frame_len);
         let tx = if total == 0 {
             PictureTx::already_ended(0, PictureEnd::Sent)
-        } else if !self.ptt.load(Ordering::Acquire) {
+        } else if !self.ptt.is_on() {
             PictureTx::already_ended(total, PictureEnd::Cut(CutReason::Unkeyed))
         } else {
             // The link polls on a short timeout while a picture runs, so the

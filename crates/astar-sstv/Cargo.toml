@@ -9,7 +9,7 @@ authors.workspace = true
 description = "astar-sstv: SSTV picture decoding over slowrx, with the sstv fork's de-jitter in front, and PNG output."
 
 [dependencies]
-astar-record = { path = "../astar-record", version = "0.1.25-beta", default-features = false }
+astar-record = { path = "../astar-record", version = "0.1.26-beta", default-features = false }
 slowrx = { workspace = true }
 # The de-jitter that re-times a picture before slowrx sees it, from the
 # vendored `sstv` fork (MIT). Decode only: never its encoder

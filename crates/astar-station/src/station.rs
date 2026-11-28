@@ -116,6 +116,17 @@ impl PictureSlot {
     }
     #[allow(clippy::unused_self)]
     fn call_lost(&self) {}
+    #[allow(clippy::unused_self)]
+    fn stop_after_press(
+        &self,
+        _arbiter: &mut PttArbiter,
+        session: &Mutex<ConsoleSession>,
+        edge: PttEdge,
+    ) {
+        if edge == PttEdge::Unkey {
+            let _ = relock(session).set_ptt(false);
+        }
+    }
 }
 
 /// The running `astar-ptt-watch` thread. Dropping `stop` wakes it at once
@@ -712,6 +723,10 @@ pub struct Station {
     /// without it). See [`Station::send_picture`]. Lock order: `ptt`, then
     /// this, then `session`.
     picture: PictureSlot,
+    /// Test hook: the next `send_picture` fails as if its pacer thread
+    /// would not start.
+    #[cfg(all(feature = "sstv-tx", feature = "test-hooks"))]
+    fail_next_picture_pacer: AtomicBool,
     /// Memoized [`Station::m17_available`] probe, keyed on the exact
     /// `codec_dirs` value it was computed against (iax-f2b8 Task 4).
     /// `codec2_available`'s static backend does a full `Codec2::new()`
@@ -816,6 +831,8 @@ impl Station {
             ptt_seen_seq: AtomicU64::new(0),
             ptt_watch_hook: PttWatchHook::default(),
             picture: PictureSlot::default(),
+            #[cfg(all(feature = "sstv-tx", feature = "test-hooks"))]
+            fail_next_picture_pacer: AtomicBool::new(false),
             #[cfg(feature = "m17")]
             codec2_probe_cache: Mutex::new(None),
             recording: Mutex::new(RecordSlot::default()),
@@ -875,6 +892,8 @@ impl Station {
             ptt_seen_seq: AtomicU64::new(0),
             ptt_watch_hook: PttWatchHook::default(),
             picture: PictureSlot::default(),
+            #[cfg(all(feature = "sstv-tx", feature = "test-hooks"))]
+            fail_next_picture_pacer: AtomicBool::new(false),
             #[cfg(feature = "m17")]
             codec2_probe_cache: Mutex::new(None),
             recording: Mutex::new(RecordSlot::default()),
@@ -3960,7 +3979,9 @@ impl Station {
     /// # Errors
     /// [`StationError::NotConnected`] if no call is active;
     /// [`StationError::PttLatched`] for a press while Legacy is latched (only
-    /// after the transmit time-out or a stop-all); the console's own refusal
+    /// after the transmit time-out or a stop-all), and for a press while an
+    /// SSTV picture is going out (feature `sstv-tx`), which stops the picture,
+    /// unkeys and latches Legacy until `set_ptt(false)`; the console's own refusal
     /// (NXDN, DMR, no capture device) for a press, which latches nothing.
     pub fn set_ptt(&self, on: bool) -> Result<(), StationError> {
         if on {
@@ -3995,7 +4016,11 @@ impl Station {
     /// [`PttSource::Picture`], which only the engine's own picture sender
     /// holds (releasing it is allowed, and stops a picture being sent);
     /// [`StationError::PttLatched`] while the
-    /// source is latched; otherwise the console's own refusal
+    /// source is latched, and for a press of a hand-operated source while an
+    /// SSTV picture is going out (feature `sstv-tx`): that press stops the
+    /// picture and unkeys, and is used up, so the source latches and keys
+    /// again only after a release. A [`PttSource::Vox`] press while a picture
+    /// is going out does nothing and returns `Ok`. Otherwise the console's own refusal
     /// ([`StationError::NotConnected`], [`StationError::Audio`] for no capture
     /// device, [`StationError::Nxdn`], [`StationError::Dmr`]), after the press
     /// is rolled back and — for every source but [`PttSource::Legacy`] —
@@ -4187,19 +4212,30 @@ impl Station {
     /// [`SendEnd::Cancelled`](crate::SendEnd::Cancelled), the same as
     /// calling its `cancel`.
     ///
-    /// The checks run in this order, and a refusal keys nothing: the call
-    /// and its network; the picture's size; its length against the time-out
+    /// A push-to-talk press while the picture is going out (the on-screen
+    /// button, a USB interface's PTT line, a Bluetooth button, a
+    /// `set_ptt(true)`) stops it the same way, and the press keys nothing:
+    /// see [`Station::ptt_source`]. VOX cannot stop a picture.
+    ///
+    /// The checks run in this order, and a refusal keys nothing: that this
+    /// station is allowed to send pictures
+    /// ([`Station::set_picture_sending_allowed`]); the call and its network;
+    /// the picture's size; its length against the time-out
     /// ([`Station::picture_duration`] must not exceed [`Station::tx_timeout`]);
     /// nothing already on the air.
     ///
     /// No remote surface reaches this method: astar-server never calls it.
     ///
     /// # Errors
-    /// [`SendPictureError::NoCall`], [`SendPictureError::WrongNetwork`] (an
+    /// [`SendPictureError::NotAllowed`], [`SendPictureError::NoCall`],
+    /// [`SendPictureError::WrongNetwork`] (an
     /// M17, D-Star, System Fusion, NXDN or DMR session),
     /// [`SendPictureError::WrongSize`], [`SendPictureError::TooLong`],
-    /// [`SendPictureError::OnAir`].
+    /// [`SendPictureError::OnAir`], and [`SendPictureError::Engine`] when
+    /// the engine itself cannot start the picture.
     ///
+    /// [`SendPictureError::NotAllowed`]: crate::SendPictureError::NotAllowed
+    /// [`SendPictureError::Engine`]: crate::SendPictureError::Engine
     /// [`SendPictureError::NoCall`]: crate::SendPictureError::NoCall
     /// [`SendPictureError::WrongNetwork`]: crate::SendPictureError::WrongNetwork
     /// [`SendPictureError::WrongSize`]: crate::SendPictureError::WrongSize
@@ -4214,6 +4250,10 @@ impl Station {
         use crate::SendPictureError;
         use crate::sstv_tx::{PictureSend, Sending, check_size, encode_picture};
 
+        // 0. Allowed at all. Checked again under the arbiter below.
+        if !relock(&self.ptt).picture_allowed() {
+            return Err(SendPictureError::NotAllowed);
+        }
         // 1. A call, on a network that can carry a picture.
         let target = {
             let session = relock(&self.session);
@@ -4246,13 +4286,18 @@ impl Station {
         }
         let pcm: Arc<[i16]> = encode_picture(picture, mode, target.rate)?.into();
         self.ensure_ptt_watch()
-            .map_err(|_| SendPictureError::NoCall)?;
+            .map_err(|_| SendPictureError::Engine("the ptt watchdog would not start"))?;
 
         let mut arbiter = relock(&self.ptt);
         // A picture that has ended but still holds its source is let go of
         // first, so a send straight after a cancel or an end is not refused.
         if self.picture.reap(&mut arbiter) == PttEdge::Unkey {
             let _ = relock(&self.session).set_ptt(false);
+        }
+        // The check that counts: turning sending off takes the arbiter too,
+        // so it either sees this picture in the slot or stops it here.
+        if !arbiter.picture_allowed() {
+            return Err(SendPictureError::NotAllowed);
         }
         if arbiter.is_on_air() || self.picture.busy() {
             return Err(SendPictureError::OnAir);
@@ -4267,24 +4312,22 @@ impl Station {
         if arbiter.press(PttSource::Picture, Instant::now()) != PressOutcome::KeyNow {
             return Err(SendPictureError::OnAir);
         }
-        if session.key_for_picture().is_err() {
+        if let Err(e) = session.key_for_picture() {
             arbiter.rollback_press(PttSource::Picture);
             let _ = arbiter.release(PttSource::Picture);
-            return Err(SendPictureError::NoCall);
+            return Err(match e {
+                astar_console::ConsoleError::NotConnected => SendPictureError::NoCall,
+                _ => SendPictureError::Engine("the call would not key for the picture"),
+            });
         }
-        let tx = match session.send_picture_audio(pcm) {
+        let tx = match self.hand_picture_to_call(&mut session, pcm) {
             Ok(tx) => tx,
             Err(e) => {
                 // Roll the press back: let go of the source and unkey.
                 if arbiter.release(PttSource::Picture) == PttEdge::Unkey {
                     let _ = session.set_ptt(false);
                 }
-                return Err(match e {
-                    astar_console::ConsoleError::Iax(astar_iax::IaxError::PictureBusy) => {
-                        SendPictureError::OnAir
-                    }
-                    _ => SendPictureError::NoCall,
-                });
+                return Err(e);
             }
         };
         drop(session);
@@ -4305,6 +4348,94 @@ impl Station {
         })
     }
 
+    /// Hand a keyed picture's audio to the call, and name a refusal as
+    /// [`Station::send_picture`] reports it: a busy picture path is `OnAir`,
+    /// a call gone away is `NoCall`, anything else (the pacer thread not
+    /// starting) is `Engine`.
+    #[cfg(feature = "sstv-tx")]
+    #[cfg_attr(not(feature = "test-hooks"), allow(clippy::unused_self))]
+    fn hand_picture_to_call(
+        &self,
+        session: &mut ConsoleSession,
+        pcm: Arc<[i16]>,
+    ) -> Result<astar_iax::PictureTx, crate::SendPictureError> {
+        use crate::SendPictureError;
+        use astar_console::ConsoleError;
+        use astar_iax::IaxError;
+
+        #[cfg(feature = "test-hooks")]
+        let handed = if self.fail_next_picture_pacer.swap(false, Ordering::SeqCst) {
+            Err(ConsoleError::Iax(IaxError::Io(std::io::Error::other(
+                "injected pacer spawn failure (test hook)",
+            ))))
+        } else {
+            session.send_picture_audio(pcm)
+        };
+        #[cfg(not(feature = "test-hooks"))]
+        let handed = session.send_picture_audio(pcm);
+        handed.map_err(|e| match e {
+            ConsoleError::Iax(IaxError::PictureBusy) => SendPictureError::OnAir,
+            ConsoleError::NotConnected | ConsoleError::Iax(IaxError::PictureNoCall) => {
+                SendPictureError::NoCall
+            }
+            _ => SendPictureError::Engine("the picture's pacer would not start"),
+        })
+    }
+
+    /// Allow or forbid [`Station::send_picture`] on this station (feature
+    /// `sstv-tx`). Off when a station is created; the engine never saves it
+    /// and never turns it on by itself, so whoever embeds the engine turns
+    /// it on, deliberately, each time. Turning it off while a picture is
+    /// going out stops that picture and unkeys; its handle ends
+    /// [`SendEnd::Cancelled`](crate::SendEnd::Cancelled). The value shows in
+    /// [`Station::ptt_snapshot`] as `picture_allowed`.
+    #[cfg(feature = "sstv-tx")]
+    pub fn set_picture_sending_allowed(&self, allowed: bool) {
+        let mut arbiter = relock(&self.ptt);
+        arbiter.set_picture_allowed(allowed);
+        if !allowed {
+            self.picture.stop(&mut arbiter, &self.session);
+        }
+    }
+
+    /// Whether [`Station::send_picture`] is allowed on this station (feature
+    /// `sstv-tx`). `false` on a new station.
+    #[cfg(feature = "sstv-tx")]
+    #[must_use]
+    pub fn picture_sending_allowed(&self) -> bool {
+        relock(&self.ptt).picture_allowed()
+    }
+
+    /// Test-only: the next [`Station::send_picture`] fails at the hand-off
+    /// exactly as it would if the picture's pacer thread could not be
+    /// spawned, after the call has been keyed, so a test can watch the
+    /// roll-back.
+    #[cfg(all(feature = "sstv-tx", feature = "test-hooks"))]
+    #[doc(hidden)]
+    pub fn fail_next_picture_pacer_for_test(&self) {
+        self.fail_next_picture_pacer.store(true, Ordering::SeqCst);
+    }
+
+    /// Test-only: wait `delay` before the console is unkeyed whenever a
+    /// picture is stopped early (a key press, sending turned off, the
+    /// handle's `cancel`), so a test can hold open the moment between the
+    /// unkey and the picture stopping and show no microphone audio leaks.
+    #[cfg(all(feature = "sstv-tx", feature = "test-hooks"))]
+    #[doc(hidden)]
+    pub fn delay_picture_unkey_for_test(&self, delay: Duration) {
+        self.picture.set_unkey_delay(delay);
+    }
+
+    /// Test-only: wait `delay`, once a picture has ended, before it is
+    /// reaped and the call unkeyed, so a test can hold open the moment
+    /// after its last frame while the call is still keyed and show that no
+    /// microphone audio goes out in it. Only delays; never skips the reap.
+    #[cfg(all(feature = "sstv-tx", feature = "test-hooks"))]
+    #[doc(hidden)]
+    pub fn delay_picture_reap_for_test(&self, delay: Duration) {
+        self.picture.set_reap_delay(delay);
+    }
+
     /// How long `mode` takes on the air, lead-in and tail included: the
     /// length [`Station::send_picture`] compares with the transmit time-out.
     #[cfg(feature = "sstv-tx")]
@@ -4319,9 +4450,19 @@ impl Station {
     /// Holds the arbiter across the console call
     /// (lock order arbiter → session) so the OR and the console cannot
     /// disagree.
+    ///
+    /// A picture that has already ended is let go of first, so a press just
+    /// after a picture finishes keys as usual. A hand-operated press while a
+    /// picture is still going out stops it, unkeys, and is used up:
+    /// [`StationError::PttLatched`], and that source keys again only after a
+    /// release. A VOX press while a picture is going out does nothing and is
+    /// not an error.
     fn press_source(&self, src: PttSource, lease: Option<Duration>) -> Result<(), StationError> {
         self.ensure_ptt_watch()?;
         let mut arbiter = relock(&self.ptt);
+        if self.picture.reap(&mut arbiter) == PttEdge::Unkey {
+            let _ = relock(&self.session).set_ptt(false);
+        }
         let now = Instant::now();
         let outcome = match lease {
             Some(ttl) => arbiter.lease_press(src, ttl, now),
@@ -4329,7 +4470,17 @@ impl Station {
         };
         match outcome {
             PressOutcome::Ignored => Err(StationError::PttLatched),
-            PressOutcome::Held => Ok(()),
+            PressOutcome::Held | PressOutcome::HeldOffByPicture => Ok(()),
+            PressOutcome::PictureStopped(edge) => {
+                // The arbiter has already let go of `Picture`. The console
+                // unkeys first, while the picture still runs and the call
+                // still throws the microphone away, then the picture stops;
+                // the reap has nothing left to release, so the console
+                // hears exactly one unkey.
+                self.picture
+                    .stop_after_press(&mut arbiter, &self.session, edge);
+                Err(StationError::PttLatched)
+            }
             PressOutcome::KeyNow => {
                 let keyed = relock(&self.session).set_ptt(true).map_err(map_console_err);
                 if keyed.is_err() {

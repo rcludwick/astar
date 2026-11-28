@@ -29,7 +29,15 @@
 //! When the picture ends for any reason, the station's PTT watchdog lets go
 //! of [`PttSource::Picture`] (and so unkeys), and the handle says why:
 //! [`SendEnd`].
+//!
+//! Before any of that, the station must have been allowed to send pictures
+//! ([`Station::set_picture_sending_allowed`](crate::Station::set_picture_sending_allowed)):
+//! a new station refuses with [`SendPictureError::NotAllowed`]. While a
+//! picture is going out, a push-to-talk press stops it and keys nothing,
+//! and VOX is ignored (rule 9 in the PTT arbiter's docs).
 
+#[cfg(feature = "test-hooks")]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::time::Duration;
@@ -87,9 +95,8 @@ pub const PICTURE_TAIL: Duration = Duration::from_millis(300);
 /// start a picture. Nothing was keyed for any of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendPictureError {
-    /// No answered call to send it on. Also returned if the engine cannot
-    /// start the picture at all (its watchdog or pacer thread would not
-    /// start, or the call went away while the picture was being handed over).
+    /// No answered call to send it on, or the call went away while the
+    /// picture was being handed over.
     NoCall,
     /// The call is on a network that cannot carry a picture, named as a
     /// person would: `"M17"`, `"D-Star"`, `"System Fusion"`, `"NXDN"` and
@@ -116,6 +123,15 @@ pub enum SendPictureError {
     /// Something is already transmitting: a picture, PTT, VOX or an
     /// announcement.
     OnAir,
+    /// This station has not been allowed to send pictures
+    /// ([`Station::set_picture_sending_allowed`](crate::Station::set_picture_sending_allowed)).
+    /// Checked before anything else.
+    NotAllowed,
+    /// The engine itself could not start the picture: the PTT watchdog or
+    /// the picture's pacer thread would not start, or the call refused the
+    /// key for a reason other than having gone away. The text says which,
+    /// for a log; it is not meant to be shown as it is.
+    Engine(&'static str),
 }
 
 impl std::fmt::Display for SendPictureError {
@@ -135,6 +151,8 @@ impl std::fmt::Display for SendPictureError {
                 timeout.as_secs_f64()
             ),
             Self::OnAir => f.write_str("already transmitting"),
+            Self::NotAllowed => f.write_str("sending pictures is not turned on"),
+            Self::Engine(why) => write!(f, "the picture could not be started: {why}"),
         }
     }
 }
@@ -149,7 +167,9 @@ pub enum SendEnd {
     /// [`PictureSend::cancel`], or something let go of the key (the
     /// universal stop, a `set_ptt(false)`).
     Cancelled,
-    /// The transmit time-out fired while the picture was on the air.
+    /// The transmit time-out fired while the picture was on the air, or the
+    /// call's own limit on one over (the `EchoLink` link's transmit cap)
+    /// stopped it.
     TimedOut,
     /// The call ended under it.
     CallEnded,
@@ -262,6 +282,7 @@ impl Sending {
             PictureEnd::Sent => SendEnd::Sent,
             PictureEnd::Cancelled => SendEnd::Cancelled,
             PictureEnd::Cut(CutReason::CallEnded) => SendEnd::CallEnded,
+            PictureEnd::Cut(CutReason::TransmitCap) => SendEnd::TimedOut,
             PictureEnd::Cut(CutReason::Unkeyed) => {
                 if self.call_lost.load(Ordering::Acquire) {
                     SendEnd::CallEnded
@@ -283,7 +304,19 @@ impl Sending {
 /// it. Lock order: the arbiter, then this, then the session; it is never
 /// held while either of the others is taken.
 #[derive(Clone, Default)]
-pub(crate) struct PictureSlot(Arc<Mutex<Option<Arc<Sending>>>>);
+pub(crate) struct PictureSlot {
+    slot: Arc<Mutex<Option<Arc<Sending>>>>,
+    /// Test hook: how long to wait before unkeying the console when a
+    /// picture is stopped early, so a test can hold that moment open.
+    #[cfg(feature = "test-hooks")]
+    unkey_delay_ms: Arc<AtomicU64>,
+    /// Test hook: how long to wait, once a picture has ended, before it is
+    /// reaped (and so before the call is unkeyed), so a test can hold open
+    /// the moment after a picture's last frame while the call is still
+    /// keyed. It only delays; the reap always happens.
+    #[cfg(feature = "test-hooks")]
+    reap_delay_ms: Arc<AtomicU64>,
+}
 
 impl PictureSlot {
     /// With the arbiter held: if the picture in the slot has ended, fix how,
@@ -291,35 +324,133 @@ impl PictureSlot {
     /// a latch a time-out or hangup left on it). Returns the arbiter's edge,
     /// which the caller forwards to the console.
     pub(crate) fn reap(&self, arbiter: &mut PttArbiter) -> PttEdge {
-        let mut slot = relock(&self.0);
+        let mut slot = relock(&self.slot);
         let Some(sending) = slot.as_ref() else {
             return PttEdge::None;
         };
         if sending.settle(arbiter.snapshot().forced).is_none() {
             return PttEdge::None;
         }
+        #[cfg(feature = "test-hooks")]
+        {
+            let delay = self.reap_delay_ms.load(Ordering::Acquire);
+            if delay > 0 {
+                // The slot is let go of while waiting; the caller holds the
+                // arbiter, so no other reap can take the picture meanwhile.
+                drop(slot);
+                std::thread::sleep(Duration::from_millis(delay));
+                slot = relock(&self.slot);
+            }
+        }
         *slot = None;
         drop(slot);
         arbiter.release(PttSource::Picture)
     }
 
+    /// With the arbiter held, after a hand-operated press stopped the
+    /// picture in the arbiter (`PressOutcome::PictureStopped(edge)`): unkey
+    /// the console on `edge`, then stop and reap the picture.
+    pub(crate) fn stop_after_press(
+        &self,
+        arbiter: &mut PttArbiter,
+        session: &Mutex<ConsoleSession>,
+        edge: PttEdge,
+    ) {
+        if edge == PttEdge::Unkey {
+            self.unkey(Some(session));
+        }
+        self.stop_early(arbiter, Some(session), None);
+    }
+
+    /// With the arbiter held: stop the picture in the slot, if one is
+    /// running, and unkey. Its handle ends [`SendEnd::Cancelled`].
+    pub(crate) fn stop(&self, arbiter: &mut PttArbiter, session: &Mutex<ConsoleSession>) {
+        self.stop_early(arbiter, Some(session), None);
+    }
+
+    /// With the arbiter held: end a running picture early (`only`: only if
+    /// it is that one), then reap.
+    ///
+    /// The order matters. While a picture runs, the call's run loop (the
+    /// `AllStarLink` call's and the `EchoLink` link's alike) throws
+    /// microphone audio away; the moment the picture is over, a still-keyed
+    /// call sends the microphone. So the console is unkeyed first, while the
+    /// picture still runs, and only then is the picture stopped. The handle
+    /// still ends `Cancelled`: a cut by that unkey with no new forced stop
+    /// settles as `Cancelled`.
+    ///
+    /// Locks: the arbiter is held throughout. The slot is taken alone, once
+    /// to find the picture and once in `reap`; the session is taken alone,
+    /// between them. No two of slot and session are ever held at once, so
+    /// the order arbiter, slot, session is kept.
+    fn stop_early(
+        &self,
+        arbiter: &mut PttArbiter,
+        session: Option<&Mutex<ConsoleSession>>,
+        only: Option<&Arc<Sending>>,
+    ) {
+        let running = relock(&self.slot)
+            .as_ref()
+            .filter(|s| only.is_none_or(|o| Arc::ptr_eq(o, s)))
+            .filter(|s| s.tx.ended().is_none())
+            .cloned();
+        if let Some(sending) = running {
+            if arbiter.release(PttSource::Picture) == PttEdge::Unkey {
+                self.unkey(session);
+            }
+            sending.tx.cancel();
+        }
+        if self.reap(arbiter) == PttEdge::Unkey {
+            self.unkey(session);
+        }
+    }
+
+    /// Forward an unkey to the console (after the test hook's delay).
+    #[cfg_attr(not(feature = "test-hooks"), allow(clippy::unused_self))]
+    fn unkey(&self, session: Option<&Mutex<ConsoleSession>>) {
+        #[cfg(feature = "test-hooks")]
+        {
+            let delay = self.unkey_delay_ms.load(Ordering::Acquire);
+            if delay > 0 {
+                std::thread::sleep(Duration::from_millis(delay));
+            }
+        }
+        if let Some(session) = session {
+            let _ = relock(session).set_ptt(false);
+        }
+    }
+
+    /// Test hook: wait `delay` before every early-stop unkey.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn set_unkey_delay(&self, delay: Duration) {
+        let ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+        self.unkey_delay_ms.store(ms, Ordering::Release);
+    }
+
+    /// Test hook: wait `delay` before reaping a picture that has ended.
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn set_reap_delay(&self, delay: Duration) {
+        let ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+        self.reap_delay_ms.store(ms, Ordering::Release);
+    }
+
     /// The call is going away: a picture cut by the unkey that follows ended
     /// because the call did.
     pub(crate) fn call_lost(&self) {
-        if let Some(sending) = relock(&self.0).as_ref() {
+        if let Some(sending) = relock(&self.slot).as_ref() {
             sending.call_lost.store(true, Ordering::Release);
         }
     }
 
     /// A picture is in the slot and still running.
     pub(crate) fn busy(&self) -> bool {
-        relock(&self.0)
+        relock(&self.slot)
             .as_ref()
             .is_some_and(|s| s.tx.ended().is_none())
     }
 
     pub(crate) fn put(&self, sending: Arc<Sending>) {
-        *relock(&self.0) = Some(sending);
+        *relock(&self.slot) = Some(sending);
     }
 }
 
@@ -360,8 +491,18 @@ impl PictureSend {
     /// Does nothing once the picture has ended. When it returns, the station
     /// can send another picture.
     pub fn cancel(&self) {
+        let Some(ptt) = self.ptt.upgrade() else {
+            // The station is gone, and its call with it.
+            self.sending.tx.cancel();
+            return;
+        };
+        let mut arbiter = relock(&ptt);
+        let session = self.session.upgrade();
+        self.slot
+            .stop_early(&mut arbiter, session.as_deref(), Some(&self.sending));
+        // A handle whose picture already left the slot: make sure it reads
+        // as over. A no-op once it has ended.
         self.sending.tx.cancel();
-        reap_now(&self.slot, &self.ptt, &self.session);
     }
 
     /// Test hook: the picture's pacer sleeps `stall` before its next frame,
@@ -414,9 +555,10 @@ const FAR_POLL: Duration = Duration::from_millis(20);
 
 /// Spawn `astar-picture-end`, which lets go of [`PttSource::Picture`] and
 /// unkeys the moment the picture ends, instead of on the PTT watchdog's
-/// next 50 ms tick. Without it, a station with a live microphone would send
-/// up to 50 ms of microphone audio after the picture's tail, since the call
-/// is still keyed when the pacer runs out of frames.
+/// next 50 ms tick, so the call does not stay keyed over silence after the
+/// picture's tail. The microphone is not what it guards: a picture keys
+/// the call with its capture lane shut, and the call's run loop sends no
+/// microphone on a key-down a picture ran on, however late the reap.
 ///
 /// It polls one frame at a time until the picture is in its last two
 /// frames, then every millisecond. It holds only `Weak` references to the

@@ -659,6 +659,10 @@ fn voice_resumes_without_a_step() {
         wait_ended(&tx, Duration::from_secs(4)),
         Some(PictureEnd::Sent)
     );
+    // No microphone goes out on the key-down a picture ran on: the operator
+    // unkeys and keys again to talk, straight away, as a fresh press would.
+    mgr.unkey(call).unwrap();
+    mgr.key(call).unwrap();
     assert!(wait_until(Duration::from_secs(2), || peer.voice().len() > 52));
     feed.stop();
 
@@ -674,6 +678,44 @@ fn voice_resumes_without_a_step() {
         expected_ulaw_frame(&pcm, 50, 160),
         "frame 50 should be microphone audio"
     );
+}
+
+/// A picture keys the call for itself and a key press stops it, so no one
+/// holds a key through one: once a picture has run on a key-down, the
+/// microphone stays off the air until the call is unkeyed and keyed again.
+/// Here the call stays keyed, with a live microphone, for 400 ms after the
+/// picture's last frame.
+#[test]
+fn no_microphone_after_a_picture_until_keyed_again() {
+    let peer = Peer::start(VoiceFormat::G711U);
+    let (mut mgr, mic) = manager();
+    let call = keyed_call(&mut mgr, 1, &peer);
+
+    let pcm = ramp(8000 / 2);
+    let tx = mgr.send_picture_audio(call, Arc::clone(&pcm)).unwrap();
+    let feed = ToneFeed::start(&mic, 0.0);
+    assert_eq!(
+        wait_ended(&tx, Duration::from_secs(3)),
+        Some(PictureEnd::Sent)
+    );
+    thread::sleep(Duration::from_millis(400));
+    assert_eq!(
+        peer.voice().len(),
+        25,
+        "the microphone went out after the picture, on its key-down"
+    );
+    // An unkey alone still sends nothing; the next key-down talks.
+    mgr.unkey(call).unwrap();
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(peer.voice().len(), 25);
+    mgr.key(call).unwrap();
+    assert!(
+        wait_until(Duration::from_secs(2), || peer.voice().len() >= 30),
+        "the microphone never came back after a fresh key"
+    );
+    feed.stop();
+    let rx = peer.voice();
+    assert_whole_picture(&rx, &pcm, 160, 25);
 }
 
 #[test]
@@ -892,6 +934,9 @@ fn a_preroll_lead_during_a_picture_does_not_step_voice_after_it() {
         wait_ended(&tx, Duration::from_secs(4)),
         Some(PictureEnd::Sent)
     );
+    // The voice after it is a fresh over: unkey and key again at once.
+    mgr.unkey(call).unwrap();
+    mgr.key(call).unwrap();
     assert!(wait_until(Duration::from_secs(2), || peer.voice().len() > 65));
     feed.stop();
 

@@ -341,6 +341,25 @@
 #define IAX_ERR_P25 -28
 
 /**
+ * [`iax_station_picture_send`] was refused by the engine: sending pictures
+ * is not allowed, there is no call, the call's network cannot carry a
+ * picture, the picture is longer than the transmit time-out, something is
+ * already on the air, or the engine could not start it. Nothing was keyed.
+ * [`iax_station_picture_state_json`]'s `refused` says which, and
+ * `iax_station_last_error` says it in words.
+ */
+#define IAX_ERR_PICTURE -29
+
+/**
+ * [`iax_station_picture_prepare`] was overtaken: another prepare on the same
+ * station started while this one was fitting its image, and that newer one
+ * owns the pending picture. Nothing of this call was kept, and its
+ * `rgb_out`, `w` and `h` were not written. Show the newer call's preview,
+ * not this one's.
+ */
+#define IAX_ERR_SUPERSEDED -30
+
+/**
  * Number of log-spaced dBFS bins [`iax_station_mic_spectrum`] writes when
  * monitoring (iax-e73e). Size the `out` array to (at least) this; a larger
  * buffer is fine (the extra entries are left untouched). A literal here so
@@ -1706,6 +1725,12 @@ int iax_station_mic_stopped(IaxStation *st, char *buf, uintptr_t len);
  * Legacy key still held when the call hangs up is released with no latch,
  * so the next call's `true` keys. A key held past the transmit time-out
  * (two minutes unless [`iax_station_set_tx_timeout_ms`] changed it) unkeys.
+ *
+ * While a picture is going out ([`iax_station_picture_send`]), a `true`
+ * does not key: it stops the picture, unkeys, and returns
+ * [`IAX_ERR_PTT_LATCHED`]. A client should treat that as "the picture was
+ * stopped", not as an error to show. The press is used up; a `false` and
+ * then a `true` talks.
  */
 int iax_station_set_ptt(IaxStation *st, bool on);
 
@@ -1724,6 +1749,15 @@ int iax_station_set_ptt(IaxStation *st, bool on);
  * [`iax_station_ptt_lease_press`], so the engine bounds every Bluetooth
  * hold. Its release is accepted. An unknown `src` is [`IAX_ERR_INVALID`];
  * NULL `st` is [`IAX_ERR_NULL`].
+ *
+ * While a picture is going out ([`iax_station_picture_send`]), a press of
+ * a hand-operated source ([`IAX_PTT_MANUAL`], [`IAX_PTT_SERIAL`],
+ * [`IAX_PTT_LEGACY`], or [`IAX_PTT_BLUETOOTH`] through its lease press),
+ * latched or not, does not key: it stops the picture, unkeys, and returns
+ * [`IAX_ERR_PTT_LATCHED`]. A client should treat that as "the picture was
+ * stopped", not as an error to show. The source keys again on a fresh
+ * press after a release. A [`IAX_PTT_VOX`] press during a picture returns
+ * [`IAX_OK`] and does nothing at all.
  */
 int iax_station_ptt_source(IaxStation *st, uint32_t src, bool on);
 
@@ -1742,7 +1776,9 @@ int iax_station_ptt_stop_all(IaxStation *st);
  * [`iax_station_ptt_lease_renew`], so a button whose release is lost in the
  * air still ends unkeyed. Any other `src`, `ttl_ms == 0` or `ttl_ms > 5000`
  * is [`IAX_ERR_INVALID`] and changes nothing. Otherwise the result is as
- * [`iax_station_ptt_source`]'s press.
+ * [`iax_station_ptt_source`]'s press, including during a picture: the
+ * press stops it and returns [`IAX_ERR_PTT_LATCHED`], meaning "the
+ * picture was stopped", and arms no lease.
  */
 int iax_station_ptt_lease_press(IaxStation *st, uint32_t src, uint32_t ttl_ms);
 
@@ -2507,6 +2543,178 @@ int iax_station_sstv_state_json(IaxStation *st, char *buf, uintptr_t len);
  * again. Returns [`IAX_ERR_NULL`] if `st` is NULL, or [`IAX_ERR_PANIC`].
  */
 int iax_station_sstv_frame(IaxStation *st, uint8_t *buf, uintptr_t len, IaxSstvFrameInfo *info);
+
+/**
+ * 1 when this library was built with picture sending (`sstv-tx`), 0 when
+ * every other `iax_station_picture_*` function only refuses.
+ */
+int iax_station_picture_compiled(void);
+
+/**
+ * Allow (`true`) or stop allowing this station to send pictures. Off on
+ * every new station, kept in memory only, and turned on by nothing but this
+ * call. Turning it off while a picture is going out stops the picture.
+ *
+ * Returns [`IAX_OK`], [`IAX_ERR_NULL`], [`IAX_ERR_UNSUPPORTED`] (no
+ * `sstv-tx`), or [`IAX_ERR_PANIC`].
+ */
+int iax_station_picture_set_allowed(IaxStation *st, bool allowed);
+
+/**
+ * Write whether this station may send pictures into `*out`.
+ *
+ * Returns [`IAX_OK`], [`IAX_ERR_NULL`] (NULL `st` or `out`),
+ * [`IAX_ERR_UNSUPPORTED`] (no `sstv-tx`; `*out` is not written), or
+ * [`IAX_ERR_PANIC`].
+ */
+int iax_station_picture_allowed(IaxStation *st, bool *out);
+
+/**
+ * Write the modes a picture can be sent in, as JSON, into the caller buffer
+ * `buf` of `len` bytes (NUL-terminated, truncate-safe; returns the byte
+ * length the full JSON needs, excluding the NUL, so a `len == 0` call is a
+ * sizing query), as [`iax_station_sstv_state_json`] does:
+ *
+ * ```json
+ * {"default":2,"lead_secs":4.0,"modes":[{"height":240,"index":0,"name":"Robot 36",
+ *  "seconds":42.0,"width":320}, ...]}
+ * ```
+ *
+ * `modes` is in menu order; `index` is what [`iax_station_picture_prepare`]
+ * takes, and `seconds` is the whole time the mode keeps the transmitter
+ * keyed, the silent lead-in and the tail included. `lead_secs` is that
+ * silent lead-in, which every picture starts with before its first tone,
+ * so a client can show "Starting…" for that long without hard-coding it.
+ * `default` is the index to preselect. Returns
+ * [`IAX_ERR_NULL`], [`IAX_ERR_UNSUPPORTED`] (no `sstv-tx`; `buf` is not
+ * written), or [`IAX_ERR_PANIC`].
+ */
+int iax_station_picture_modes_json(IaxStation *st, char *buf, uintptr_t len);
+
+/**
+ * Fit an image to mode `mode_index` (from [`iax_station_picture_modes_json`])
+ * and keep the result as this station's pending picture.
+ *
+ * `rgba` is `width * height` pixels, 4 bytes each (red, green, blue, alpha;
+ * rows top to bottom), and `rgba_len` must be exactly `width * height * 4`.
+ * `fit` 0 fills the mode's frame, cropping what overhangs; 1 fits the whole
+ * image inside it, with black bars. On success the fitted picture is written
+ * to `rgb_out` as `*w * *h * 3` bytes of RGB, for the caller to preview, and
+ * [`iax_station_picture_send`] will send exactly those pixels.
+ *
+ * Every call first drops the pending picture, any refusal and an ended
+ * picture's state, so a failed prepare leaves nothing pending.
+ *
+ * Calls may overlap, from any threads. After any prepare returns, either
+ * nothing is pending, or the pending picture is exactly the one whose bytes
+ * the last successful caller received in `rgb_out`. A prepare that starts
+ * while an earlier one is still fitting overtakes it: the earlier one
+ * returns [`IAX_ERR_SUPERSEDED`], keeps nothing and writes nothing, even if
+ * the newer one then fails (in which case nothing is pending). An
+ * [`iax_station_picture_discard`] overtakes a prepare in the same way. So a
+ * preview can never show a picture other than the one
+ * [`iax_station_picture_send`] would send.
+ *
+ * Returns [`IAX_OK`]; [`IAX_ERR_NULL`] (NULL `st`, `rgba`, `rgb_out`, `w` or
+ * `h`); [`IAX_ERR_INVALID`] (an unknown `mode_index` or `fit`, `rgb_cap`
+ * smaller than the mode's `width * height * 3`, `rgba_len` not `width *
+ * height * 4`, an empty image, or one over 64 megapixels;
+ * `iax_station_last_error` says which); [`IAX_ERR_SUPERSEDED`] (a newer
+ * prepare overtook this one); [`IAX_ERR_UNSUPPORTED`] (no `sstv-tx`); or
+ * [`IAX_ERR_PANIC`]. `rgb_out`, `*w` and `*h` are written only on
+ * [`IAX_OK`].
+ *
+ * NOTE: resampling a large photo takes some milliseconds; call it off any
+ * UI thread.
+ */
+int iax_station_picture_prepare(IaxStation *st,
+                                const uint8_t *rgba,
+                                uintptr_t rgba_len,
+                                uint32_t width,
+                                uint32_t height,
+                                uint32_t mode_index,
+                                uint32_t fit,
+                                uint8_t *rgb_out,
+                                uintptr_t rgb_cap,
+                                uint32_t *w,
+                                uint32_t *h);
+
+/**
+ * Send the pending picture ([`iax_station_picture_prepare`]) on the current
+ * call. Nothing is pending after this, whatever it returns, so a second
+ * send needs a second prepare.
+ *
+ * The engine checks, in order, that sending is allowed
+ * ([`iax_station_picture_set_allowed`]), that there is a call on a network
+ * that can carry a picture, that the picture fits in the transmit time-out
+ * (which is never changed for it), and that nothing is already on the air.
+ * A refusal keys nothing and is reported by
+ * [`iax_station_picture_state_json`]'s `refused`. Once it is going out, a
+ * key press, the transmit time-out, the call ending or
+ * [`iax_station_picture_cancel`] stops it.
+ *
+ * Returns [`IAX_OK`] (the picture is going out); [`IAX_ERR_INVALID`] (no
+ * picture is pending); [`IAX_ERR_PICTURE`] (the engine refused it); or
+ * [`IAX_ERR_NULL`], [`IAX_ERR_UNSUPPORTED`] (no `sstv-tx`),
+ * [`IAX_ERR_PANIC`].
+ */
+int iax_station_picture_send(IaxStation *st);
+
+/**
+ * Stop the picture going out and unkey. Does nothing (and returns
+ * [`IAX_OK`]) when no picture is on the air. The state then reads `ended`,
+ * `cancelled`.
+ *
+ * Returns [`IAX_OK`], [`IAX_ERR_NULL`], [`IAX_ERR_UNSUPPORTED`] (no
+ * `sstv-tx`), or [`IAX_ERR_PANIC`].
+ */
+int iax_station_picture_cancel(IaxStation *st);
+
+/**
+ * Drop the pending picture ([`iax_station_picture_prepare`]) without sending
+ * it, for when the person closes the sheet. A prepare still fitting when
+ * this is called keeps nothing either: it returns [`IAX_ERR_SUPERSEDED`].
+ * It does not touch a picture that is going out (stop that with
+ * [`iax_station_picture_cancel`]), nor how the last one ended or was
+ * refused. Does nothing, and returns [`IAX_OK`], when nothing is pending.
+ *
+ * Returns [`IAX_OK`], [`IAX_ERR_NULL`], [`IAX_ERR_UNSUPPORTED`] (no
+ * `sstv-tx`), or [`IAX_ERR_PANIC`].
+ */
+int iax_station_picture_discard(IaxStation *st);
+
+/**
+ * Write the picture sender's state as JSON into the caller buffer `buf` of
+ * `len` bytes, with the same buffer convention as
+ * [`iax_station_sstv_state_json`]. One of:
+ *
+ * ```json
+ * {"state":"idle","pending":false,"allowed":false}
+ * {"state":"sending","mode":"Scottie 2","sent_secs":32.1,"total_secs":77.1,"pending":false,"allowed":true}
+ * {"state":"ended","mode":"Scottie 2","end":"sent","pending":true,"allowed":true}
+ * ```
+ *
+ * `pending` is whether a prepared picture is waiting to be sent.
+ *
+ * `end` is `"sent"`, `"cancelled"`, `"timed_out"` or `"call_ended"`.
+ * `"timed_out"` covers both the station's transmit time-out and an
+ * `EchoLink` link's own transmit cap. `ended` is reported only until the
+ * next prepare or send, so a client that wants to keep showing how the
+ * last picture ended must remember it itself.
+ *
+ * After a refused send the document also carries `"refused"`:
+ * `"not_allowed"`, `"no_call"`, `"wrong_network"` (with `"network"`, as a
+ * person would name it), `"too_long"` (with `"picture_secs"` and
+ * `"timeout_secs"`), `"on_air"` or `"engine"`, until the next prepare or
+ * send. A refusal and a picture still going out coexist: a send refused
+ * while a picture runs reads `"state":"sending"` together with
+ * `"refused":"on_air"`. The text of an `"engine"` refusal is in
+ * [`iax_station_last_error`]. Never waits on a picture starting. Returns [`IAX_ERR_NULL`], [`IAX_ERR_UNSUPPORTED`] (no `sstv-tx`;
+ * `buf` is not written), or [`IAX_ERR_PANIC`].
+ */
+int iax_station_picture_state_json(IaxStation *st,
+                                   char *buf,
+                                   uintptr_t len);
 
 /**
  * Set extra directories to search for a runtime `libcodec2`, ahead of the

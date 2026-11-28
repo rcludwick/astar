@@ -208,7 +208,13 @@ impl Drop for Call {
     }
 }
 
+/// A station on a connected `EchoLink` call, allowed to send pictures.
 fn on_an_echolink_call() -> Call {
+    on_an_echolink_call_capped_at(Timings::default().max_transmit)
+}
+
+/// The same, with the link's transmit cap at `max_transmit`.
+fn on_an_echolink_call_capped_at(max_transmit: Duration) -> Call {
     let fake = FakeStation::start("*ECHOTEST*");
     fake.set_echo(false);
     let dir = FakeDirectory::start(FakeLogin::Ok, vec![fake.entry(NODE)]);
@@ -239,6 +245,7 @@ fn on_an_echolink_call() -> Call {
             connection_timeout: ms(5_000),
             give_up_after: 20,
             talk_hold: ms(100),
+            max_transmit,
             ..Timings::default()
         },
     });
@@ -263,6 +270,7 @@ fn on_an_echolink_call() -> Call {
         }),
         "the fake station never answered"
     );
+    station.set_picture_sending_allowed(true);
     Call {
         station,
         fake,
@@ -778,4 +786,101 @@ fn echolink_is_accepted() {
     send.cancel();
     assert_eq!(send.ended(), Some(SendEnd::Cancelled));
     let_go(&call);
+}
+
+#[test]
+fn the_links_transmit_cap_ends_a_picture_as_timed_out() {
+    // The station's own time-out stays at its two minutes; only the link's
+    // cap is short, so it is the cap that stops the picture.
+    let call = on_an_echolink_call_capped_at(ms(1_500));
+    let send = call
+        .station
+        .send_picture(&picture_for(robot36()), robot36())
+        .expect("send");
+    assert_eq!(
+        wait_ended(&send, Duration::from_secs(5)),
+        Some(SendEnd::TimedOut)
+    );
+    let ptt = call.station.ptt_snapshot();
+    assert_eq!(ptt.forced.seq, 0, "the station's time-out never fired");
+    let_go(&call);
+    assert!(!call.station.snapshot().ptt);
+}
+
+#[test]
+fn a_manual_press_keeps_the_mic_off_the_air() {
+    let call = on_an_echolink_call();
+    // Hold the console's unkey back 300 ms: if the picture stopped before
+    // the link unkeyed, the microphone would have that long on the air.
+    call.station.delay_picture_unkey_for_test(ms(300));
+    let (talking, talker) = talk(&call.mic);
+    let send = call
+        .station
+        .send_picture(&picture_for(robot36()), robot36())
+        .expect("send");
+    assert!(
+        wait_until(Duration::from_secs(2), || call.packets().len() >= 5),
+        "no picture packets arrived"
+    );
+    // Still in the picture's silent lead.
+    assert!(matches!(
+        call.station.ptt_source(PttSource::Manual, true),
+        Err(astar_station::StationError::PttLatched)
+    ));
+    assert_eq!(send.ended(), Some(SendEnd::Cancelled));
+    thread::sleep(ms(500));
+    talking.store(false, Ordering::SeqCst);
+    talker.join().unwrap();
+    assert!(!call.link_keyed(), "the link unkeyed");
+    let audio = decode(&call.packets());
+    let loudest = audio.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+    assert!(
+        loudest < 500,
+        "the microphone reached the far station: peak {loudest} in {} samples",
+        audio.len()
+    );
+}
+
+/// A picture that runs to its end: the link stays keyed after its last
+/// frame until the picture is reaped (held open 400 ms here by the test
+/// hook), then unkeys. A microphone talking throughout, whose capture lane
+/// an earlier over has already opened, is never heard: not during the
+/// picture, not in those 400 ms, and not in the 300 ms after.
+#[test]
+fn a_picture_that_ends_by_itself_keeps_the_mic_off_the_air() {
+    let call = on_an_echolink_call();
+    // An over first, so the capture lane is open and the microphone live.
+    call.station
+        .ptt_source(PttSource::Manual, true)
+        .expect("key");
+    assert!(wait_until(Duration::from_secs(1), || call.link_keyed()));
+    call.station.ptt_source(PttSource::Manual, false).unwrap();
+    let_go(&call);
+    let before = call.packets().len();
+
+    call.station.delay_picture_reap_for_test(ms(400));
+    let (talking, talker) = talk(&call.mic);
+    let want = robot36_packets();
+    let send = call
+        .station
+        .send_picture(&picture_for(robot36()), robot36())
+        .expect("send");
+    assert_eq!(
+        wait_ended(&send, Duration::from_secs(60)),
+        Some(SendEnd::Sent)
+    );
+    let_go(&call);
+    thread::sleep(ms(300));
+    talking.store(false, Ordering::SeqCst);
+    talker.join().unwrap();
+    assert!(!call.link_keyed(), "the link unkeyed");
+
+    let got = call.packets();
+    let picture = &got[before..];
+    assert_eq!(
+        picture.len(),
+        want.len(),
+        "packets went out after the picture's last"
+    );
+    assert_picture_prefix(picture, &want);
 }

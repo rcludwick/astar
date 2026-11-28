@@ -2231,12 +2231,16 @@ impl ConsoleSession {
     }
 
     /// Key the live call for a picture, which brings its own audio and so
-    /// needs no microphone: exactly [`Self::set_ptt`]`(true)`, except that a
-    /// voice route (an `EchoLink` call's) with no capture device is keyed
-    /// anyway rather than refused with [`ConsoleError::NoCaptureDevice`].
-    /// The capture lane is still opened when it can be, so a person who
-    /// holds PTT through the end of the picture is heard after it. Unkey
-    /// with [`Self::set_ptt`]`(false)`.
+    /// needs no microphone: [`Self::set_ptt`]`(true)`, except that the
+    /// capture lane is left shut. A voice route (an `EchoLink` call's) is
+    /// not keyed at all, so one with no capture device does not refuse with
+    /// [`ConsoleError::NoCaptureDevice`]; an `AllStarLink` call is keyed with
+    /// its mic gate shut ([`astar_iax::Manager::key_for_picture`]). A key
+    /// press during a picture stops it, so nobody can hold a key through
+    /// one, and the call's run loop sends no microphone after a picture
+    /// until the call has been unkeyed and keyed again; a lane that is
+    /// never opened for a picture cannot leak into it either. Unkey with
+    /// [`Self::set_ptt`]`(false)`, which closes the lane as usual.
     ///
     /// It refuses by itself on every network that cannot carry a picture,
     /// so no caller can use it to key a digital-voice session (M17, D-Star,
@@ -2264,9 +2268,10 @@ impl ConsoleSession {
         }
     }
 
-    /// [`Self::set_ptt`], with the capture lane's refusal optional: a
-    /// key-down with `capture_required` false goes ahead without one.
-    fn set_ptt_with(&mut self, on: bool, capture_required: bool) -> Result<(), ConsoleError> {
+    /// [`Self::set_ptt`], with the capture lane optional: a key-down with
+    /// `with_mic` false (a picture's) neither opens the lane nor refuses for
+    /// the lack of one.
+    fn set_ptt_with(&mut self, on: bool, with_mic: bool) -> Result<(), ConsoleError> {
         // NXDN has no transmit path yet (`crate::nxdn`'s Transmit section),
         // and the refusal has to come out BEFORE the gate below opens: a
         // key-down that opened the capture lane and then refused would leave
@@ -2302,7 +2307,7 @@ impl ConsoleSession {
         // an RF header over a stream of silence is worse than no key at all.
         if self.voice_route.is_some() {
             if on {
-                if !self.key_voice_route(true) && capture_required {
+                if with_mic && !self.key_voice_route(true) {
                     return Err(ConsoleError::NoCaptureDevice);
                 }
             } else {
@@ -2403,10 +2408,10 @@ impl ConsoleSession {
         // records nothing on the timeline.
         let id = self.active.ok_or(ConsoleError::NotConnected)?;
         let mgr = self.manager.as_mut().ok_or(ConsoleError::NotConnected)?;
-        if on {
-            mgr.key(id)?;
-        } else {
-            mgr.unkey(id)?;
+        match (on, with_mic) {
+            (true, true) => mgr.key(id)?,
+            (true, false) => mgr.key_for_picture(id)?,
+            (false, _) => mgr.unkey(id)?,
         }
         self.state.ptt = on;
         self.tracer

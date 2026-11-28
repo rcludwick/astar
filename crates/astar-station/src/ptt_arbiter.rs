@@ -39,6 +39,15 @@
 //! 8. When it fires, everything stops and every held source is latched,
 //!    `Legacy` included. Each re-arms only by releasing (`set_ptt(false)`
 //!    for `Legacy`).
+//! 9. While [`PttSource::Picture`] holds, a press of a hand-operated source
+//!    (`Manual`, `Serial`, `Legacy`, `Bluetooth`, plain or leased) stops the
+//!    picture: `Picture` is released and the presser is latched, not held,
+//!    so the press is used up and that source keys again only after a
+//!    release. This holds even when the presser was already latched (rule
+//!    9 is checked before rule 2), because a latched source is not on air
+//!    and a picture can start while it is latched. A `Vox` press while
+//!    `Picture` holds changes nothing at all, latched or not:
+//!    sound at the microphone can neither stop a picture nor key behind it.
 
 use std::time::{Duration, Instant};
 
@@ -172,6 +181,16 @@ pub enum PressOutcome {
     /// Recorded and this raised the OR: the caller must key the console now,
     /// and call `rollback_press(src)` if that fails.
     KeyNow,
+    /// A hand-operated source was pressed while [`PttSource::Picture`] held
+    /// the key (rule 9). `Picture` has been released and the pressing source
+    /// latched without being held. The caller must stop the picture and
+    /// forward the edge (`Unkey` when nothing else holds the key). The press
+    /// keyed nothing.
+    PictureStopped(PttEdge),
+    /// `Vox` was pressed while [`PttSource::Picture`] held the key (rule 9):
+    /// nothing recorded, nothing latched, nothing keyed. Not an error: VOX
+    /// keys on its next press after the picture.
+    HeldOffByPicture,
 }
 
 /// [`PttArbiter::lease_renew`] on a source that holds no live lease. Renew
@@ -196,6 +215,10 @@ pub struct PttSnapshot {
     pub forced: ForcedRecord,
     /// The transmit time-out in force.
     pub tx_timeout: Duration,
+    /// Whether this station's embedder has allowed it to send SSTV pictures
+    /// (`Station::set_picture_sending_allowed`, feature `sstv-tx`). Off on a
+    /// new station; always off without the feature.
+    pub picture_allowed: bool,
 }
 
 /// A held source; `lease` is set only through [`PttArbiter::lease_press`].
@@ -230,6 +253,7 @@ pub struct PttArbiter {
     tx_timeout: Duration,
     forced: ForcedRecord,
     last_answered_seq: Option<u64>,
+    picture_allowed: bool,
 }
 
 impl PttArbiter {
@@ -247,6 +271,7 @@ impl PttArbiter {
                 reason: None,
             },
             last_answered_seq: None,
+            picture_allowed: false,
         }
     }
 
@@ -263,12 +288,32 @@ impl PttArbiter {
     }
 
     /// The press rules shared by `press` and `lease_press`. A latched source
-    /// is ignored (rule 2). Pressing a source that already holds is `Held`
-    /// and changes nothing. A press that raises the OR starts the transmit
-    /// time-out's clock.
+    /// is ignored (rule 2). While a picture holds the key, a hand-operated
+    /// press stops it and VOX is held off (rule 9). Pressing a source that
+    /// already holds is `Held` and changes nothing. A press that raises the
+    /// OR starts the transmit time-out's clock.
     fn press_inner(&mut self, src: PttSource, now: Instant) -> PressOutcome {
+        let picture_holds =
+            src != PttSource::Picture && self.held[PttSource::Picture.index()].is_some();
+        // Rule 9 comes before rule 2: a hand-operated source can be latched
+        // without being held (a lost Bluetooth release, a time-out or the
+        // universal stop with the key still down), and a picture can start
+        // in that state, because a latch is not on air. Its press must still
+        // stop the picture.
+        if picture_holds && src != PttSource::Vox {
+            let was_on = self.is_on_air();
+            self.held[PttSource::Picture.index()] = None;
+            self.latched[PttSource::Picture.index()] = false;
+            self.held[src.index()] = None;
+            self.latched[src.index()] = true;
+            return PressOutcome::PictureStopped(self.edge_after(was_on));
+        }
         if self.latched[src.index()] {
             return PressOutcome::Ignored;
+        }
+        if picture_holds {
+            // Only `Vox` reaches here.
+            return PressOutcome::HeldOffByPicture;
         }
         if self.held[src.index()].is_some() {
             return PressOutcome::Held;
@@ -287,7 +332,7 @@ impl PttArbiter {
     /// renewed, so a client that stalls can never leave the radio keyed.
     pub fn lease_press(&mut self, src: PttSource, ttl: Duration, now: Instant) -> PressOutcome {
         let outcome = self.press_inner(src, now);
-        if outcome != PressOutcome::Ignored {
+        if matches!(outcome, PressOutcome::Held | PressOutcome::KeyNow) {
             let deadline = now.checked_add(ttl).unwrap_or(now);
             self.held[src.index()] = Some(Hold {
                 lease: Some(Lease { ttl, deadline }),
@@ -449,7 +494,20 @@ impl PttArbiter {
             latched: mask_of(|src| self.latched[src.index()]),
             forced: self.forced,
             tx_timeout: self.tx_timeout,
+            picture_allowed: self.picture_allowed,
         }
+    }
+
+    /// Record whether pictures may be sent, for the snapshot. Only the flag:
+    /// stopping a picture that is going out is the station's job.
+    pub fn set_picture_allowed(&mut self, allowed: bool) {
+        self.picture_allowed = allowed;
+    }
+
+    /// Whether pictures may be sent. Off on a new arbiter.
+    #[must_use]
+    pub fn picture_allowed(&self) -> bool {
+        self.picture_allowed
     }
 
     fn held_mask(&self) -> u32 {
@@ -524,5 +582,148 @@ mod tests {
         // Releasing re-arms it, as for every other source.
         assert_eq!(a.release(PttSource::Picture), PttEdge::None);
         assert_eq!(a.snapshot().latched, 0);
+    }
+
+    /// An arbiter with a picture holding the key, as `send_picture` leaves it.
+    fn picture_on_air(t0: Instant) -> PttArbiter {
+        let mut a = PttArbiter::new();
+        assert_eq!(a.press(PttSource::Picture, t0), PressOutcome::KeyNow);
+        a
+    }
+
+    /// Rule 9 for one hand-operated press: the picture is let go of, the
+    /// presser is latched and not held, and the station unkeys.
+    fn assert_press_stops_the_picture(src: PttSource, outcome: PressOutcome, a: &PttArbiter) {
+        assert_eq!(
+            outcome,
+            PressOutcome::PictureStopped(PttEdge::Unkey),
+            "{src:?}"
+        );
+        let snap = a.snapshot();
+        assert_eq!(snap.sources, 0, "{src:?}: nothing holds the key");
+        assert_eq!(
+            snap.latched,
+            src.bit(),
+            "{src:?}: only the presser is latched"
+        );
+        assert!(!a.is_on_air(), "{src:?}");
+    }
+
+    #[test]
+    fn a_press_during_a_picture_releases_it_and_latches_the_presser() {
+        let t0 = Instant::now();
+        let mut a = picture_on_air(t0);
+        let outcome = a.press(PttSource::Manual, t0 + Duration::from_secs(1));
+        assert_press_stops_the_picture(PttSource::Manual, outcome, &a);
+    }
+
+    #[test]
+    fn a_serial_press_during_a_picture_stops_it() {
+        let t0 = Instant::now();
+        let mut a = picture_on_air(t0);
+        let outcome = a.press(PttSource::Serial, t0);
+        assert_press_stops_the_picture(PttSource::Serial, outcome, &a);
+    }
+
+    #[test]
+    fn a_legacy_press_during_a_picture_stops_it() {
+        let t0 = Instant::now();
+        let mut a = picture_on_air(t0);
+        let outcome = a.press(PttSource::Legacy, t0);
+        assert_press_stops_the_picture(PttSource::Legacy, outcome, &a);
+    }
+
+    #[test]
+    fn a_bluetooth_lease_press_during_a_picture_stops_it() {
+        let t0 = Instant::now();
+        let mut a = picture_on_air(t0);
+        let outcome = a.lease_press(PttSource::Bluetooth, Duration::from_millis(1500), t0);
+        assert_press_stops_the_picture(PttSource::Bluetooth, outcome, &a);
+        // No lease was armed, so a renewal keys nothing and expiry forces
+        // nothing.
+        assert_eq!(a.lease_renew(PttSource::Bluetooth, t0), Err(NotLeased));
+        assert_eq!(a.tick(t0 + Duration::from_secs(5)), PttEdge::None);
+        assert_eq!(a.snapshot().forced.seq, 0);
+    }
+
+    /// An arbiter where `src` was held and then latched by the universal stop
+    /// while the key stayed down, and a picture was then started: a latch is
+    /// not on air, so nothing stood in the picture's way.
+    fn latched_then_picture(src: PttSource, t0: Instant) -> PttArbiter {
+        let mut a = PttArbiter::new();
+        if src == PttSource::Bluetooth {
+            let _ = a.lease_press(src, Duration::from_millis(1500), t0);
+        } else {
+            let _ = a.press(src, t0);
+        }
+        assert_eq!(a.stop_all(), PttEdge::Unkey);
+        assert_eq!(a.snapshot().latched, src.bit(), "{src:?} is latched");
+        assert_eq!(a.press(PttSource::Picture, t0), PressOutcome::KeyNow);
+        a
+    }
+
+    #[test]
+    fn a_latched_manual_press_still_stops_a_picture() {
+        let t0 = Instant::now();
+        let mut a = latched_then_picture(PttSource::Manual, t0);
+        let outcome = a.press(PttSource::Manual, t0);
+        assert_press_stops_the_picture(PttSource::Manual, outcome, &a);
+        assert_eq!(a.press(PttSource::Manual, t0), PressOutcome::Ignored);
+        assert_eq!(a.release(PttSource::Manual), PttEdge::None);
+        assert_eq!(a.press(PttSource::Manual, t0), PressOutcome::KeyNow);
+    }
+
+    #[test]
+    fn a_latched_bluetooth_lease_press_still_stops_a_picture() {
+        let t0 = Instant::now();
+        let mut a = latched_then_picture(PttSource::Bluetooth, t0);
+        let outcome = a.lease_press(PttSource::Bluetooth, Duration::from_millis(1500), t0);
+        assert_press_stops_the_picture(PttSource::Bluetooth, outcome, &a);
+        assert_eq!(a.lease_renew(PttSource::Bluetooth, t0), Err(NotLeased));
+        assert_eq!(a.tick(t0 + Duration::from_secs(5)), PttEdge::None);
+    }
+
+    #[test]
+    fn a_latched_vox_press_during_a_picture_is_inert() {
+        let t0 = Instant::now();
+        let mut a = latched_then_picture(PttSource::Vox, t0);
+        let before = a.snapshot();
+        assert_eq!(a.press(PttSource::Vox, t0), PressOutcome::Ignored);
+        assert_eq!(a.snapshot(), before, "nothing changes");
+        assert!(a.is_on_air(), "the picture still holds the key");
+    }
+
+    #[test]
+    fn vox_during_a_picture_is_inert() {
+        let t0 = Instant::now();
+        let mut a = picture_on_air(t0);
+        let before = a.snapshot();
+        assert_eq!(a.press(PttSource::Vox, t0), PressOutcome::HeldOffByPicture);
+        assert_eq!(a.snapshot(), before, "nothing recorded, nothing latched");
+        assert!(a.is_on_air(), "the picture still holds the key");
+        // Once the picture has let go, VOX keys on its next press.
+        assert_eq!(a.release(PttSource::Picture), PttEdge::Unkey);
+        assert_eq!(a.press(PttSource::Vox, t0), PressOutcome::KeyNow);
+    }
+
+    #[test]
+    fn the_presser_keys_again_after_a_release() {
+        let t0 = Instant::now();
+        let mut a = picture_on_air(t0);
+        let _ = a.press(PttSource::Manual, t0);
+        // A second press without a release is still used up.
+        assert_eq!(a.press(PttSource::Manual, t0), PressOutcome::Ignored);
+        assert_eq!(a.release(PttSource::Manual), PttEdge::None);
+        assert_eq!(a.press(PttSource::Manual, t0), PressOutcome::KeyNow);
+    }
+
+    #[test]
+    fn picture_allowed_is_off_until_set_and_in_the_snapshot() {
+        let mut a = PttArbiter::new();
+        assert!(!a.picture_allowed());
+        assert!(!a.snapshot().picture_allowed);
+        a.set_picture_allowed(true);
+        assert!(a.picture_allowed());
+        assert!(a.snapshot().picture_allowed);
     }
 }

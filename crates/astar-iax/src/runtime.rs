@@ -251,6 +251,55 @@ fn translate(event: &AppEvent, negotiated: VoiceFormat) -> Option<CallEvent> {
     }
 }
 
+/// Whether this call may send the microphone. A picture keys the call for
+/// itself, and a key press during a picture stops it, so nobody can hold a
+/// key through a picture: once a picture has run on a key-down, no
+/// microphone frame goes out on this call until it has been unkeyed and
+/// then keyed again. That closes the moments after a picture ends (by
+/// itself, or stopped early) while the call is still keyed, in which a
+/// queued capture frame would otherwise go out.
+///
+/// With no picture it stays [`MicHold::Open`] and changes nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum MicHold {
+    /// The microphone is sent as usual.
+    #[default]
+    Open,
+    /// A picture has run on this key-down; held until the unkey.
+    UntilUnkey,
+    /// Unkeyed after a picture; held until the next key-down.
+    UntilKey,
+}
+
+impl MicHold {
+    /// A picture has been handed to the run loop.
+    pub(crate) fn picture_started(&mut self) {
+        *self = Self::UntilUnkey;
+    }
+
+    /// The call is being keyed (`true`) or unkeyed. Returns `true` when what
+    /// the microphone has queued so far must be thrown away now: at the
+    /// unkey that follows a picture, so nothing captured before it is sent
+    /// once the call is keyed again.
+    pub(crate) fn ptt(&mut self, engaged: bool) -> bool {
+        match (*self, engaged) {
+            (Self::UntilUnkey, false) => {
+                *self = Self::UntilKey;
+                true
+            }
+            (Self::UntilKey, true) => {
+                *self = Self::Open;
+                false
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn is_open(self) -> bool {
+        self == Self::Open
+    }
+}
+
 /// Media-clock timestamp ladder for outbound voice (iax-86d7). Every frame
 /// is exactly 160 samples = 20 ms, so consecutive frames advance the media
 /// clock by exactly 20 regardless of send-time jitter (resampler chunking,
@@ -519,6 +568,9 @@ fn run_loop(
     // The picture being sent in place of the microphone, if any. Dropping it
     // on any return below marks it cut because the call ended.
     let mut picture: Option<crate::picture_tx::ActivePicture> = None;
+    // No microphone after a picture until the call is unkeyed and keyed
+    // again (`MicHold`). Per call: this run loop is the call's.
+    let mut mic_hold = MicHold::default();
     loop {
         let now = Instant::now();
         let next_timer = timers
@@ -595,6 +647,11 @@ fn run_loop(
             }
             match cmd {
                 RuntimeCommand::App(app) => {
+                    if let AppCommand::SendPtt(engaged) = &app
+                        && mic_hold.ptt(*engaged)
+                    {
+                        while mic_rx.try_recv().is_ok() {}
+                    }
                     let actions = fsm.handle(Event::App(app));
                     if dispatch_actions(
                         actions,
@@ -619,6 +676,7 @@ fn run_loop(
                 RuntimeCommand::Picture(job) => {
                     // The Manager refuses a second picture while one runs.
                     picture = Some(crate::picture_tx::ActivePicture::new(job));
+                    mic_hold.picture_started();
                 }
                 RuntimeCommand::Shutdown => {
                     let actions = fsm.handle(Event::App(AppCommand::Hangup {
@@ -830,12 +888,13 @@ fn run_loop(
         // disabled this never fires, so `media_lead` stays 0 and the ladder is
         // byte-identical to today.
         //
-        // While a picture runs the swap still consumes the lead, but the
-        // flushed pre-roll frames are thrown away with the rest of the mic
-        // audio, so nothing is armed: the lead must not carry over into the
-        // voice that follows the picture.
+        // While a picture runs, or the microphone is held after one
+        // (`MicHold`), the swap still consumes the lead, but the flushed
+        // pre-roll frames are thrown away with the rest of the mic audio, so
+        // nothing is armed: the lead must not carry over into the voice that
+        // follows the picture.
         let lead = preroll_lead.swap(0, Ordering::Relaxed);
-        if lead > 0 && picture.is_none() {
+        if lead > 0 && picture.is_none() && mic_hold.is_open() {
             media_lead = 0;
             preroll_remaining = lead;
         }
@@ -843,7 +902,8 @@ fn run_loop(
         // frames go out on time-stamps counted from frames sent, anchored once
         // at the voice ladder's next value, and microphone audio is thrown
         // away. When it ends the ladder continues from the frame after its
-        // last, so voice carries on without a step.
+        // last, so the voice of the next over (after an unkey and a fresh
+        // key, `MicHold`) carries on without a step.
         let mut burst = 0usize;
         if let Some(pic) = picture.as_mut() {
             while mic_rx.try_recv().is_ok() {}
@@ -892,7 +952,13 @@ fn run_loop(
                 picture = None;
             }
         }
+        if picture.is_none() && !mic_hold.is_open() {
+            // A picture has run on this key-down: the microphone waits for
+            // an unkey and a fresh key.
+            while mic_rx.try_recv().is_ok() {}
+        }
         while picture.is_none()
+            && mic_hold.is_open()
             && let Ok(pcm) = mic_rx.try_recv()
         {
             count_tx_send(&mut burst, &mut tx_last_send, &mut tx_max_gap_ms);

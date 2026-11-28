@@ -85,12 +85,13 @@
 //!
 //! The picture starts on a fresh packet and with a fresh GSM encoder, so its
 //! packets are the same whatever was said before it; only its last packet
-//! is filled out with silent frames. While it runs, whatever the
+//! is filled out with silent frames. While it runs, and until the call has
+//! been unkeyed and keyed again (`TxState::mic_held_for`), whatever the
 //! microphone queued is thrown away. The audio socket's read timeout drops
 //! to [`PICTURE_POLL`] so the thread never sleeps through a due frame. If
-//! the key comes up or the transmit cap stops the over, the picture is cut
-//! ([`CutReason::Unkeyed`]); if the call ends or we hang up, it is cut
-//! ([`CutReason::CallEnded`]).
+//! the key comes up, the picture is cut ([`CutReason::Unkeyed`]); if the
+//! transmit cap stops the over, it is cut ([`CutReason::TransmitCap`]); if
+//! the call ends or we hang up, it is cut ([`CutReason::CallEnded`]).
 
 use std::io;
 use std::net::{SocketAddr, UdpSocket};
@@ -197,6 +198,36 @@ impl PeerShared {
     }
 }
 
+/// The app's push-to-talk request: set by the session, read by the link on
+/// each pass. It also counts key-downs, so the link can tell that the call
+/// was unkeyed and keyed again even when both fall between two of its
+/// passes (see [`TxState::mic_held_for`]).
+#[derive(Debug, Default)]
+pub(crate) struct PttRequest {
+    on: AtomicBool,
+    key_downs: AtomicU32,
+}
+
+impl PttRequest {
+    /// Request PTT on or off. One writer: the session.
+    pub(crate) fn set(&self, on: bool) {
+        if on && !self.on.load(Ordering::Acquire) {
+            // Counted before `on` is published, so a pass that sees the new
+            // key-down also sees its count.
+            self.key_downs.fetch_add(1, Ordering::AcqRel);
+        }
+        self.on.store(on, Ordering::Release);
+    }
+
+    pub(crate) fn is_on(&self) -> bool {
+        self.on.load(Ordering::Acquire)
+    }
+
+    fn key_downs(&self) -> u32 {
+        self.key_downs.load(Ordering::Acquire)
+    }
+}
+
 /// Where a station's audio comes from and goes to.
 #[allow(
     clippy::large_enum_variant,
@@ -206,7 +237,7 @@ pub(crate) enum PeerAudio {
     /// The app's one call: the voice route's channel ends and the PTT request.
     Client {
         call_audio: CallAudio,
-        ptt: Arc<AtomicBool>,
+        ptt: Arc<PttRequest>,
     },
     /// A conference member on astar-server, at the member's rate.
     Member {
@@ -234,6 +265,13 @@ struct TxState {
     /// The picture being sent in place of the microphone, if any. Dropping
     /// it while it runs cuts it as [`CutReason::CallEnded`].
     picture: Option<PicturePacing>,
+    /// The key-down (the app's [`PttRequest`] count) a picture ran on. No
+    /// microphone frame is sent while the call is still on that key-down:
+    /// a key press during a picture stops it, so nobody can hold a key
+    /// through one, and this closes the moments after a picture ends (by
+    /// itself, or stopped early) while the call is still keyed. Cleared by
+    /// the unkey, or by a later key-down the link did not see the unkey of.
+    mic_held_for: Option<u32>,
 }
 
 /// What [`TxCap::check`] decided for one pass.
@@ -400,6 +438,7 @@ impl EchoLinkLink {
                 last_heard: None,
                 cap: TxCap::default(),
                 picture: None,
+                mic_held_for: None,
             },
             info_sent: false,
             first,
@@ -952,7 +991,11 @@ fn transmit_client(
     let PeerAudio::Client { call_audio, ptt } = &slot.audio else {
         return;
     };
-    let request = connected && ptt.load(Ordering::Acquire);
+    let request = connected && ptt.is_on();
+    let key_down = ptt.key_downs();
+    if slot.tx.mic_held_for.is_some_and(|held| held != key_down) {
+        slot.tx.mic_held_for = None;
+    }
     let verdict = slot.tx.cap.check(request, now, max_transmit);
     if verdict == CapVerdict::Stop {
         warn!(
@@ -970,7 +1013,12 @@ fn transmit_client(
     } else if let Some(picture) = slot.tx.picture.as_ref()
         && !want
     {
-        picture.cut(CutReason::Unkeyed);
+        // The cap, not the key, stopped it when the key is still down.
+        picture.cut(if request {
+            CutReason::TransmitCap
+        } else {
+            CutReason::Unkeyed
+        });
     }
     if want && !slot.tx.keyed {
         slot.tx.keyed = true;
@@ -982,12 +1030,18 @@ fn transmit_client(
         // Not transmitting: what the mic queued is never sent.
         while call_audio.tx_frames.try_recv().is_ok() {}
         slot.tx.picture = None;
+        slot.tx.mic_held_for = None;
         return;
     }
     if slot.tx.picture.is_some() {
-        // A picture owns the transmit side: the mic is thrown away.
+        // A picture owns the transmit side: the mic is thrown away, and
+        // stays so until this key-down is over.
+        slot.tx.mic_held_for = Some(key_down);
         while call_audio.tx_frames.try_recv().is_ok() {}
         send_picture_frames(sockets, slot);
+    } else if slot.tx.mic_held_for.is_some() {
+        // A picture ran on this key-down: the mic waits for a fresh one.
+        while call_audio.tx_frames.try_recv().is_ok() {}
     } else {
         let frames: Vec<Vec<i16>> = call_audio.tx_frames.try_iter().collect();
         for frame in frames {
@@ -1002,6 +1056,7 @@ fn transmit_client(
         }
         slot.tx.pending.clear();
         slot.tx.keyed = false;
+        slot.tx.mic_held_for = None;
         slot.shared.ptt.store(false, Ordering::Relaxed);
     }
 }

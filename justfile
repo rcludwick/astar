@@ -518,7 +518,7 @@ mutants-ble-ptt:
 # is gated by `just discord-check` / ci.yml's `discord` job, not here.
 # guard-ble-ptt.sh is in the chain for the same reason: the Bluetooth PTT core
 # staying dependency-free and out of the node is a safety property.
-ci: fmt-check clippy test cbindgen version-check release-test deploy-verify-test public-check dns-check auth-check http-check gsm-check soft-ambe-check imbe-check p25-check
+ci: fmt-check clippy test cbindgen version-check release-test deploy-verify-test public-check dns-check auth-check http-check gsm-check soft-ambe-check imbe-check p25-check picture-ffi-check
     ./ci/guard-discord-feature.sh
     ./ci/guard-no-tiny-http.sh
     ./ci/guard-echolink.sh
@@ -528,7 +528,7 @@ ci: fmt-check clippy test cbindgen version-check release-test deploy-verify-test
     ./ci/guard-sstv.sh --self-test
     ./ci/guard-sstv.sh
     ./ci/guard-p25-imbe.sh
-    @echo "✓ ci: fmt + clippy + test + cbindgen + version-check + release-test + deploy-verify-test + public-check + dns-check + auth-check + http-check + gsm-check + soft-ambe-check + imbe-check + p25-check + discord-guard + tiny-http-guard + echolink-guard + packet-log-guard + netrec-guard + ble-ptt-guard + sstv-guard + p25-imbe-guard passed"
+    @echo "✓ ci: fmt + clippy + test + cbindgen + version-check + release-test + deploy-verify-test + public-check + dns-check + auth-check + http-check + gsm-check + soft-ambe-check + imbe-check + p25-check + picture-ffi-check + discord-guard + tiny-http-guard + echolink-guard + packet-log-guard + netrec-guard + ble-ptt-guard + sstv-guard + p25-imbe-guard passed"
 
 # astar-server's opt-in public-tls (HTTPS, ACME, Porkbun) and stream-mp3 (LAME)
 # features, which a default-features `just clippy`/`just test` never compiles. Unlike discord it
@@ -564,6 +564,20 @@ soft-ambe-check:
     cargo test -p astar-netrec --features release
     ./ci/guard-dstar-soft-ambe.sh
     @echo "✓ soft-ambe-check: clippy + tests with --features dstar-soft-ambe passed"
+
+# astar-sys's opt-in `sstv-tx` (the bodies of the iax_station_picture_* entry
+# points), which a default `just test` never turns on, so the picture C
+# interface's tests (tests/picture_ffi.rs) would otherwise only compile, in
+# ci/feature-matrix.sh's clippy. Test-only, so ci/guard-sstv.sh allows this
+# one line: nothing here builds a shipped artifact. It builds into its own
+# target directory, which nothing else reads: in target/debug the test build
+# would leave a libastar_sys.a with working picture functions, and
+# bindings/swift/Package.swift's fallback links that file when no
+# xcframework is present. Each test talks to a fake peer on 127.0.0.1; one
+# sends a whole Robot 36 picture, about 45 s.
+picture-ffi-check:
+    cargo test -p astar-sys --features sstv-tx --target-dir target/picture-ffi
+    @echo "✓ picture-ffi-check: the picture C interface tests passed"
 
 # The P25 IMBE vocoder island (GPL-3.0-or-later), excluded from the workspace
 # so fmt/clippy --workspace never see it; tested here instead, against golden

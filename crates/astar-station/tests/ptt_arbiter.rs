@@ -755,6 +755,7 @@ fn default_tx_timeout_is_120s() {
                 reason: None,
             },
             tx_timeout: secs(120),
+            picture_allowed: false,
         }
     );
     assert_eq!(PttArbiter::default().snapshot(), a.snapshot());

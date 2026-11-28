@@ -28,9 +28,11 @@
 //!   its proper time-stamp.
 //! * **The run loop's side** ([`ActivePicture`]): while a picture is on, it
 //!   sends the picture's frames through the same codec edge as voice and
-//!   throws away whatever the microphone produces. When the picture ends it
-//!   hands the voice ladder the time-stamp after the picture's last frame, so
-//!   voice carries on without a step.
+//!   throws away whatever the microphone produces, and goes on throwing it
+//!   away until the call has been unkeyed and keyed again (the run loop's
+//!   `MicHold`). When the picture ends it hands the voice ladder the
+//!   time-stamp after the picture's last frame, so the next over's voice
+//!   carries on without a step.
 //!
 //! The first two parts are not tied to IAX2. [`PicturePacing`] holds the
 //! cut-up audio and the pacer, and the `EchoLink` link in astar-console
@@ -77,6 +79,10 @@ pub enum CutReason {
     CallEnded,
     /// The call was not keyed, or unkeyed mid-picture.
     Unkeyed,
+    /// The call's own limit on one continuous over stopped it: the
+    /// `EchoLink` link's transmit cap. A time limit, like a transmit
+    /// time-out, so a caller reports it as one.
+    TransmitCap,
 }
 
 // `Shared::end` encoding. `RUNNING` until the first writer wins.
@@ -85,6 +91,7 @@ const SENT: u8 = 1;
 const CANCELLED: u8 = 2;
 const CUT_CALL_ENDED: u8 = 3;
 const CUT_UNKEYED: u8 = 4;
+const CUT_TRANSMIT_CAP: u8 = 5;
 
 fn end_code(end: PictureEnd) -> u8 {
     match end {
@@ -92,6 +99,7 @@ fn end_code(end: PictureEnd) -> u8 {
         PictureEnd::Cancelled => CANCELLED,
         PictureEnd::Cut(CutReason::CallEnded) => CUT_CALL_ENDED,
         PictureEnd::Cut(CutReason::Unkeyed) => CUT_UNKEYED,
+        PictureEnd::Cut(CutReason::TransmitCap) => CUT_TRANSMIT_CAP,
     }
 }
 
@@ -162,6 +170,7 @@ impl PictureTx {
             CANCELLED => Some(PictureEnd::Cancelled),
             CUT_CALL_ENDED => Some(PictureEnd::Cut(CutReason::CallEnded)),
             CUT_UNKEYED => Some(PictureEnd::Cut(CutReason::Unkeyed)),
+            CUT_TRANSMIT_CAP => Some(PictureEnd::Cut(CutReason::TransmitCap)),
             _ => None,
         }
     }

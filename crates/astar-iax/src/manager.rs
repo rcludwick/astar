@@ -1499,6 +1499,22 @@ impl Manager {
             .set_ptt(true)
     }
 
+    /// Key a routed call for a picture: send PTT-on to the peer exactly as
+    /// [`Manager::key`] does, but leave its mic lane gate shut. A picture
+    /// brings its own audio, and a key press during one stops it, so the
+    /// microphone has nothing to say on this key-down; a gate that never
+    /// opens cannot put it on the air. Unkey with [`Manager::unkey`].
+    ///
+    /// # Errors
+    /// As [`Manager::key`].
+    pub fn key_for_picture(&mut self, call: CallId) -> Result<(), IaxError> {
+        let conn = self.calls.get(&call).ok_or(IaxError::NoActiveCall)?;
+        if conn.mic.is_none() {
+            return Err(IaxError::NotRouted);
+        }
+        conn.call.set_ptt(true)
+    }
+
     /// Unkey a call (close its mic lane gate + send PTT-off to the peer). A
     /// monitor-only call unkeys cleanly (no-op gate).
     ///
